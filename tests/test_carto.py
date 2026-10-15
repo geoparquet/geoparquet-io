@@ -1521,21 +1521,25 @@ class TestTableCrs:
     @pytest.mark.parametrize(
         ("rows", "expected"),
         [
-            ([{"srid": 4326}], 4326),
-            ([{"srid": "2272"}], 2272),
-            ([{"srid": 3857.0}], 3857),
-            ([], None),
-            (None, None),
-            (["garbage"], None),
-            ([{"srid": True}], None),
-            ([{"srid": 3.5}], None),
-            ([{"srid": "abc"}], None),
-            ([{"srid": None}], None),
+            ([{"srid": 4326}], [4326]),
+            ([{"srid": "2272"}], [2272]),
+            ([{"srid": 3857.0}], [3857]),
+            ([{"srid": 4326}, {"srid": 2272}], [4326, 2272]),
+            ([{"srid": 4326}, {"srid": "4326"}], [4326]),
+            ([], []),
+            (None, []),
+            (["garbage"], []),
+            ([{"srid": True}], []),
+            ([{"srid": 3.5}], []),
+            ([{"srid": "abc"}], []),
+            ([{"srid": None}], []),
         ],
         ids=[
             "int",
             "quoted",
             "integral-float",
+            "mixed",
+            "duplicate",
             "no-rows",
             "rows-null",
             "row-not-a-mapping",
@@ -1545,12 +1549,29 @@ class TestTableCrs:
             "srid-null",
         ],
     )
-    def test_probe_reads_the_srid(self, rows, expected):
+    def test_probe_reads_the_srids(self, rows, expected):
         with self._srid_rows(rows) as probe:
-            assert carto_module._probe_geometry_srid(self.URL, "tbl") == expected
+            assert carto_module._probe_geometry_srids(self.URL, "tbl") == expected
         sql = probe.call_args.args[1]
         assert 'ST_SRID("the_geom")' in sql
         assert "LIMIT 1" in sql
+        assert "DISTINCT" not in sql
+
+    def test_probe_over_the_data_query_looks_for_a_second_srid(self):
+        data_sql = 'SELECT * FROM "tbl" WHERE (x = 1\n) LIMIT 10'
+        with self._srid_rows([{"srid": 4326}]) as probe:
+            carto_module._probe_geometry_srids(self.URL, "tbl", source_sql=data_sql)
+        sql = probe.call_args.args[1]
+        assert "SELECT DISTINCT ST_SRID" in sql
+        assert f"FROM ({data_sql}) AS q" in sql
+        assert "LIMIT 2" in sql
+
+    def test_mixed_srids_are_refused(self):
+        with self._srid_rows([{"srid": 4326}, {"srid": 2272}]):
+            with pytest.raises(CartoError, match="more than one SRID") as exc:
+                carto_module._resolve_table_crs(self.URL, "tbl", source_sql="SELECT 1")
+        assert "4326" in str(exc.value)
+        assert "2272" in str(exc.value)
 
     @pytest.mark.parametrize(
         ("srid", "authority", "code"),

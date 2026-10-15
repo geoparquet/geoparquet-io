@@ -627,33 +627,50 @@ def _coerce_srid(raw: object) -> int | None:
         return None
 
 
-def _probe_geometry_srid(
+def _probe_geometry_srids(
     url: str,
     table_name: str,
     api_key: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
-) -> int | None:
-    """The SRID of the table's ``the_geom``, read with one bounded query.
+    source_sql: str | None = None,
+) -> list[int]:
+    """The SRIDs ``the_geom`` holds, read with one bounded query.
 
     Carto's GeoJSON format is ``ST_AsGeoJSON(the_geom)`` with no transform, so
-    the coordinates gpio receives are in this SRID (#1059).
+    the coordinates gpio receives are in these SRIDs (#1059).
+
+    Args:
+        source_sql: The data query that was fetched. When given, its own rows
+            are asked for up to two distinct SRIDs, since an unconstrained
+            PostGIS ``geometry`` column can mix them. That costs no more than
+            the fetch did. Without it (no rows were fetched) the table is asked
+            for its first SRID only: there are no coordinates to mislabel.
 
     Returns:
-        The SRID, or None when the column holds no non-NULL geometry to ask.
+        The distinct SRIDs found, empty when there is no non-NULL geometry.
 
     Raises:
         CartoError: If the probe request fails.
     """
     _validate_table_name(table_name)
     geom = quote_identifier(_CARTO_GEOMETRY_COLUMN)
-    sql = (
-        f"SELECT ST_SRID({geom}) AS srid FROM {quote_identifier(table_name)} "
-        f"WHERE {geom} IS NOT NULL LIMIT 1"
-    )
+    if source_sql is None:
+        sql = (
+            f"SELECT ST_SRID({geom}) AS srid FROM {quote_identifier(table_name)} "
+            f"WHERE {geom} IS NOT NULL LIMIT 1"
+        )
+    else:
+        sql = (
+            f"SELECT DISTINCT ST_SRID({geom}) AS srid FROM ({source_sql}) AS q "
+            f"WHERE {geom} IS NOT NULL LIMIT 2"
+        )
     rows = _carto_sql_json(url, sql, api_key, timeout).get("rows")
-    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
-        return None
-    return _coerce_srid(rows[0].get("srid"))
+    srids: list[int] = []
+    for row in rows if isinstance(rows, list) else []:
+        srid = _coerce_srid(row.get("srid")) if isinstance(row, dict) else None
+        if srid is not None and srid not in srids:
+            srids.append(srid)
+    return srids
 
 
 def _crs_for_srid(srid: int) -> dict | None:
@@ -674,27 +691,35 @@ def _resolve_table_crs(
     table_name: str,
     api_key: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    source_sql: str | None = None,
 ) -> dict:
     """The CRS to tag the output with, from the SRID the table really stores.
 
-    Never a CRS gpio did not check: a probe that fails, or an SRID no authority
-    defines, is refused rather than written as OGC:CRS84 (#1059, as #1045 did
-    for ArcGIS). A column with no geometry to ask has no coordinates to
-    mislabel, so it keeps CRS84.
+    Never a CRS gpio did not check: a probe that fails, rows in more than one
+    SRID, or an SRID no authority defines, is refused rather than written as
+    OGC:CRS84 (#1059, as #1045 did for ArcGIS). A column with no geometry to
+    ask has no coordinates to mislabel, so it keeps CRS84.
 
     Raises:
-        CartoError: If the SRID cannot be read or does not resolve.
+        CartoError: If the SRID cannot be read, is mixed, or does not resolve.
     """
     try:
-        srid = _probe_geometry_srid(url, table_name, api_key, timeout)
+        srids = _probe_geometry_srids(url, table_name, api_key, timeout, source_sql)
     except CartoError as e:
         raise CartoError(
             f"Carto: could not read the SRID of '{table_name}'.{_CARTO_GEOMETRY_COLUMN}, so "
             f"the output cannot be tagged with a CRS: {sanitize_error_message(str(e))}"
         ) from e
-    if srid is None:
+    if not srids:
         debug("No non-NULL geometry to read an SRID from; tagging OGC:CRS84")
         return _crs84()
+    if len(srids) > 1:
+        raise CartoError(
+            f"Table '{table_name}' stores {_CARTO_GEOMETRY_COLUMN} in more than one SRID "
+            f"(at least {srids[0]} and {srids[1]}), and a GeoParquet column has one CRS. "
+            f"Filter with --where 'ST_SRID({_CARTO_GEOMETRY_COLUMN}) = <srid>' to extract one."
+        )
+    srid = srids[0]
     crs = _crs_for_srid(srid)
     if crs is None:
         raise CartoError(
@@ -1198,7 +1223,9 @@ def _carto_geo_table(
 
     # Probed after the fetch, so a missing table or a rejected key still gets
     # the fetch's own status handling rather than a bare probe failure.
-    crs = _resolve_table_crs(url, table_name, api_key, timeout)
+    crs = _resolve_table_crs(
+        url, table_name, api_key, timeout, source_sql=sql if table.num_rows else None
+    )
 
     if table.num_rows == 0:
         warn("Query returned no rows")
