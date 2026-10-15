@@ -19,6 +19,7 @@ from geoparquet_io.core.wfs import (
     WFSAuthenticationError,
     WFSError,
     _fetch_wfs_page,
+    _fetch_with_spatial_tiles,
     _get_feature_count,
     _make_request,
     _probe_startindex_limit,
@@ -990,3 +991,96 @@ def test_a_server_bbox_is_counted_with_the_bbox_so_a_small_result_is_not_a_cap(
     assert len(pages) == 1
     assert "sortBy" not in pages[0].params
     assert pq.read_metadata(out).num_rows == 3
+
+
+# ---------------------------------------------------------------------------
+# A geographic layer CRS whose authority order is lat,lon (#1278 review)
+# ---------------------------------------------------------------------------
+
+
+def _geographic_layer(monkeypatch, srs: str):
+    """A layer that offers only ``srs``, serving lon/lat points near Oslo."""
+    http = FakeTransport.install(monkeypatch)
+    wfs_capabilities(monkeypatch, _projected_capabilities(srs), SCHEMA)
+    http.respond(_is_hits, xml_reply(b'<wfs:FeatureCollection numberMatched="3"/>'))
+    http.respond(_is_startindex_probe, geojson_reply(_geojson(0)))
+
+    def _serve(request):
+        document = _geojson(3)
+        for index, feature in enumerate(document["features"]):
+            feature["geometry"]["coordinates"] = [10.7 + index * 0.01, 59.9]
+        return geojson_reply(document)(request)
+
+    http.respond(_is_getfeature, _serve)
+    return http
+
+
+@pytest.mark.parametrize(
+    "srs,code",
+    [
+        ("urn:ogc:def:crs:EPSG::4258", 4258),
+        ("EPSG:4269", 4269),
+    ],
+)
+def test_a_lat_lon_geographic_layer_gets_its_bbox_lat_lon_with_the_urn(
+    monkeypatch, tmp_path, srs, code
+):
+    """The short EPSG:4258 label is read lat,lon by MapServer and lon,lat by
+    GeoServer and deegree. The URN in authority order reads the same on all."""
+    http = _geographic_layer(monkeypatch, srs)
+    out = tmp_path / "oslo.parquet"
+
+    convert_wfs_to_geoparquet(
+        SERVICE,
+        TYPENAME,
+        str(out),
+        version="1.1.0",
+        bbox=(10.6, 59.85, 10.9, 60.0),
+        bbox_mode="server",
+        skip_hilbert=True,
+    )
+
+    expected = f"59.85,10.6,60.0,10.9,urn:ogc:def:crs:EPSG::{code}"
+    hits = [r for r in http.requests if _is_hits(r)]
+    pages = [r for r in http.requests if _is_getfeature(r)]
+    assert hits
+    assert pages
+    assert {r.params["bbox"] for r in hits + pages} == {expected}
+    assert geo_block_crs_id(out) == {"authority": "EPSG", "code": code}
+
+
+def test_every_tile_of_a_lat_lon_geographic_layer_is_sent_lat_lon(monkeypatch):
+    """Auto-tiling builds its tile probes and tile pages from the same rule."""
+    http = _geographic_layer(monkeypatch, "urn:ogc:def:crs:EPSG::4258")
+
+    _fetch_with_spatial_tiles(
+        service_url=SERVICE,
+        typename=TYPENAME,
+        version="1.1.0",
+        total_count=100_000,
+        startindex_limit=50_000,
+        layer_bbox=(5.0, 55.0, 15.0, 65.0),
+        crs="urn:ogc:def:crs:EPSG::4258",
+    )
+
+    sent = [r.params["bbox"] for r in http.requests if "bbox" in r.params]
+    assert len(sent) >= 4
+    for bbox in sent:
+        *numbers, label = bbox.split(",")
+        lat_min, lon_min, lat_max, lon_max = map(float, numbers)
+        assert label == "urn:ogc:def:crs:EPSG::4258"
+        assert 55.0 <= lat_min < lat_max <= 65.0
+        assert 5.0 <= lon_min < lon_max <= 15.0
+
+
+def test_an_unresolvable_layer_crs_fails_before_any_feature_is_requested(monkeypatch, tmp_path):
+    """The request CRS is known after negotiation, so a large layer is not
+    downloaded only to be refused at the end."""
+    http = _stub_projected_layer(monkeypatch, "urn:EPSG:def:crs:::999999")
+
+    with pytest.raises(WFSError, match="could not resolve"):
+        convert_wfs_to_geoparquet(
+            SERVICE, TYPENAME, str(tmp_path / "early.parquet"), version="1.1.0"
+        )
+
+    assert not [r for r in http.requests if _is_getfeature(r) or _is_hits(r)]

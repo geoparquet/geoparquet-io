@@ -1614,11 +1614,24 @@ a service advertises nothing at all, gpio asks for GeoJSON as it always has.
 
 ### Axis Order
 
-Pass `--bbox` as x,y (lon,lat for a geographic layer). By default gpio sends it
-that way, labelled CRS84 for lon/lat. Some servers, such as ArcGIS WFS, read
-every EPSG:4326 bbox as lat,lon whatever the label says, so the filter selects
-a swapped area. For those, `--axis-order latlon` sends the bbox as lat,lon with
-the `urn:ogc:def:crs:EPSG::4326` label. It has no effect on a projected bbox.
+Pass `--bbox` as x,y (lon,lat for a geographic layer). gpio then picks the
+order and the label from the layer CRS, so that every server reads the bbox the
+same way.
+
+- A WGS84 lon/lat layer (EPSG:4326, CRS84) gets x,y labelled CRS84.
+- A layer CRS whose official axis order starts with latitude or northing, such
+  as EPSG:4258, EPSG:4269 or EPSG:3006, gets lat,lon (or y,x) labelled
+  `urn:ogc:def:crs:EPSG::<code>`. Servers disagree on the short `EPSG:<code>`
+  label for these CRSs, while they all read the URN in that order.
+- Any other projected layer (EPSG:3857, EPSG:25832) gets x,y with its
+  `EPSG:<code>` label.
+- WFS 1.0.0 is always read x,y, so the bbox goes x,y with no label.
+
+Some servers, such as ArcGIS WFS, read every EPSG:4326 bbox as lat,lon whatever
+the label says, so the filter selects a swapped area. For those,
+`--axis-order latlon` sends the bbox as lat,lon with the
+`urn:ogc:def:crs:EPSG::4326` label. It has no effect on an x,y CRS, and on WFS
+1.0.0 it is ignored with a warning.
 
 <!-- doctest: skip="illustrative endpoint" -->
 ```bash

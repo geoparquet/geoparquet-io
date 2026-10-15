@@ -21,6 +21,7 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET  # nosec B405 - the one parse here (_is_empty_gml_collection) refuses any body declaring a DTD, so no entity expansion is possible; stdlib ET never resolves external entities regardless
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Final
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -472,8 +473,9 @@ def negotiate_wfs_version(service_url: str, preferred_version: str = "auto"):
     )
 
 
-# The EPSG code a CRS string names: the last ASCII digit run after "EPSG",
-# behind a ":", "/" or "#". That one rule reads every form WFS servers send:
+# The EPSG code a CRS string names: the ASCII digit run after "EPSG", behind a
+# ":", "/" or "#", that ends the string or one part of a compound URN. That one
+# rule reads every form WFS servers send:
 #   EPSG:4326                                      short form
 #   urn:ogc:def:crs:EPSG::4326                     OGC URN
 #   urn:x-ogc:def:crs:EPSG:6.11:31287              versioned URN (6.11 is the database version)
@@ -481,7 +483,9 @@ def negotiate_wfs_version(service_url: str, preferred_version: str = "auto"):
 #   urn:EPSG:def:crs:::25830                       OWSLib's rewrite of the legacy URN
 #   http://www.opengis.net/def/crs/EPSG/0/4326     OGC URL
 #   http://www.opengis.net/gml/srs/epsg.xml#31287  GML srs URL
-_EPSG_CODE: Final = re.compile(r"EPSG[^,]*?[:/#]([0-9]{1,9})\s*$", re.IGNORECASE)
+#   urn:ogc:def:crs,crs:EPSG::4326,crs:EPSG::5773  compound URN, the first
+#                                                  (horizontal) part is read
+_EPSG_CODE: Final = re.compile(r"EPSG[^,]*?[:/#]([0-9]{1,9})\s*(?:,|$)", re.IGNORECASE)
 # A server CRS string longer than this is not a CRS name. It is never parsed.
 _MAX_CRS_STRING: Final = 1024
 
@@ -1214,11 +1218,6 @@ def _determine_bbox_strategy(
     return True
 
 
-def _is_urn_crs(crs: str) -> bool:
-    """Check if CRS string is in URN format (urn:ogc:def:crs:EPSG::4326)."""
-    return crs.lower().startswith("urn:")
-
-
 def _is_geographic_crs(crs: str) -> bool:
     """Check if CRS is a geographic coordinate system (lat/lon, not projected).
 
@@ -1244,47 +1243,58 @@ def _is_geographic_crs(crs: str) -> bool:
         return normalized in geographic_codes or "CRS84" in crs.upper()
 
 
-def _needs_axis_swap(crs: str, version: str, axis_order: str = "auto") -> bool:
-    """
-    Determine if bbox coordinates need axis order swap (lat,lon instead of lon,lat).
-
-    Per OGC spec:
-    - WFS 1.0.0: Always lon,lat (XY)
-    - WFS 1.1.0+: Depends on CRS definition
-      - EPSG:4326 (simple): lon,lat (common practice, though spec says lat,lon)
-      - urn:ogc:def:crs:EPSG::4326: lat,lon per spec (YX)
-      - CRS:84: Always lon,lat (XY) by definition
-
-    Args:
-        crs: Coordinate reference system string
-        version: WFS version
-        axis_order: "auto" (detect), "xy" (force lon,lat), "latlon" (force lat,lon)
-
-    Returns:
-        True if bbox needs to be swapped to lat,lon order
-    """
-    if axis_order == "xy":
-        return False
-    if axis_order == "latlon":
-        return True
-
-    # WFS 1.0.0 always uses XY order
-    if version == "1.0.0":
-        return False
-
-    # CRS:84 is explicitly XY ordered
-    if "CRS84" in crs.upper() or "CRS:84" in crs.upper():
-        return False
-
-    # For WFS 1.1.0+: URN format with geographic CRS uses lat,lon
-    if _is_urn_crs(crs) and _is_geographic_crs(crs):
-        return True
-
-    return False
-
-
 # The lon/lat CRS label every WFS server reads in x,y order (see _build_bbox_param).
 _CRS84_URN: Final = "urn:ogc:def:crs:OGC:1.3:CRS84"
+# The OGC URN form, which WFS 1.1.0 and 2.0.0 servers read in the authority's
+# own axis order.
+_EPSG_URN_PREFIX: Final = "urn:ogc:def:crs:EPSG::"
+
+
+@lru_cache(maxsize=64)
+def _request_pyproj_crs(crs: str):
+    """The pyproj CRS a WFS CRS string names, or None when it cannot be read.
+
+    The EPSG code comes first (every form ``_EPSG_CODE`` reads, which pyproj
+    does not all know), then pyproj on the string itself (``ESRI:102100``, a
+    CRS84 URN or URL).
+    """
+    if len(crs) > _MAX_CRS_STRING:
+        return None
+    from pyproj import CRS as _PyprojCRS
+
+    code = _epsg_code(crs)
+    try:
+        return _PyprojCRS.from_user_input(f"EPSG:{code}" if code else crs)
+    except Exception as e:
+        debug(f"pyproj could not read CRS {crs[:200]!r}: {e}")
+        return None
+
+
+@dataclass(frozen=True)
+class _BboxAxes:
+    """What the request CRS says about the order of a bbox's numbers."""
+
+    north_first: bool
+    """The authority lists northing or latitude first (EPSG:4326, 4258, 3006)."""
+    wgs84_lon_lat: bool
+    """The CRS is WGS84 lon/lat up to axis order, so CRS84 names it in x,y."""
+
+
+@lru_cache(maxsize=64)
+def _bbox_axes(crs: str) -> _BboxAxes | None:
+    """The axis facts of the request CRS, from pyproj, or None when unknown."""
+    target = _request_pyproj_crs(crs)
+    if target is None or not target.axis_info:
+        return None
+    from pyproj import CRS as _PyprojCRS
+
+    return _BboxAxes(
+        north_first=target.axis_info[0].direction.lower() in ("north", "south"),
+        wgs84_lon_lat=bool(
+            target.is_geographic
+            and target.equals(_PyprojCRS.from_user_input("OGC:CRS84"), ignore_axis_order=True)
+        ),
+    )
 
 
 def _build_bbox_param(
@@ -1296,48 +1306,65 @@ def _build_bbox_param(
     """
     Build the WFS bbox parameter string.
 
-    The bbox coordinates are in the request CRS (``crs``, the srsName gpio
-    asks for), in x,y order. The CRS suffix names that same CRS in its short
-    ``EPSG:<code>`` form. The short form keeps x,y axis order on servers that
-    read a URN in its authority axis order (#397). Labelling every bbox
-    EPSG:4326 made servers drop the filter on any other layer and return the
-    whole layer (#640).
+    ``bbox`` is in the request CRS (``crs``, the srsName gpio asks for), in
+    x,y order, so lon,lat for a geographic CRS. The label and the order the
+    numbers go out in are chosen from the CRS itself (pyproj), so that every
+    server reads them the same way:
 
-    A lon/lat (EPSG:4326) request is labelled ``urn:ogc:def:crs:OGC:1.3:CRS84``
-    instead. MapServer and QGIS Server read even the short ``EPSG:4326`` form
-    as lat,lon in WFS 1.1.0, so a lon,lat bbox selected a swapped area or
-    nothing (seen live on demo.mapserver.org, PDOK, wfs.nrw.de, USGS mrdata
-    and geo.weather.gc.ca). CRS84 is lon,lat by definition, and GeoServer,
-    MapServer, QGIS Server and deegree all read it that way.
+    - WFS 1.0.0 has no label and is always read x,y, so x,y is sent as is.
+    - WFS 1.1.0 and 2.0.0 read a URN in the authority's axis order. The short
+      ``EPSG:<code>`` form is ambiguous for a CRS the authority lists
+      northing or latitude first. GeoServer and deegree read it x,y, MapServer
+      and QGIS Server in the authority order (seen live on demo.mapserver.org,
+      PDOK, wfs.nrw.de, USGS mrdata and geo.weather.gc.ca). So:
 
-    WFS 1.0.0: xmin,ymin,xmax,ymax (no CRS suffix, the layer's SRS applies)
-    WFS 1.1.0+: xmin,ymin,xmax,ymax,<CRS84 URN or EPSG:<code of the request CRS>>
+      - an east-first CRS (most projected CRSs) goes x,y with the short label,
+        which both readings agree on. Labelling every bbox EPSG:4326 made
+        servers drop the filter on any other layer (#640).
+      - WGS84 lon/lat (EPSG:4326, CRS84) goes x,y labelled
+        ``urn:ogc:def:crs:OGC:1.3:CRS84``, lon,lat by definition.
+      - any other north-first CRS (EPSG:4258, EPSG:4269, EPSG:3006) has no x,y
+        twin, so it goes in the authority order with the
+        ``urn:ogc:def:crs:EPSG::<code>`` label.
+
+    ``axis_order="latlon"`` sends a north-first CRS in the authority order with
+    the URN even when CRS84 would do. ArcGIS WFS reads every 4326 bbox lat,lon
+    whatever the label says (seen live on sampleserver6). "auto" and "xy" pick
+    the form above. A CRS pyproj cannot read goes x,y with its own label.
 
     Args:
         bbox: Bounding box tuple (xmin, ymin, xmax, ymax) in the request CRS
         crs: Request CRS (the srsName sent with the request)
         version: WFS version
-        axis_order: "latlon" sends a geographic bbox as lat,lon, labelled
-            with the lat,lon URN. ArcGIS WFS reads every 4326 bbox lat,lon
-            whatever the label says (seen live on sampleserver6). "auto" and
-            "xy" send x,y.
+        axis_order: "auto", "xy" or "latlon", see above
 
     Returns:
         Bbox parameter string
     """
     xmin, ymin, xmax, ymax = bbox
-    label = _normalize_crs(crs)
-    if axis_order == "latlon" and _is_geographic_crs(crs):
-        coords = f"{ymin},{xmin},{ymax},{xmax}"
-        label = "urn:ogc:def:crs:EPSG::" + label.removeprefix("EPSG:")
-    else:
-        coords = f"{xmin},{ymin},{xmax},{ymax}"
-        if label == "EPSG:4326":
-            label = _CRS84_URN
-
+    xy = f"{xmin},{ymin},{xmax},{ymax}"
     if version == "1.0.0":
-        return coords
-    return f"{coords},{label}"
+        return xy
+    axes = _bbox_axes(crs)
+    code = _epsg_code(crs)
+    if axes and axes.north_first and code and (axis_order == "latlon" or not axes.wgs84_lon_lat):
+        return f"{ymin},{xmin},{ymax},{xmax},{_EPSG_URN_PREFIX}{code}"
+    if axes and axes.wgs84_lon_lat:
+        return f"{xy},{_CRS84_URN}"
+    return f"{xy},{_normalize_crs(crs)}"
+
+
+def _warn_if_axis_order_ignored(version: str, axis_order: str) -> None:
+    """Warn that ``--axis-order latlon`` does nothing on WFS 1.0.0.
+
+    WFS 1.0.0 is always read x,y and its bbox has no label to say otherwise,
+    so gpio sends the bbox x,y there.
+    """
+    if version == "1.0.0" and axis_order == "latlon":
+        warn(
+            "--axis-order latlon is ignored on WFS 1.0.0, which always reads the "
+            "bbox as x,y. The bbox is sent x,y."
+        )
 
 
 def _warn_if_bbox_looks_lon_lat(bbox: tuple[float, float, float, float], crs: str) -> None:
@@ -2986,12 +3013,44 @@ def _get_tiling_bbox(
     try:
         from pyproj import Transformer
 
-        transformer = Transformer.from_crs("EPSG:4326", _normalize_crs(crs), always_xy=True)
-        xmin, ymin, xmax, ymax = transformer.transform_bounds(*layer_info.bbox)
+        target = _normalize_crs(crs)
+        lon_lat = _clip_to_area_of_use(layer_info.bbox, target)
+        if lon_lat is None:
+            warn(
+                f"The layer bbox lies outside the area {crs} is defined for, so auto-tiling is off."
+            )
+            return None
+        transformer = Transformer.from_crs("EPSG:4326", target, always_xy=True)
+        xmin, ymin, xmax, ymax = transformer.transform_bounds(*lon_lat)
         return (xmin, ymin, xmax, ymax)
     except Exception as e:
         warn(f"Could not reproject the layer bbox into {crs}, so auto-tiling is off: {e}")
         return None
+
+
+def _clip_to_area_of_use(
+    lon_lat: tuple[float, float, float, float], crs: str
+) -> tuple[float, float, float, float] | None:
+    """Clip a lon/lat bbox to the area of use of ``crs``, or None if they miss.
+
+    A capabilities bbox is often the whole world. Reprojected as is into a CRS
+    defined for less (EPSG:3857 stops near 85 degrees), its corners run off
+    toward infinity and the tiles cover mostly empty space. Longitude is left
+    alone when the area of use crosses the antimeridian (EPSG:4269), where a
+    plain min/max clip would be wrong.
+    """
+    from pyproj import CRS as _PyprojCRS
+
+    area = _PyprojCRS.from_user_input(crs).area_of_use
+    xmin, ymin, xmax, ymax = lon_lat
+    if area is None:
+        return lon_lat
+    ymin, ymax = max(ymin, area.south), min(ymax, area.north)
+    if area.west <= area.east:
+        xmin, xmax = max(xmin, area.west), min(xmax, area.east)
+    if xmin >= xmax or ymin >= ymax:
+        return None
+    return (xmin, ymin, xmax, ymax)
 
 
 def _output_crs_projjson(crs: str) -> dict:
@@ -3098,6 +3157,9 @@ def wfs_to_table(
 
     # Negotiate CRS
     crs = _negotiate_crs(layer_info, output_crs)
+    # Fail before any request when the CRS cannot label the output, not after
+    # the whole layer is downloaded.
+    _output_crs_projjson(crs)
 
     # Detect the best output format we can actually parse. None means the
     # server advertises nothing we recognize, so we omit outputFormat and take
@@ -3118,6 +3180,7 @@ def wfs_to_table(
     if bbox:
         use_server_bbox = _determine_bbox_strategy(bbox_mode, layer_info)
         _warn_if_bbox_looks_lon_lat(bbox, crs)
+        _warn_if_axis_order_ignored(version, axis_order)
 
     # Get expected feature count for cap detection
     # Try WFS 2.0.0 first for count query since it often has higher/no limits

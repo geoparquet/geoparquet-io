@@ -876,8 +876,6 @@ class TestBboxFilters:
     @pytest.mark.parametrize(
         "crs,suffix",
         [
-            # The Moldova cadastre layer from #640: projected, YX authority axes.
-            ("urn:ogc:def:crs:EPSG::4026", "EPSG:4026"),
             ("http://www.opengis.net/def/crs/EPSG/0/25830", "EPSG:25830"),
             ("EPSG:3857", "EPSG:3857"),
             # A lon/lat request is labelled CRS84, which every server reads as x,y.
@@ -890,6 +888,14 @@ class TestBboxFilters:
         bbox = (185357.315, 133208.941, 213794.05, 174347.488)
         result = _build_bbox_param(bbox, crs, "2.0.0")
         assert result == f"185357.315,133208.941,213794.05,174347.488,{suffix}"
+
+    def test_a_northing_first_projected_crs_goes_in_authority_order_with_the_urn(self):
+        """The Moldova cadastre layer from #640 is projected with YX authority
+        axes. The short label is read x,y by GeoServer and y,x by MapServer, so
+        the bbox goes y,x with the URN, which both read the same way."""
+        bbox = (185357.315, 133208.941, 213794.05, 174347.488)
+        result = _build_bbox_param(bbox, "urn:ogc:def:crs:EPSG::4026", "2.0.0")
+        assert result == "133208.941,185357.315,174347.488,213794.05,urn:ogc:def:crs:EPSG::4026"
 
     def test_invalid_geometry_column_rejected(self):
         """Invalid geometry column names with SQL injection characters are rejected."""
@@ -1440,6 +1446,9 @@ class TestCRSNegotiation:
             ("urn:EPSG:def:crs:::25830", "EPSG:25830"),
             ("urn:ogc:def:crs:OGC:1.3:CRS84", "EPSG:4326"),
             ("CRS:84", "EPSG:4326"),
+            # A compound URN names the horizontal CRS first, then the vertical one
+            ("urn:ogc:def:crs,crs:EPSG::4326,crs:EPSG::5773", "EPSG:4326"),
+            ("urn:ogc:def:crs,crs:EPSG:6.3:25832,crs:EPSG:6.3:5783", "EPSG:25832"),
             # Not an EPSG code: left alone
             ("ESRI:102100", "ESRI:102100"),
             # Non-ASCII digits are not a code
@@ -2732,19 +2741,11 @@ class TestAutoPageSingleWorker:
 class TestAxisOrder:
     """Test axis order detection and bbox parameter building.
 
-    WFS 1.1.0+ with URN format CRS uses lat,lon (YX) axis order per OGC spec,
-    while simple EPSG:4326 format uses lon,lat (XY).
+    The bbox order and label come from the request CRS axes (pyproj). WGS84
+    lon/lat goes x,y as CRS84, another north-first CRS goes in authority order
+    with the EPSG URN, an east-first CRS goes x,y with its short label, and
+    WFS 1.0.0 always goes x,y with no label.
     """
-
-    def test_is_urn_crs_detects_urn_format(self):
-        """Should correctly identify URN format CRS strings."""
-        from geoparquet_io.core.wfs import _is_urn_crs
-
-        assert _is_urn_crs("urn:ogc:def:crs:EPSG::4326") is True
-        assert _is_urn_crs("urn:x-ogc:def:crs:EPSG::4326") is True
-        assert _is_urn_crs("URN:OGC:DEF:CRS:EPSG::3857") is True
-        assert _is_urn_crs("EPSG:4326") is False
-        assert _is_urn_crs("http://www.opengis.net/def/crs/EPSG/0/4326") is False
 
     def test_is_geographic_crs_detects_geographic_systems(self):
         """Should correctly identify geographic (lat/lon) CRS."""
@@ -2770,36 +2771,6 @@ class TestAxisOrder:
         assert _is_geographic_crs("urn:ogc:def:crs:EPSG::4171") is True
         assert _is_geographic_crs("EPSG:22174") is False  # POSGAR 98 (projected)
         assert _is_geographic_crs("EPSG:25830") is False  # ETRS89 / UTM 30N (projected)
-
-    @pytest.mark.parametrize(
-        "crs,version,axis_order,expected_swap",
-        [
-            # WFS 1.0.0 always uses XY
-            ("EPSG:4326", "1.0.0", "auto", False),
-            ("urn:ogc:def:crs:EPSG::4326", "1.0.0", "auto", False),
-            # WFS 1.1.0+ with simple EPSG format uses XY
-            ("EPSG:4326", "1.1.0", "auto", False),
-            ("EPSG:4326", "2.0.0", "auto", False),
-            # WFS 1.1.0+ with URN format uses YX (lat,lon)
-            ("urn:ogc:def:crs:EPSG::4326", "1.1.0", "auto", True),
-            ("urn:ogc:def:crs:EPSG::4326", "2.0.0", "auto", True),
-            ("urn:x-ogc:def:crs:EPSG::4326", "1.1.0", "auto", True),
-            # CRS:84 is always XY by definition
-            ("CRS:84", "1.1.0", "auto", False),
-            ("urn:ogc:def:crs:OGC:1.3:CRS84", "2.0.0", "auto", False),
-            # Projected CRS never swaps
-            ("urn:ogc:def:crs:EPSG::3857", "1.1.0", "auto", False),
-            # Forced axis order overrides auto-detection
-            ("urn:ogc:def:crs:EPSG::4326", "1.1.0", "xy", False),
-            ("EPSG:4326", "1.1.0", "latlon", True),
-        ],
-    )
-    def test_needs_axis_swap(self, crs, version, axis_order, expected_swap):
-        """Axis swap decision based on CRS format, version, and override."""
-        from geoparquet_io.core.wfs import _needs_axis_swap
-
-        result = _needs_axis_swap(crs, version, axis_order)
-        assert result is expected_swap
 
     @pytest.mark.parametrize(
         "bbox,crs,version,axis_order,expected",
@@ -2848,12 +2819,71 @@ class TestAxisOrder:
                 "latlon",
                 "37.5,-122.5,38.0,-122.0,urn:ogc:def:crs:EPSG::4326",
             ),
+            # WFS 1.0.0 is always read x,y and carries no label, so latlon
+            # cannot apply there
             (
                 (-122.5, 37.5, -122.0, 38.0),
                 "EPSG:4326",
                 "1.0.0",
                 "latlon",
-                "37.5,-122.5,38.0,-122.0",
+                "-122.5,37.5,-122.0,38.0",
+            ),
+            ((0.0, 40.0, 20.0, 60.0), "EPSG:4258", "1.0.0", "auto", "0.0,40.0,20.0,60.0"),
+            # A geographic CRS whose authority order is lat,lon and that is not
+            # WGS84 has no lon,lat twin. The short EPSG:4258 label is read
+            # lat,lon by MapServer and lon,lat by GeoServer and deegree, so the
+            # bbox goes out lat,lon with the URN every server reads that way.
+            (
+                (0.0, 40.0, 20.0, 60.0),
+                "EPSG:4258",
+                "1.1.0",
+                "auto",
+                "40.0,0.0,60.0,20.0,urn:ogc:def:crs:EPSG::4258",
+            ),
+            (
+                (0.0, 40.0, 20.0, 60.0),
+                "urn:ogc:def:crs:EPSG::4258",
+                "2.0.0",
+                "xy",
+                "40.0,0.0,60.0,20.0,urn:ogc:def:crs:EPSG::4258",
+            ),
+            (
+                (-125.0, 24.0, -66.0, 50.0),
+                "http://www.opengis.net/def/crs/EPSG/0/4269",
+                "1.1.0",
+                "auto",
+                "24.0,-125.0,50.0,-66.0,urn:ogc:def:crs:EPSG::4269",
+            ),
+            (
+                (-125.0, 24.0, -66.0, 50.0),
+                "EPSG:4269",
+                "2.0.0",
+                "latlon",
+                "24.0,-125.0,50.0,-66.0,urn:ogc:def:crs:EPSG::4269",
+            ),
+            # A projected CRS whose authority order is northing,easting (SWEREF99 TM)
+            (
+                (670000.0, 6570000.0, 680000.0, 6590000.0),
+                "EPSG:3006",
+                "1.1.0",
+                "auto",
+                "6570000.0,670000.0,6590000.0,680000.0,urn:ogc:def:crs:EPSG::3006",
+            ),
+            # The request CRS is CRS84 itself
+            (
+                (4.82, 50.44, 4.92, 50.48),
+                "urn:ogc:def:crs:OGC:1.3:CRS84",
+                "1.1.0",
+                "auto",
+                "4.82,50.44,4.92,50.48,urn:ogc:def:crs:OGC:1.3:CRS84",
+            ),
+            # A CRS pyproj cannot read keeps x,y and its own label
+            (
+                (1.0, 2.0, 3.0, 4.0),
+                "urn:example:local",
+                "1.1.0",
+                "auto",
+                "1.0,2.0,3.0,4.0,urn:example:local",
             ),
             # --axis-order xy keeps the CRS84 label
             (
@@ -3999,6 +4029,65 @@ class TestBboxCrsContract:
         with caplog.at_level(logging.WARNING):
             assert _get_tiling_bbox(None, True, self._layer(), "urn:example:local") is None
         assert "tiling" in caplog.text
+
+    def test_a_world_layer_bbox_is_clipped_to_the_crs_area_of_use(self):
+        """Web Mercator stops near 85 degrees, so y stays near 20e6 m, not 242e6."""
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        xmin, ymin, xmax, ymax = _get_tiling_bbox(
+            None, True, self._layer(bbox=(-180.0, -90.0, 180.0, 90.0)), "EPSG:3857"
+        )
+        limit = 20_037_509
+        assert -limit <= xmin < xmax <= limit
+        assert -1.01 * limit <= ymin < ymax <= 1.01 * limit
+
+    def test_a_world_layer_bbox_is_clipped_for_a_national_crs(self):
+        """RD New covers the Netherlands, not the world."""
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        xmin, ymin, xmax, ymax = _get_tiling_bbox(
+            None, True, self._layer(bbox=(-180.0, -90.0, 180.0, 90.0)), "EPSG:28992"
+        )
+        assert -100_000 < xmin < xmax < 400_000
+        assert 250_000 < ymin < ymax < 700_000
+
+    def test_an_area_of_use_across_the_antimeridian_clips_only_latitude(self):
+        """NAD83 spans 167.65E to 40.73W, so its west edge is east of its east edge."""
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        xmin, ymin, xmax, ymax = _get_tiling_bbox(
+            None, True, self._layer(bbox=(-125.0, 0.0, -66.0, 50.0)), "EPSG:4269"
+        )
+        assert xmin == pytest.approx(-125.0, abs=0.01)
+        assert xmax == pytest.approx(-66.0, abs=0.01)
+        assert ymin == pytest.approx(14.92, abs=0.01)
+        assert ymax == pytest.approx(50.0, abs=0.01)
+
+    def test_a_layer_outside_the_crs_area_of_use_disables_tiling(self, caplog):
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        with caplog.at_level(logging.WARNING):
+            sydney = self._layer(bbox=(150.0, -34.0, 151.5, -33.5))
+            assert _get_tiling_bbox(None, True, sydney, "EPSG:28992") is None
+        assert "tiling" in caplog.text
+
+    def test_latlon_on_wfs_1_0_0_warns_that_it_is_ignored(self, caplog):
+        from geoparquet_io.core.wfs import _warn_if_axis_order_ignored
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_axis_order_ignored("1.0.0", "latlon")
+        assert "--axis-order latlon" in caplog.text
+        assert "1.0.0" in caplog.text
+
+    @pytest.mark.parametrize(
+        "version,axis_order", [("1.0.0", "auto"), ("1.0.0", "xy"), ("1.1.0", "latlon")]
+    )
+    def test_axis_order_on_a_version_that_honours_it_is_quiet(self, caplog, version, axis_order):
+        from geoparquet_io.core.wfs import _warn_if_axis_order_ignored
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_axis_order_ignored(version, axis_order)
+        assert caplog.text == ""
 
     def test_no_bbox_anywhere_means_no_tiling(self):
         from geoparquet_io.core.wfs import _get_tiling_bbox

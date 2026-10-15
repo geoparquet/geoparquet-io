@@ -331,7 +331,7 @@ table = ops.from_wfs('https://geo.example.com/wfs', 'cities', limit=100)
 | `limit` | int | Maximum number of features |
 | `max_workers` | int | Number of parallel fetch workers (default: 1) |
 | `page_size` | int | Features per WFS request page (default: 100000) |
-| `axis_order` | str | Bbox axis order: `auto` (default), `xy`, `latlon`. Auto detects from CRS format. |
+| `axis_order` | str | Bbox axis order: `auto` (default), `xy`, `latlon`. Pass the bbox x,y. `auto` and `xy` pick the form from the layer CRS (CRS84 for lon/lat, lat,lon with the EPSG URN for other lat,lon CRSs). `latlon` also sends a lon/lat bbox lat,lon. Ignored on WFS 1.0.0. |
 | `auto_tile` | bool | Auto-subdivide bbox when server caps response (default: True) |
 | `strict_crs` | bool | Fail when the server returns a different CRS than requested (default: False, warns and uses the server's actual CRS instead). gpio trusts the CRS the server declares in its GeoJSON response and never guesses from coordinates. |
 
