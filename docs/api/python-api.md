@@ -327,7 +327,7 @@ table = ops.from_wfs('https://geo.example.com/wfs', 'cities', limit=100)
 | `service_url` | str | WFS service URL |
 | `typename` | str | Layer name to extract |
 | `version` | str | WFS version: `auto` (default), `2.0.0`, `1.1.0`, `1.0.0`. Auto tries 2.0.0 first. |
-| `bbox` | tuple | Bounding box filter (xmin, ymin, xmax, ymax) |
+| `bbox` | tuple | Bounding box filter (xmin, ymin, xmax, ymax), x,y, in the CRS requested from the layer (`output_crs`, else EPSG:4326, else the layer's default CRS). Not reprojected. When it looks like lon/lat on a projected layer, or matches nothing, a warning prints the box reprojected into the layer CRS as a hint. |
 | `limit` | int | Maximum number of features |
 | `max_workers` | int | Number of parallel fetch workers (default: 1) |
 | `page_size` | int | Features per WFS request page (default: 100000) |

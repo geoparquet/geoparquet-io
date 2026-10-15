@@ -927,9 +927,11 @@ class Table:
             typename: Feature type name (e.g., 'cities' or 'ns:cities')
             version: WFS version ('auto', '2.0.0', '1.1.0', '1.0.0'). Default 'auto'
                 tries 2.0.0, then 1.1.0, then 1.0.0.
-            bbox: Optional bounding box filter (xmin, ymin, xmax, ymax), in the CRS
-                requested from the layer (output_crs, else EPSG:4326, else the
-                layer's default CRS)
+            bbox: Optional bounding box filter (xmin, ymin, xmax, ymax), x,y, in the
+                CRS requested from the layer (output_crs, else EPSG:4326, else the
+                layer's default CRS). It is not reprojected. When it looks like
+                lon/lat on a projected layer, or matches nothing, a warning prints
+                the box reprojected into the layer CRS as a hint.
             limit: Maximum features to fetch
             max_workers: Parallel requests for large datasets (default: 1)
             page_size: Features per page when using parallel mode (default: 100000)

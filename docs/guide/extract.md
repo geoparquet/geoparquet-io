@@ -1471,11 +1471,23 @@ Spatial filtering can be applied server-side (pushed to WFS) or locally (after d
 The bbox is read in the CRS gpio requests from the layer. That is `--output-crs`
 when the layer offers it, else EPSG:4326 when the layer offers it, else the
 layer's default CRS. Most layers offer EPSG:4326, so a lon/lat bbox works. For
-a layer that only offers a projected CRS, pass the bbox in that CRS. gpio sends
-it labelled with that CRS in x,y order, so the server applies the filter, and
-warns when the bbox looks like lon/lat on a projected layer. A lon/lat bbox is
-labelled `urn:ogc:def:crs:OGC:1.3:CRS84`, which GeoServer, MapServer, QGIS
-Server and deegree all read as lon,lat.
+a layer that only offers a projected CRS, pass the bbox in that CRS, x,y
+(easting first). gpio does not reproject it, and sends it labelled with that
+CRS so the server applies the filter. A lon/lat bbox is labelled
+`urn:ogc:def:crs:OGC:1.3:CRS84`, which GeoServer, MapServer, QGIS Server and
+deegree all read as lon,lat.
+
+When the bbox looks like lon/lat on a projected layer, or a bbox matches no
+features, gpio warns. The warning names the layer CRS, shows the layer extent
+in lon/lat and in that CRS, and prints your box reprojected into it, ready to
+copy. gpio does not apply the hint. For a layer that only offers EPSG:4026, it
+reads like this.
+
+```text
+--bbox 28.82,47.01,28.825,47.013 looks like lon/lat. --bbox is read in the layer CRS EPSG:4026 (MOLDREF99 / Moldova TM), x,y (easting first).
+Layer extent is 26.63,45.44,30.13,48.47 in lon/lat and 61521,33542,335349,371881 in EPSG:4026.
+If your box is lon/lat, try --bbox 231933,208131,232316,208468 (reprojected to EPSG:4026, not applied).
+```
 
 === "CLI"
     <!-- doctest: skip="illustrative endpoint" -->

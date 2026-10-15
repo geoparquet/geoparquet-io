@@ -887,9 +887,11 @@ def _deprecated_version_callback(ctx, param, value):
 )
 @click.option(
     "--bbox",
-    help="Bounding box: xmin,ymin,xmax,ymax in the CRS gpio requests from the layer "
+    help="Bounding box: xmin,ymin,xmax,ymax, x,y, in the CRS gpio requests from the layer "
     "(--output-crs when the layer offers it, else EPSG:4326 when offered, "
-    "else the layer's default CRS)",
+    "else the layer's default CRS). It is not reprojected. When it looks like "
+    "lon/lat on a projected layer, or matches nothing, gpio prints the box "
+    "reprojected into the layer CRS as a hint",
 )
 @click.option(
     "--bbox-mode",

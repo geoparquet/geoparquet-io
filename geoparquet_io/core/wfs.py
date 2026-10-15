@@ -1412,20 +1412,120 @@ def _warn_if_axis_order_ignored(version: str, axis_order: str) -> None:
         )
 
 
-def _warn_if_bbox_looks_lon_lat(bbox: tuple[float, float, float, float], crs: str) -> None:
+def _bbox_looks_lon_lat_on_projected(bbox: tuple[float, float, float, float], crs: str) -> bool:
+    """The bbox looks like lon/lat degrees but the request CRS is projected."""
+    return not _is_geographic_crs(crs) and _estimate_crs_from_bbox(bbox) == "EPSG:4326"
+
+
+def _warn_if_bbox_looks_lon_lat(
+    bbox: tuple[float, float, float, float],
+    crs: str,
+    layer_bbox: tuple[float, float, float, float] | None = None,
+) -> None:
     """Warn when a bbox for a projected request CRS looks like lon/lat degrees.
 
     ``--bbox`` is read in the request CRS. Degrees on a projected layer select
     a tiny area near the CRS origin, so the result is almost always empty.
+    The warning names the CRS, shows the layer extent and prints the box
+    reprojected into the CRS, ready to copy. gpio does not apply it.
     """
-    if _is_geographic_crs(crs) or _estimate_crs_from_bbox(bbox) != "EPSG:4326":
+    if not _bbox_looks_lon_lat_on_projected(bbox, crs):
         return
-    short = _normalize_crs(crs)
-    warn(
-        f"--bbox {','.join(str(v) for v in bbox)} looks like lon/lat, but it is read "
-        f"in the layer CRS {short}. Pass the bbox in {short}, or request EPSG:4326 "
-        "with --output-crs if the layer offers it."
-    )
+    lines = [f"--bbox {_format_bbox(bbox)} looks like lon/lat. {_bbox_crs_line(crs)}"]
+    lines += _bbox_hint_lines(bbox, crs, layer_bbox)
+    warn("\n".join(lines))
+
+
+def _warn_no_features_in_bbox(
+    typename: str,
+    bbox: tuple[float, float, float, float],
+    crs: str,
+    layer_bbox: tuple[float, float, float, float] | None,
+) -> None:
+    """Warn that a bbox matched nothing, and say which CRS it was read in."""
+    lines = [
+        f"No features found in bbox for layer '{typename}'. Writing empty file.",
+        _bbox_crs_line(crs),
+    ]
+    if _bbox_looks_lon_lat_on_projected(bbox, crs):
+        lines += _bbox_hint_lines(bbox, crs, layer_bbox)
+    else:
+        lines += _bbox_extent_lines(crs, layer_bbox)
+    warn("\n".join(lines))
+
+
+def _bbox_crs_line(crs: str) -> str:
+    """One line that says --bbox is read in the layer CRS, with its name."""
+    label = _normalize_crs(crs)
+    target = _request_pyproj_crs(crs)
+    if target is not None and target.name:
+        label = f"{label} ({target.name})"
+    order = "lon,lat" if _is_geographic_crs(crs) else "easting first"
+    return f"--bbox is read in the layer CRS {label}, x,y ({order})."
+
+
+def _bbox_hint_lines(
+    bbox: tuple[float, float, float, float],
+    crs: str,
+    layer_bbox: tuple[float, float, float, float] | None,
+) -> list[str]:
+    """The layer extent and the lon/lat box reprojected into ``crs``."""
+    lines = _bbox_extent_lines(crs, layer_bbox)
+    hint = _try_lon_lat_bbox_in_crs(bbox, crs)
+    if hint is not None:
+        lines.append(
+            f"If your box is lon/lat, try --bbox {_format_bbox(hint, outward=True)} "
+            f"(reprojected to {_normalize_crs(crs)}, not applied)."
+        )
+    return lines
+
+
+def _bbox_extent_lines(crs: str, layer_bbox: tuple[float, float, float, float] | None) -> list[str]:
+    """The layer extent from capabilities, in lon/lat and in ``crs``."""
+    if not layer_bbox or layer_bbox[0] > layer_bbox[2]:
+        return []
+    line = f"Layer extent is {_format_bbox(layer_bbox)} in lon/lat"
+    native = None
+    if not _is_geographic_crs(crs):
+        clipped = _clip_to_area_of_use_or_none(layer_bbox, crs)
+        native = _try_lon_lat_bbox_in_crs(clipped, crs) if clipped else None
+    if native is not None:
+        line += f" and {_format_bbox(native, outward=True)} in {_normalize_crs(crs)}"
+    return [line + "."]
+
+
+def _clip_to_area_of_use_or_none(
+    lon_lat: tuple[float, float, float, float], crs: str
+) -> tuple[float, float, float, float] | None:
+    try:
+        return _clip_to_area_of_use(lon_lat, _normalize_crs(crs))
+    except Exception:
+        return None
+
+
+def _try_lon_lat_bbox_in_crs(
+    lon_lat: tuple[float, float, float, float], crs: str
+) -> tuple[float, float, float, float] | None:
+    """``_lon_lat_bbox_in_crs``, or None when pyproj cannot give a finite box."""
+    import math
+
+    try:
+        out = _lon_lat_bbox_in_crs(lon_lat, crs)
+    except Exception as e:
+        debug(f"Could not reproject {lon_lat} into {crs}: {e}")
+        return None
+    return out if all(math.isfinite(v) for v in out) else None
+
+
+def _format_bbox(bbox: tuple[float, float, float, float], outward: bool = False) -> str:
+    """A bbox as ``xmin,ymin,xmax,ymax``, rounded outward to whole units if asked."""
+    import math
+
+    if outward:
+        xmin, ymin, xmax, ymax = bbox
+        rounded = (math.floor(xmin), math.floor(ymin), math.ceil(xmax), math.ceil(ymax))
+        return ",".join(str(v) for v in rounded)
+    return ",".join(f"{v:g}" for v in bbox)
 
 
 def _validate_identifier(name: str) -> str:
@@ -3070,28 +3170,36 @@ def _get_tiling_bbox(
     if _crs_matches(crs, "EPSG:4326"):
         return layer_info.bbox
     try:
-        from pyproj import Transformer
-
-        target = _normalize_crs(crs)
-        lon_lat = _clip_to_area_of_use(layer_info.bbox, target)
+        lon_lat = _clip_to_area_of_use(layer_info.bbox, _normalize_crs(crs))
         if lon_lat is None:
             warn(
                 f"The layer bbox lies outside the area {crs} is defined for, so auto-tiling is off."
             )
             return None
-        # Authority order out, then x,y by the same rule _build_bbox_param
-        # swaps back with. always_xy is not that rule: PROJ leaves a
-        # Southing, Westing CRS (EPSG:5513, Krovak) as is, so the bbox would
-        # be swapped twice.
-        transformer = Transformer.from_crs("OGC:CRS84", target, always_xy=False)
-        a0_min, a1_min, a0_max, a1_max = transformer.transform_bounds(*lon_lat)
-        axes = _bbox_axes(crs)
-        if axes and axes.north_first:
-            return (a1_min, a0_min, a1_max, a0_max)
-        return (a0_min, a1_min, a0_max, a1_max)
+        return _lon_lat_bbox_in_crs(lon_lat, crs)
     except Exception as e:
         warn(f"Could not reproject the layer bbox into {crs}, so auto-tiling is off: {e}")
         return None
+
+
+def _lon_lat_bbox_in_crs(
+    lon_lat: tuple[float, float, float, float], crs: str
+) -> tuple[float, float, float, float]:
+    """Reproject a lon/lat bbox into ``crs``, in the x,y order gpio holds it.
+
+    Authority order comes out of pyproj, then x,y by the same rule
+    ``_build_bbox_param`` swaps back with. ``always_xy`` is not that rule.
+    PROJ leaves a Southing, Westing CRS (EPSG:5513, Krovak) as is, so the
+    bbox would be swapped twice. Raises when pyproj cannot do it.
+    """
+    from pyproj import Transformer
+
+    transformer = Transformer.from_crs("OGC:CRS84", _normalize_crs(crs), always_xy=False)
+    a0_min, a1_min, a0_max, a1_max = transformer.transform_bounds(*lon_lat)
+    axes = _bbox_axes(crs)
+    if axes and axes.north_first:
+        return (a1_min, a0_min, a1_max, a0_max)
+    return (a0_min, a1_min, a0_max, a1_max)
 
 
 def _clip_to_area_of_use(
@@ -3245,7 +3353,7 @@ def wfs_to_table(
     use_server_bbox = True
     if bbox:
         use_server_bbox = _determine_bbox_strategy(bbox_mode, layer_info)
-        _warn_if_bbox_looks_lon_lat(bbox, crs)
+        _warn_if_bbox_looks_lon_lat(bbox, crs, layer_info.bbox)
         _warn_if_axis_order_ignored(version, axis_order)
 
     # Get expected feature count for cap detection
@@ -3371,7 +3479,7 @@ def wfs_to_table(
     if table.num_rows == 0:
         if bbox:
             # Empty results with bbox filter is valid - just no features in that area
-            warn(f"No features found in bbox for layer '{typename}'. Writing empty file.")
+            _warn_no_features_in_bbox(typename, bbox, crs, layer_info.bbox)
         else:
             # Empty results without bbox likely indicates a problem
             raise EmptyLayerError(typename)

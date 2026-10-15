@@ -5,12 +5,14 @@ Tests use mocked HTTP responses to avoid network dependencies.
 Network tests are marked separately for optional integration testing.
 """
 
+import contextlib
 import logging
 import os
 import re
 import time
 from unittest.mock import MagicMock, patch
 
+import pyarrow as pa
 import pytest
 
 # Module-level imports for WFS functions (avoids per-test imports)
@@ -4104,6 +4106,78 @@ class TestBboxCrsContract:
             _warn_if_bbox_looks_lon_lat((-3.8, 40.3, -3.6, 40.5), "urn:ogc:def:crs:EPSG::25830")
         assert "EPSG:25830" in caplog.text
         assert "--bbox" in caplog.text
+
+    MOLDOVA_WGS84 = (26.63, 45.44, 30.13, 48.47)
+    CHISINAU = (28.8, 47.0, 28.85, 47.03)
+
+    def test_the_lon_lat_warning_names_the_crs_and_gives_a_hint(self, caplog):
+        """Option A on #1278: --bbox stays in the layer CRS, gpio prints a hint."""
+        from pyproj import Transformer
+
+        from geoparquet_io.core.wfs import _warn_if_bbox_looks_lon_lat
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_bbox_looks_lon_lat(self.CHISINAU, "EPSG:4026", self.MOLDOVA_WGS84)
+
+        text = caplog.text
+        assert "EPSG:4026 (MOLDREF99 / Moldova TM)" in text
+        assert "26.63,45.44,30.13,48.47" in text
+        hint = text.split("try --bbox ")[1].split()[0]
+        xmin, ymin, xmax, ymax = (float(v) for v in hint.split(","))
+        to_xy = Transformer.from_crs("OGC:CRS84", "EPSG:4026", always_xy=True)
+        x, y = to_xy.transform(28.82, 47.01)
+        assert xmin <= x <= xmax and ymin <= y <= ymax
+        assert len(text.strip().splitlines()) <= 4
+
+    def test_the_lon_lat_warning_shows_the_layer_extent_in_its_crs(self, caplog):
+        from geoparquet_io.core.wfs import _warn_if_bbox_looks_lon_lat
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_bbox_looks_lon_lat(self.CHISINAU, "EPSG:4026", self.MOLDOVA_WGS84)
+
+        extent = caplog.text.split("lon/lat and ")[1].split()[0]
+        xmin, ymin, xmax, ymax = (float(v) for v in extent.split(","))
+        # Easting first, then northing, as --bbox takes it
+        assert 50_000 < xmin < 100_000 and 300_000 < xmax < 400_000
+        assert 0 <= ymin < 50_000 and 350_000 < ymax < 400_000
+
+    def test_the_lon_lat_warning_works_without_a_layer_extent(self, caplog):
+        from geoparquet_io.core.wfs import _warn_if_bbox_looks_lon_lat
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_bbox_looks_lon_lat(self.CHISINAU, "EPSG:4026", None)
+        assert "try --bbox " in caplog.text
+        assert "extent" not in caplog.text
+
+    def test_an_empty_bbox_result_explains_the_crs(self, monkeypatch, caplog):
+        """A bbox that matched nothing says which CRS it was read in."""
+        from geoparquet_io.core import wfs
+
+        layer = WFSLayerInfo(
+            typename="cadastru_data:terenuri",
+            title="",
+            crs_list=["EPSG:4026"],
+            default_crs="EPSG:4026",
+            bbox=self.MOLDOVA_WGS84,
+            geometry_column="geom",
+            available_formats=[],
+        )
+        monkeypatch.setattr(wfs, "get_layer_info", lambda *a, **k: layer)
+        monkeypatch.setattr(wfs, "negotiate_wfs_version", lambda *a, **k: ("1.1.0", None))
+        monkeypatch.setattr(wfs, "_get_feature_count", lambda *a, **k: 0)
+        monkeypatch.setattr(wfs, "fetch_all_features_duckdb", lambda **k: pa.table({"a": []}))
+
+        with caplog.at_level(logging.WARNING):
+            with contextlib.suppress(Exception):
+                wfs.wfs_to_table(
+                    "http://mock/wfs",
+                    "cadastru_data:terenuri",
+                    bbox=(230403.0, 207012.0, 234224.0, 210368.0),
+                )
+
+        assert "No features found in bbox" in caplog.text
+        assert "read in the layer CRS EPSG:4026 (MOLDREF99 / Moldova TM)" in caplog.text
+        assert "26.63,45.44,30.13,48.47" in caplog.text
 
     @pytest.mark.parametrize(
         "bbox,crs",
