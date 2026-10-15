@@ -175,6 +175,18 @@ def spy(self, table, row_group_size=None):
     return real_write_table(self, table, row_group_size=row_group_size)
 
 pq.ParquetWriter.write_table = spy
+
+# Pool threads keep a decoded column chunk alive for a moment after the read. This
+# file has one column, so that chunk is a whole group, and a busy runner would make
+# the spy count thread cleanup lag instead of the streaming shape. Production stays
+# parallel because threads off made a 631 MB, 64-column rewrite about 22% slower.
+real_read_row_group = pq.ParquetFile.read_row_group
+
+def read_row_group_one_thread(self, i, columns=None, use_threads=True, use_pandas_metadata=False):
+    return real_read_row_group(self, i, columns=columns, use_threads=False,
+                               use_pandas_metadata=use_pandas_metadata)
+
+pq.ParquetFile.read_row_group = read_row_group_one_thread
 baseline = pa.total_allocated_bytes()
 _rewrite_file_with_geo_metadata(
     path, {"version": "2.0.0"}, "ZSTD", None, None if rows == "none" else int(rows)
