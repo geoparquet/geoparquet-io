@@ -1754,6 +1754,11 @@ gpio extract carto https://phl.carto.com opa_properties_public output.parquet
 
 Carto tables typically have geometry in a column named `the_geom` (WGS84). This is automatically renamed to `geometry` in the output for consistency with other geoparquet-io extractors.
 
+Carto returns `the_geom` in the SRID the table stores it in, without reprojecting. So `gpio` reads that SRID with one small `ST_SRID` query and tags the output with it. SRID 4326 is written as `OGC:CRS84`, and any other SRID as its EPSG definition. If the SRID cannot be read, or resolves to no EPSG definition, the extraction **fails** and writes nothing, because a file tagged as WGS84 would label projected coordinates as longitude and latitude.
+
+!!! note "Changed after 1.6.0"
+    Every Carto extraction used to be tagged `OGC:CRS84`, whatever SRID the table used. A table stored in a projected SRID is now tagged with that SRID, and one whose SRID cannot be resolved is refused.
+
 ### Non-Geometry (Tabular) Tables
 
 Carto accounts often include geometry-less lookup or demographics tables. `gpio` auto-detects these and extracts them as **plain Parquet** (no GeoParquet `geo` metadata key) — the same behavior as converting a non-spatial file. Hilbert ordering, the bbox column, and `--bbox` filtering are skipped (they require geometry); `--where`, `--limit`, `--include-cols`, and `--exclude-cols` are still honored.
