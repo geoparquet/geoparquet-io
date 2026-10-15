@@ -2847,7 +2847,7 @@ class TestAxisOrder:
                 (0.0, 40.0, 20.0, 60.0),
                 "urn:ogc:def:crs:EPSG::4258",
                 "2.0.0",
-                "xy",
+                "auto",
                 "40.0,0.0,60.0,20.0,urn:ogc:def:crs:EPSG::4258",
             ),
             (
@@ -4118,6 +4118,157 @@ class TestBboxCrsContract:
         with caplog.at_level(logging.WARNING):
             _warn_if_bbox_looks_lon_lat(bbox, crs)
         assert caplog.text == ""
+
+
+class TestBboxAxisRuleByCrs:
+    """Second review of #1278: the bbox order comes from the first axis name."""
+
+    BOX = (1.0, 2.0, 3.0, 4.0)
+
+    @pytest.mark.parametrize(
+        "crs,expected",
+        [
+            # WGS84 lon/lat goes x,y labelled CRS84
+            ("EPSG:4326", "1.0,2.0,3.0,4.0,urn:ogc:def:crs:OGC:1.3:CRS84"),
+            # Latitude or northing first, and no x,y twin
+            ("EPSG:4258", "2.0,1.0,4.0,3.0,urn:ogc:def:crs:EPSG::4258"),
+            ("EPSG:4269", "2.0,1.0,4.0,3.0,urn:ogc:def:crs:EPSG::4269"),
+            ("EPSG:3006", "2.0,1.0,4.0,3.0,urn:ogc:def:crs:EPSG::3006"),
+            # UPS North lists northing first, both axes point south
+            ("EPSG:32661", "2.0,1.0,4.0,3.0,urn:ogc:def:crs:EPSG::32661"),
+            # Easting first
+            ("EPSG:2056", "1.0,2.0,3.0,4.0,EPSG:2056"),
+            ("EPSG:21781", "1.0,2.0,3.0,4.0,EPSG:21781"),
+            ("EPSG:3857", "1.0,2.0,3.0,4.0,EPSG:3857"),
+            ("EPSG:25832", "1.0,2.0,3.0,4.0,EPSG:25832"),
+            # Polar stereographic, easting first but both axes north or south
+            ("EPSG:3031", "1.0,2.0,3.0,4.0,EPSG:3031"),
+            ("EPSG:3413", "1.0,2.0,3.0,4.0,EPSG:3413"),
+            ("EPSG:3995", "1.0,2.0,3.0,4.0,EPSG:3995"),
+            ("EPSG:5041", "1.0,2.0,3.0,4.0,EPSG:5041"),
+            ("urn:x-ogc:def:crs:EPSG:3031", "1.0,2.0,3.0,4.0,EPSG:3031"),
+        ],
+    )
+    def test_the_bbox_order_follows_the_first_axis(self, crs, expected):
+        from geoparquet_io.core.wfs import _build_bbox_param
+
+        assert _build_bbox_param(self.BOX, crs, "1.1.0") == expected
+        assert _build_bbox_param(self.BOX, crs, "2.0.0") == expected
+
+    @pytest.mark.parametrize(
+        "crs",
+        [
+            "CRS:84",
+            "crs:84",
+            "urn:ogc:def:crs:OGC:1.3:CRS84",
+            "http://www.opengis.net/def/crs/OGC/1.3/CRS84",
+        ],
+    )
+    def test_a_crs84_layer_goes_x_y_labelled_crs84(self, crs):
+        from geoparquet_io.core.wfs import _build_bbox_param
+
+        assert (
+            _build_bbox_param(self.BOX, crs, "1.1.0")
+            == "1.0,2.0,3.0,4.0,urn:ogc:def:crs:OGC:1.3:CRS84"
+        )
+
+    @pytest.mark.parametrize("crs", ["CRS:84", "http://www.opengis.net/def/crs/OGC/1.3/CRS84"])
+    def test_a_crs84_layer_resolves_to_lon_lat_crs84(self, crs):
+        from pyproj import CRS
+
+        from geoparquet_io.core.wfs import _output_crs_projjson
+
+        resolved = CRS.from_json_dict(_output_crs_projjson(crs))
+        assert resolved.equals(CRS.from_user_input("OGC:CRS84"))
+
+    @pytest.mark.parametrize(
+        "crs,expected",
+        [
+            ("EPSG:4258", "1.0,2.0,3.0,4.0,EPSG:4258"),
+            ("EPSG:3006", "1.0,2.0,3.0,4.0,EPSG:3006"),
+            ("urn:ogc:def:crs:EPSG::4258", "1.0,2.0,3.0,4.0,EPSG:4258"),
+            ("EPSG:4326", "1.0,2.0,3.0,4.0,urn:ogc:def:crs:OGC:1.3:CRS84"),
+            ("EPSG:3857", "1.0,2.0,3.0,4.0,EPSG:3857"),
+        ],
+    )
+    def test_axis_order_xy_forces_x_y(self, crs, expected):
+        from geoparquet_io.core.wfs import _build_bbox_param
+
+        assert _build_bbox_param(self.BOX, crs, "1.1.0", "xy") == expected
+
+    def test_the_bbox_count_probe_sends_the_srs_name(self, monkeypatch):
+        """QGIS Server reads the bbox in srsName or the layer CRS, not its label."""
+        from geoparquet_io.core.wfs import _get_feature_count
+
+        http = FakeTransport.install(monkeypatch)
+        http.respond("/wfs", xml_reply(b'<c numberOfFeatures="8"/>'))
+
+        count = _get_feature_count(
+            "http://mock/wfs", "layer", "1.1.0", bbox=(7.5, 47.19, 7.56, 47.22), crs="EPSG:4326"
+        )
+
+        assert count == 8
+        assert http.last.params["srsName"] == "EPSG:4326"
+        assert http.last.params["bbox"] == ("7.5,47.19,7.56,47.22,urn:ogc:def:crs:OGC:1.3:CRS84")
+
+    def test_the_tile_probe_sends_the_srs_name(self, monkeypatch):
+        from geoparquet_io.core.wfs import _refine_tiles_adaptive
+
+        http = FakeTransport.install(monkeypatch)
+        http.respond("/wfs", xml_reply(b'<c numberOfFeatures="3"/>'))
+
+        tiles = _refine_tiles_adaptive(
+            [(0.0, 0.0, 10.0, 10.0)],
+            "http://mock/wfs",
+            "layer",
+            "1.1.0",
+            "EPSG:2056",
+            "auto",
+            max_per_tile=100,
+        )
+
+        assert tiles == [(0.0, 0.0, 10.0, 10.0)]
+        assert http.last.params["srsName"] == "EPSG:2056"
+
+    @pytest.mark.parametrize(
+        "axes,expected",
+        [
+            ((("A", "north"), ("B", "east")), True),
+            ((("A", "south"), ("B", "west")), True),
+            ((("A", "north"), ("B", "north")), False),
+            ((("A", "east"), ("B", "north")), False),
+            ((("A", "north"),), False),
+        ],
+    )
+    def test_an_unnamed_axis_falls_back_to_both_directions(self, axes, expected):
+        from types import SimpleNamespace
+
+        from geoparquet_io.core.wfs import _first_axis_is_north
+
+        info = [SimpleNamespace(name=name, direction=direction) for name, direction in axes]
+        assert _first_axis_is_north(info) is expected
+
+    def test_an_oversized_crs_string_is_not_read(self):
+        from geoparquet_io.core.wfs import _MAX_CRS_STRING, _request_pyproj_crs
+
+        assert _request_pyproj_crs("EPSG:" + "9" * _MAX_CRS_STRING) is None
+
+    def test_a_layer_bbox_across_the_antimeridian_says_so(self, caplog):
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        layer = WFSLayerInfo(
+            typename="t:l",
+            title="",
+            crs_list=[],
+            default_crs=None,
+            bbox=(170.0, 50.0, -130.0, 72.0),
+            geometry_column="geom",
+            available_formats=[],
+        )
+        with caplog.at_level(logging.WARNING):
+            assert _get_tiling_bbox(None, True, layer, "EPSG:3857") is None
+        assert "antimeridian" in caplog.text
+        assert "outside" not in caplog.text
 
 
 # =============================================================================

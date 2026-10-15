@@ -873,8 +873,9 @@ def _deprecated_version_callback(ctx, param, value):
     type=click.Choice(["auto", "xy", "latlon"]),
     default="auto",
     help="Order the server reads --bbox in. Pass --bbox as x,y (lon,lat). 'auto' "
-    "(default) and 'xy' pick the form every server reads alike, CRS84 for "
-    "lon/lat and lat,lon with the EPSG URN for other lat,lon CRSs. 'latlon' also "
+    "(default) picks the form every server reads alike, CRS84 for lon/lat and "
+    "lat,lon with the EPSG URN for other lat,lon CRSs. 'xy' always sends x,y "
+    "with the short EPSG:<code> label (CRS84 for lon/lat). 'latlon' also "
     "sends a lon/lat bbox as lat,lon, for servers such as ArcGIS WFS that read "
     "every EPSG:4326 bbox that way. Ignored on WFS 1.0.0, which reads x,y.",
 )

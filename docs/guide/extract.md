@@ -1623,7 +1623,8 @@ same way.
   as EPSG:4258, EPSG:4269 or EPSG:3006, gets lat,lon (or y,x) labelled
   `urn:ogc:def:crs:EPSG::<code>`. Servers disagree on the short `EPSG:<code>`
   label for these CRSs, while they all read the URN in that order.
-- Any other projected layer (EPSG:3857, EPSG:25832) gets x,y with its
+- Any other projected layer (EPSG:3857, EPSG:25832, and polar CRSs such as
+  EPSG:3031 or EPSG:3413 that list easting first) gets x,y with its
   `EPSG:<code>` label.
 - WFS 1.0.0 is always read x,y, so the bbox goes x,y with no label.
 
@@ -1633,9 +1634,13 @@ the label says, so the filter selects a swapped area. For those,
 `urn:ogc:def:crs:EPSG::4326` label. It has no effect on an x,y CRS, and on WFS
 1.0.0 it is ignored with a warning.
 
+`--axis-order xy` always sends the bbox x,y with the short `EPSG:<code>` label
+(CRS84 for a lon/lat layer). Use it for a server that reads the short label x,y
+but mishandles the URN for a lat,lon CRS such as EPSG:4258.
+
 <!-- doctest: skip="illustrative endpoint" -->
 ```bash
-# Default, x,y order (same as --axis-order xy)
+# Default, x,y order
 gpio extract wfs https://geo.example.com/wfs cities output.parquet \
     --bbox 4.82,50.44,4.92,50.48
 

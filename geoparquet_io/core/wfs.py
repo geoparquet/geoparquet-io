@@ -1251,21 +1251,34 @@ _CRS84_URN: Final = "urn:ogc:def:crs:OGC:1.3:CRS84"
 _EPSG_URN_PREFIX: Final = "urn:ogc:def:crs:EPSG::"
 
 
+# The WMS-style ``CRS:84`` label, which pyproj does not read. The URN and URL
+# forms of CRS84 it reads as they are.
+_CRS_84_LABEL: Final = re.compile(r"^\s*CRS:84\s*$", re.IGNORECASE)
+
+
+def _pyproj_input(crs: str, code: str | None) -> str:
+    """The string pyproj reads for a WFS CRS string with EPSG code ``code``."""
+    if code:
+        return f"EPSG:{code}"
+    if _CRS_84_LABEL.match(crs):
+        return "OGC:CRS84"
+    return crs
+
+
 @lru_cache(maxsize=64)
 def _request_pyproj_crs(crs: str):
     """The pyproj CRS a WFS CRS string names, or None when it cannot be read.
 
     The EPSG code comes first (every form ``_EPSG_CODE`` reads, which pyproj
-    does not all know), then pyproj on the string itself (``ESRI:102100``, a
-    CRS84 URN or URL).
+    does not all know), then ``CRS:84``, then pyproj on the string itself
+    (``ESRI:102100``, a CRS84 URN or URL).
     """
     if len(crs) > _MAX_CRS_STRING:
         return None
     from pyproj import CRS as _PyprojCRS
 
-    code = _epsg_code(crs)
     try:
-        return _PyprojCRS.from_user_input(f"EPSG:{code}" if code else crs)
+        return _PyprojCRS.from_user_input(_pyproj_input(crs, _epsg_code(crs)))
     except Exception as e:
         debug(f"pyproj could not read CRS {crs[:200]!r}: {e}")
         return None
@@ -1281,6 +1294,31 @@ class _BboxAxes:
     """The CRS is WGS84 lon/lat up to axis order, so CRS84 names it in x,y."""
 
 
+_NORTH_FIRST_AXIS_NAMES: Final = ("northing", "southing", "latitude")
+_EAST_FIRST_AXIS_NAMES: Final = ("easting", "westing", "longitude")
+
+
+def _first_axis_is_north(axis_info) -> bool:
+    """The authority lists northing or latitude first.
+
+    The axis name decides. The direction alone is not enough, because a polar
+    stereographic CRS (EPSG:3031, 3413, 3995, 5041) lists easting first while
+    both its axes point north or south. Without a known name, the first axis
+    counts as northing only when it points north or south and the second axis
+    points east or west.
+    """
+    name = axis_info[0].name.lower()
+    if any(word in name for word in _NORTH_FIRST_AXIS_NAMES):
+        return True
+    if any(word in name for word in _EAST_FIRST_AXIS_NAMES):
+        return False
+    return (
+        len(axis_info) > 1
+        and axis_info[0].direction.lower() in ("north", "south")
+        and axis_info[1].direction.lower() in ("east", "west")
+    )
+
+
 @lru_cache(maxsize=64)
 def _bbox_axes(crs: str) -> _BboxAxes | None:
     """The axis facts of the request CRS, from pyproj, or None when unknown."""
@@ -1290,7 +1328,7 @@ def _bbox_axes(crs: str) -> _BboxAxes | None:
     from pyproj import CRS as _PyprojCRS
 
     return _BboxAxes(
-        north_first=target.axis_info[0].direction.lower() in ("north", "south"),
+        north_first=_first_axis_is_north(target.axis_info),
         wgs84_lon_lat=bool(
             target.is_geographic
             and target.equals(_PyprojCRS.from_user_input("OGC:CRS84"), ignore_axis_order=True)
@@ -1315,14 +1353,16 @@ def _build_bbox_param(
     - WFS 1.0.0 has no label and is always read x,y, so x,y is sent as is.
     - WFS 1.1.0 and 2.0.0 read a URN in the authority's axis order. The short
       ``EPSG:<code>`` form is ambiguous for a CRS the authority lists
-      northing or latitude first. GeoServer and deegree read it x,y, MapServer
-      and QGIS Server in the authority order (seen live on demo.mapserver.org,
-      PDOK, wfs.nrw.de, USGS mrdata and geo.weather.gc.ca). So:
+      northing or latitude first. GeoServer, deegree and QGIS Server read it
+      x,y, MapServer in the authority order (seen live on demo.mapserver.org,
+      PDOK, wfs.nrw.de, USGS mrdata, geo.weather.gc.ca and geo.so.ch). The
+      first axis name decides what is first (see ``_first_axis_is_north``),
+      so a polar stereographic CRS such as EPSG:3031 is east-first. So:
 
       - an east-first CRS (most projected CRSs) goes x,y with the short label,
         which both readings agree on. Labelling every bbox EPSG:4326 made
         servers drop the filter on any other layer (#640).
-      - WGS84 lon/lat (EPSG:4326, CRS84) goes x,y labelled
+      - WGS84 lon/lat (EPSG:4326, CRS84, ``CRS:84``) goes x,y labelled
         ``urn:ogc:def:crs:OGC:1.3:CRS84``, lon,lat by definition.
       - any other north-first CRS (EPSG:4258, EPSG:4269, EPSG:3006) has no x,y
         twin, so it goes in the authority order with the
@@ -1330,8 +1370,11 @@ def _build_bbox_param(
 
     ``axis_order="latlon"`` sends a north-first CRS in the authority order with
     the URN even when CRS84 would do. ArcGIS WFS reads every 4326 bbox lat,lon
-    whatever the label says (seen live on sampleserver6). "auto" and "xy" pick
-    the form above. A CRS pyproj cannot read goes x,y with its own label.
+    whatever the label says (seen live on sampleserver6). ``axis_order="xy"``
+    sends every bbox x,y, with the CRS84 label for WGS84 lon/lat and the short
+    ``EPSG:<code>`` label for any other CRS, for a server that reads that
+    label x,y but mishandles the URN. "auto" picks the form above. A CRS
+    pyproj cannot read goes x,y with its own label.
 
     Args:
         bbox: Bounding box tuple (xmin, ymin, xmax, ymax) in the request CRS
@@ -1348,7 +1391,8 @@ def _build_bbox_param(
         return xy
     axes = _bbox_axes(crs)
     code = _epsg_code(crs)
-    if axes and axes.north_first and code and (axis_order == "latlon" or not axes.wgs84_lon_lat):
+    swap = axis_order == "latlon" or (axis_order == "auto" and not (axes and axes.wgs84_lon_lat))
+    if axes and axes.north_first and code and swap:
         return f"{ymin},{xmin},{ymax},{xmax},{_EPSG_URN_PREFIX}{code}"
     if axes and axes.wgs84_lon_lat:
         return f"{xy},{_CRS84_URN}"
@@ -1513,6 +1557,9 @@ def _get_feature_count(
     }
 
     if bbox and crs:
+        # The srsName GetFeature sends. QGIS Server reads the bbox in srsName,
+        # or in the layer CRS without one, whatever the bbox label says.
+        params["srsName"] = crs
         params["bbox"] = _build_bbox_param(bbox, crs, version, axis_order)
 
     # Merge the WFS params into the URL instead of passing params= to the
@@ -3009,6 +3056,9 @@ def _get_tiling_bbox(
         return user_bbox
     if not layer_info.bbox:
         return None
+    if layer_info.bbox[0] > layer_info.bbox[2]:
+        warn("The layer bbox crosses the antimeridian, so auto-tiling is off.")
+        return None
     if _crs_matches(crs, "EPSG:4326"):
         return layer_info.bbox
     try:
@@ -3072,7 +3122,7 @@ def _output_crs_projjson(crs: str) -> dict:
         try:
             from pyproj import CRS as _PyprojCRS
 
-            return _PyprojCRS.from_user_input(crs).to_json_dict()
+            return _PyprojCRS.from_user_input(_pyproj_input(crs, None)).to_json_dict()
         except Exception as e:
             debug(f"pyproj could not read CRS {crs[:200]!r}: {e}")
     raise WFSError(
