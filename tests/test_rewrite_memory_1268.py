@@ -435,6 +435,7 @@ class TestHilbertOrderEdgeCases:
                 "geometry": pa.array(wkbs, type=pa.binary()),
                 "name": pa.array([f"n{i}" * (i % 4) for i in range(200)], type=pa.large_string()),
                 "tag": pa.array([None if i % 5 == 0 else f"t{i}" for i in range(200)]),
+                "kind": pa.array([f"k{i % 3}" for i in range(200)]).dictionary_encode(),
                 "id": pa.array(range(200), type=pa.int32()),
             }
         )
@@ -605,3 +606,46 @@ def test_hilbert_multi_chunk_geoarrow_wkb_column(con):
         strict=True,
     ):
         assert geom == wkbs[rid]
+
+
+def test_repair_halves_a_chunk_whose_patch_overflows(con, monkeypatch):
+    """A chunk the repaired bytes no longer fit (offset overflow) is patched in halves."""
+    import geoparquet_io.core.geometry_repair as mod
+
+    real = mod._if_else_chunk
+
+    def overflowing(chunk, fixed):
+        if len(chunk) > 1:
+            raise pa.ArrowCapacityError("offset overflow")
+        return real(chunk, fixed)
+
+    monkeypatch.setattr(mod, "_if_else_chunk", overflowing)
+    valid = _wkb(con, "POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))")
+    table = pa.table({"geometry": pa.array([valid, _wkb(con, BOWTIE_WKT), valid], pa.binary())})
+    repaired, n = mod.repair_arrow_table_geometry(table, "geometry", repair=True)
+    assert n == 1
+    column = repaired.column("geometry")
+    assert column.num_chunks == 3
+    assert column.to_pylist()[0] == column.to_pylist()[2] == valid
+    assert con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [column[1].as_py()]).fetchone()[0]
+
+
+def test_registered_dictionary_geometry_reads_flat(con):
+    """A dictionary-typed WKB column is decoded on registration, so flat SQL reads it."""
+    from geoparquet_io.core.geometry_detection import register_geometry_column
+
+    point = _wkb(con, "POINT(1 2)")
+    geometry = pa.array([point, b"not wkb", b"", None, point]).dictionary_encode()
+    table = pa.table({"geometry": geometry})
+    read = register_geometry_column(con, "__dict_src", table, "geometry")
+    assert read.kind == "wkb" and read.flat
+    rows = con.execute(
+        f"SELECT {read.parseable_sql}, ST_AsText({read.expr}) FROM __dict_src"
+    ).fetchall()
+    assert rows == [
+        (True, "POINT (1 2)"),
+        (False, None),
+        (False, None),
+        (False, None),
+        (True, "POINT (1 2)"),
+    ]

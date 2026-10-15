@@ -198,9 +198,7 @@ def _gather_column(column: pa.ChunkedArray, indices) -> pa.ChunkedArray:
 
 
 def _take_rows(table: pa.Table, indices) -> pa.Table:
-    """``table`` reordered to ``indices`` (numpy int64), one column at a time."""
-    if table.num_rows == 0:
-        return table
+    """``table`` reordered to ``indices`` (numpy int64, one per row), one column at a time."""
     columns = [_gather_column(table.column(i), indices) for i in range(table.num_columns)]
     return pa.Table.from_arrays(columns, schema=table.schema)
 
