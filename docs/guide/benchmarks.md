@@ -322,20 +322,18 @@ variable to a directory to turn on DuckDB's own profiler for every connection
 gpio opens — any command, no flags or code changes:
 
 === "CLI"
-    <!-- doctest: skip="needs input.parquet, which the harness does not seed" -->
     ```bash
-    GPIO_DUCKDB_PROFILE=/tmp/prof gpio convert geoparquet input.parquet output.parquet
-    ls /tmp/prof
+    GPIO_DUCKDB_PROFILE=profiles gpio convert geoparquet input.parquet output.parquet
+    ls profiles
     # gpio-profile-20261015T110948-p99396-c1-q0017.json
     # gpio-profile-20261015T110948-p99396-c1-q0021.json
     ```
 
 === "Python"
-    <!-- doctest: skip="needs input.parquet, which the harness does not seed" -->
     ```python
     import os
 
-    os.environ["GPIO_DUCKDB_PROFILE"] = "/tmp/prof"
+    os.environ["GPIO_DUCKDB_PROFILE"] = "profiles"
 
     import geoparquet_io as gpio
 
