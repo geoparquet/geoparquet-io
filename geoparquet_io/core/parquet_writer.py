@@ -668,6 +668,20 @@ def dictionary_columns(schema: pa.Schema, geometry_columns: Collection[str] = ()
     ]
 
 
+def without_geometry_dictionary(
+    writer_kwargs: dict, schema: pa.Schema, geometry_columns: Collection[str] = ()
+) -> dict:
+    """``writer_kwargs`` with ``use_dictionary`` limited to the non-geometry columns.
+
+    The one place a pyarrow ``ParquetWriter`` or ``write_table`` call gets its
+    ``use_dictionary``. pyarrow's default encodes every column, so a write that
+    builds its own kwargs re-encodes the geometry (#1122).
+    ``tests/test_geometry_not_dictionary_encoded.py`` fails on a new pyarrow
+    write that does not ask here.
+    """
+    return {**writer_kwargs, "use_dictionary": dictionary_columns(schema, geometry_columns)}
+
+
 @dataclass
 class ParquetWriteSettings:
     """

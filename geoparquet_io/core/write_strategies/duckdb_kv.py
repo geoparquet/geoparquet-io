@@ -116,12 +116,13 @@ def _table_query_with_native_geometry(
     At 2.0 the same goes for a secondary the table's carried ``geo`` key declares
     as plain WKB bytes: left a BLOB, it is described in ``geo.columns`` but not
     natively typed, which 2.0 requires of every geometry column (#1175). It gets
-    its own declared CRS, never the primary's. Below 2.0 the secondaries stay WKB
-    and the write path's blob conversion handles them.
+    its own declared CRS, never the primary's. parquet-geo-only writes no block,
+    so the native type is a secondary's only geometry identity there too. Below
+    2.0 the secondaries stay WKB and the write path's blob conversion handles them.
     """
     replacements = []
     columns = [geometry_column]
-    if geoparquet_version == "2.0":
+    if geoparquet_version in ("2.0", "parquet-geo-only"):
         columns += list((geometry_info or {}).get("secondary") or ())
     metadata = (geometry_info or {}).get("metadata") or {}
     for name in columns:

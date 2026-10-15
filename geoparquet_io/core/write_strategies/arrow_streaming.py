@@ -44,7 +44,10 @@ from geoparquet_io.core.geoarrow_encoding import (
     wkb_array_to_geoarrow,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
-from geoparquet_io.core.parquet_writer import apply_output_kv_metadata, dictionary_columns
+from geoparquet_io.core.parquet_writer import (
+    apply_output_kv_metadata,
+    without_geometry_dictionary,
+)
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
     _parse_existing_geo_metadata,
@@ -242,13 +245,6 @@ def _check_geometry_type(
 
     final_sql = _wrap_query_with_wkb_conversion(query, geometry_column, con) if needs_wkb else query
     return needs_wkb, final_sql
-
-
-def without_geometry_dictionary(
-    writer_kwargs: dict, schema: pa.Schema, geometry_columns: set[str]
-) -> dict:
-    """``writer_kwargs`` with dictionary encoding limited to the non-geometry columns (#1122)."""
-    return {**writer_kwargs, "use_dictionary": dictionary_columns(schema, geometry_columns)}
 
 
 class ArrowStreamingStrategy(BaseWriteStrategy):
@@ -704,6 +700,10 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         # parquet-geo-only request (#773). `_build_streaming_schema` starts from
         # this table's metadata, so the same call covers the geometry path,
         # where a parquet-geo-only write used to keep the input's block too.
+        # Read before the facade below, which drops `geo` under parquet-geo-only.
+        # It is still the witness for which columns are geometry, and without it
+        # a secondary lost its native type and kept its dictionary (#1122).
+        carried_geo = _parse_geo_metadata_quietly(table.schema.metadata)
         table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
 
         validated_compression, validated_level, _ = validate_compression_settings(
@@ -733,9 +733,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         # what names a block-less table's secondaries (#1175). Below 2.0 they also
         # have to give up the GeoArrow carrier the schema builder would otherwise
         # write as a native Parquet GEOMETRY type -- illegal in a 1.x file.
-        geometry_info = table_geometry_info(
-            table, geometry_column, _parse_geo_metadata_quietly(table.schema.metadata)
-        )
+        geometry_info = table_geometry_info(table, geometry_column, carried_geo)
         if geometry_info and effective_version in ("1.0", "1.1"):
             table = _canonicalize_wkb_columns(
                 table,
@@ -836,6 +834,9 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             verbose=verbose,
             extra_kv_metadata=extra_kv_metadata,
             geoarrow_target_type=geoarrow_target_type,
+            # parquet-geo-only has set `geo_meta` to None by now, so the
+            # secondaries are named here or not at all.
+            geometry_columns=geometry_columns,
         )
 
         writer_kwargs = {"compression": validated_compression or "NONE"}

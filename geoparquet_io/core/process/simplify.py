@@ -32,9 +32,9 @@ from geoparquet_io.core.geoarrow_encoding import is_wkb_extension_field
 from geoparquet_io.core.logging_config import debug, info, warn
 from geoparquet_io.core.optional_deps import load_module, require_coarsen
 from geoparquet_io.core.parquet_writer import (
-    dictionary_columns,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
+    without_geometry_dictionary,
 )
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
@@ -600,8 +600,7 @@ def _simplify_file_streaming(
                 write_target,
                 writer_schema,
                 store_schema=False,
-                use_dictionary=dictionary_columns(schema, [geom_col]),
-                **writer_kwargs,
+                **without_geometry_dictionary(writer_kwargs, schema, [geom_col]),
             ) as writer:
                 for batch in batches:
                     table = pa.Table.from_batches([batch])

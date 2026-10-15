@@ -314,6 +314,10 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         # runs before the non-geo early return below -- which is exactly the
         # return that wrote a carried `geo` key through under an explicit
         # parquet-geo-only request (#773).
+        # Read before the facade below, which drops `geo` under parquet-geo-only.
+        # It is still the witness for which columns are geometry, and without it
+        # a secondary lost its native type and kept its dictionary (#1122).
+        carried_geo = _parse_geo_metadata_quietly(table.schema.metadata)
         table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
 
         # Handle non-geo tables: write plain Parquet without geo metadata
@@ -372,7 +376,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 geometry_info=table_geometry_info(
                     table,
                     geometry_column,
-                    _parse_geo_metadata_quietly(table.schema.metadata),
+                    carried_geo,
                 ),
             )
         finally:
@@ -583,9 +587,9 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         }
         if compression_level is not None and pa_compression:
             writer_kwargs["compression_level"] = compression_level
-        from geoparquet_io.core.write_strategies.arrow_streaming import (
-            without_geometry_dictionary,
-        )
+        # Imported here, not at the top, to keep this hunk clear of the module's
+        # import block (#1281 edits that line).
+        from geoparquet_io.core.parquet_writer import without_geometry_dictionary
 
         # parquet-geo-only has no block, so `native_crs` is what names its columns.
         writer_kwargs = without_geometry_dictionary(

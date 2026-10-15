@@ -181,6 +181,8 @@ def _fix_vecorel_schema(parquet_file: str, non_nullable_columns: list[str]) -> N
     import pyarrow as pa
     import pyarrow.parquet as pq
 
+    from geoparquet_io.core.parquet_writer import without_geometry_dictionary
+
     pf = pq.ParquetFile(parquet_file)
     schema = pf.schema_arrow
 
@@ -249,7 +251,11 @@ def _fix_vecorel_schema(parquet_file: str, non_nullable_columns: list[str]) -> N
     fd, temp_out = tempfile.mkstemp(suffix=".parquet")
     os.close(fd)
     try:
-        with pq.ParquetWriter(temp_out, new_schema, compression=pa_compression) as writer:
+        # The facade's use_dictionary, or pyarrow re-encodes the geometry the
+        # write funnel kept out of the dictionary (#1122). The geo block and the
+        # geoarrow extension types name the geometry columns.
+        writer_kwargs = without_geometry_dictionary({"compression": pa_compression}, new_schema)
+        with pq.ParquetWriter(temp_out, new_schema, **writer_kwargs) as writer:
             for rg_idx in range(pf.metadata.num_row_groups):
                 rg_table = pf.read_row_group(rg_idx)
                 rg_table = rg_table.cast(new_schema)

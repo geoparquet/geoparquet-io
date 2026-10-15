@@ -32,7 +32,7 @@ from geoparquet_io.core.duckdb_metadata import (
 from geoparquet_io.core.geo_metadata import _DIMENSION_SUFFIXES, _GEOMETRY_TYPE_CODES
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns
-from geoparquet_io.core.parquet_writer import dictionary_columns
+from geoparquet_io.core.parquet_writer import without_geometry_dictionary
 
 
 def _geo_code_to_type_name(code: int) -> str | None:
@@ -428,7 +428,7 @@ def _rewrite_file_with_geo_metadata(
             new_meta[b"geo"] = json.dumps(geo_meta).encode()
             schema = pf.schema_arrow.with_metadata(new_meta)
             with pq.ParquetWriter(
-                tmp_path, schema, use_dictionary=dictionary_columns(schema), **write_kwargs
+                tmp_path, schema, **without_geometry_dictionary(write_kwargs, schema)
             ) as writer:
                 _copy_row_groups(pf, writer, row_group_rows)
         os.replace(tmp_path, output_path)
