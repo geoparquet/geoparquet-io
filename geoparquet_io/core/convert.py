@@ -2589,6 +2589,8 @@ def read_spatial_to_arrow(
                 # Spatial formats (GeoJSON, Shapefile, GeoPackage, etc.)
                 table_expr = _plain_st_read_expr(input_file, encoding, layer, con=con)
             arrow_table = con.execute(f"SELECT * FROM {table_expr}").arrow().read_all()
+            if is_parquet:
+                arrow_table = _carry_input_kv_metadata(arrow_table, input_file, verbose)
             return arrow_table, None, None
 
         # Repair invalid geometry (issue #506). The geometry column is WKB-encoded

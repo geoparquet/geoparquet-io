@@ -33,6 +33,7 @@ from geoparquet_io.core.arrow_geo_metadata import (
     _normalize_arrow_large_types,
     _write_table_with_settings,
     nonplanar_edges_from_schema,
+    with_planar_edge_types,
 )
 from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.crs_utils import (
@@ -1597,12 +1598,15 @@ def table_nonplanar_edges(table, geometry_column: str, edges: str | None) -> dic
     """Map geometry column -> non-planar edges an in-memory table declares.
 
     The caller's ``edges`` wins for the primary, then a GeoArrow field's own
-    edge type, then the carried ``geo`` block. The table is the only witness
-    the Arrow funnel has, since it never sees the input file.
+    edge type, then the carried ``geo`` block. An explicit ``"planar"`` is a
+    choice too, so it drops the primary. The table is the only witness the
+    Arrow funnel has, since it never sees the input file.
     """
     edges_by_col = _collect_nonplanar_edges_from_metadata(table.schema.metadata)
     edges_by_col.update(nonplanar_edges_from_schema(table.schema))
-    if edges and edges != "planar":
+    if edges == "planar":
+        edges_by_col.pop(geometry_column, None)
+    elif edges:
         edges_by_col[geometry_column] = edges
     return {name: e for name, e in edges_by_col.items() if name in table.column_names}
 
@@ -1712,6 +1716,10 @@ def write_geoparquet_table(
     # Read before the metadata pass rebuilds the column: a 1.x write strips the
     # GeoArrow edge type, and a 2.0 one regenerates a block without `edges`.
     edges_by_col = table_nonplanar_edges(table, geometry_column, edges) if has_geometry else {}
+    if has_geometry and edges == "planar":
+        # An explicit planar choice also clears a native GEOGRAPHY type, which
+        # a 2.0 write would otherwise keep as spherical.
+        table = with_planar_edge_types(table, [geometry_column])
 
     # No AWS_PROFILE env mutation here: the write target inside this block is a
     # local (temp) file, and the upload at the end is credentialed by passing

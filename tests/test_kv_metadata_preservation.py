@@ -405,6 +405,14 @@ class TestNonGeoTablePreservesKv:
 
         assert "geo" not in kv_keys(out)
 
+    def test_convert_without_geometry_keeps_keys(self, nongeo_kv_source, tmp_path):
+        """``convert()`` reads a geometry-less Parquet as a plain table (#1268)."""
+        out = tmp_path / "nongeo_convert.parquet"
+        api.convert(str(nongeo_kv_source)).write(str(out))
+
+        assert {"fiboa", "custom_note"} <= kv_keys(out)
+        assert kv_value(out, "custom_note") == CUSTOM_VALUE
+
     def test_rows_survive(self, nongeo_kv_source, tmp_path):
         out = tmp_path / "nongeo_rows.parquet"
         api.read(str(nongeo_kv_source)).write(str(out))

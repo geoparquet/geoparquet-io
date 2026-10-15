@@ -309,7 +309,8 @@ def _with_carried_edges(table: pa.Table, geometry_column: str, edges: str | None
         "columns": {},
     }
     columns = geo.setdefault("columns", {})
-    columns.setdefault(geometry_column, {"encoding": "WKB"}).setdefault("edges", edges)
+    # The type is what the column is, so it replaces a carried value.
+    columns.setdefault(geometry_column, {"encoding": "WKB"})["edges"] = edges
     metadata[b"geo"] = json.dumps(geo).encode("utf-8")
     return table.replace_schema_metadata(metadata)
 

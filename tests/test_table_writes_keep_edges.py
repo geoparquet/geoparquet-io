@@ -29,6 +29,7 @@ from geoparquet_io.core.arrow_geo_metadata import (
     nonplanar_edges_from_schema,
     with_planar_edge_types,
 )
+from geoparquet_io.core.process.simplify import _with_carried_edges
 from geoparquet_io.core.write_funnels import table_nonplanar_edges, write_geoparquet_table
 from tests.native_geo_probes import (
     conus_wkb,
@@ -141,7 +142,7 @@ class TestSchemaEdges:
         geo = {"columns": {"geometry": {"edges": "spherical"}, "gone": {"edges": "spherical"}}}
         table = _plain_table(rows).replace_schema_metadata({"geo": json.dumps(geo)})
         assert table_nonplanar_edges(table, "geometry", "karney") == {"geometry": "karney"}
-        assert table_nonplanar_edges(table, "geometry", "planar") == {"geometry": "spherical"}
+        assert table_nonplanar_edges(table, "geometry", "planar") == {}
 
     def test_planar_edge_types_keep_bytes_and_crs(self, rows):
         crs_type = ga.wkb().with_crs("OGC:CRS84").with_edge_type(gt.EdgeType.SPHERICAL)
@@ -216,6 +217,21 @@ class TestArrowFunnel:
         )
         _assert_spherical(out, "1.1")
 
+    @pytest.mark.parametrize("version", ["1.1", "2.0"])
+    def test_explicit_planar_wins_over_the_table(self, native, declared, tmp_path, version):
+        """``edges="planar"`` is a choice, not an absence of one."""
+        for i, src in enumerate((native, declared)):
+            out = tmp_path / f"out{i}.parquet"
+            write_geoparquet_table(
+                pq.read_table(src),
+                str(out),
+                geometry_column="geometry",
+                geoparquet_version=version,
+                edges="planar",
+            )
+            assert _edges(out) in (None, "planar")
+            assert native_geo_edges(out)[1] in (None, "EdgeType.PLANAR")
+
     def test_planar_table_is_untouched(self, rows, tmp_path):
         out = tmp_path / "out.parquet"
         write_geoparquet_table(
@@ -240,6 +256,16 @@ class TestSimplify:
         result = CliRunner().invoke(cli, [*args, "--geoparquet-version", "2.0"])
         assert result.exit_code == 0, result.output
         _assert_spherical(out, "2.0")
+
+    def test_native_edges_replace_conflicting_carried_edges(self, rows):
+        """The type is what the column is. A stale carried block does not win."""
+        geo = {"version": "1.1.0", "primary_column": "geometry"}
+        geo["columns"] = {"geometry": {"encoding": "WKB", "edges": "planar"}}
+        table = _plain_table(rows).replace_schema_metadata({"geo": json.dumps(geo)})
+        out = _with_carried_edges(table, "geometry", "spherical")
+        assert json.loads(out.schema.metadata[b"geo"])["columns"]["geometry"]["edges"] == (
+            "spherical"
+        )
 
 
 class TestTableWrite:
