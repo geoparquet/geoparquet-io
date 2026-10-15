@@ -171,9 +171,7 @@ def test_geoarrow_field_edges_planar_is_not_non_planar():
 
 def test_one_copy_of_the_edge_helpers():
     """#1280's write-side names are the duckdb_utils helpers, not a second copy."""
-    from geoparquet_io.core import arrow_geo_metadata
-
-    from geoparquet_io.core import duckdb_utils
+    from geoparquet_io.core import arrow_geo_metadata, duckdb_utils
 
     assert arrow_geo_metadata._field_edges is geoarrow_field_edges
     assert not hasattr(duckdb_utils, "_nonplanar_edges")
