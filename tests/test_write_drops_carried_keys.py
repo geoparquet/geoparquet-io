@@ -38,6 +38,7 @@ from geoparquet_io.core.write_strategies import WriteStrategy, WriteStrategyFact
 
 STRATEGIES = [s.value for s in WriteStrategy]
 PROVENANCE = b'{"by": "test"}'
+EXPLICIT_OVERVIEWS = '{"note": "explicit overviews"}'
 N = 20
 
 STALE_GEO = {
@@ -334,8 +335,42 @@ def test_caller_extras_named_like_carried_keys_survive(strategy, tmp_path):
         row_group_size_mb=None,
         row_group_rows=None,
         verbose=False,
-        extra_kv_metadata={"pandas": explicit_pandas, "provenance": PROVENANCE.decode()},
+        extra_kv_metadata={
+            "pandas": explicit_pandas,
+            OVERVIEWS_KEY: EXPLICIT_OVERVIEWS,
+            "provenance": PROVENANCE.decode(),
+        },
     )
+
+    footer = _footer(out)
+    assert footer[b"pandas"] == explicit_pandas.encode()
+    assert footer[OVERVIEWS_KEY.encode()] == EXPLICIT_OVERVIEWS.encode()
+    assert footer[b"provenance"] == PROVENANCE
+
+
+def test_query_write_in_memory_keeps_a_caller_pandas_extra(tmp_path):
+    """The in-memory ``write_from_query`` must hand its extras to the final write too.
+
+    ``_write_table_with_settings`` applies the facade again just before
+    ``pq.write_table``. Without the extras there, it drops a ``pandas`` extra.
+    """
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+
+    out = tmp_path / "out.parquet"
+    explicit_pandas = '{"note": "explicit"}'
+    con = get_duckdb_connection(load_spatial=True)
+    try:
+        write_parquet_with_metadata(
+            con,
+            "SELECT 1 AS id, ST_Point(1, 2) AS geometry",
+            str(out),
+            geoparquet_version="1.1",
+            write_strategy="in-memory",
+            extra_kv_metadata={"pandas": explicit_pandas, "provenance": PROVENANCE.decode()},
+        )
+    finally:
+        con.close()
 
     footer = _footer(out)
     assert footer[b"pandas"] == explicit_pandas.encode()
