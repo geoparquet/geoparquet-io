@@ -22,13 +22,16 @@ from geoparquet_io.core.common import split_zm_suffix, zm_suffix_sql
 from geoparquet_io.core.crs_utils import (
     CRS_ABSENT,
     NULL_CRS_HINT,
+    PARQUET_UNKNOWN_CRS,
     PROJJSON_CRS_TYPES,
     _is_crs84_equivalent,
     _is_ogc_crs84,
     _parse_crs_value,
     crs_from_column_meta,
     get_crs_display_name,
+    is_empty_crs_value,
     is_geographic_crs,
+    is_unknown_type_crs,
 )
 from geoparquet_io.core.duckdb_metadata import (
     count_kv_key,
@@ -3379,15 +3382,14 @@ def _check_v2_crs_in_parquet_type(
     )
 
 
-#: The Parquet logical type's spelling of "this column's CRS is unknown".
-#:
-#: The GeoParquet spec pairs it with a geo-metadata ``"crs": null``: "When the
-#: GeoParquet column-metadata crs is null, the Parquet logical-type crs property
-#: SHOULD be set to the string srid:0", and its conformance table lists
-#: ``srid:0 | null`` as "CRS undefined or unknown". Since an explicit null is not
-#: the OGC:CRS84 default, this pairing is the *only* way a GeoParquet 2.0 file
-#: can declare an unknown CRS, so it has to compare equal.
-_PARQUET_UNKNOWN_CRS = "srid:0"
+# The Parquet logical type's spelling of "this column's CRS is unknown" is
+# ``crs_utils.PARQUET_UNKNOWN_CRS`` (``srid:0``), the one constant every reader
+# and writer shares. The GeoParquet spec pairs it with a geo-metadata
+# ``"crs": null``: "When the GeoParquet column-metadata crs is null, the Parquet
+# logical-type crs property SHOULD be set to the string srid:0", and its
+# conformance table lists ``srid:0 | null`` as "CRS undefined or unknown". Since
+# an explicit null is not the OGC:CRS84 default, this pairing is the *only* way
+# a GeoParquet 2.0 file can declare an unknown CRS, so it has to compare equal.
 
 
 def _schema_crs_for_consistency(schema_info: list, geom_col: str) -> Any:
@@ -3418,7 +3420,7 @@ def _schema_crs_for_consistency(schema_info: list, geom_col: str) -> Any:
         crs = parsed["crs"]
         if isinstance(crs, str):
             token = crs.strip()
-            if token.lower() == _PARQUET_UNKNOWN_CRS:
+            if is_unknown_type_crs(token):
                 return None
             if token.lower().startswith("srid:"):
                 # srid:<id> is EPSG:<id> per the Parquet spec; keep the raw
@@ -3745,10 +3747,10 @@ def _get_crs_bounds(crs: Any) -> tuple[float, float, float, float] | None:
 
     Returns (xmin, ymin, xmax, ymax) or None if bounds cannot be determined.
     """
-    # Default CRS (absent key) or an explicit OGC:CRS84 - geographic.
-    # An explicit null (unknown CRS) keeps the geographic bounds too: this is a
-    # coordinate sanity check, and lon/lat is the only guess worth making. The
-    # null itself is reported by _check_crs_valid.
+    # Default CRS (absent key) or an explicit OGC:CRS84 - geographic. ``None``
+    # here is an unset Parquet type CRS, which is the default as well. An
+    # unknown CRS (geo ``crs: null`` or a ``srid:0`` type) never gets this far,
+    # _check_coordinates_valid_for_crs skips it (#1277 review).
     if crs is CRS_ABSENT or crs is None or _is_ogc_crs84(crs):
         return _GEOGRAPHIC_BOUNDS
 
@@ -3898,6 +3900,16 @@ def _check_coordinates_valid_for_crs(
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
     check_name = f"coordinates_valid_for_crs_{geom_col}"
 
+    # An unknown CRS has no valid range to hold the coordinates to. Guessing
+    # lon/lat here failed every projected file whose CRS was simply unknown.
+    if is_unknown_type_crs(crs):
+        return ValidationCheck(
+            name=check_name,
+            status=CheckStatus.SKIPPED,
+            message="CRS is unknown, so there is no valid coordinate range to check",
+            category="data_validation",
+        )
+
     # Get expected bounds for the CRS
     crs_bounds = _get_crs_bounds(crs)
     if crs_bounds is None:
@@ -3977,6 +3989,18 @@ def _check_coordinates_valid_for_crs(
 # =============================================================================
 # Helper Functions
 # =============================================================================
+
+
+def _entry_crs_is_unknown(col_meta: dict, schema_info: list, geom_col: str) -> bool:
+    """True when a geometry column's CRS is unknown.
+
+    A ``crs`` key decides when the entry has one: null or empty is unknown.
+    Without one, a ``srid:0`` Parquet type does, which is how DuckDB's V2
+    writer spells an unknown CRS.
+    """
+    if "crs" in col_meta:
+        return col_meta["crs"] is None or is_empty_crs_value(col_meta["crs"])
+    return is_unknown_type_crs(_get_crs_from_schema(schema_info, geom_col))
 
 
 def _get_crs_from_schema(schema_info: list, geom_col: str) -> Any:
@@ -4589,10 +4613,15 @@ def _run_geoparquet_checks(
                 )
             )
 
-            # Check coordinates are valid for declared CRS
+            # Check coordinates are valid for declared CRS. An unknown CRS (a
+            # null or empty crs, or no crs key over a srid:0 type) is spelled
+            # the way the Parquet type spells it, so the check skips it rather
+            # than reading it as the lon/lat default.
+            unknown = _entry_crs_is_unknown(col_meta, schema_info, col_name)
+            range_crs = PARQUET_UNKNOWN_CRS if unknown else crs
             checks.append(
                 _check_coordinates_valid_for_crs(
-                    parquet_file, col_name, crs, con, sample_size, encoding
+                    parquet_file, col_name, range_crs, con, sample_size, encoding
                 )
             )
 
