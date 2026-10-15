@@ -711,6 +711,7 @@ FAILED_ARMS = {
     "_check_orientation_matches_data": ELSEWHERE,
     "_interpret_bbox_result": ELSEWHERE,
     "_check_bbox_contains_data": "tests/test_validate_bbox_dimensions.py",
+    "_check_geography_stats_bbox": "tests/test_validate_geography_bbox.py",
     "_bbox_column_missing": ELSEWHERE,
     "_check_native_columns_in_metadata": ELSEWHERE,
     "_check_native_geo_stats_contains_data": ELSEWHERE,

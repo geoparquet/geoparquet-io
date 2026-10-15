@@ -2409,6 +2409,185 @@ def _execute_bounds_query(con, raw_url: str, geom_col: str, limit_clause: str):
 # =============================================================================
 
 
+def _geography_bbox_issues(chunks: list[dict]) -> list[str]:
+    """Canonical-range violations in GEOGRAPHY row-group boxes, as messages.
+
+    ``xmin > xmax`` is legal (the antimeridian wrap, RFC 7946 5.2); Y never
+    wraps, and every value must stay in [-180, 180] x [-90, 90].
+    """
+    issues = []
+    for chunk in chunks:
+        group = chunk.get("row_group_id")
+        for key in ("xmin", "xmax"):
+            if not -180.0 <= chunk[key] <= 180.0:
+                issues.append(f"row group {group}: {key}={chunk[key]} outside [-180, 180]")
+        for key in ("ymin", "ymax"):
+            if not -90.0 <= chunk[key] <= 90.0:
+                issues.append(f"row group {group}: {key}={chunk[key]} outside [-90, 90]")
+        if chunk["ymin"] > chunk["ymax"]:
+            issues.append(
+                f"row group {group}: ymin={chunk['ymin']} > ymax={chunk['ymax']} "
+                "(only X may wrap the antimeridian)"
+            )
+    return issues
+
+
+def _geography_stats_gate(
+    parquet_file: str, geom_col: str, schema_info: list | None, name: str
+) -> tuple[list[dict] | None, ValidationCheck | None]:
+    """The GEOGRAPHY row-group boxes to validate, or the SKIPPED check instead."""
+
+    def skipped(message: str) -> ValidationCheck:
+        return ValidationCheck(
+            name=name, status=CheckStatus.SKIPPED, message=message, category="parquet_geo_types"
+        )
+
+    if not _is_geography_column(schema_info or [], geom_col):
+        return None, skipped("not a GEOGRAPHY column, geodesic bbox checks not applicable")
+    if is_remote_url(parquet_file):
+        return None, skipped("GEOGRAPHY bbox check skipped for remote files")
+    from geoparquet_io.core.duckdb_metadata import get_native_geo_stats_by_row_group
+
+    try:
+        chunks = get_native_geo_stats_by_row_group(parquet_file, geom_col)
+    except Exception as e:
+        return None, skipped(f"could not read geospatial statistics: {e}")
+    with_bbox = [c for c in chunks or [] if c.get("xmin") is not None]
+    if not with_bbox:
+        return None, skipped(
+            "GEOGRAPHY column has no bounding-box statistics to validate "
+            "(a dropped box is legal; it only gives up row-group pruning)"
+        )
+    return with_bbox, None
+
+
+def _check_geography_stats_bbox(
+    parquet_file: str, geom_col: str, schema_info: list | None
+) -> ValidationCheck:
+    """A GEOGRAPHY bounding box must stay in the canonical lon/lat ranges (#1272).
+
+    Parquet's ``Geospatial.md``: for GEOGRAPHY, X is restricted to [-180, 180]
+    and Y to [-90, 90], with ``xmin > xmax`` meaning the box wraps the
+    antimeridian -- so the wrap passes and everything out of range fails.
+    """
+    name = f"geography_stats_bbox_{geom_col}"
+    chunks, gate = _geography_stats_gate(parquet_file, geom_col, schema_info, name)
+    if gate is not None:
+        return gate
+    issues = _geography_bbox_issues(chunks)
+    if issues:
+        return ValidationCheck(
+            name=name,
+            status=CheckStatus.FAILED,
+            message="GEOGRAPHY bounding-box statistics leave the canonical ranges",
+            details="; ".join(issues),
+            category="parquet_geo_types",
+        )
+    wrapped = any(c["xmin"] > c["xmax"] for c in chunks)
+    wrap_note = " (xmin > xmax read as the antimeridian wrap, RFC 7946 5.2)" if wrapped else ""
+    return ValidationCheck(
+        name=name,
+        status=CheckStatus.PASSED,
+        message=f"GEOGRAPHY bounding boxes within [-180,180] x [-90,90]{wrap_note}",
+        category="parquet_geo_types",
+    )
+
+
+def _geography_edge_algorithm(schema_info: list | None, geom_col: str) -> str:
+    """The column's edge algorithm, read from its GEOGRAPHY logical type."""
+    from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
+
+    for col in schema_info or []:
+        if col.get("name") == geom_col:
+            parsed = parse_geometry_logical_type(col.get("logical_type") or "") or {}
+            return parsed.get("algorithm") or "spherical"
+    return "spherical"
+
+
+def _sampled_geodesic_bbox(
+    parquet_file: str, geom_col: str, con, sample_size: int, algorithm: str
+) -> tuple | None:
+    """The geodesic bound of a sample of the column, or None."""
+    from geoparquet_io.core.geodesic_bbox import geodesic_bbox_of_wkb
+
+    raw_url = resolve_file_url(parquet_file, verbose=False)
+    limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
+    rows = con.execute(f"""
+        SELECT ST_AsWKB({quote_identifier(geom_col)})::BLOB
+        FROM read_parquet({sql_path(raw_url)})
+        WHERE {quote_identifier(geom_col)} IS NOT NULL
+          AND NOT ST_IsEmpty({quote_identifier(geom_col)})
+        {limit_clause}
+    """).fetchall()
+    return geodesic_bbox_of_wkb((row[0] for row in rows), edges=algorithm)
+
+
+def _check_geography_stats_cover_edges(
+    parquet_file: str, geom_col: str, schema_info: list | None, con, sample_size: int
+) -> ValidationCheck:
+    """Warn when a GEOGRAPHY bounding box is vertex-only (#1272).
+
+    A geodesic edge can leave the box of its vertices -- a long east-west edge
+    at high latitude bulges poleward -- and a reader pruning row groups by a
+    vertex-only box can then skip rows that really match. The sampled
+    geometries' geodesic bound must fit inside the declared box; a box gpio
+    writes does, because it is computed the same way.
+    """
+    name = f"geography_stats_cover_edges_{geom_col}"
+    chunks, gate = _geography_stats_gate(parquet_file, geom_col, schema_info, name)
+    if gate is not None:
+        return gate
+    from geoparquet_io.core.duckdb_metadata import aggregate_native_geo_stats
+    from geoparquet_io.core.geodesic_bbox import lon_range_contains
+
+    try:
+        bbox = aggregate_native_geo_stats(chunks).get("bbox")
+        sampled = _sampled_geodesic_bbox(
+            parquet_file,
+            geom_col,
+            con,
+            sample_size,
+            _geography_edge_algorithm(schema_info, geom_col),
+        )
+    except Exception as e:
+        return ValidationCheck(
+            name=name,
+            status=CheckStatus.SKIPPED,
+            message=f"could not compare the bounding box with the geodesic extent: {e}",
+            category="parquet_geo_types",
+        )
+    if not bbox or sampled is None:
+        return ValidationCheck(
+            name=name,
+            status=CheckStatus.SKIPPED,
+            message="no geometries to compare the bounding box against",
+            category="parquet_geo_types",
+        )
+    tolerance = 1e-6
+    covered = (
+        sampled[1] >= bbox[1] - tolerance
+        and sampled[3] <= bbox[3] + tolerance
+        and lon_range_contains((bbox[0], bbox[2]), (sampled[0], sampled[2]), tolerance)
+    )
+    if covered:
+        return ValidationCheck(
+            name=name,
+            status=CheckStatus.PASSED,
+            message="GEOGRAPHY bounding boxes contain the sampled geodesic extent",
+            category="parquet_geo_types",
+        )
+    return ValidationCheck(
+        name=name,
+        status=CheckStatus.WARNING,
+        message="GEOGRAPHY bounding box appears vertex-only: it does not contain "
+        "the geodesic edge bulge",
+        details=f"sampled geodesic extent {list(sampled)} leaves the declared "
+        f"{list(bbox[:4])}; a reader pruning row groups by this box can skip "
+        "matching rows. Rewrite with gpio to get a geodesic box.",
+        category="parquet_geo_types",
+    )
+
+
 def _is_bbox_valid(geo_bbox: dict) -> bool:
     """Check if bbox values are reasonable (not garbage from parsing errors).
 
@@ -2450,8 +2629,11 @@ def _check_native_geo_statistics(
     """Check that geometry column has native Parquet GeospatialStatistics (geo_bbox).
 
     A GEOGRAPHY column without a bounding box is not warned about: a box of the
-    vertices does not bound a geodesic edge, so Arrow writes none for one and
-    gpio drops DuckDB's planar one when it retypes a column GEOGRAPHY (#999).
+    vertices does not bound a geodesic edge, so Arrow writes none for one.
+    gpio's own GEOGRAPHY outputs carry a geodesic box (#1272), computed over
+    the edges, with the drop kept as the fallback when nothing can bound a
+    column; ``geography_stats_bbox_*`` and ``geography_stats_cover_edges_*``
+    validate the box when there is one.
     """
     from geoparquet_io.core.duckdb_metadata import (
         aggregate_native_geo_stats,
@@ -4033,6 +4215,7 @@ def _run_parquet_geo_only_checks(
         checks.append(_check_native_geo_type_present(schema_info, geom_col))
         checks.append(_check_geography_edges_valid(schema_info, geom_col))
         checks.append(_check_native_geo_statistics(parquet_file, geom_col, schema_info))
+        checks.append(_check_geography_stats_bbox(parquet_file, geom_col, schema_info))
 
         # Parquet-geo-only specific CRS check (more detailed than _check_native_crs_format)
         checks.append(_check_parquet_geo_only_crs(schema_info, geom_col, parquet_file))
@@ -4049,6 +4232,11 @@ def _run_parquet_geo_only_checks(
             )
             checks.append(
                 _check_geography_coordinate_bounds(
+                    parquet_file, geom_col, schema_info, con, sample_size
+                )
+            )
+            checks.append(
+                _check_geography_stats_cover_edges(
                     parquet_file, geom_col, schema_info, con, sample_size
                 )
             )
@@ -4216,6 +4404,7 @@ def _run_geoparquet_checks(
             checks.append(_check_native_crs_format(schema_info, col_name))
             checks.append(_check_geography_edges_valid(schema_info, col_name))
             checks.append(_check_native_geo_statistics(parquet_file, col_name, schema_info))
+            checks.append(_check_geography_stats_bbox(parquet_file, col_name, schema_info))
             checks.append(
                 _check_geometry_types_match_stats(
                     parquet_file, col_name, col_meta.get("geometry_types") or []
@@ -4238,6 +4427,11 @@ def _run_geoparquet_checks(
                 )
                 checks.append(
                     _check_geography_coordinate_bounds(
+                        parquet_file, col_name, schema_info, con, sample_size
+                    )
+                )
+                checks.append(
+                    _check_geography_stats_cover_edges(
                         parquet_file, col_name, schema_info, con, sample_size
                     )
                 )

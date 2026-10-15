@@ -132,6 +132,105 @@ def test_each_chunk_loses_its_bbox_and_keeps_its_types(duckdb_file, tmp_path):
     assert _geo_stats(out, "s.geometry") == _geo_stats(duckdb_file, "s.geometry")
 
 
+def _geo_bbox(path, column: str) -> list:
+    """Each row group's geospatial bbox for one leaf, as (xmin, xmax, ymin, ymax)."""
+    metadata = pq.read_metadata(str(path))
+    index = [metadata.schema.column(i).path for i in range(metadata.num_columns)].index(column)
+    found = []
+    for group in range(metadata.num_row_groups):
+        stats = metadata.row_group(group).column(index).geo_statistics
+        if stats is None or stats.xmin is None:
+            found.append(None)
+        else:
+            found.append((stats.xmin, stats.xmax, stats.ymin, stats.ymax))
+    return found
+
+
+class TestGeographyBbox:
+    """``geography_bbox`` splices a correct box in instead of stripping it (#1272)."""
+
+    def test_a_supplied_bbox_replaces_the_planar_one(self, duckdb_file, tmp_path):
+        out = tmp_path / "out.parquet"
+        boxes = {"geometry": [(1.0, -2.0, 3.0, 4.0)] * 3}
+
+        patch_footer(
+            str(duckdb_file),
+            geography={"geometry": "spherical"},
+            geography_bbox=boxes,
+            output_file=str(out),
+        )
+
+        assert _geo_bbox(out, "geometry") == [(1.0, 3.0, -2.0, 4.0)] * 3
+        assert [types for _, types in _geo_stats(out, "geometry")] == [[1]] * 3
+        assert _geo_bbox(out, "other") == _geo_bbox(duckdb_file, "other")
+        assert _data_section(out) == _data_section(duckdb_file)
+        assert _logical(out)["geometry"]["Type"] == "Geography"
+
+    def test_a_wrapped_bbox_is_written_verbatim(self, duckdb_file, tmp_path):
+        out = tmp_path / "out.parquet"
+        boxes = {"geometry": [(170.0, 5.0, -170.0, 9.0)] * 3}
+
+        patch_footer(
+            str(duckdb_file),
+            geography={"geometry": "spherical"},
+            geography_bbox=boxes,
+            output_file=str(out),
+        )
+
+        assert _geo_bbox(out, "geometry") == [(170.0, -170.0, 5.0, 9.0)] * 3
+
+    def test_a_missing_entry_still_drops_that_row_groups_box(self, duckdb_file, tmp_path):
+        """None keeps #1254's behavior for the one row group nothing could bound."""
+        out = tmp_path / "out.parquet"
+        boxes = {"geometry": [(1.0, -2.0, 3.0, 4.0), None, (5.0, -6.0, 7.0, 8.0)]}
+
+        patch_footer(
+            str(duckdb_file),
+            geography={"geometry": "spherical"},
+            geography_bbox=boxes,
+            output_file=str(out),
+        )
+
+        assert _geo_bbox(out, "geometry") == [(1.0, 3.0, -2.0, 4.0), None, (5.0, 7.0, -6.0, 8.0)]
+        assert [types for _, types in _geo_stats(out, "geometry")] == [[1]] * 3
+
+    def test_a_short_list_drops_the_rest(self, duckdb_file, tmp_path):
+        out = tmp_path / "out.parquet"
+        boxes = {"geometry": [(1.0, -2.0, 3.0, 4.0)]}
+
+        patch_footer(
+            str(duckdb_file),
+            geography={"geometry": "spherical"},
+            geography_bbox=boxes,
+            output_file=str(out),
+        )
+
+        assert _geo_bbox(out, "geometry") == [(1.0, 3.0, -2.0, 4.0), None, None]
+
+    def test_z_bounds_survive_the_xy_replacement(self, tmp_path):
+        path = tmp_path / "xyz.parquet"
+        con = get_duckdb_connection(load_spatial=True)
+        try:
+            con.execute(
+                "COPY (SELECT ST_GeomFromText('POINT Z (10 20 5)') AS geometry) "
+                f"TO {sql_path(str(path))} (FORMAT PARQUET, GEOPARQUET_VERSION 'V2')"
+            )
+        finally:
+            con.close()
+        before = pq.read_metadata(str(path)).row_group(0).column(0).geo_statistics
+        assert before.zmin == 5.0
+
+        patch_footer(
+            str(path),
+            geography={"geometry": "spherical"},
+            geography_bbox={"geometry": [(9.0, 19.0, 11.0, 21.0)]},
+        )
+
+        stats = pq.read_metadata(str(path)).row_group(0).column(0).geo_statistics
+        assert (stats.xmin, stats.xmax, stats.ymin, stats.ymax) == (9.0, 11.0, 19.0, 21.0)
+        assert (stats.zmin, stats.zmax) == (5.0, 5.0)
+
+
 def test_the_rows_read_back_unchanged(duckdb_file, tmp_path):
     out = tmp_path / "out.parquet"
     patch_footer(str(duckdb_file), geography={"geometry": "karney"}, output_file=str(out))

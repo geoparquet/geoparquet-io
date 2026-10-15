@@ -33,11 +33,12 @@ The other edit is a column's logical type, from planar ``GEOMETRY`` to
 has no type to write one back, so a 2.0 file gpio writes through it comes out
 planar whatever the input was. GEOGRAPHY data pages are the same WKB bytes as
 GEOMETRY ones, so only the description changes: the column's ``SchemaElement``
-gets the GEOGRAPHY logical type, with the GEOMETRY's CRS and the edge algorithm,
-and each of its chunks loses the bounding box from its ``GeospatialStatistics``
-(DuckDB measured vertices on a plane, which does not bound a geodesic edge; the
-type codes stay, since they do not depend on the edges). See
-:func:`_geography_splices`.
+gets the GEOGRAPHY logical type, with the GEOMETRY's CRS and the edge
+algorithm, and each of its chunks either has the bounding box in its
+``GeospatialStatistics`` replaced by one the caller computed over the geodesic
+edges (``geography_bbox``, #1272) or loses it (DuckDB measured vertices on a
+plane, which does not bound a geodesic edge; the type codes stay either way,
+since they do not depend on the edges). See :func:`_geography_splices`.
 """
 
 from __future__ import annotations
@@ -671,19 +672,57 @@ def _chunk_path(buf: bytes, meta: dict[int, _Field]) -> tuple[str, ...]:
     return tuple(parts)
 
 
-def _bbox_splice(buf: bytes, chunk: list[_Field], converted: set[str]) -> _Splice | None:
-    """Drop the bounding box from a converted column chunk's geospatial stats.
+def _bbox_value(buf: bytes, bbox_field: _Field, box: tuple) -> bytes:
+    """A ``BoundingBox`` value: the caller's X/Y bounds, the file's Z/M kept.
 
-    The geospatial type codes stay. A stats struct with nothing else in it goes
-    as a whole, rather than staying behind as an empty claim.
+    ``box`` is ``(xmin, ymin, xmax, ymax)``, GeoParquet's order; the thrift
+    struct orders the maxima after the minima per axis. Fields past ymax --
+    zmin/zmax, mmin/mmax -- are vertex bounds a geodesic X/Y edge does not
+    disturb, so they are copied as they were.
+    """
+    fields, _ = _struct_fields(buf, bbox_field.value_start)
+    xmin, ymin, xmax, ymax = box
+    out = bytearray()
+    previous = 0
+    for field_id, value in ((1, xmin), (2, xmax), (3, ymin), (4, ymax)):
+        out += _field_header(field_id, previous, _DOUBLE) + struct.pack("<d", float(value))
+        previous = field_id
+    for field in fields:
+        if field.field_id <= 4:
+            continue
+        out += _field_header(field.field_id, previous, field.type_id)
+        out += buf[field.value_start : field.end]
+        previous = field.field_id
+    return bytes(out) + b"\x00"
 
-    The trade-off: DuckDB's box is of the vertices on a plane, which a geodesic
-    edge can leave (an edge bulges poleward), so keeping it would let a reader
-    prune a row group that holds a match. Arrow C++ writes no box for a
-    GEOGRAPHY for the same reason. The cost is that readers can no longer use
-    these statistics to skip row groups of a GEOGRAPHY output. The ``geo``
-    block's ``bbox`` and any bbox covering column are left as they were, and
-    are still vertex boxes on a plane, as they were before #999.
+
+def _replacement_box(bboxes: Mapping[str, list] | None, column: str, group: int) -> tuple | None:
+    boxes = (bboxes or {}).get(column)
+    if boxes is None or group >= len(boxes):
+        return None
+    return boxes[group]
+
+
+def _bbox_splice(
+    buf: bytes,
+    chunk: list[_Field],
+    converted: set[str],
+    bboxes: Mapping[str, list] | None = None,
+    group: int = 0,
+) -> _Splice | None:
+    """Replace or drop the bounding box in a converted chunk's geospatial stats.
+
+    The geospatial type codes stay either way. With a box in ``bboxes`` for
+    this column and row group -- one the caller computed over the geodesic
+    edges (#1272) -- the planar box is replaced by it. Without one it is
+    dropped, a stats struct with nothing else in it going as a whole rather
+    than staying behind as an empty claim.
+
+    The drop is #1254's trade-off: DuckDB's box is of the vertices on a plane,
+    which a geodesic edge can leave (an edge bulges poleward), so keeping it
+    would let a reader prune a row group that holds a match. Arrow C++ writes
+    no box for a GEOGRAPHY for the same reason; dropping gives up row-group
+    pruning, which is what the computed replacement exists to win back.
     """
     meta_field = _by_id(chunk).get(_CHUNK_META_DATA)
     if meta_field is None or meta_field.type_id != _STRUCT:
@@ -695,28 +734,41 @@ def _bbox_splice(buf: bytes, chunk: list[_Field], converted: set[str]) -> _Splic
     if stats is None or len(path) != 1 or path[0] not in converted:
         return None
     stats_fields, _ = _struct_fields(buf, stats.value_start)
-    if _GEO_STATS_BBOX not in _by_id(stats_fields):
+    bbox_field = _by_id(stats_fields).get(_GEO_STATS_BBOX)
+    if bbox_field is None:
         return None
+    box = _replacement_box(bboxes, path[0], group)
+    if box is not None:
+        return (bbox_field.value_start, bbox_field.end, _bbox_value(buf, bbox_field, box))
     if len(stats_fields) == 1:
         replacement = _without_field(buf, meta_fields, _META_GEO_STATS)
         return (meta_field.value_start, meta_field.end, replacement)
     return (stats.value_start, stats.end, _without_field(buf, stats_fields, _GEO_STATS_BBOX))
 
 
-def _row_group_splices(buf: bytes, row_groups: _Field, converted: set[str]) -> list[_Splice]:
+def _row_group_splices(
+    buf: bytes,
+    row_groups: _Field,
+    converted: set[str],
+    bboxes: Mapping[str, list] | None = None,
+) -> list[_Splice]:
     splices = []
-    for group in _struct_list(buf, row_groups.value_start):
-        columns = _by_id(group).get(_ROW_GROUP_COLUMNS)
+    for group, fields in enumerate(_struct_list(buf, row_groups.value_start)):
+        columns = _by_id(fields).get(_ROW_GROUP_COLUMNS)
         if columns is None:
             continue
         for chunk in _struct_list(buf, columns.value_start):
-            splice = _bbox_splice(buf, chunk, converted)
+            splice = _bbox_splice(buf, chunk, converted, bboxes, group)
             if splice is not None:
                 splices.append(splice)
     return splices
 
 
-def _geography_splices(footer: bytes, algorithms: Mapping[str, int]) -> tuple[bytes, list[str]]:
+def _geography_splices(
+    footer: bytes,
+    algorithms: Mapping[str, int],
+    bboxes: Mapping[str, list] | None = None,
+) -> tuple[bytes, list[str]]:
     """The footer with each named GEOMETRY column retyped GEOGRAPHY, and their names.
 
     Only a top-level leaf whose logical type is GEOMETRY changes: a column that
@@ -730,7 +782,7 @@ def _geography_splices(footer: bytes, algorithms: Mapping[str, int]) -> tuple[by
     splices, converted = _schema_splices(footer, schema, algorithms)
     row_groups = fields.get(_ROW_GROUPS_FIELD_ID)
     if converted and row_groups is not None:
-        splices += _row_group_splices(footer, row_groups, set(converted))
+        splices += _row_group_splices(footer, row_groups, set(converted), bboxes)
     return _apply_splices(footer, splices), converted
 
 
@@ -759,13 +811,17 @@ def _algorithm_codes(geography: Mapping[str, str]) -> dict[str, int]:
     return {name: EDGE_ALGORITHMS[edges] for name, edges in geography.items()}
 
 
-def _patch_geography(footer: bytes, geography: Mapping[str, str]) -> tuple[bytes, list[str]]:
+def _patch_geography(
+    footer: bytes,
+    geography: Mapping[str, str],
+    bboxes: Mapping[str, list] | None = None,
+) -> tuple[bytes, list[str]]:
     """`_geography_splices`, with a malformed footer named as unsupported."""
     codes = _algorithm_codes(geography)
     if not codes:
         return footer, []
     try:
-        return _geography_splices(footer, codes)
+        return _geography_splices(footer, codes, bboxes)
     except FooterPatchUnsupported:
         raise
     except (IndexError, ValueError, OverflowError, RecursionError) as exc:
@@ -960,6 +1016,7 @@ def patch_footer(
     updates: dict[str, str | bytes | None] | None = None,
     *,
     geography: Mapping[str, str] | None = None,
+    geography_bbox: Mapping[str, list] | None = None,
     output_file: str | None = None,
     verbose: bool = False,
 ) -> list[str]:
@@ -991,8 +1048,15 @@ def patch_footer(
         geography: ``{column: edges}`` for columns to retype from a planar
             GEOMETRY logical type to a GEOGRAPHY with that edge algorithm
             (a key of :data:`EDGE_ALGORITHMS`), keeping the CRS. Each chunk of
-            such a column loses its geospatial bounding box and keeps its type
-            codes. A column that is not a top-level GEOMETRY is left alone.
+            such a column keeps its geospatial type codes, and its bounding
+            box is replaced from ``geography_bbox`` or dropped. A column that
+            is not a top-level GEOMETRY is left alone.
+        geography_bbox: ``{column: [box per row group]}`` for retyped columns,
+            each box ``(xmin, ymin, xmax, ymax)`` with ``xmin > xmax`` wrapping
+            the antimeridian, computed over the geodesic edges (#1272). A
+            ``None`` box, a missing row group or a missing column drops that
+            planar bounding box instead, #1254's behavior; Z/M bounds the
+            chunk already carries are kept either way.
         output_file: Where to write the result. Defaults to the input, replaced
             atomically once the new footer has been read back.
         verbose: Report the footer sizes.
@@ -1022,7 +1086,7 @@ def patch_footer(
     # its embedded `ARROW:schema` updated alongside the plain entries, or the
     # stale blob shadows them for every Arrow reader.
     before = _read_metadata_or_refuse(parquet_file)
-    footer, retyped = _patch_geography(original, geography or {})
+    footer, retyped = _patch_geography(original, geography or {}, geography_bbox)
     wanted = _normalized(updates or {})
     wanted.update(
         _arrow_schema_in_step(

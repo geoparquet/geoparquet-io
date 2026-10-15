@@ -224,5 +224,8 @@ def test_a_pending_block_whose_edges_already_match_is_still_written(tmp_path):
     )
 
     block = geo_block(path)
+    # The geodesic bbox rides along on the same patch (#1272); the assertion
+    # here is that the deferred block reached the footer at all.
+    block["columns"]["geometry"].pop("bbox", None)
     assert block == pending
     assert native_geo_edges(path) == ("Geography", "EdgeType.SPHERICAL")

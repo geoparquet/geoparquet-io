@@ -473,6 +473,22 @@ When a GeoParquet 2.0 input declares an ellipsoidal edges algorithm
 algorithm is mapped to `"spherical"` — the only non-planar value 1.x supports
 — with a warning. 2.0 outputs keep the algorithm verbatim.
 
+### Geodesic Bounding Boxes for GEOGRAPHY
+
+A 2.0 output whose column carries non-planar edges comes out as a native
+Parquet `GEOGRAPHY`, and its bounding boxes — each row group's geospatial
+statistics and the `geo` block's per-column `bbox` — are computed over the
+**geodesic edges**, not just the vertices. A long east–west great-circle edge
+at high latitude bulges poleward (`LINESTRING (-30 60, 30 60)` peaks near
+63.4°N, not 60°), so a vertex-only box would let a reader prune row groups
+that really match. gpio writes the bulged box instead: for `spherical` edges
+it is the exact great-circle bound, including the poles when a ring encloses
+one; for the ellipsoidal algorithms it is the spherical bound padded by a
+small documented margin. Geometry that crosses the antimeridian gets
+`xmin > xmax`, the wrap form both Parquet's statistics and RFC 7946 §5.2
+define. When a column cannot be bounded (unreadable WKB), the box is dropped
+instead — a missing box is always legal; it only gives up pruning.
+
 ### Z and M Dimensions
 
 Geometries with Z (elevation) and/or M (measure) values are preserved, and the

@@ -74,6 +74,7 @@ from geoparquet_io.core.geo_metadata import (
     strip_derived_stats,
     strip_nonplanar_edges,
 )
+from geoparquet_io.core.geodesic_bbox import geography_statistics
 from geoparquet_io.core.geometry_detection import (
     _detect_geometry_from_query,
     native_geometry_types_from_query,
@@ -204,6 +205,12 @@ def _apply_nonplanar_edges(
     block-only rewrite this replaced cost a full pass and lost the compression
     level; it stays as the fallback for a footer that cannot be read.
 
+    A retyped column gets its bounding boxes back (#1272): the row-group
+    GeospatialStatistics and the block's ``bbox`` were vertex boxes on a plane,
+    which a geodesic edge can leave, so each is replaced with a bound computed
+    over the edges (``core/geodesic_bbox``) rather than dropped as #1254 did.
+    When nothing can bound a column, the drop remains the fallback.
+
     ``pending_geo`` is the ``geo`` block the V2 M/ZM repair deferred to this
     patch (#1270): the block the output needs but does not yet carry, taken in
     place of the file's own and written whether or not the edges change it, so
@@ -217,13 +224,20 @@ def _apply_nonplanar_edges(
     edges_by_col = {
         name: _edges_for_output_version(edges, geo_version) for name, edges in edges_by_col.items()
     }
-    geo_updates = _geo_block_with_edges(geo_meta, edges_by_col)
-    if pending_geo is not None and not geo_updates:
-        geo_updates = {"geo": json.dumps(geo_meta)}
     geography = _geography_candidates(output_file, edges_by_col)
+    geography_bbox, file_bboxes = _geodesic_bounds(output_file, geography)
+    geo_updates = _geo_block_updates(
+        geo_meta, edges_by_col, file_bboxes, force=pending_geo is not None
+    )
 
     try:
-        retyped = patch_footer(output_file, geo_updates, geography=geography, verbose=verbose)
+        retyped = patch_footer(
+            output_file,
+            geo_updates,
+            geography=geography,
+            geography_bbox=geography_bbox,
+            verbose=verbose,
+        )
     except FooterPatchRaced:
         # Nothing was written, and a rewrite now would describe another
         # writer's bytes (see _ensure_v2_geo_metadata).
@@ -296,15 +310,58 @@ def _read_geo_key(output_file: str) -> dict | None:
     return json.loads(raw.decode("utf-8")) if raw else None
 
 
-def _geo_block_with_edges(geo_meta: dict | None, edges_by_col: dict[str, str]) -> dict[str, str]:
-    """``{"geo": <block>}`` with each described column's edges set, or ``{}``."""
+def _geodesic_bounds(output_file: str, geography: dict[str, str]) -> tuple[dict, dict]:
+    """Geodesic row-group and file-level bounds for the columns being retyped.
+
+    Best-effort: a column whose bounds cannot be computed falls back to #1254's
+    behavior -- its planar boxes are dropped -- rather than failing the write.
+    """
+    if not geography:
+        return {}, {}
+    try:
+        return geography_statistics(output_file, geography)
+    except Exception as e:  # noqa: BLE001 - any read failure degrades to "drop the box"
+        debug(f"Could not compute geodesic bounds for {output_file}: {e}")
+        return {}, {}
+
+
+def _bbox_with_geodesic_xy(existing: object, box: tuple) -> list[float]:
+    """A ``geo`` block ``bbox`` with the geodesic X/Y bounds, Z kept if it had one."""
+    xmin, ymin, xmax, ymax = box
+    if isinstance(existing, list) and len(existing) == 6:
+        return [xmin, ymin, existing[2], xmax, ymax, existing[5]]
+    return [xmin, ymin, xmax, ymax]
+
+
+def _geo_block_updates(
+    geo_meta: dict | None,
+    edges_by_col: dict[str, str],
+    file_bboxes: dict[str, tuple],
+    force: bool = False,
+) -> dict[str, str]:
+    """``{"geo": <block>}`` with edges and geodesic bboxes set, or ``{}``.
+
+    ``force`` writes the block even unchanged -- the #1270 deferred repair's
+    block is not in the file yet, so "unchanged" still has to land.
+    """
     changed = False
+    columns = (geo_meta or {}).get("columns") or {}
     for name, edges in edges_by_col.items():
-        col_meta = ((geo_meta or {}).get("columns") or {}).get(name)
+        col_meta = columns.get(name)
         if isinstance(col_meta, dict) and col_meta.get("edges") != edges:
             col_meta["edges"] = edges
             changed = True
-    return {"geo": json.dumps(geo_meta)} if changed else {}
+    for name, box in file_bboxes.items():
+        col_meta = columns.get(name)
+        if not isinstance(col_meta, dict):
+            continue
+        bbox = _bbox_with_geodesic_xy(col_meta.get("bbox"), box)
+        if col_meta.get("bbox") != bbox:
+            col_meta["bbox"] = bbox
+            changed = True
+    if geo_meta is None or not (changed or force):
+        return {}
+    return {"geo": json.dumps(geo_meta)}
 
 
 def _ensure_v2_geo_metadata(

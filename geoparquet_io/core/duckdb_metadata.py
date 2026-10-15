@@ -857,8 +857,10 @@ def parse_geometry_logical_type(logical_type: str) -> dict | None:
     if crs is not None:
         result["crs"] = crs
 
-    # Parse algorithm for Geography
-    algo_match = re.search(r"algorithm=(planar|spherical)", params)
+    # Parse algorithm for Geography: the full parquet.thrift vocabulary, not
+    # just the 1.x pair -- an ellipsoidal algorithm read as "no algorithm"
+    # degraded to spherical in every caller's fallback (#1272).
+    algo_match = re.search(r"algorithm=(planar|spherical|vincenty|thomas|andoyer|karney)", params)
     if algo_match:
         result["algorithm"] = algo_match.group(1)
 
