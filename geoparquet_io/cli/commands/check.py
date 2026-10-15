@@ -1297,8 +1297,16 @@ def check_bbox_cmd(
     Also compares each row's bbox against its geometry's real envelope. A bbox
     that does not cover its geometry is a failure -- readers prune on the
     covering, so those rows go missing from spatial query results with no error
-    anywhere. A bbox larger than its geometry is only a warning: readers
-    over-fetch, but the answer stays right.
+    anywhere -- as are a NULL or NaN bbox and a geometry that is not valid WKB.
+    A bbox larger than its geometry is a warning: readers over-fetch, but the
+    answer stays right.
+
+    The comparison decodes a seeded random sample (--sample-rows) or every row
+    (--all-rows); either way the geometry and bbox columns are read in full.
+    --fix repairs the column and metadata, not the values, so its output is
+    compared again and a wrong bbox still fails the run.
+
+    Exits 1 if any check fails, or on a warning with --strict.
     """
     from geoparquet_io.core.check_fixes import fix_bbox_all, fix_bbox_removal
     from geoparquet_io.core.check_parquet_structure import check_bbox

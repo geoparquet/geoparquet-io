@@ -19,7 +19,7 @@ from geoparquet_io.core.check_bbox_values import (
     DEFAULT_BBOX_SAMPLE_ROWS,
     check_bbox_covers_geometry,
 )
-from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+from geoparquet_io.core.check_parquet_structure import check_bbox, check_metadata_and_bbox
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
 #: A square whose envelope is exactly (0, 0, 10, 10) in float64.
@@ -46,14 +46,35 @@ def _wkb_values(wkts):
         con.close()
 
 
-def _write_geoparquet(path, wkts, bboxes, *, bbox_type=pa.float64(), version="1.1.0"):
+def _write_geoparquet(
+    path,
+    wkts,
+    bboxes,
+    *,
+    bbox_type=pa.float64(),
+    version="1.1.0",
+    geometry=None,
+    crs=None,
+    edges=None,
+    file_bbox=None,
+    covering=True,
+    use_dictionary=False,
+    extra_columns=None,
+):
     """A GeoParquet 1.1 file with exactly the bbox values asked for.
 
     Written straight through pyarrow rather than through gpio's own writers on
     purpose: the point of every test here is a bbox that disagrees with its
     geometry, which no gpio write path will produce.
+
+    ``geometry`` replaces the WKB built from ``wkts`` with raw bytes (corrupt
+    values included); a bbox tuple may hold None for a NULL field inside a
+    non-NULL struct. ``crs``, ``edges`` and ``file_bbox`` go into the column's
+    ``geo`` entry; ``covering=False`` leaves the bbox column undeclared.
     """
-    geometry = pa.array(_wkb_values(wkts), type=pa.binary())
+    if geometry is None:
+        geometry = _wkb_values(wkts)
+    geometry = pa.array(geometry, type=pa.binary())
     fields = [
         pa.array([None if box is None else box[i] for box in bboxes], type=bbox_type)
         for i in range(4)
@@ -63,27 +84,28 @@ def _write_geoparquet(path, wkts, bboxes, *, bbox_type=pa.float64(), version="1.
         ["xmin", "ymin", "xmax", "ymax"],
         mask=pa.array([box is None for box in bboxes], type=pa.bool_()),
     )
-    table = pa.table({"id": pa.array(range(len(wkts))), "geometry": geometry, "bbox": bbox})
-    geo = {
-        "version": version,
-        "primary_column": "geometry",
-        "columns": {
-            "geometry": {
-                "encoding": "WKB",
-                "geometry_types": [],
-                "covering": {
-                    "bbox": {
-                        "xmin": ["bbox", "xmin"],
-                        "ymin": ["bbox", "ymin"],
-                        "xmax": ["bbox", "xmax"],
-                        "ymax": ["bbox", "ymax"],
-                    }
-                },
+    columns = {"id": pa.array(range(len(geometry))), "geometry": geometry, "bbox": bbox}
+    columns.update(extra_columns or {})
+    table = pa.table(columns)
+    column_meta = {"encoding": "WKB", "geometry_types": []}
+    if covering:
+        column_meta["covering"] = {
+            "bbox": {
+                "xmin": ["bbox", "xmin"],
+                "ymin": ["bbox", "ymin"],
+                "xmax": ["bbox", "xmax"],
+                "ymax": ["bbox", "ymax"],
             }
-        },
-    }
+        }
+    if crs is not None:
+        column_meta["crs"] = crs
+    if edges is not None:
+        column_meta["edges"] = edges
+    if file_bbox is not None:
+        column_meta["bbox"] = list(file_bbox)
+    geo = {"version": version, "primary_column": "geometry", "columns": {"geometry": column_meta}}
     table = table.replace_schema_metadata({"geo": json.dumps(geo)})
-    pq.write_table(table, str(path))
+    pq.write_table(table, str(path), use_dictionary=use_dictionary)
     return str(path)
 
 
@@ -176,14 +198,14 @@ class TestUndersizedIsAFailure:
 class TestOversizedIsOnlyAWarning:
     """A bbox larger than its geometry costs an over-fetch, not a wrong answer."""
 
-    def test_inflated_bbox_warns_but_passes(self, tmp_path):
+    def test_inflated_bbox_is_a_warning_not_a_failure(self, tmp_path):
         path = _write_geoparquet(
             tmp_path / "inflated.parquet",
             [SQUARE, SQUARE],
             [SQUARE_BBOX, (-5.0, -5.0, 15.0, 15.0)],
         )
         report = check_bbox_covers_geometry(path, quiet=True)
-        assert report["passed"] is True
+        assert report["severity"] == "warning"
         assert report["oversized_rows"] == 1
         assert report["undersized_rows"] == 0
         assert report["worst_excess"] == pytest.approx(5.0)
@@ -260,24 +282,35 @@ class TestNullAndEmptyGeometry:
         assert report["checked_rows"] == 2
         assert report["null_bbox_rows"] == 0
 
-    def test_null_geometry_with_a_bbox_is_skipped_not_failed(self, tmp_path):
-        """No envelope to compare against; the row cannot be judged either way."""
+    def test_null_geometry_with_a_bbox_warns_not_fails(self, tmp_path):
+        """No envelope to compare against: a bbox there describes nothing, which is advice."""
         path = _write_geoparquet(
             tmp_path / "null_geom_bbox.parquet", [SQUARE, None], [SQUARE_BBOX, SQUARE_BBOX]
         )
         report = check_bbox_covers_geometry(path, quiet=True)
-        assert report["passed"] is True
+        assert report["severity"] == "warning"
         assert report["absent_geometry_rows"] == 1
+        assert report["undersized_rows"] == 0
 
     def test_empty_geometry_is_skipped(self, tmp_path):
         path = _write_geoparquet(
             tmp_path / "empty_geom.parquet",
             [SQUARE, "POLYGON EMPTY"],
-            [SQUARE_BBOX, (0.0, 0.0, 0.0, 0.0)],
+            [SQUARE_BBOX, None],
         )
         report = check_bbox_covers_geometry(path, quiet=True)
         assert report["passed"] is True
         assert report["absent_geometry_rows"] == 1
+
+    def test_empty_geometry_with_a_bbox_warns(self, tmp_path):
+        path = _write_geoparquet(
+            tmp_path / "empty_geom_bbox.parquet",
+            [SQUARE, "POLYGON EMPTY"],
+            [SQUARE_BBOX, (0.0, 0.0, 0.0, 0.0)],
+        )
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["severity"] == "warning"
+        assert report["bbox_without_geometry_rows"] == 1
 
 
 class TestNothingToCheck:
@@ -444,22 +477,30 @@ class TestNativeGeometry:
         assert report["undersized_rows"] >= 1
 
 
-class TestFoldedIntoCheckMetadataAndBbox:
-    """``check_metadata_and_bbox`` carries the verdict only when asked to."""
+class TestFoldedIntoCheckBbox:
+    """``check_bbox`` carries the verdict; ``check_metadata_and_bbox`` stays footer-only."""
 
-    def test_off_by_default(self, tmp_path):
+    def test_footer_check_never_compares(self, tmp_path):
         path = _write_geoparquet(tmp_path / "quiet.parquet", [SQUARE], [(0.0, 0.0, 9.0, 9.0)])
         result = check_metadata_and_bbox(path, return_results=True, quiet=True)
         assert result["passed"] is True
         assert "bbox_values" not in result
 
+    def test_off_by_default(self, tmp_path):
+        path = _write_geoparquet(tmp_path / "off.parquet", [SQUARE], [(0.0, 0.0, 9.0, 9.0)])
+        result = check_bbox(path, return_results=True, quiet=True)
+        assert result["passed"] is True
+        assert result["bbox_values"]["checked"] is False
+
     def test_verify_rows_flips_the_verdict(self, tmp_path):
         path = _write_geoparquet(tmp_path / "loud.parquet", [SQUARE], [(0.0, 0.0, 9.0, 9.0)])
-        result = check_metadata_and_bbox(path, return_results=True, quiet=True, verify_rows=1000)
+        result = check_bbox(path, return_results=True, quiet=True, verify_rows=1000)
         assert result["passed"] is False
-        assert result["failed"] is True
+        assert result["severity"] == "failure"
+        assert "failed" not in result
         assert result["bbox_values"]["undersized_rows"] == 1
         assert any("does not cover" in issue for issue in result["issues"])
+        assert result["recommendations"][0].startswith("Regenerate the column")
         # The repair is a column rewrite, so --fix must still decline.
         assert result["fix_available"] is False
 
@@ -469,7 +510,7 @@ class TestFoldedIntoCheckMetadataAndBbox:
 
         path = _write_geoparquet(tmp_path / "print.parquet", [SQUARE], [(0.0, 0.0, 9.0, 9.0)])
         with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
-            assert check_metadata_and_bbox(path, verify_rows=1000) is None
+            assert check_bbox(path, verify_rows=1000) is None
         assert "does not cover" in caplog.text
 
     def test_plain_parquet_still_returns_nothing_to_print_only_callers(self, tmp_path):
@@ -478,12 +519,21 @@ class TestFoldedIntoCheckMetadataAndBbox:
         pq.write_table(pa.table({"name": pa.array(["a"])}), path)
         assert check_metadata_and_bbox(str(path), quiet=True) is None
 
-    def test_oversized_leaves_the_verdict_alone(self, tmp_path):
+    def test_oversized_is_a_warning_in_the_combined_result(self, tmp_path):
         path = _write_geoparquet(tmp_path / "wide.parquet", [SQUARE], [(-5.0, -5.0, 15.0, 15.0)])
-        result = check_metadata_and_bbox(path, return_results=True, quiet=True, verify_rows=1000)
-        assert result["passed"] is True
-        assert result.get("failed", False) is False
+        result = check_bbox(path, return_results=True, quiet=True, verify_rows=1000)
+        assert result["severity"] == "warning"
         assert any("larger than" in issue for issue in result["issues"])
+
+    def test_could_not_run_reaches_the_combined_result(self, tmp_path):
+        path = _write_geoparquet(tmp_path / "geomstr2.parquet", [SQUARE], [SQUARE_BBOX])
+        table = pq.read_table(path)
+        idx = table.schema.get_field_index("geometry")
+        pq.write_table(table.set_column(idx, "geometry", pa.array(["POINT (1 1)"])), path)
+        result = check_bbox(path, return_results=True, quiet=True, verify_rows=1000)
+        assert result["severity"] == "failure"
+        assert result["could_not_run"]
+        assert result["error"]
 
 
 class TestExitCodes:
@@ -652,3 +702,433 @@ class TestPythonApi:
         path = _write_geoparquet(tmp_path / "api_skip.parquet", [SQUARE], [(0.0, 0.0, 9.0, 9.0)])
         result = gpio.read(path).check_bbox(sample_rows=0)
         assert result.passed() is True
+
+
+# --------------------------------------------------------------------------
+# Review findings on #1239. Each class pins one behaviour the first version
+# got wrong; the fixtures are the reviewers' repros, shrunk.
+# --------------------------------------------------------------------------
+
+#: A point's WKB header with a truncated body: parses as nothing.
+BAD_WKB = b"\x01\x01\x00\x00\x00garbage"
+
+#: A projected CRS, as far as ``is_geographic_crs`` reads one.
+UTM_31N = {
+    "type": "ProjectedCRS",
+    "name": "WGS 84 / UTM zone 31N",
+    "id": {"authority": "EPSG", "code": 32631},
+}
+
+#: Fiji, cut at the antimeridian as RFC 7946 tells producers to.
+FIJI = "MULTIPOLYGON (((177 -18, 180 -18, 180 -16, 177 -16, 177 -18)), ((-180 -18, -178 -18, -178 -16, -180 -16, -180 -18)))"
+FIJI_BBOX = (177.0, -18.0, -178.0, -16.0)
+
+
+def _labels(report):
+    """``{issue: label}`` for every issue, through the shared verdict reader."""
+    from geoparquet_io.core.check_verdict import labelled_issues
+
+    return {issue: level.label for level, issue in labelled_issues(report)}
+
+
+class TestUnparsableGeometry:
+    """A geometry value that is not WKB is a finding, never a crash or a pass (P1-1)."""
+
+    def test_one_bad_row_is_counted_and_the_rest_still_compared(self, tmp_path):
+        good = _wkb_values([SQUARE])[0]
+        path = _write_geoparquet(
+            tmp_path / "bad_wkb.parquet",
+            None,
+            [(0.0, 0.0, 9.0, 9.0)] * 3,
+            geometry=[good, BAD_WKB, good],
+        )
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["unparsable_geometry_rows"] == 1
+        assert report["undersized_rows"] == 2
+        assert report["absent_geometry_rows"] == 0
+        assert report["passed"] is False
+        assert report["severity"] == "failure"
+        assert any("not valid WKB" in issue for issue in report["issues"])
+
+    def test_unparsable_alone_fails(self, tmp_path):
+        good = _wkb_values([SQUARE])[0]
+        path = _write_geoparquet(
+            tmp_path / "bad_only.parquet",
+            None,
+            [SQUARE_BBOX, (0.0, 0.0, 1.0, 1.0)],
+            geometry=[good, BAD_WKB],
+        )
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["unparsable_geometry_rows"] == 1
+        assert report["undersized_rows"] == 0
+        assert report["severity"] == "failure"
+
+    def test_zero_length_value_is_unparsable(self, tmp_path):
+        good = _wkb_values([SQUARE])[0]
+        path = _write_geoparquet(
+            tmp_path / "zero.parquet", None, [SQUARE_BBOX] * 2, geometry=[good, b""]
+        )
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["unparsable_geometry_rows"] == 1
+        assert report["severity"] == "failure"
+
+    def test_dictionary_encoded_bad_row_does_not_null_the_rest(self, tmp_path):
+        """pyarrow dictionary-encodes repeated WKB; one bad entry must not hide 999 rows."""
+        good = _wkb_values([SQUARE])[0]
+        path = _write_geoparquet(
+            tmp_path / "dict.parquet",
+            None,
+            [(1.0, 1.0, 9.0, 9.0)] * 1000,
+            geometry=[good] * 999 + [BAD_WKB],
+            use_dictionary=True,
+        )
+        # Non-vacuity: the geometry column really is dictionary-encoded.
+        encodings = pq.ParquetFile(path).metadata.row_group(0).column(1).encodings
+        assert any("DICTIONARY" in str(e) for e in encodings)
+
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["unparsable_geometry_rows"] == 1
+        assert report["undersized_rows"] == 999
+        assert report["passed"] is False
+
+    def test_cli_reports_instead_of_crashing(self, tmp_path):
+        good = _wkb_values([SQUARE])[0]
+        path = _write_geoparquet(
+            tmp_path / "cli_bad_wkb.parquet", None, [SQUARE_BBOX] * 2, geometry=[good, BAD_WKB]
+        )
+        result = CliRunner().invoke(check, ["bbox", path])
+        assert result.exit_code == 1
+        assert "not valid WKB" in result.output
+        assert "Invalid Input Error" not in result.output
+
+    def test_table_check_bbox_reports_instead_of_crashing(self, tmp_path):
+        import geoparquet_io as gpio
+
+        good = _wkb_values([SQUARE])[0]
+        path = _write_geoparquet(
+            tmp_path / "api_bad_wkb.parquet", None, [SQUARE_BBOX] * 2, geometry=[good, BAD_WKB]
+        )
+        result = gpio.read(path).check_bbox()
+        assert result.verdict() == "failure"
+        assert any("not valid WKB" in f for f in result.failures())
+
+
+class TestAntimeridian:
+    """xmin > xmax on a geographic CRS crosses the antimeridian (RFC 7946 5.2) (P1-2)."""
+
+    def test_fiji_covers(self, tmp_path):
+        path = _write_geoparquet(tmp_path / "fiji.parquet", [FIJI], [FIJI_BBOX])
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["undersized_rows"] == 0
+        assert report["oversized_rows"] == 0
+        assert report["passed"] is True
+
+    def test_line_across_the_antimeridian_covers(self, tmp_path):
+        path = _write_geoparquet(
+            tmp_path / "line.parquet", ["LINESTRING (179 0, -179 1)"], [(179.0, 0.0, -179.0, 1.0)]
+        )
+        assert check_bbox_covers_geometry(path, quiet=True)["passed"] is True
+
+    def test_a_vertex_outside_the_wrapped_range_is_undersized(self, tmp_path):
+        path = _write_geoparquet(
+            tmp_path / "short.parquet", ["LINESTRING (179 0, -170 1)"], [(179.0, 0.0, -179.0, 1.0)]
+        )
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["undersized_rows"] == 1
+        assert report["worst_shortfall"] == pytest.approx(9.0)
+
+    def test_a_wrapped_bbox_wider_than_needed_is_oversized(self, tmp_path):
+        path = _write_geoparquet(
+            tmp_path / "wide.parquet", ["LINESTRING (179 0, -179 1)"], [(170.0, 0.0, -170.0, 1.0)]
+        )
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["undersized_rows"] == 0
+        assert report["oversized_rows"] == 1
+        assert report["worst_excess"] == pytest.approx(9.0)
+
+    def test_projected_crs_does_not_wrap(self, tmp_path):
+        """For a projected CRS xmin > xmax is broken, as ``check spec`` reads it."""
+        path = _write_geoparquet(
+            tmp_path / "utm.parquet",
+            ["LINESTRING (179 0, -179 1)"],
+            [(179.0, 0.0, -179.0, 1.0)],
+            crs=UTM_31N,
+        )
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["undersized_rows"] == 1
+
+    def test_a_reversed_bbox_outside_longitude_range_is_not_a_wrap(self, tmp_path):
+        """Only a longitude can wrap; x = 20000 with xmin > xmax is just wrong."""
+        path = _write_geoparquet(
+            tmp_path / "far.parquet", ["POINT (20000 1)"], [(20000.5, 1.0, 20000.0, 1.0)]
+        )
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["undersized_rows"] == 1
+        assert report["wrapped_rows"] == 0
+
+    def test_agrees_with_check_spec(self, tmp_path):
+        """The same wrapped extent passes spec's bbox check and this one alike."""
+        from geoparquet_io.core.validate import validate_geoparquet
+
+        path = _write_geoparquet(
+            tmp_path / "agree.parquet", [FIJI], [FIJI_BBOX], file_bbox=FIJI_BBOX
+        )
+        spec = validate_geoparquet(path, validate_data=True, verbose=False)
+        contains = [c for c in spec.checks if c.name.startswith("bbox_contains_data")]
+        assert [c.status.value for c in contains] == ["passed"]
+        assert check_bbox_covers_geometry(path, quiet=True)["passed"] is True
+
+
+class TestNullAndNanFields:
+    """A bbox no filter can match is a NULL bbox, however it got that way (P1-3, P3-10)."""
+
+    @pytest.mark.parametrize(
+        "box",
+        [(None, 10.0, 10.0, 10.0), (10.0, 10.0, 10.0, None), (None, None, None, None)],
+        ids=["xmin", "ymax", "all-four"],
+    )
+    def test_a_null_field_is_a_null_bbox(self, tmp_path, box):
+        path = _write_geoparquet(tmp_path / "nf.parquet", ["POINT (10 10)"], [box])
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["null_bbox_rows"] == 1
+        assert report["passed"] is False
+        assert report["severity"] == "failure"
+
+    def test_nan_is_named_as_nan(self, tmp_path):
+        nan = float("nan")
+        path = _write_geoparquet(
+            tmp_path / "nan.parquet", ["POINT (1 1)", "POINT (1 1)"], [(nan,) * 4, (1.0,) * 4]
+        )
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["nan_bbox_rows"] == 1
+        assert report["undersized_rows"] == 0
+        assert report["severity"] == "failure"
+        assert any("bbox contains NaN" in issue for issue in report["issues"])
+        assert not any("nan)" in issue for issue in report["issues"])
+
+
+class TestSeverity:
+    """Undersized fails; oversized warns -- and each issue carries its own level (#1252)."""
+
+    def test_oversized_is_a_warning_not_a_pass(self, tmp_path):
+        path = _write_geoparquet(tmp_path / "wide.parquet", [SQUARE], [(-5.0, -5.0, 15.0, 15.0)])
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["passed"] is False
+        assert report["severity"] == "warning"
+
+    def test_mixed_findings_keep_their_own_levels(self, tmp_path):
+        path = _write_geoparquet(
+            tmp_path / "mixed.parquet",
+            [SQUARE, SQUARE],
+            [(0.0, 0.0, 9.0, 9.0), (-5.0, -5.0, 15.0, 15.0)],
+        )
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["severity"] == "failure"
+        labels = _labels(report)
+        assert {label for issue, label in labels.items() if "larger than" in issue} == {"warning"}
+        assert {label for issue, label in labels.items() if "does not cover" in issue} == {
+            "failure"
+        }
+
+    def test_cli_prints_each_issue_at_its_own_level(self, tmp_path):
+        path = _write_geoparquet(
+            tmp_path / "cli_mixed.parquet",
+            [SQUARE, SQUARE],
+            [(0.0, 0.0, 9.0, 9.0), (-5.0, -5.0, 15.0, 15.0)],
+        )
+        result = CliRunner().invoke(check, ["bbox", path])
+        assert result.exit_code == 1
+        lines = result.output.splitlines()
+        assert any("WARNING" in line and "larger than" in line for line in lines)
+        assert any("ERROR" in line and "does not cover" in line for line in lines)
+
+    def test_strict_fails_an_oversized_bbox(self, tmp_path):
+        path = _write_geoparquet(tmp_path / "strict.parquet", [SQUARE], [(-5.0, -5.0, 15.0, 15.0)])
+        assert CliRunner().invoke(check, ["bbox", path]).exit_code == 0
+        assert CliRunner().invoke(check, ["bbox", path, "--strict"]).exit_code == 1
+
+    def test_glyphs_are_the_shared_ones(self, tmp_path):
+        from geoparquet_io.core.check_verdict import FAILURE_GLYPH
+
+        path = _write_geoparquet(tmp_path / "glyph.parquet", [SQUARE], [(0.0, 0.0, 9.0, 9.0)])
+        output = CliRunner().invoke(check, ["bbox", path]).output
+        assert "❌" not in output
+        assert "⚠️" not in output.split("Bbox vs geometry")[1]
+        assert FAILURE_GLYPH in output.split("Bbox vs geometry")[1]
+
+    def test_check_all_does_not_compare_values(self, tmp_path):
+        """``check all`` stays a metadata pass: no geometry is decoded for the bbox."""
+        from geoparquet_io.core.check_parquet_structure import check_all as core_check_all
+
+        path = _write_geoparquet(tmp_path / "all.parquet", [SQUARE], [(0.0, 0.0, 9.0, 9.0)])
+        results = core_check_all(path, return_results=True, quiet=True)
+        assert "bbox_values" not in results["bbox"]
+        assert "Bbox vs geometry" not in CliRunner().invoke(check, ["all", path]).output
+
+
+class TestFixCarriesTheValueVerdict:
+    """``--fix`` repairs metadata, not numbers, so a wrong bbox still fails after it."""
+
+    def test_metadata_only_fix_still_exits_one(self, tmp_path):
+        """The fix adds the missing covering; the numbers it declares stay wrong."""
+        path = _write_geoparquet(
+            tmp_path / "undeclared.parquet", [SQUARE], [(0.0, 0.0, 9.0, 9.0)], covering=False
+        )
+        before = check_bbox(path, return_results=True, quiet=True, verify_rows=100)
+        # Non-vacuity: --fix has something to apply (the missing covering).
+        assert before["fix_available"] is True
+        assert before["needs_bbox_metadata"] is True
+        out = tmp_path / "fixed.parquet"
+        result = CliRunner().invoke(check, ["bbox", path, "--fix", "--fix-output", str(out)])
+        assert "Added bbox covering metadata" in result.output
+        after = check_bbox(str(out), return_results=True, quiet=True, verify_rows=100)
+        assert after["needs_bbox_metadata"] is False
+        assert after["bbox_values"]["undersized_rows"] == 1
+        assert result.exit_code == 1
+
+
+class TestUnusableTypes:
+    """A column the comparison cannot read is reported, never a traceback (P2-4)."""
+
+    def test_varchar_bbox_fields_are_not_compared(self, tmp_path):
+        path = _write_geoparquet(
+            tmp_path / "strings.parquet", [SQUARE], [("0", "0", "10", "10")], bbox_type=pa.string()
+        )
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["checked"] is False
+        assert "FLOAT or DOUBLE" in report["skip_reason"]
+        result = CliRunner().invoke(check, ["bbox", path])
+        assert "Binder Error" not in result.output
+        assert result.exit_code == 1  # the structure check already fails it
+
+    def test_varchar_geometry_could_not_run(self, tmp_path):
+        path = _write_geoparquet(tmp_path / "geomstr.parquet", [SQUARE], [SQUARE_BBOX])
+        table = pq.read_table(path)
+        idx = table.schema.get_field_index("geometry")
+        table = table.set_column(idx, "geometry", pa.array(["POINT (1 1)"]))
+        pq.write_table(table, path)
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["severity"] == "failure"
+        assert report["could_not_run"]
+        result = CliRunner().invoke(check, ["bbox", path])
+        assert result.exit_code == 1
+        assert "INTERNAL Error" not in result.output
+        assert "Traceback" not in result.output
+
+    def test_a_duckdb_error_is_a_could_not_run_failure(self, tmp_path, monkeypatch):
+        import duckdb
+
+        from geoparquet_io.core import check_bbox_values
+
+        def boom(*args, **kwargs):
+            raise duckdb.IOException("disk on fire")
+
+        monkeypatch.setattr(check_bbox_values, "_comparison_query", boom)
+        path = _write_geoparquet(tmp_path / "boom.parquet", [SQUARE], [SQUARE_BBOX])
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["severity"] == "failure"
+        assert "disk on fire" in report["could_not_run"][0]
+
+    def test_multi_file_crash_is_not_called_a_failed_fix(self, tmp_path):
+        part = tmp_path / "part"
+        part.mkdir()
+        _write_geoparquet(part / "good.parquet", [SQUARE], [SQUARE_BBOX])
+        bad = _write_geoparquet(part / "bad.parquet", [SQUARE], [SQUARE_BBOX])
+        table = pq.read_table(bad)
+        idx = table.schema.get_field_index("geometry")
+        pq.write_table(table.set_column(idx, "geometry", pa.array(["POINT (1 1)"])), bad)
+        result = CliRunner().invoke(check, ["bbox", str(part), "--all-files"])
+        assert result.exit_code == 1
+        assert "Failed to fix" not in result.output
+        assert "bad.parquet" in result.output
+
+
+class TestRowNumbersAndSampling:
+    """Rows are named by their place in the file, and a sample is a sample (P2-5, P2-7)."""
+
+    def test_sampled_rows_keep_their_file_position_when_the_file_owns_the_name(self, tmp_path):
+        """Row r's bbox is short by r/1000, so a wrongly numbered example cannot match."""
+        rows = 3000
+        points = [f"POINT ({i} {i})" for i in range(rows)]
+        boxes = [(float(i), i + i / 1000, float(i), float(i)) for i in range(rows)]
+        path = _write_geoparquet(
+            tmp_path / "frn.parquet",
+            points,
+            boxes,
+            extra_columns={"file_row_number": pa.array(range(rows, 2 * rows))},
+        )
+        report = check_bbox_covers_geometry(path, sample_rows=50, quiet=True)
+        assert report["sampled"] is True
+        assert report["undersized_examples"]
+        for example in report["undersized_examples"]:
+            assert example["shortfall"] == pytest.approx(example["row"] / 1000)
+
+    def test_a_corrupt_tail_is_found_by_the_sample(self, tmp_path):
+        """A LIMIT reads the head; a sample across the file must see the tail."""
+        rows = 6000
+        boxes = [SQUARE_BBOX] * (rows - 1000) + [(0.0, 0.0, 9.0, 9.0)] * 1000
+        path = _write_geoparquet(tmp_path / "tail.parquet", [SQUARE] * rows, boxes)
+        report = check_bbox_covers_geometry(path, sample_rows=500, quiet=True)
+        assert report["sampled"] is True
+        assert report["undersized_rows"] > 0
+        assert min(e["row"] for e in report["undersized_examples"]) >= rows - 1000
+
+    def test_the_sample_is_repeatable(self, tmp_path):
+        rows = 6000
+        boxes = [SQUARE_BBOX if i % 7 else (0.0, 0.0, 9.0, 9.0) for i in range(rows)]
+        path = _write_geoparquet(tmp_path / "rep.parquet", [SQUARE] * rows, boxes)
+        first = check_bbox_covers_geometry(path, sample_rows=300, quiet=True)
+        second = check_bbox_covers_geometry(path, sample_rows=300, quiet=True)
+        assert first["undersized_rows"] == second["undersized_rows"]
+        assert first["undersized_examples"] == second["undersized_examples"]
+
+
+class TestWhatTheOutputSays:
+    """A skipped comparison, spherical edges and an orphan bbox are all said (P3-9/12/13)."""
+
+    def test_skip_reason_is_printed(self, tmp_path):
+        path = _write_geoparquet(tmp_path / "skip.parquet", [SQUARE], [SQUARE_BBOX])
+        result = CliRunner().invoke(check, ["bbox", path, "--sample-rows", "0"])
+        assert "not compared" in result.output
+        assert "not requested" in result.output
+
+    def test_spherical_edges_are_noted(self, tmp_path):
+        path = _write_geoparquet(
+            tmp_path / "sph.parquet",
+            ["LINESTRING (-60 60, 60 60)"],
+            [(-60.0, 60.0, 60.0, 60.0)],
+            edges="spherical",
+        )
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["edges"] == "spherical"
+        result = CliRunner().invoke(check, ["bbox", path])
+        assert "spherical" in result.output
+
+    def test_a_bbox_beside_no_geometry_warns(self, tmp_path):
+        path = _write_geoparquet(
+            tmp_path / "orphan.parquet", [None, SQUARE], [SQUARE_BBOX, SQUARE_BBOX]
+        )
+        report = check_bbox_covers_geometry(path, quiet=True)
+        assert report["bbox_without_geometry_rows"] == 1
+        assert report["severity"] == "warning"
+
+
+class TestFooterReads:
+    """``check_bbox`` hands what it already read to the comparison (P3-14)."""
+
+    def test_bbox_structure_is_read_once(self, tmp_path, monkeypatch):
+        from geoparquet_io.core import bbox_structure, check_bbox_values, check_parquet_structure
+
+        calls = []
+        real = bbox_structure.check_bbox_structure
+
+        def counting(*args, **kwargs):
+            calls.append(args)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(check_parquet_structure, "check_bbox_structure", counting)
+        monkeypatch.setattr(check_bbox_values, "check_bbox_structure", counting, raising=False)
+        path = _write_geoparquet(tmp_path / "once.parquet", [SQUARE], [SQUARE_BBOX])
+        result = check_bbox(path, return_results=True, quiet=True, verify_rows=100)
+        assert result["bbox_values"]["checked"] is True
+        assert len(calls) == 1
