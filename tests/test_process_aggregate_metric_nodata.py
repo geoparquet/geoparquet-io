@@ -513,6 +513,9 @@ class _FakeAdminDataset:
     def configure_s3(self, con):
         pass
 
+    def get_s3_config(self):
+        return {"profile": None}
+
 
 @pytest.fixture
 def fake_admin_dataset(tmp_path, monkeypatch):

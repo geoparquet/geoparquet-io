@@ -736,6 +736,9 @@ class _FakeAdminDataset:
     def configure_s3(self, con):
         pass
 
+    def get_s3_config(self):
+        return {"profile": None}
+
     def supports_per_level_sources(self):
         return True
 

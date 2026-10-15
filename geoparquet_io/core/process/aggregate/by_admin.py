@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet
 from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
+    s3_config_scope,
     sql_path,
     validate_where_clause,
     where_sql_fragment,
@@ -258,9 +259,12 @@ def aggregate_by_admin(
     input_url = resolve_file_url(input_parquet, verbose)
     geom_col = find_primary_geometry_column(input_parquet, verbose) or "geometry"
 
-    con = open_bounded_connection(
-        load_spatial=True, load_httpfs=True, memory_limit=memory_limit, verbose=verbose
-    )
+    # Opened in the dataset's scope, so its public read is not signed with an
+    # outer AWS profile and configure_s3's endpoint is not beaten by a secret.
+    with s3_config_scope(admin_dataset.get_s3_config()):
+        con = open_bounded_connection(
+            load_spatial=True, load_httpfs=True, memory_limit=memory_limit, verbose=verbose
+        )
     try:
         con.execute("SET geometry_always_xy = true")
         admin_dataset.configure_s3(con)

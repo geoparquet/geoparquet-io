@@ -734,7 +734,13 @@ class AdminDataset(ABC):
         return f"admin:{level_name}"
 
     def get_s3_config(self) -> dict:
-        """Return S3 configuration for this dataset. Override in subclasses."""
+        """Return S3 configuration for this dataset. Override in subclasses.
+
+        A public dataset returns ``"profile": None`` so an outer AWS profile
+        (``--aws-profile`` or an exported ``AWS_PROFILE``) does not build a
+        signed ``credential_chain`` secret for it. That secret would sign the
+        anonymous read, and its endpoint would beat the dataset's own.
+        """
         return {}
 
     @abstractmethod
@@ -809,7 +815,7 @@ class CurrentAdminDataset(AdminDataset):
         return "bbox"
 
     def get_s3_config(self) -> dict:
-        return {"s3_endpoint": "data.source.coop", "s3_use_ssl": True}
+        return {"s3_endpoint": "data.source.coop", "s3_use_ssl": True, "profile": None}
 
     def configure_s3(self, con: duckdb.DuckDBPyConnection) -> None:
         """Configure S3 for source.coop endpoint."""
@@ -858,7 +864,7 @@ class GAULAdminDataset(AdminDataset):
         return "geometry_bbox"
 
     def get_s3_config(self) -> dict:
-        return {"s3_endpoint": "data.source.coop", "s3_use_ssl": True}
+        return {"s3_endpoint": "data.source.coop", "s3_use_ssl": True, "profile": None}
 
     def configure_s3(self, con: duckdb.DuckDBPyConnection) -> None:
         """Configure S3 for source.coop endpoint."""
@@ -1144,7 +1150,7 @@ class OvertureAdminDataset(AdminDataset):
         return cache_path
 
     def get_s3_config(self) -> dict:
-        return {"s3_region": "us-west-2"}
+        return {"s3_region": "us-west-2", "profile": None}
 
     def configure_s3(self, con: duckdb.DuckDBPyConnection) -> None:
         """Configure S3 for AWS us-west-2 region where Overture data is stored."""
