@@ -605,8 +605,14 @@ Validates file structure and metadata against the GeoParquet specification:
   and 1.1 outputs keep `"crs": null`, 2.0 outputs keep it and type the column
   `srid:0`, and parquet-geo-only outputs type the column `srid:0`. An empty
   `crs` value such as `{}` is read as unknown too, with a warning, and written
-  the same way. If the coordinates really are lon/lat WGS84, drop the null
-  instead: `gpio convert reproject in.parquet out.parquet --assume-crs84`
+  the same way. So is a `srid:0` type under a geo entry with no `crs` key,
+  which is how DuckDB's own 2.0 writer spells an unknown CRS. Secondary
+  geometry columns follow the same rules. An unknown CRS has no valid
+  coordinate range, so `coordinates_valid_for_crs` is skipped for it instead
+  of holding projected coordinates to the lon/lat range. If you know the real
+  CRS, `gpio convert reproject in.parquet out.parquet --src-crs EPSG:5070`
+  reprojects from it. If the coordinates really are lon/lat WGS84, drop the
+  null instead. `gpio convert reproject in.parquet out.parquet --assume-crs84`
   writes the default (see [convert](../cli/convert.md)).
 - **Every CRS form the Parquet geo type may use** — the `GEOMETRY`/`GEOGRAPHY`
   logical type can name its CRS as inline PROJJSON, `srid:<id>`,

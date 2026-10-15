@@ -768,6 +768,15 @@ WGS84, use `assume_crs84=True` to treat them as OGC:CRS84 and write the default
 table = gpio.read('unknown_crs.parquet').reproject(assume_crs84=True)
 ```
 
+If you know the real CRS of a file whose CRS is unknown, pass it as
+`source_crs` instead. A `srid:0` Parquet type reads as unknown the same way.
+
+```python
+table = gpio.read('unknown_crs.parquet').reproject(
+    target_crs='EPSG:4326', source_crs='EPSG:5070'
+)
+```
+
 Without that, `Table.write()` keeps an unknown CRS unknown. A 1.0 or 1.1
 output keeps `crs: null`, a 2.0 output keeps it and types the column `srid:0`,
 and a parquet-geo-only output types the column `srid:0`. An empty `crs` value
