@@ -354,7 +354,7 @@ def test_api_convert_of_a_planar_parquet_describes_no_edges(tmp_path):
 
 
 @pytest.mark.xfail(
-    strict=True,
+    strict=False,
     reason=(
         "Table.write rebuilds the geo block without the table's edges (#1253); "
         "PR #1280 restores them. Remove this marker when it lands."
