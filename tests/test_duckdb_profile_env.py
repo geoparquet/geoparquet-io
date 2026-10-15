@@ -248,6 +248,8 @@ def test_directory_that_becomes_unusable_disables_profiling_once(tmp_path, monke
     warnings = [r for r in caplog.records if "GPIO_DUCKDB_PROFILE" in r.getMessage()]
     assert len(warnings) == 1
     assert con.execute("SELECT current_setting('enable_profiling')").fetchone() == (None,)
+    # a cursor of a connection whose profiling is off is a plain cursor
+    assert type(con.cursor()) is duckdb.DuckDBPyConnection
 
 
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", "0", "false", "off"])
