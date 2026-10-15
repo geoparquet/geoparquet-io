@@ -347,3 +347,103 @@ def test_the_oracle_uses_the_column_crs_ellipsoid():
     ]
     assert _geography_geod(schema, "geometry", "karney").f > 0
     assert _geography_geod(schema, "geometry", "spherical").f == 0
+
+
+def _many_row_groups(tmp_path, groups: int) -> Path:
+    """``groups`` row groups of 20-gon rings; the last group is the bulging line.
+
+    DuckDB will not cut a row group smaller than its 2048-row vector.
+    """
+    rows = 2048
+    path = tmp_path / "many.parquet"
+    last = (groups - 1) * rows
+    ring = ", ".join(f"{v % 20} {v % 3}" for v in range(19)) + ", 0 0"
+    con = get_duckdb_connection(load_spatial=True)
+    try:
+        con.execute(
+            f"COPY (SELECT i AS id, CASE WHEN i >= {last} "
+            f"THEN ST_GeomFromText('{BULGE_LINE}') "
+            f"ELSE ST_GeomFromText('POLYGON (({ring}))') END AS geometry "
+            f"FROM range({groups * rows}) t(i) ORDER BY i) TO {sql_path(str(path))} "
+            f"(FORMAT PARQUET, ROW_GROUP_SIZE {rows}, GEOPARQUET_VERSION 'V2')"
+        )
+    finally:
+        con.close()
+    boxes = [(-1.0, -1.0, 20.0, 3.0)] * (groups - 1) + [(-30.0, 60.0, 30.0, 60.0)]
+    patch_footer(str(path), geography={"geometry": "spherical"}, geography_bbox={"geometry": boxes})
+    return path
+
+
+class TestOracleBudget:
+    """``check spec``'s cost must not grow with the number of row groups."""
+
+    @staticmethod
+    def _spy(monkeypatch) -> dict:
+        import geoparquet_io.core.validate as validate
+
+        seen = {"edges": 0, "calls": 0}
+        real = validate._densified
+
+        def counting(geod, points, edges):
+            seen["edges"] += len(edges)
+            seen["calls"] += 1
+            return real(geod, points, edges)
+
+        monkeypatch.setattr(validate, "_densified", counting)
+        return seen
+
+    def test_many_row_groups_share_one_edge_budget(self, tmp_path, monkeypatch):
+        from geoparquet_io.core import validate
+        from geoparquet_io.core.duckdb_metadata import get_schema_info
+
+        path = _many_row_groups(tmp_path, groups=40)
+        seen = self._spy(monkeypatch)
+        con = get_duckdb_connection(load_spatial=True)
+        try:
+            check = validate._check_geography_stats_cover_edges(
+                str(path), "geometry", get_schema_info(str(path)), con, 1000
+            )
+        finally:
+            con.close()
+        # Per row group, 1000 rows of 20 edges each would be 800,000 edges.
+        assert seen["edges"] <= validate._ORACLE_EDGE_BUDGET
+        assert seen["calls"] == 40
+        # The bad box sits in the last group, and still gets caught.
+        assert check.status == CheckStatus.WARNING
+        assert "row group 39" in (check.details or "")
+
+    def test_one_huge_geometry_is_cut_to_the_budget(self, tmp_path, monkeypatch):
+        from geoparquet_io.core import validate
+
+        ring = ", ".join(f"{v / 1000} {(v % 7) / 1000}" for v in range(5000)) + ", 0 0"
+        path = _geography_file(
+            tmp_path,
+            f"POLYGON (({ring}))",
+            geography_bbox={"geometry": [(-1.0, -1.0, 6.0, 1.0)]},
+        )
+        monkeypatch.setattr(validate, "_ORACLE_EDGE_BUDGET", 300)
+        seen = self._spy(monkeypatch)
+        assert _check(path, "geography_stats_cover_edges_geometry").status == CheckStatus.PASSED
+        assert seen["edges"] <= 300
+
+    def test_row_groups_past_the_cap_are_sampled_and_said_so(self, tmp_path, monkeypatch):
+        from geoparquet_io.core import validate
+
+        path = _many_row_groups(tmp_path, groups=12)
+        monkeypatch.setattr(validate, "_ORACLE_MAX_GROUPS", 4)
+        check = _check(path, "geography_stats_cover_edges_geometry")
+        # Evenly spaced picks keep the first and last group.
+        assert check.status == CheckStatus.WARNING
+        assert "row group 11" in (check.details or "")
+        assert "4 of 12 row groups" in (check.details or "")
+
+    def test_a_pass_says_which_row_groups_it_checked(self, tmp_path, monkeypatch):
+        from geoparquet_io.core import validate
+
+        path = _two_row_groups(
+            tmp_path, "ok.parquet", [(-30.0, 60.0, 30.0, 63.44), (-10.0, -11.0, 10.0, 0.0)]
+        )
+        monkeypatch.setattr(validate, "_ORACLE_MAX_GROUPS", 1)
+        check = _check(path, "geography_stats_cover_edges_geometry")
+        assert check.status == CheckStatus.PASSED
+        assert "1 of 2 row groups" in check.message

@@ -2529,6 +2529,13 @@ def _geography_edge_algorithm(schema_info: list | None, geom_col: str) -> str:
 _ORACLE_POINTS_PER_EDGE = 32
 #: Edges the oracle densifies across the whole file when sampling (bounded time).
 _ORACLE_EDGE_BUDGET = 50_000
+#: Every checked row group gets at least this many rows and edges, so a bad
+#: box in any of them can still be caught however many there are.
+_ORACLE_MIN_GROUP_ROWS = 4
+_ORACLE_MIN_GROUP_EDGES = 64
+#: Row groups past this many are checked at evenly spaced picks (first and
+#: last kept), which caps the floors above at a fixed total.
+_ORACLE_MAX_GROUPS = 1024
 _ORACLE_BATCH_ROWS = 4096
 #: Slack on the oracle's containment test, in degrees (pyproj's own error is ~1e-12).
 _ORACLE_TOLERANCE_DEG = 1e-7
@@ -2659,15 +2666,64 @@ def _geojson_of(con, wkb):
                 yield json.loads(text)
 
 
+def _oracle_plan(groups: list, sample_size: int) -> tuple[list, int, int | None]:
+    """``(row groups to check, rows each, edges each)`` under one file-wide budget.
+
+    ``sample_size`` rows and :data:`_ORACLE_EDGE_BUDGET` edges are split across
+    the row groups, each keeping a small floor; past :data:`_ORACLE_MAX_GROUPS`
+    groups only evenly spaced ones are checked. ``sample_size`` 0 checks every
+    row of every group, with no budget.
+    """
+    if sample_size <= 0 or not groups:
+        return groups, 0, None
+    if len(groups) > _ORACLE_MAX_GROUPS:
+        np = load_module("numpy")
+        picks = np.unique(np.linspace(0, len(groups) - 1, _ORACLE_MAX_GROUPS).astype(np.int64))
+        groups = [groups[int(i)] for i in picks]
+    share = len(groups)
+    rows = max(_ORACLE_MIN_GROUP_ROWS, sample_size // share)
+    edges = max(_ORACLE_MIN_GROUP_EDGES, _ORACLE_EDGE_BUDGET // share)
+    return groups, rows, edges
+
+
+def _group_samples(reader, group: int, geom_col: str, con, rows: int, edge_quota: int | None):
+    """``(points, edges, geometries)`` of one row group's sample, edges cut at the quota.
+
+    The quota is enforced per geometry: once it is spent no further rows are
+    read, and a geometry larger than what is left contributes only its first
+    edges (every vertex is still compared).
+    """
+    points: list = []
+    edges: list = []
+    count = 0
+    for wkb in _sampled_rows(reader, group, geom_col, rows):
+        for geometry in _geojson_of(con, wkb):
+            own_points: list = []
+            own_edges: list = []
+            _geojson_parts(geometry, own_points, own_edges)
+            if not own_points:
+                continue
+            if edge_quota is not None:
+                own_edges = own_edges[: max(0, edge_quota - len(edges))]
+            count += 1
+            points.extend(own_points)
+            edges.extend(own_edges)
+            if edge_quota is not None and len(edges) >= edge_quota:
+                return points, edges, count
+    return points, edges, count
+
+
 def _geodesic_escapes(
     parquet_file: str, geom_col: str, con, sample_size: int, geod, chunks: list[dict]
-) -> tuple[list[str], int]:
+) -> tuple[list[str], int, str]:
     """Row groups whose box misses a densified point of its own sampled geometries.
 
     The oracle is independent of gpio's writer: DuckDB reads the geometry,
     ``pyproj.Geod`` walks each edge's geodesic, and every sampled point must be
     inside its own row group's box (a pole a polygon encloses is not sampled;
-    only its boundary is). Returns ``(problems, geometries checked)``.
+    only its boundary is). The work is bounded by one file-wide budget
+    (:func:`_oracle_plan`), not per row group. Returns ``(problems, geometries
+    checked, which row groups were checked)``.
     """
     import pyarrow.parquet as pq
 
@@ -2676,32 +2732,25 @@ def _geodesic_escapes(
         for c in chunks
         if not _validate_geography_bounds(c["xmin"], c["xmax"], c["ymin"], c["ymax"])
     }
-    budget = max(500, _ORACLE_EDGE_BUDGET // max(1, len(boxes))) if sample_size > 0 else None
+    groups, rows, edge_quota = _oracle_plan(sorted(boxes), sample_size)
     problems: list[str] = []
     checked = 0
     with pq.ParquetFile(parquet_file) as reader:
-        for group, box in sorted(boxes.items()):
-            misses, example, edges_seen = 0, None, 0
-            for wkb in _sampled_rows(reader, group, geom_col, sample_size):
-                for geometry in _geojson_of(con, wkb):
-                    points: list = []
-                    edges: list = []
-                    _geojson_parts(geometry, points, edges)
-                    if not points:
-                        continue
-                    checked += 1
-                    edges_seen += len(edges)
-                    count, worst = _escapes_box(*_densified(geod, points, edges), box)
-                    misses += count
-                    example = example or worst
-                if budget is not None and edges_seen >= budget:
-                    break
+        for group in groups:
+            points, edges, count = _group_samples(reader, group, geom_col, con, rows, edge_quota)
+            if not count:
+                continue
+            checked += count
+            misses, example = _escapes_box(*_densified(geod, points, edges), boxes[group])
             if misses:
                 problems.append(
                     f"row group {group}: {misses} sampled point(s) outside "
-                    f"{[round(v, 6) for v in box]}, e.g. {example}"
+                    f"{[round(v, 6) for v in boxes[group]]}, e.g. {example}"
                 )
-    return problems, checked
+    scope = "every row group"
+    if len(groups) < len(boxes):
+        scope = f"{len(groups)} of {len(boxes)} row groups (evenly spaced)"
+    return problems, checked, scope
 
 
 def _check_geography_stats_cover_edges(
@@ -2725,7 +2774,7 @@ def _check_geography_stats_cover_edges(
         geod = _geography_geod(
             schema_info, geom_col, _geography_edge_algorithm(schema_info, geom_col)
         )
-        problems, checked = _geodesic_escapes(
+        problems, checked, scope = _geodesic_escapes(
             parquet_file, geom_col, con, sample_size, geod, chunks
         )
     except Exception as e:
@@ -2746,8 +2795,8 @@ def _check_geography_stats_cover_edges(
         return ValidationCheck(
             name=name,
             status=CheckStatus.PASSED,
-            message="GEOGRAPHY bounding boxes contain the sampled geodesic edges of every "
-            f"row group ({checked} geometries checked)",
+            message="GEOGRAPHY bounding boxes contain the sampled geodesic edges of "
+            f"{scope} ({checked} geometries checked)",
             category="parquet_geo_types",
         )
     return ValidationCheck(
@@ -2755,8 +2804,8 @@ def _check_geography_stats_cover_edges(
         status=CheckStatus.WARNING,
         message="GEOGRAPHY bounding box appears vertex-only: it does not contain "
         "the geodesic edges of its row group",
-        details="; ".join(problems) + ". A reader pruning row groups by this box can "
-        "skip matching rows. Rewrite with gpio to get a geodesic box.",
+        details="; ".join(problems) + f" ({scope} checked). A reader pruning row groups "
+        "by this box can skip matching rows. Rewrite with gpio to get a geodesic box.",
         category="parquet_geo_types",
     )
 
