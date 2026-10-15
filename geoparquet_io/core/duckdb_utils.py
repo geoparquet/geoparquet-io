@@ -6,6 +6,7 @@ with appropriate extensions loaded for GeoParquet operations.
 """
 
 import datetime
+import itertools
 import os
 import re
 import shutil
@@ -987,6 +988,93 @@ def _apply_connection_limits(
         con.execute(f"SET threads = {cap}")
 
 
+_PROFILE_ENV_VAR = "GPIO_DUCKDB_PROFILE"
+
+# Distinguishes connections opened within one process (the PID in the filename
+# separates concurrent processes); itertools.count is safe under threads.
+_profile_connection_ids = itertools.count(1)
+
+
+def _profile_directory() -> str | None:
+    """The usable ``GPIO_DUCKDB_PROFILE`` directory, or ``None`` (profiling off).
+
+    Creates the directory when missing and probes that it is writable. An
+    unusable path warns and returns ``None`` rather than raising: DuckDB fails
+    *every* query on a connection whose ``profiling_output`` cannot be written
+    (an InternalException at fetch time), so profiling must be refused up
+    front — it may never break the actual work.
+    """
+    raw = os.environ.get(_PROFILE_ENV_VAR, "").strip()
+    if not raw:
+        return None
+    try:
+        os.makedirs(raw, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=raw, prefix=".gpio-profile-probe-"):
+            pass
+    except OSError as exc:
+        warn(
+            f"GPIO_DUCKDB_PROFILE={raw!r} is not a writable directory ({exc}); "
+            "continuing without DuckDB profiling"
+        )
+        return None
+    return raw
+
+
+class ProfiledConnection:
+    """A DuckDB connection whose every query writes its own JSON profile.
+
+    DuckDB's ``profiling_output`` setting names *one* file, and each profiled
+    statement overwrites it, so a fixed path would keep only the last query's
+    profile. This wrapper re-points ``profiling_output`` at a fresh file in
+    the ``GPIO_DUCKDB_PROFILE`` directory before every statement; a ``SET``
+    writes no profile itself, so the rotation never clobbers anything, and a
+    statement DuckDB does not profile simply leaves its file uncreated.
+
+    Everything else delegates to the wrapped connection. Note that a
+    ``.cursor()`` is a new DuckDB session, so its queries are not profiled.
+    """
+
+    def __init__(self, con: "duckdb.DuckDBPyConnection", directory: str):
+        self._con = con
+        self._directory = directory
+        stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+        self._prefix = f"gpio-profile-{stamp}-p{os.getpid()}-c{next(_profile_connection_ids)}"
+        self._statement_ids = itertools.count(1)
+        # Order matters: DuckDB rejects a .json profiling_output until
+        # enable_profiling is 'json'. The window between the two SETs is safe
+        # because SET statements are themselves never profiled.
+        con.execute("SET enable_profiling = 'json';")
+        self._rotate_profile_output()
+
+    def _rotate_profile_output(self) -> None:
+        target = os.path.join(
+            self._directory, f"{self._prefix}-q{next(self._statement_ids):04d}.json"
+        )
+        self._con.execute(f"SET profiling_output = '{_escape_sql_string(target)}';")
+
+    def execute(self, *args, **kwargs):
+        self._rotate_profile_output()
+        return self._con.execute(*args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        self._rotate_profile_output()
+        return self._con.executemany(*args, **kwargs)
+
+    def sql(self, *args, **kwargs):
+        self._rotate_profile_output()
+        return self._con.sql(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._con, name)
+
+    def __enter__(self):
+        self._con.__enter__()
+        return self
+
+    def __exit__(self, *exc_info):
+        return self._con.__exit__(*exc_info)
+
+
 def get_duckdb_connection(
     load_spatial=True,
     load_httpfs=None,
@@ -1037,8 +1125,16 @@ def get_duckdb_connection(
                     ``threads`` to what it affords (``_apply_connection_limits``);
                     a value given here is used as given.
 
+    Environment:
+        GPIO_DUCKDB_PROFILE: a directory path. When set, the connection runs
+            with ``enable_profiling = 'json'`` and writes one profile file per
+            query into that directory (created if missing), named
+            ``gpio-profile-<timestamp>-p<pid>-c<n>-q<n>.json``. An unusable
+            path warns and profiling is skipped; the work itself never fails.
+
     Returns:
         duckdb.DuckDBPyConnection: Configured connection with extensions loaded
+        (wrapped in :class:`ProfiledConnection` when GPIO_DUCKDB_PROFILE is set)
     """
     config = {}
     if threads is not None:
@@ -1104,6 +1200,13 @@ def get_duckdb_connection(
     if eff_region:
         safe_region = _escape_sql_string(eff_region)
         con.execute(f"SET s3_region='{safe_region}';")
+
+    # GPIO_DUCKDB_PROFILE=<dir>: wrap the connection (after all setup, so the
+    # setup statements above are not profiled) to write one JSON profile per
+    # query into <dir>. An unusable directory warned and returned None.
+    profile_dir = _profile_directory()
+    if profile_dir is not None:
+        return ProfiledConnection(con, profile_dir)
 
     return con
 

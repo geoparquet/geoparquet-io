@@ -314,6 +314,44 @@ Top 20 functions by cumulative time:
     10000    2.345    0.000    3.456    0.000 pyarrow.lib:456(cast)
 ```
 
+### DuckDB Query Profiles
+
+cProfile shows where the Python time goes, but most of a conversion's work
+happens inside DuckDB queries. Set the `GPIO_DUCKDB_PROFILE` environment
+variable to a directory to turn on DuckDB's own profiler for every connection
+gpio opens — any command, no flags or code changes:
+
+=== "CLI"
+    <!-- doctest: skip="needs input.parquet, which the harness does not seed" -->
+    ```bash
+    GPIO_DUCKDB_PROFILE=/tmp/prof gpio convert geoparquet input.parquet output.parquet
+    ls /tmp/prof
+    # gpio-profile-20261015T110948-p99396-c1-q0017.json
+    # gpio-profile-20261015T110948-p99396-c1-q0021.json
+    ```
+
+=== "Python"
+    <!-- doctest: skip="needs input.parquet, which the harness does not seed" -->
+    ```python
+    import os
+
+    os.environ["GPIO_DUCKDB_PROFILE"] = "/tmp/prof"
+
+    import geoparquet_io as gpio
+
+    gpio.convert("input.parquet").write("output.parquet")
+    ```
+
+Each profiled query writes its own JSON file, named
+`gpio-profile-<timestamp>-p<pid>-c<connection>-q<statement>.json`, so
+successive queries and parallel connections never overwrite each other. The
+`query_name` key in each file holds the SQL text and the operator tree below
+it carries per-operator timings, so you can see which query inside a command
+is slow. The directory is created if missing; an unusable path logs a warning
+and the command runs on without profiling. Statement numbers can have gaps —
+DuckDB does not profile statements like `SET`, so those files are never
+created.
+
 ### Profiling Overhead
 
 - Profiling adds ~5-15% overhead to benchmark timing
