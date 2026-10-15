@@ -325,8 +325,8 @@ gpio opens — any command, no flags or code changes:
     ```bash
     GPIO_DUCKDB_PROFILE=profiles gpio convert geoparquet input.parquet output.parquet
     ls profiles
-    # gpio-profile-20261015T110948-p99396-c1-q0017.json
-    # gpio-profile-20261015T110948-p99396-c1-q0021.json
+    # gpio-profile-20261015T110948123456-p99396-3fa2c1-c1-q0017.json
+    # gpio-profile-20261015T110948123456-p99396-3fa2c1-c1-q0021.json
     ```
 
 === "Python"
@@ -340,15 +340,50 @@ gpio opens — any command, no flags or code changes:
     gpio.convert("input.parquet").write("output.parquet")
     ```
 
-Each profiled query writes its own JSON file, named
-`gpio-profile-<timestamp>-p<pid>-c<connection>-q<statement>.json`, so
-successive queries and parallel connections never overwrite each other. The
+The value is a **directory path**, not an on/off switch. It is resolved to an
+absolute path when each connection opens, so a later change of working
+directory does not move it, and it is created if missing. A value that looks
+like a flag (`1`, `true`, `yes`, `on`, `0`, `false`, `no`, `off`) is only used
+when a directory of that name already exists; otherwise gpio warns and runs
+without profiling rather than creating a `./true/` directory. Any other
+unusable path also logs a warning and the command runs on without profiling.
+
+Each profile is its own JSON file, named
+`gpio-profile-<time>-p<pid>-<token>-c<connection>-q<statement>.json`. The
+microsecond time, process ID and random token keep names distinct across
+processes (containers often all run as PID 1), and gpio never picks a name
+that is already on disk, so one query's file never overwrites another's. The
 `query_name` key in each file holds the SQL text and the operator tree below
 it carries per-operator timings, so you can see which query inside a command
-is slow. The directory is created if missing; an unusable path logs a warning
-and the command runs on without profiling. Statement numbers can have gaps —
-DuckDB does not profile statements like `SET`, so those files are never
-created.
+is slow.
+
+**Which statements get a profile.** DuckDB decides, and it writes a profile
+only when a statement's result is *fully consumed*: a `COPY ... TO` write, a
+`fetchall()`, an Arrow table read to the end. Those are the reads and writes
+that move a command's data, so they are the ones you usually want. Several
+kinds of statement leave no file, which is why the statement numbers have
+gaps:
+
+- `SET`, `CREATE` and other statements DuckDB does not profile;
+- small lookups gpio reads with a single `fetchone()` (a row count, a bounding
+  box, a metadata probe), whose result is never exhausted;
+- a result abandoned when the next statement starts.
+
+A `gpio sort hilbert` run, for example, writes a single profile — for the
+`COPY` that writes its output — out of more than a dozen statements. To
+profile a statement that leaves no file, take its SQL (`--show-sql` prints it
+on the commands that offer it) and run it yourself under `EXPLAIN ANALYZE` in
+the DuckDB CLI. Setting DuckDB's `enable_profiling` by hand does not help: it
+follows the same fully-consumed rule.
+
+Two further caveats. For code that uses a gpio connection directly, a DuckDB
+relation from `con.sql()` runs when it is fetched, not when it is built, so if
+another query ran in between, the relation's profile replaces that query's
+file. And a profile directory deleted or
+made unwritable between statements is re-created, or profiling is switched
+off for that connection with a single warning — but one removed (or a disk
+that fills) *while* a statement runs fails that statement, because DuckDB
+writes the profile as the statement finishes.
 
 ### Profiling Overhead
 
