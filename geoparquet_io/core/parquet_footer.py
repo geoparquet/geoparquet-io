@@ -676,6 +676,14 @@ def _bbox_splice(buf: bytes, chunk: list[_Field], converted: set[str]) -> _Splic
 
     The geospatial type codes stay. A stats struct with nothing else in it goes
     as a whole, rather than staying behind as an empty claim.
+
+    The trade-off: DuckDB's box is of the vertices on a plane, which a geodesic
+    edge can leave (an edge bulges poleward), so keeping it would let a reader
+    prune a row group that holds a match. Arrow C++ writes no box for a
+    GEOGRAPHY for the same reason. The cost is that readers can no longer use
+    these statistics to skip row groups of a GEOGRAPHY output. The ``geo``
+    block's ``bbox`` and any bbox covering column are left as they were, and
+    are still vertex boxes on a plane, as they were before #999.
     """
     meta_field = _by_id(chunk).get(_CHUNK_META_DATA)
     if meta_field is None or meta_field.type_id != _STRUCT:
