@@ -373,11 +373,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 extra_kv_metadata=extra_kv_metadata,
                 # This entry point gets no `geometry_info`, so the table's own
                 # schema is what names a block-less table's secondaries (#1175).
-                geometry_info=table_geometry_info(
-                    table,
-                    geometry_column,
-                    carried_geo,
-                ),
+                geometry_info=table_geometry_info(table, geometry_column, carried_geo),
             )
         finally:
             con.close()

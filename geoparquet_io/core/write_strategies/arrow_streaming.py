@@ -31,6 +31,7 @@ from geoparquet_io.core.crs_utils import apply_output_crs
 from geoparquet_io.core.duckdb_utils import _wrap_query_with_wkb_conversion, quote_identifier
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
+    NATIVE_GEOMETRY_VERSIONS,
     bbox_column_to_declare,
     compute_geo_stats_via_sql,
     create_geo_metadata,
@@ -306,7 +307,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         _, final_sql = _check_geometry_type(con, query, geometry_column, verbose)
 
         # Determine version flags
-        use_native_geometry = geoparquet_version in ("2.0", "parquet-geo-only")
+        use_native_geometry = geoparquet_version in NATIVE_GEOMETRY_VERSIONS
         should_add_geo_metadata = geoparquet_version != "parquet-geo-only"
         geoarrow_native = geoparquet_version == "1.1-geoarrow"
 
@@ -742,7 +743,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 native_columns={geometry_column},
             )
 
-        use_native_geometry = effective_version in ("2.0", "parquet-geo-only")
+        use_native_geometry = effective_version in NATIVE_GEOMETRY_VERSIONS
         should_add_geo_metadata = effective_version != "parquet-geo-only"
         geoarrow_native = effective_version == "1.1-geoarrow"
 

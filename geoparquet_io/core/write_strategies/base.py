@@ -29,6 +29,7 @@ from geoparquet_io.core.crs_utils import (
 from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
+    NATIVE_GEOMETRY_VERSIONS,
     decode_carried_geo,
     sanitize_geo_metadata,
     strip_unsupported_covering,
@@ -99,7 +100,7 @@ def native_geometry_crs(
     schema, the disk-rewrite writer's, and the in-memory path in
     ``common._apply_geoparquet_metadata``.
     """
-    if geoparquet_version not in ("2.0", "parquet-geo-only"):
+    if geoparquet_version not in NATIVE_GEOMETRY_VERSIONS:
         return {}
 
     column_metadata = (geo_meta or {}).get("columns") or {}
@@ -151,7 +152,7 @@ def wrap_query_with_secondary_crs(
     columns the query already types GEOMETRY are touched, as ``ST_SetCRS``
     takes nothing else.
     """
-    if geoparquet_version not in ("2.0", "parquet-geo-only"):
+    if geoparquet_version not in NATIVE_GEOMETRY_VERSIONS:
         return query
     wanted = secondary_type_crs(geo_columns, primary)
     if not wanted:

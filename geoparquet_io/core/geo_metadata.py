@@ -56,6 +56,11 @@ GEOPARQUET_VERSIONS = {
 
 DEFAULT_GEOPARQUET_VERSION = "1.1"
 
+#: The output versions whose geometry columns are native Parquet GEOMETRY types.
+#: In both, the type is where each column's CRS lives (parquet-geo-only has no
+#: ``geo`` block at all), so every geometry column is typed, not just the primary.
+NATIVE_GEOMETRY_VERSIONS = frozenset({"2.0", "parquet-geo-only"})
+
 #: The non-planar edge algorithms a Parquet GEOGRAPHY can name, in the order of
 #: parquet.thrift's ``EdgeInterpolationAlgorithm`` (the position is the enum
 #: value). GeoParquet's ``edges`` spells them the same, lowercase.
