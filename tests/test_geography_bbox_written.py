@@ -369,3 +369,32 @@ def test_running_out_of_memory_is_not_swallowed(tmp_path, monkeypatch):
     monkeypatch.setattr(write_funnels, "geography_statistics", oom)
     with pytest.raises(MemoryError):
         write_funnels._geodesic_bounds("unused.parquet", {"geometry": "spherical"}, None)
+
+
+def test_an_unbounded_column_loses_its_planar_block_bbox():
+    from geoparquet_io.core.write_funnels import _geo_block_updates
+
+    geo_meta = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "bbox": [-30.0, 60.0, 30.0, 60.0]}},
+    }
+    updates = _geo_block_updates(geo_meta, {}, {}, unbounded={"geometry", "absent"})
+    assert updates
+    assert "bbox" not in geo_meta["columns"]["geometry"]
+
+
+def test_block_bbox_targets_skip_projected_and_planar_columns():
+    from geoparquet_io.core.write_funnels import _block_bbox_targets
+
+    geo_meta = {
+        "columns": {
+            "a": {"encoding": "WKB"},
+            "b": {"encoding": "WKB", "crs": {"type": "ProjectedCRS", "name": "UTM zone 33N"}},
+            "c": {"encoding": "WKB"},
+            "d": "not a dict",
+        }
+    }
+    edges = {"a": "spherical", "b": "spherical", "c": "planar", "d": "spherical", "e": "karney"}
+    assert _block_bbox_targets(geo_meta, edges, {}) == {"a": "spherical"}
+    assert _block_bbox_targets(geo_meta, edges, {"a": "spherical"}) == {}

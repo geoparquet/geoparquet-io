@@ -534,3 +534,30 @@ class TestLonNormalization:
 
     def test_a_positive_odd_multiple_of_180_stays_east(self):
         assert bbox_of("POINT (540 0)") == (180.0, 0.0, 180.0, 0.0)
+
+
+class TestEllipsoidForCrs:
+    def test_no_crs_is_wgs84(self):
+        from geoparquet_io.core.geodesic_bbox import WGS84_ELLIPSOID, ellipsoid_for_crs
+
+        assert ellipsoid_for_crs(None) == WGS84_ELLIPSOID
+        assert ellipsoid_for_crs("not a crs at all") == WGS84_ELLIPSOID
+
+    def test_a_crs_names_its_own_ellipsoid(self):
+        from geoparquet_io.core.geodesic_bbox import ellipsoid_for_crs
+
+        semi_major, flattening = ellipsoid_for_crs("EPSG:4269")  # NAD83 / GRS80
+        assert semi_major == 6378137.0
+        assert flattening == pytest.approx(1 / 298.257222101)
+        assert ellipsoid_for_crs("+proj=longlat +R=6371000 +no_defs") == (6371000.0, 0.0)
+
+
+def test_a_binary_view_array_is_read(tmp_path):
+    import pyarrow as pa
+
+    from geoparquet_io.core.geodesic_bbox import _Bound, _bound_array, _context
+
+    acc = _Bound()
+    array = pa.array([_wkb("POINT (1 2)")], pa.binary()).cast(pa.binary_view())
+    _bound_array(array, acc, _context("spherical", None, None))
+    assert acc.result() == (1.0, 2.0, 1.0, 2.0)

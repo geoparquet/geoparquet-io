@@ -317,3 +317,33 @@ def test_gpio_outputs_pass_both_checks(tmp_path):
     assert by_name["geography_stats_cover_edges_geometry"].status == CheckStatus.PASSED
     failed = [f"{c.name}: {c.message}" for c in result.checks if c.status == CheckStatus.FAILED]
     assert failed == []
+
+
+def test_a_karney_output_passes_against_the_ellipsoidal_oracle(tmp_path):
+    from geoparquet_io.core.write_funnels import _apply_nonplanar_edges
+
+    path = tmp_path / "karney.parquet"
+    con = get_duckdb_connection(load_spatial=True)
+    try:
+        con.execute(
+            "COPY (SELECT ST_GeomFromText('LINESTRING (-60 30, 60 35)') AS geometry) "
+            f"TO {sql_path(str(path))} (FORMAT PARQUET, GEOPARQUET_VERSION 'V2')"
+        )
+    finally:
+        con.close()
+    _apply_nonplanar_edges({"geometry": "karney"}, str(path))
+
+    assert _check(path, "geography_stats_cover_edges_geometry").status == CheckStatus.PASSED
+
+
+def test_the_oracle_uses_the_column_crs_ellipsoid():
+    from geoparquet_io.core.validate import _geography_geod
+
+    schema = [
+        {
+            "name": "geometry",
+            "logical_type": 'GeographyType(crs={"type": "GeographicCRS"}, algorithm=karney)',
+        }
+    ]
+    assert _geography_geod(schema, "geometry", "karney").f > 0
+    assert _geography_geod(schema, "geometry", "spherical").f == 0
