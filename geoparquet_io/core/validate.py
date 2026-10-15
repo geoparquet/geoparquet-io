@@ -17,6 +17,7 @@ from typing import Any
 from rich.console import Console
 from rich.markup import escape
 
+from geoparquet_io.core.check_verdict import validation_verdict
 from geoparquet_io.core.common import split_zm_suffix, zm_suffix_sql
 from geoparquet_io.core.crs_utils import (
     CRS_ABSENT,
@@ -4372,6 +4373,10 @@ def format_json_output(result: ValidationResult) -> str:
         "detected_version": result.detected_version,
         "target_version": result.target_version,
         "is_valid": result.is_valid,
+        # The exit-code verdict (#1241): "pass", "warning" or "failure".
+        "verdict": validation_verdict(
+            failed=result.failed_count, warnings=result.warning_count
+        ).label,
         "summary": {
             "passed": result.passed_count,
             "warnings": result.warning_count,

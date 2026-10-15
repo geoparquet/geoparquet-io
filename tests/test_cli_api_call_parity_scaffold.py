@@ -827,15 +827,15 @@ CASES: list[ParityCase] = [
     ParityCase(
         id="check bbox",
         cli=_cli(
-            "check_metadata_and_bbox",
-            core_check_structure.check_metadata_and_bbox,
+            "check_bbox",
+            core_check_structure.check_bbox,
             lambda c: ["check", "bbox", c.input_file],
             module=core_check_structure,
         ),
         table=_table(
             core_check_structure,
-            "check_metadata_and_bbox",
-            core_check_structure.check_metadata_and_bbox,
+            "check_bbox",
+            core_check_structure.check_bbox,
             lambda c: c.gpio_table.check_bbox(),
         ),
         normalize={"return_results": ("return_results", "return_results")},

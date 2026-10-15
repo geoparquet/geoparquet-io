@@ -3119,12 +3119,18 @@ class Table:
 
     def check(self) -> CheckResult:
         """
-        Run all best-practice checks on the table.
+        Run the structure checks on the table.
 
         Checks include:
         - Row group optimization
-        - Bbox structure and metadata
+        - Bbox structure and metadata, and the covering
         - Compression settings
+        - Bloom filters
+
+        Not spatial order or spec validation, which ``gpio check all`` also
+        runs: ``check().verdict()`` can be ``"warning"`` for a file ``check
+        all`` fails. For ``check all``'s answer, take the worst of this,
+        :meth:`check_spatial` and :meth:`validate`.
 
         Measured on the source file when this Table was read from one; see
         ``CheckResult.prospective``.
@@ -3134,12 +3140,10 @@ class Table:
 
         Example:
             >>> table = gpio.read('data.parquet')
-            >>> result = table.check()
-            >>> if result.passed():
-            ...     print("All checks passed!")
-            >>> else:
-            ...     for failure in result.failures():
-            ...         print(failure)
+            >>> results = [table.check(), table.check_spatial(), table.validate()]
+            >>> if any(r.verdict() == "failure" for r in results):
+            ...     for r in results:
+            ...         print(*r.failures(), sep="\n")
         """
         from geoparquet_io.core.check_parquet_structure import check_all
 
@@ -3240,6 +3244,9 @@ class Table:
         Verifies:
         - Bbox column exists and has correct structure
         - GeoParquet covering metadata is present
+        - A declared covering has a ``bbox`` member readers can use
+
+        The same checks, and verdict, as ``gpio check bbox``.
 
         Measured on the source file when this Table was read from one; see
         ``CheckResult.prospective``.
@@ -3253,11 +3260,9 @@ class Table:
             >>> if not result.passed():
             ...     table = table.add_bbox()
         """
-        from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+        from geoparquet_io.core.check_parquet_structure import check_bbox
 
-        return self._run_check(
-            "bbox", check_metadata_and_bbox, verbose=False, return_results=True, quiet=True
-        )
+        return self._run_check("bbox", check_bbox, verbose=False, return_results=True, quiet=True)
 
     def check_row_groups(self, profile: CheckProfile | None = None) -> CheckResult:
         """

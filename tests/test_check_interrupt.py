@@ -307,8 +307,10 @@ def test_structure_stage_failure_fails_the_file_and_fixes_nothing(
     result = CliRunner().invoke(
         cli, ["check", "all", fixable_file, "--fix", "--fix-output", str(out)]
     )
-    assert result.exit_code != 0
-    assert "structure exploded" in str(result.exception)
+    # Reported as a check that could not run, not a traceback (#1252).
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    assert "Check could not run, structure exploded" in result.output
     assert "Spec Validation:" not in result.output
     assert not out.exists()
 

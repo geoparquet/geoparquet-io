@@ -235,9 +235,9 @@ def test_check_stac_valid_no_error(valid_stac_item):
         pass
 
 
-def test_check_stac_invalid_raises(temp_output_dir):
-    """Test check_stac raises ValidationError for invalid STAC."""
-    from geoparquet_io.core.exceptions import ValidationError
+def test_check_stac_invalid_is_a_failure(temp_output_dir):
+    """Test check_stac returns a failure verdict for invalid STAC."""
+    from geoparquet_io.core.check_verdict import Verdict
 
     # Create invalid STAC (missing required field)
     invalid_item = {
@@ -251,10 +251,8 @@ def test_check_stac_invalid_raises(temp_output_dir):
     with open(output_path, "w") as f:
         json.dump(invalid_item, f)
 
-    with pytest.raises(ValidationError) as exc_info:
-        check_stac(output_path, verbose=False)
-
-    assert "validation failed" in str(exc_info.value).lower()
+    # One signal: the verdict, which the CLI turns into exit 1 (#1252).
+    assert check_stac(output_path, verbose=False) is Verdict.FAILURE
 
 
 def _assert_not_stac_json_message(message: str, path: str) -> None:

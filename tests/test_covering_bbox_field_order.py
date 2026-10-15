@@ -472,7 +472,7 @@ class TestCheckBbox:
 
         output = run_cli("check", "bbox", overture_v1_1, "--fix")
 
-        assert "No fix available" in output, output
+        assert "No automatic fix available" in output, output
         assert "optimal" not in output, output
         assert pq.read_schema(str(overture_v1_1)).equals(before), "the file was rewritten"
 

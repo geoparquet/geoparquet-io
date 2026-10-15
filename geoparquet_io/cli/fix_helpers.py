@@ -267,57 +267,6 @@ def handle_fix_common(
     return output_path, created_backup
 
 
-def display_spatial_result(spatial_result, show_output):
-    """Display spatial order check result.
-
-    Args:
-        spatial_result: Can be either a dict with 'ratio' and 'passed' keys,
-                       or just a float ratio for backward compatibility
-        show_output: Whether to display output
-    """
-    if not show_output:
-        return
-
-    # Handle both dict result and plain ratio for backward compatibility
-    if isinstance(spatial_result, dict):
-        ratio = spatial_result.get("ratio")
-        passed = spatial_result.get("passed", ratio < 0.5 if ratio is not None else True)
-    else:
-        ratio = spatial_result
-        passed = ratio < 0.5 if ratio is not None else True
-
-    if ratio is None:
-        return
-
-    if passed:
-        click.echo(click.style("✓ Data appears to be spatially ordered", fg="green"))
-    else:
-        click.echo(
-            click.style(
-                "⚠️  Data may not be optimally spatially ordered\n"
-                "Consider running 'gpio sort hilbert' to improve spatial locality",
-                fg="yellow",
-            )
-        )
-
-
-def aggregate_check_results(structure_results, spatial_result):
-    """Aggregate check results for runner tracking.
-
-    Returns:
-        tuple: (combined_passed, combined_issues, all_check_results)
-    """
-    all_check_results = {**structure_results, "spatial": spatial_result}
-    combined_passed = all(
-        r.get("passed", True) for r in all_check_results.values() if isinstance(r, dict)
-    )
-    combined_issues = []
-    for r in all_check_results.values():
-        if isinstance(r, dict):
-            combined_issues.extend(r.get("issues", []))
-    return combined_passed, combined_issues, all_check_results
-
-
 def apply_check_all_fixes(
     file_path,
     all_results,

@@ -161,7 +161,7 @@ class TestCheckFixRowGroups:
         """Test that small files with single row group are considered optimal.
 
         Small files (<64 MB) with a single row group don't need row group optimization,
-        so the fix should not create a new file.
+        so the fix rewrites nothing: --fix-output gets a verbatim copy (#1252).
         """
         # Create file with single row group
         poor_file = os.path.join(temp_output_dir, "poor_groups.parquet")
@@ -177,9 +177,10 @@ class TestCheckFixRowGroups:
         )
 
         assert result.exit_code == 0
-        # Small file with single row group is optimal - no fix created
+        # Small file with single row group is optimal - nothing rewritten, only copied
         assert "No fix needed" in result.output or "optimal" in result.output.lower()
-        assert not os.path.exists(fixed_file)
+        with open(fixed_file, "rb") as fixed, open(poor_file, "rb") as source:
+            assert fixed.read() == source.read()
         assert_places_output_is_sound(poor_file, version="1.0", covering=False)
 
 

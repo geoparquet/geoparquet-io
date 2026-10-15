@@ -9,7 +9,6 @@ from pathlib import Path
 import pystac.validation
 
 from geoparquet_io.core.check_verdict import Verdict
-from geoparquet_io.core.exceptions import ValidationError
 from geoparquet_io.core.logging_config import debug, error, progress, success, warn
 
 
@@ -219,7 +218,7 @@ def _should_raise_error(results: dict) -> bool:
     return False
 
 
-def check_stac(stac_path: str, verbose: bool = False):
+def check_stac(stac_path: str, verbose: bool = False) -> Verdict:
     """
     CLI-friendly STAC validation function.
 
@@ -230,20 +229,14 @@ def check_stac(stac_path: str, verbose: bool = False):
         verbose: Print verbose output
 
     Returns:
-        The run's :class:`~geoparquet_io.core.check_verdict.Verdict` when it
-        did not fail: ``WARNING`` when anything was reported, else ``PASS``.
-
-    Raises:
-        ValidationError: when the file fails validation.
+        The run's :class:`~geoparquet_io.core.check_verdict.Verdict`
+        (:func:`stac_verdict`); the caller turns it into an exit code.
     """
     if verbose:
         debug(f"Validating STAC file: {stac_path}\n")
 
     results = validate_stac_file(stac_path, verbose)
     _print_validation_results(results, verbose)
-
-    if stac_verdict(results) is Verdict.FAILURE:
-        raise ValidationError("STAC validation failed")
     return stac_verdict(results)
 
 

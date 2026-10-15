@@ -7,6 +7,15 @@ from statistics import mean
 import duckdb
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.check_verdict import (
+    ISSUE_SEVERITY_KEY,
+    SEVERITY_KEY,
+    Verdict,
+    could_not_run,
+    is_could_not_run,
+    result_verdict,
+    worst,
+)
 from geoparquet_io.core.duckdb_metadata import (
     get_per_row_group_bbox_stats,
     get_per_row_group_native_geo_stats,
@@ -31,6 +40,9 @@ _SKIP_RATE_THRESHOLD = 0.5
 _DEFAULT_NUM_SAMPLES = 20
 _DEFAULT_QUERY_FRACTION = 0.1
 _DEFAULT_SEED = 42
+
+#: The check's name in a "could not run" line.
+SPATIAL_ORDER_CHECK = "Spatial order check"
 
 
 def _bboxes_overlap(bbox1: dict, bbox2: dict) -> bool:
@@ -106,20 +118,18 @@ def _calculate_random_avg(con, raw_url, read, row_limit, random_sample_size, ver
 def _errored_results(reason: str) -> dict:
     """The verdict for a sampling check that could not read the geometry.
 
-    Not a pass, and not a fixable ordering problem either. ``error`` carries
-    the reason so a caller can tell "could not check" from "badly ordered".
+    A failure (:func:`~geoparquet_io.core.check_verdict.could_not_run`), not a
+    fixable ordering problem. ``error`` carries the reason so a caller can tell
+    "could not check" from "badly ordered".
     """
-    return {
-        "passed": False,
-        "ratio": None,
-        "consecutive_avg": None,
-        "random_avg": None,
-        "method": "sampling",
-        "issues": [f"❌ Cannot check spatial order, {reason}"],
-        "recommendations": [],
-        "fix_available": False,
-        "error": reason,
-    }
+    return could_not_run(
+        SPATIAL_ORDER_CHECK,
+        reason,
+        ratio=None,
+        consecutive_avg=None,
+        random_avg=None,
+        method="sampling",
+    )
 
 
 def _build_results_dict(ratio, consecutive_avg, random_avg):
@@ -682,3 +692,65 @@ def check_spatial_pushdown_readiness(
         "issues": issues,
         "recommendations": recommendations,
     }
+
+
+_NATIVE_GEO_FILE_TYPES = ("geoparquet_v2", "parquet_geo_only")
+
+
+def pushdown_verdict(pushdown: dict, *, native_geo: bool) -> Verdict:
+    """How much :func:`check_spatial_pushdown_readiness`'s finding matters.
+
+    Advice where it is advice: a multi-row-group file whose row groups a
+    regional query cannot skip, or a 1.x file with no bbox column to skip on,
+    is a ``WARNING``. Not where it is not: a file with native geo types carries
+    per-row-group statistics without a bbox column (``check bbox`` tells such
+    a file to *drop* one), and a single row group has nothing to skip -- its
+    size is ``check row-group``'s question. Both are ``PASS``, shown as
+    information.
+    """
+    if not pushdown.get("has_geo_bbox"):
+        return Verdict.PASS if native_geo else Verdict.WARNING
+    if pushdown.get("num_row_groups", 0) <= 1 or pushdown.get("passed"):
+        return Verdict.PASS
+    return Verdict.WARNING
+
+
+def with_pushdown(parquet_file: str, spatial: dict, verbose: bool = False) -> dict:
+    """``spatial`` (a :func:`check_spatial_order` result) with pushdown readiness folded in.
+
+    ``gpio check spatial`` judges both: the pushdown result is kept under
+    ``"pushdown"`` with its own severity, and when it is a warning its issues
+    join the result's, labelled as warnings, so ``--strict`` sees what stdout
+    marks ``⚠``. A spatial check that could not run is returned unchanged; a
+    pushdown measurement that cannot be taken is left out (``None``) rather
+    than guessed.
+    """
+    from geoparquet_io.core.file_type import detect_geoparquet_file_type
+
+    if is_could_not_run(spatial):
+        return spatial
+    try:
+        pushdown = check_spatial_pushdown_readiness(parquet_file, verbose=verbose)
+        file_type = detect_geoparquet_file_type(parquet_file)["file_type"]
+    except Exception as e:
+        if is_interrupt(e):
+            raise
+        debug(f"Pushdown readiness could not be measured: {e}")
+        return {**spatial, "pushdown": None}
+    verdict = pushdown_verdict(pushdown, native_geo=file_type in _NATIVE_GEO_FILE_TYPES)
+    pushdown = {**pushdown, SEVERITY_KEY: verdict.label}
+    merged = {**spatial, "pushdown": pushdown}
+    if verdict is Verdict.PASS:
+        return merged
+    issues = list(pushdown.get("issues", []))
+    merged["issues"] = [*spatial.get("issues", []), *issues]
+    merged[ISSUE_SEVERITY_KEY] = {
+        **(spatial.get(ISSUE_SEVERITY_KEY) or {}),
+        **dict.fromkeys(issues, verdict.label),
+    }
+    merged["recommendations"] = [
+        *spatial.get("recommendations", []),
+        *pushdown.get("recommendations", []),
+    ]
+    merged[SEVERITY_KEY] = worst([result_verdict(spatial), verdict]).label
+    return merged

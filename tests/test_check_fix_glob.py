@@ -11,6 +11,7 @@ rewrite that drops the CRS cannot hide behind CRS84 being the default (#993).
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -397,8 +398,9 @@ class TestOneFailureAmongMany:
         )
 
         assert result.exit_code == 1, result.output
-        assert "Check failed: b.parquet" in result.output
-        assert "Failed to fix 1 file:" in result.output
+        # A check that could not run, counted as the failure it is -- not a failed fix.
+        assert re.search(r"b\.parquet - [\w ]*could not run", result.output), result.output
+        assert "Failed to fix" not in result.output
         assert "Fixed 2 files:" in result.output
         assert digest(files[1]) == before[files[1]]
         for path in (files[0], files[2]):

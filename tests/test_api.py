@@ -2308,10 +2308,18 @@ class TestCheckResult:
         """Test CheckResult.failures() method."""
         from geoparquet_io.api.check import CheckResult
 
-        result = CheckResult({"passed": False, "issues": ["Issue 1", "Issue 2"]}, check_type="test")
+        result = CheckResult(
+            {"passed": False, "severity": "failure", "issues": ["Issue 1", "Issue 2"]},
+            check_type="test",
+        )
         failures = result.failures()
         assert len(failures) == 2
         assert "Issue 1" in failures
+
+        # A miss that states no severity is advice: a warning, not a failure (#1252).
+        advice = CheckResult({"passed": False, "issues": ["Issue 1"]}, check_type="test")
+        assert advice.failures() == []
+        assert advice.warnings() == ["Issue 1"]
 
     def test_check_result_to_dict(self):
         """Test CheckResult.to_dict() method."""
@@ -2356,9 +2364,9 @@ class TestCheckResult:
         result = CheckResult(
             {"passed": True, "issues": ["Info message 1", "Info message 2"]}, check_type="test"
         )
-        # For single checks, issues are NOT included in warnings (only in failures when failed)
-        # This behavior is only for "all" checks
-        assert result.warnings() == []
+        # Issues a passing check mentions are advice, for single checks as for "all"
+        assert result.warnings() == ["Info message 1", "Info message 2"]
+        assert result.failures() == []
 
     def test_check_result_warnings_all_check_aggregates(self):
         """Test CheckResult.warnings() aggregates warnings from all check categories."""
@@ -2450,7 +2458,8 @@ class TestCheckResult:
 
         # Failing check with issues and warnings
         result = CheckResult(
-            {"passed": False, "issues": ["Issue 1"], "warnings": ["Warn 1"]}, check_type="bbox"
+            {"passed": False, "severity": "failure", "issues": ["Issue 1"], "warnings": ["Warn 1"]},
+            check_type="bbox",
         )
         repr_str = repr(result)
         assert "bbox" in repr_str

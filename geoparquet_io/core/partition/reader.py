@@ -279,11 +279,30 @@ def get_files_to_check(
             - files_to_check: List of file paths to check
             - notice_message: Informational message about what's being checked (or empty)
     """
+    files, notice, _ = select_files_to_check(
+        path, check_all=check_all, check_sample=check_sample, verbose=verbose, fix=fix
+    )
+    return files, notice
+
+
+def select_files_to_check(
+    path: str,
+    check_all: bool = False,
+    check_sample: int | None = None,
+    verbose: bool = False,
+    fix: bool = False,
+) -> tuple[list[str], str, int]:
+    """:func:`get_files_to_check`, plus how many files the input matched.
+
+    The count is what lets a sampled run say its verdict covers only part of
+    the input. A remote glob, which cannot be enumerated, counts as the one
+    pattern it is checked as.
+    """
     partition_info = get_partition_info(path, verbose)
 
     if not partition_info["is_partition"]:
         # Single file - just return it
-        return [partition_info["first_file"]], ""
+        return [partition_info["first_file"]], "", 1
 
     all_files = partition_info["all_files"]
     file_count = partition_info["file_count"]
@@ -291,25 +310,25 @@ def get_files_to_check(
     # For remote globs, we can only check the glob pattern as a whole
     if partition_info["partition_type"] == "remote_glob":
         notice = "Checking remote glob pattern (file enumeration not supported)"
-        return [path], notice
+        return [path], notice, 1
 
     if check_all:
         notice = f"Checking all {file_count} files in partition"
-        return all_files, notice
+        return all_files, notice, file_count
 
     if check_sample is not None:
         sample_count = min(check_sample, file_count)
         files = all_files[:sample_count]
         notice = f"Checking sample of {sample_count} files (out of {file_count} total)"
-        return files, notice
+        return files, notice, file_count
 
     # Default: check first file only
     first_file = partition_info["first_file"]
     if fix and first_file:
         notice = f"Fixing all {file_count} files in the input (--fix never samples)"
-        return all_files, notice
+        return all_files, notice, file_count
     if first_file:
         notice = f"Checking first file (of {file_count} total). Use --all-files or --sample-files N for more."
-        return [first_file], notice
+        return [first_file], notice, file_count
 
-    return [], "No parquet files found in partition"
+    return [], "No parquet files found in partition", 0
