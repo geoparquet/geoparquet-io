@@ -474,8 +474,9 @@ def negotiate_wfs_version(service_url: str, preferred_version: str = "auto"):
 
 
 # The EPSG code a CRS string names: the ASCII digit run after "EPSG", behind a
-# ":", "/" or "#", that ends the string or one part of a compound URN. That one
-# rule reads every form WFS servers send:
+# ":", "/" or "#", that ends the string or one part of a compound URN. "EPSG"
+# must start the string or a URI part, so "not-a-crs-EPSG:4326" names no code.
+# That one rule reads every form WFS servers send:
 #   EPSG:4326                                      short form
 #   urn:ogc:def:crs:EPSG::4326                     OGC URN
 #   urn:x-ogc:def:crs:EPSG:6.11:31287              versioned URN (6.11 is the database version)
@@ -485,7 +486,7 @@ def negotiate_wfs_version(service_url: str, preferred_version: str = "auto"):
 #   http://www.opengis.net/gml/srs/epsg.xml#31287  GML srs URL
 #   urn:ogc:def:crs,crs:EPSG::4326,crs:EPSG::5773  compound URN, the first
 #                                                  (horizontal) part is read
-_EPSG_CODE: Final = re.compile(r"EPSG[^,]*?[:/#]([0-9]{1,9})\s*(?:,|$)", re.IGNORECASE)
+_EPSG_CODE: Final = re.compile(r"(?:^|[:/,])EPSG[^,]*?[:/#]([0-9]{1,9})\s*(?:,|$)", re.IGNORECASE)
 # A server CRS string longer than this is not a CRS name. It is never parsed.
 _MAX_CRS_STRING: Final = 1024
 

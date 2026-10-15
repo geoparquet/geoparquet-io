@@ -1451,6 +1451,9 @@ class TestCRSNegotiation:
             ("urn:ogc:def:crs,crs:EPSG:6.3:25832,crs:EPSG:6.3:5783", "EPSG:25832"),
             # Not an EPSG code: left alone
             ("ESRI:102100", "ESRI:102100"),
+            # EPSG inside another word is not a URI part, so not a code
+            ("not-a-crs-EPSG:4326", "not-a-crs-EPSG:4326"),
+            ("urn:ogc:def:crs:XEPSG::4326", "urn:ogc:def:crs:XEPSG::4326"),
             # Non-ASCII digits are not a code
             ("EPSG:\u0664\u0663\u0662\u0666", "EPSG:\u0664\u0663\u0662\u0666"),
         ],
