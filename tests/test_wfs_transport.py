@@ -13,6 +13,7 @@ from __future__ import annotations
 import pyarrow.parquet as pq
 import pytest
 
+from geoparquet_io.core.http_retry import MAX_RETRY_AFTER
 from geoparquet_io.core.wfs import (
     LayerNotFoundError,
     WFSAuthenticationError,
@@ -198,20 +199,42 @@ def test_a_429_honours_an_integer_retry_after(monkeypatch):
     assert http.sleeps == [11.0]
 
 
-def test_an_http_date_retry_after_degrades_to_linear_backoff(monkeypatch):
-    """`Retry-After` is honoured only when `.isdigit()` (wfs.py:263-268).
+def test_a_huge_retry_after_is_capped(monkeypatch, caplog):
+    """A day-long Retry-After must not park ``gpio extract wfs`` for a day (#1052)."""
+    http = FakeTransport.install(monkeypatch)
+    http.respond(SERVICE, error_reply(503, retry_after=86400), xml_reply(b"<ok/>"))
 
-    RFC 9110 also allows an HTTP-date. gpio ignores that form and uses its own
-    backoff instead — graceful degradation, not a defect, but invisible unless
-    asserted. Pinning it here makes a future date-parsing change show up as a
-    failing test rather than a silent behaviour change.
-    """
+    with caplog.at_level("WARNING"):
+        assert _make_request(SERVICE) == b"<ok/>"
+
+    assert http.sleeps == [MAX_RETRY_AFTER]
+    assert "86400" in caplog.text
+
+
+def test_a_decimal_retry_after_is_honoured(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(SERVICE, error_reply(429, retry_after="2.5"), xml_reply(b"<ok/>"))
+
+    assert _make_request(SERVICE) == b"<ok/>"
+    assert http.sleeps == [2.5]
+
+
+def test_an_http_date_retry_after_is_honoured_and_capped(monkeypatch):
+    """RFC 9110 allows an HTTP-date. A date far ahead waits the cap, not the date."""
     http = FakeTransport.install(monkeypatch)
     http.respond(
         SERVICE,
-        error_reply(503, retry_after="Wed, 21 Oct 2026 07:28:00 GMT"),
+        error_reply(503, retry_after="Fri, 01 Jan 2100 00:00:00 GMT"),
         xml_reply(b"<ok/>"),
     )
+
+    assert _make_request(SERVICE) == b"<ok/>"
+    assert http.sleeps == [MAX_RETRY_AFTER]
+
+
+def test_an_unreadable_retry_after_degrades_to_linear_backoff(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(SERVICE, error_reply(503, retry_after="later"), xml_reply(b"<ok/>"))
 
     assert _make_request(SERVICE) == b"<ok/>"
     assert http.sleeps == [1.0]

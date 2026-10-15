@@ -7,14 +7,18 @@ This module provides reusable HTTP request functions with:
 - Gzip compression support
 - Proper error classification (retryable vs. fatal)
 
-Used by: arcgis.py (wfs.py shares only the pooled client)
+Used by: arcgis.py (wfs.py and carto.py share the pooled client and the
+``Retry-After`` parser)
 """
 
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from geoparquet_io.core.exceptions import BatchTooLargeError, RemoteAccessError
@@ -38,6 +42,55 @@ DEFAULT_RETRY_DELAY = 1.0
 # (unavailable, unsupported) and carry Retry-After, nor 429. Only a request that
 # asked for a page (``batch_size`` set) is refused in this sense (#1134).
 PAGE_REFUSAL_STATUSES = frozenset({500, 502, 504})
+
+# The longest a server's Retry-After is honoured for, so a hostile or confused
+# header (or a WAF in front of the server) cannot park the client for a day.
+MAX_RETRY_AFTER = 60.0  # seconds
+
+
+def _retry_after_seconds(value: str, now: datetime | None) -> float | None:
+    """Either Retry-After form (RFC 9110) as seconds from now, uncapped."""
+    try:
+        seconds = float(value)
+    except ValueError:
+        return _retry_after_date(value, now)
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return seconds
+
+
+def _retry_after_date(value: str, now: datetime | None) -> float | None:
+    """The HTTP-date form as seconds from ``now``, 0 for a date already past."""
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:  # the "-0000" zone; HTTP dates are always UTC
+        when = when.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    return max(0.0, (when - current).total_seconds())
+
+
+def parse_retry_after(value: str | None, *, now: datetime | None = None) -> float | None:
+    """A server's ``Retry-After`` in seconds, capped at ``MAX_RETRY_AFTER``.
+
+    Accepts delay-seconds (integer or decimal) and the HTTP-date form. Returns
+    None when the header is absent or unreadable, so the caller keeps its own
+    backoff. A value over the cap is clamped, with a warning.
+    """
+    text = (value or "").strip()
+    if not text:
+        return None
+    seconds = _retry_after_seconds(text, now)
+    if seconds is None:
+        return None
+    if seconds > MAX_RETRY_AFTER:
+        warn(
+            f"Server asked to wait {seconds:g}s (Retry-After: {text}), "
+            f"capping the wait at {MAX_RETRY_AFTER:g}s"
+        )
+        return MAX_RETRY_AFTER
+    return seconds
 
 
 def _json_error_envelope(response: httpx.Response) -> dict[str, Any] | None:
@@ -239,12 +292,8 @@ def make_request_with_retry(
                 last_exception = e
                 warn(f"HTTP {status} (attempt {attempt + 1}/{max_retries})")
                 if attempt < max_retries - 1:
-                    retry_after = e.response.headers.get("Retry-After")
-                    delay = (
-                        float(retry_after)
-                        if retry_after and retry_after.isdigit()
-                        else retry_delay * (attempt + 1)
-                    )
+                    retry_after = parse_retry_after(e.response.headers.get("Retry-After"))
+                    delay = retry_after if retry_after is not None else retry_delay * (attempt + 1)
                     time.sleep(delay)
                     continue
                 if page_refused and batch_size is not None:  # the latter narrows the type

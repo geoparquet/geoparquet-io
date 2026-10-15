@@ -32,6 +32,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, sanitize_error_message
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
+from geoparquet_io.core.http_retry import parse_retry_after
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
@@ -56,10 +57,6 @@ STATUS_PROBE_TIMEOUT = 30.0  # seconds
 # answers a bad query with a short JSON error; the cap keeps a body that is
 # not short from becoming a download.
 PROBE_DETAIL_BYTES = 2048
-
-# The longest a server's Retry-After is honoured for, so a hostile or confused
-# header cannot park the client for an hour.
-MAX_RETRY_AFTER = 60.0  # seconds
 
 # Statuses that mean "try again": the server is asking for it (429), asked the
 # client to resend (408), or is itself failing (5xx).
@@ -718,11 +715,8 @@ def _read_probe_detail(response) -> str | None:
 
 
 def _retry_after(response) -> float | None:
-    """A ``Retry-After`` given in seconds, capped; None when absent or a date."""
-    raw = response.headers.get("Retry-After")
-    if raw and raw.strip().isdigit():
-        return min(float(raw), MAX_RETRY_AFTER)
-    return None
+    """The server's ``Retry-After``, capped; None when absent or unreadable."""
+    return parse_retry_after(response.headers.get("Retry-After"))
 
 
 def _classify_fetch_failure(

@@ -57,6 +57,9 @@ from geoparquet_io.core.http_retry import (
     get_shared_http_client as _get_shared_http_client_base,
 )
 from geoparquet_io.core.http_retry import (
+    parse_retry_after,
+)
+from geoparquet_io.core.http_retry import (
     reset_http_client as _reset_http_client_base,
 )
 from geoparquet_io.core.logging_config import (
@@ -265,12 +268,8 @@ def _make_request(
                 last_exception = e
                 warn(f"HTTP {status} (attempt {attempt + 1}/{max_retries})")
                 if attempt < max_retries - 1:
-                    retry_after = e.response.headers.get("Retry-After")
-                    delay = (
-                        float(retry_after)
-                        if retry_after and retry_after.isdigit()
-                        else retry_delay * (attempt + 1)
-                    )
+                    retry_after = parse_retry_after(e.response.headers.get("Retry-After"))
+                    delay = retry_after if retry_after is not None else retry_delay * (attempt + 1)
                     time.sleep(delay)
                     continue
             elif status == 401:

@@ -17,6 +17,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.arcgis import (
+    DEFAULT_PAGE_SIZE,
     ArcGISAuth,
     ArcGISLayerInfo,
     _get_reduced_batch_size,
@@ -35,6 +36,7 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
     RemoteAccessError,
 )
+from geoparquet_io.core.http_retry import MAX_RETRY_AFTER
 from tests.http_transport import (
     FakeTransport,
     error_reply,
@@ -333,6 +335,68 @@ def test_a_layer_without_max_record_count_defaults_to_1000(monkeypatch):
     assert get_layer_info(SERVICE).max_record_count == 1000
 
 
+@pytest.mark.parametrize("advertised", [0, -1, None, "lots", 12.5, True, [1000]])
+def test_an_unusable_max_record_count_falls_back_to_the_default_page(
+    monkeypatch, caplog, advertised
+):
+    """A 0, -1, null or non-integer maxRecordCount must not reach the paging math (#1053)."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=1, layer=_layer_json(max_record_count=advertised))
+
+    with caplog.at_level("WARNING"):
+        info = get_layer_info(SERVICE)
+
+    assert info.max_record_count == DEFAULT_PAGE_SIZE
+    assert "maxRecordCount" in caplog.text
+    assert repr(advertised) in caplog.text
+
+
+@pytest.mark.parametrize(("advertised", "expected"), [("500", 500), (750.0, 750)])
+def test_an_integral_max_record_count_is_coerced(monkeypatch, advertised, expected):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=1, layer=_layer_json(max_record_count=advertised))
+
+    assert get_layer_info(SERVICE).max_record_count == expected
+
+
+def test_a_zero_max_record_count_still_pages_the_whole_layer(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=DEFAULT_PAGE_SIZE + 3, layer=_layer_json(max_record_count=0))
+
+    info = get_layer_info(SERVICE)
+    pages = list(fetch_all_features(SERVICE, info))
+
+    assert sum(len(page["features"]) for page in pages) == DEFAULT_PAGE_SIZE + 3
+    page_sizes = [r.params["resultRecordCount"] for r in http.matching(_is_query)]
+    assert page_sizes == [str(DEFAULT_PAGE_SIZE), "3"]
+
+
+@pytest.mark.parametrize("reported", [-1, None, "many", 2.5, True])
+def test_an_unusable_feature_count_is_refused_by_name(monkeypatch, reported):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_count, json_reply({"count": reported}))
+
+    with pytest.raises(RemoteAccessError) as excinfo:
+        get_feature_count(SERVICE)
+
+    assert "count" in excinfo.value.reason
+    assert repr(reported) in excinfo.value.reason
+
+
+def test_a_string_feature_count_is_coerced(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_count, json_reply({"count": "42"}))
+
+    assert get_feature_count(SERVICE) == 42
+
+
+def test_a_count_reply_without_a_count_is_zero(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_count, json_reply({}))
+
+    assert get_feature_count(SERVICE) == 0
+
+
 def test_feature_count_without_a_bbox_sends_no_spatial_params(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(_is_count, json_reply({"count": 5}))
@@ -425,24 +489,45 @@ def test_a_429_honours_an_integer_retry_after(monkeypatch):
     assert http.sleeps == [7.0]
 
 
-def test_an_http_date_retry_after_degrades_to_linear_backoff(monkeypatch):
-    """`Retry-After` is honoured only when `.isdigit()` (http_retry.py).
+def test_a_429_honours_a_decimal_retry_after(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_count, error_reply(429, retry_after="1.5"), json_reply({"count": 1}))
 
-    RFC 9110 allows an HTTP-date, and a server that sends one gets gpio's own
-    exponential backoff instead of the delay it asked for. That is graceful
-    degradation rather than a defect, but it is invisible unless asserted:
-    this test pins the current behaviour so a future change to parse the date
-    form shows up as a failing test rather than a silent one.
-    """
+    assert get_feature_count(SERVICE) == 1
+    assert http.sleeps == [1.5]
+
+
+def test_a_429_with_a_huge_retry_after_is_capped(monkeypatch, caplog):
+    """A day-long Retry-After must not park ``gpio extract`` for a day (#1052)."""
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_count, error_reply(429, retry_after=86400), json_reply({"count": 1}))
+
+    with caplog.at_level("WARNING"):
+        assert get_feature_count(SERVICE) == 1
+
+    assert http.sleeps == [MAX_RETRY_AFTER]
+    assert "86400" in caplog.text
+
+
+def test_an_http_date_retry_after_is_honoured_and_capped(monkeypatch):
+    """RFC 9110 allows an HTTP-date. A date far ahead waits the cap, not the date."""
     http = FakeTransport.install(monkeypatch)
     http.respond(
         _is_count,
-        error_reply(429, retry_after="Wed, 21 Oct 2026 07:28:00 GMT"),
+        error_reply(429, retry_after="Fri, 01 Jan 2100 00:00:00 GMT"),
         json_reply({"count": 1}),
     )
 
     assert get_feature_count(SERVICE) == 1
-    assert http.sleeps == [1.0]  # retry_delay * (attempt + 1), not the date
+    assert http.sleeps == [MAX_RETRY_AFTER]
+
+
+def test_an_unreadable_retry_after_degrades_to_linear_backoff(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_count, error_reply(429, retry_after="soon"), json_reply({"count": 1}))
+
+    assert get_feature_count(SERVICE) == 1
+    assert http.sleeps == [1.0]  # retry_delay * (attempt + 1)
 
 
 def test_retries_are_exhausted_and_then_reported(monkeypatch):
@@ -1057,7 +1142,7 @@ def test_an_error_key_that_is_not_an_envelope_is_still_reported(monkeypatch):
     ("status", "retry_after", "expected_sleeps"),
     [
         (503, None, [1.0, 2.0]),
-        (503, 120, [120.0, 120.0]),
+        (503, 30, [30.0, 30.0]),
         (501, None, [1.0, 2.0]),
     ],
 )
