@@ -23,12 +23,15 @@ from geoparquet_io.core.parquet_footer import (
     _LIST,
     _STRUCT,
     FooterPatchUnsupported,
+    _apply_splices,
     _bbox_splice,
     _field_header,
+    _patch_footer,
     _patch_geography,
     _struct_fields,
     _with_geography_fields,
     patch_footer,
+    read_footer_kv,
 )
 
 
@@ -290,3 +293,71 @@ class TestTheStatsSplice:
     def test_a_chunk_without_inline_metadata_is_skipped(self):
         chunk = _field_header(2, 0, 6) + b"\x00" + b"\x00"  # file_offset only
         assert _bbox_splice(chunk, _struct_fields(chunk)[0], {"g"}) is None
+
+
+class TestManySplices:
+    """Splices are joined in one pass; each lands at its own original offset."""
+
+    def test_splices_of_every_size_apply_at_their_original_offsets(self):
+        footer = bytes(range(100))
+        # Out of order, growing, shrinking, emptying and one at each end.
+        splices = [(50, 60, b"X" * 25), (0, 3, b""), (97, 100, b"END"), (10, 11, b"ab")]
+
+        expected = footer
+        for start, end, value in sorted(splices, reverse=True):
+            expected = expected[:start] + value + expected[end:]
+
+        assert _apply_splices(footer, splices) == expected
+        assert _apply_splices(footer, []) == footer
+
+    def test_a_footer_with_many_row_groups_loses_every_bbox(self, tmp_path):
+        import geoarrow.pyarrow as ga
+        import shapely
+
+        rows = 300
+        source = tmp_path / "many.parquet"
+        wkb = shapely.to_wkb(shapely.points(range(rows), range(rows)))
+        table = pa.table(
+            {
+                "id": pa.array(range(rows)),
+                "geometry": pa.ExtensionArray.from_storage(
+                    ga.wkb(), pa.array(list(wkb), pa.binary())
+                ),
+            }
+        )
+        pq.write_table(table, str(source), row_group_size=1)
+        assert all(stats[0] is not None for stats in _geo_stats(source, "geometry"))
+        out = tmp_path / "out.parquet"
+
+        patch_footer(str(source), geography={"geometry": "spherical"}, output_file=str(out))
+
+        assert _geo_stats(out, "geometry") == [(None, [1])] * rows
+        assert pq.read_table(str(out)).column("id").to_pylist() == list(range(rows))
+        assert _data_section(out) == _data_section(source)
+
+
+#: A struct whose first field is a struct whose first field is a struct...,
+#: nested deeper than Python's recursion limit allows a reader to follow.
+DEEPLY_NESTED = b"\x1c" * 5000 + b"\x00" * 5001
+
+
+def _file_with_footer(path: Path, footer: bytes) -> Path:
+    path.write_bytes(b"PAR1" + footer + struct.pack("<I", len(footer)) + b"PAR1")
+    return path
+
+
+class TestDeeplyNestedFooters:
+    """A footer nested past the recursion limit is unreadable, not a crash."""
+
+    def test_read_footer_kv_names_it_unsupported(self, tmp_path):
+        crafted = _file_with_footer(tmp_path / "deep.parquet", DEEPLY_NESTED)
+        with pytest.raises(FooterPatchUnsupported, match="thrift structure"):
+            read_footer_kv(str(crafted))
+
+    def test_the_geography_patch_names_it_unsupported(self):
+        with pytest.raises(FooterPatchUnsupported, match="thrift structure"):
+            _patch_geography(DEEPLY_NESTED, {"geometry": "spherical"})
+
+    def test_the_kv_patch_names_it_unsupported(self):
+        with pytest.raises(FooterPatchUnsupported, match="thrift structure"):
+            _patch_footer(DEEPLY_NESTED, {"k": "v"})

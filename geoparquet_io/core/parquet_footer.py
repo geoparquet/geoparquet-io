@@ -528,7 +528,7 @@ def _patch_footer(footer: bytes, updates: _Updates) -> bytes:
         return _rewrite_kv_field(footer, updates)
     except FooterPatchUnsupported:
         raise
-    except (IndexError, ValueError, OverflowError) as exc:
+    except (IndexError, ValueError, OverflowError, RecursionError) as exc:
         raise FooterPatchUnsupported(
             f"the footer's thrift structure could not be read: {exc}"
         ) from exc
@@ -722,10 +722,24 @@ def _geography_splices(footer: bytes, algorithms: Mapping[str, int]) -> tuple[by
     row_groups = fields.get(_ROW_GROUPS_FIELD_ID)
     if converted and row_groups is not None:
         splices += _row_group_splices(footer, row_groups, set(converted))
-    # Back to front, so each splice leaves the offsets of the ones before it alone.
-    for start, end, value in sorted(splices, reverse=True):
-        footer = footer[:start] + value + footer[end:]
-    return footer, converted
+    return _apply_splices(footer, splices), converted
+
+
+def _apply_splices(footer: bytes, splices: list[_Splice]) -> bytes:
+    """`footer` with every splice applied, in one pass over it.
+
+    Splices never overlap and each names an offset into the original footer,
+    so the result is the untouched stretches and the replacements joined in
+    offset order. Applying them one at a time instead copied the whole footer
+    once per row group: 20,000 row groups took 19 seconds rather than 4.
+    """
+    parts = []
+    position = 0
+    for start, end, value in sorted(splices):
+        parts += (footer[position:start], value)
+        position = end
+    parts.append(footer[position:])
+    return b"".join(parts)
 
 
 def _algorithm_codes(geography: Mapping[str, str]) -> dict[str, int]:
@@ -745,7 +759,7 @@ def _patch_geography(footer: bytes, geography: Mapping[str, str]) -> tuple[bytes
         return _geography_splices(footer, codes)
     except FooterPatchUnsupported:
         raise
-    except (IndexError, ValueError, OverflowError) as exc:
+    except (IndexError, ValueError, OverflowError, RecursionError) as exc:
         raise FooterPatchUnsupported(
             f"the footer's thrift structure could not be read: {exc}"
         ) from exc
@@ -911,7 +925,7 @@ def read_footer_kv(parquet_file: str) -> list[_Entry]:
                 return _decode_kv_list(footer, field.value_start)
     except FooterPatchUnsupported:
         raise
-    except (IndexError, ValueError, OverflowError) as exc:
+    except (IndexError, ValueError, OverflowError, RecursionError) as exc:
         raise FooterPatchUnsupported(
             f"the footer's thrift structure could not be read: {exc}"
         ) from exc
