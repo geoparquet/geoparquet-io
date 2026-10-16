@@ -158,6 +158,47 @@ class TestRewriteWriterKwargs:
         assert _rewrite_writer_kwargs("UNCOMPRESSED", None)["compression"] == "none"
 
 
+class TestHelpTextNamesTheRightDefault:
+    """``--help`` has to name the number the writers actually use.
+
+    Both are imported rather than typed into the help string, so this is a
+    check that the right *decorator* is on each command, not a spell-check.
+    """
+
+    def _help(self, args):
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        result = CliRunner().invoke(cli, args + ["--help"])
+        assert result.exit_code == 0, result.output
+        return " ".join(result.output.split())
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["process", "simplify"],
+            ["process", "polygonize"],
+            ["process", "contour"],
+            ["process", "overview"],
+            ["process", "aggregate", "h3"],
+            ["process", "aggregate", "a5"],
+            ["process", "aggregate", "admin"],
+        ],
+    )
+    def test_process_commands_name_the_process_level(self, args):
+        text = self._help(args)
+        assert f"ZSTD: 1-22 (default: {PROCESS_ZSTD_LEVEL})" in text
+        assert "ZSTD: 1-22 (default: 15)" not in text
+
+    @pytest.mark.parametrize(
+        "args", [["convert", "geoparquet"], ["sort", "hilbert"], ["add", "bbox"]]
+    )
+    def test_other_commands_still_name_fifteen(self, args):
+        text = self._help(args)
+        assert "ZSTD: 1-22 (default: 15)" in text
+
+
 class TestEveryProcessWriterResolves:
     """The ratchet: a new process command cannot forget the group's default.
 
