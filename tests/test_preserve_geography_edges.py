@@ -251,3 +251,41 @@ def test_file_edges_ignore_unrecognized_geo_only_declarations(tmp_path, edges):
 
     source = _make_edges_input(tmp_path, edges)
     assert collect_nonplanar_edges(str(source)) == {}
+
+
+@pytest.mark.parametrize("columns", [["geometry"], "broken"])
+def test_malformed_geo_block_keeps_known_native_edges(tmp_path, columns, caplog):
+    """An unreadable optional block cannot erase a readable native GEOGRAPHY type."""
+    import geoarrow.pyarrow as ga
+    import pyarrow as pa
+
+    from geoparquet_io.core.write_funnels import collect_nonplanar_edges
+
+    array = pa.ExtensionArray.from_storage(
+        ga.wkb().with_edge_type(ga.EdgeType.SPHERICAL), pa.array([], type=pa.binary())
+    )
+    geo = {"version": "2.0.0", "primary_column": "geometry", "columns": columns}
+    table = pa.table({"geometry": array}).replace_schema_metadata(
+        {b"geo": json.dumps(geo).encode()}
+    )
+    source = tmp_path / "malformed.parquet"
+    pq.write_table(table, source)
+    assert collect_nonplanar_edges(str(source)) == {"geometry": "spherical"}
+    assert "keeping known non-planar declarations" in caplog.text
+
+
+def test_geo_metadata_read_failure_keeps_known_native_edges(monkeypatch, caplog):
+    from geoparquet_io.core import write_funnels
+
+    monkeypatch.setattr(
+        write_funnels,
+        "get_schema_info",
+        lambda path: [{"name": "geometry", "logical_type": "GeographyType(crs=OGC:CRS84)"}],
+    )
+
+    def unreadable_block(path):
+        raise RuntimeError("unreadable block")
+
+    monkeypatch.setattr(write_funnels, "get_geo_metadata", unreadable_block)
+    assert write_funnels.collect_nonplanar_edges("fake.parquet") == {"geometry": "spherical"}
+    assert "keeping known non-planar declarations" in caplog.text

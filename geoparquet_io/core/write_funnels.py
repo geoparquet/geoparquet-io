@@ -147,13 +147,14 @@ def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
             elif edges in GEOGRAPHY_EDGE_ALGORITHMS:
                 edges_by_col[name] = edges
     except Exception as e:
-        # Fail loudly: an empty answer reads as "planar", which re-enables the
-        # planar geometry repair and drops the edges from the output (#1287).
-        warn(
-            f"Could not read the edges metadata of {input_file}; treating its geometry "
-            f"as planar: {e}"
+        # A broken optional geo block must not erase native declarations already
+        # read. An empty answer would re-enable destructive planar work (#1287).
+        fallback = (
+            "keeping known non-planar declarations"
+            if edges_by_col
+            else "treating its geometry as planar"
         )
-        return {}
+        warn(f"Could not read the edges metadata of {input_file}; {fallback}: {e}")
     return edges_by_col
 
 

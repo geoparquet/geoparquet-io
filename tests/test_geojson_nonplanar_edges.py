@@ -351,3 +351,24 @@ def test_pmtiles_stdin_refused_before_starting_subprocesses(tmp_path, monkeypatc
     probe.assert_not_called()
     run.assert_not_called()
     assert output.read_bytes() == b"keep existing archive"
+
+
+@pytest.mark.parametrize("columns", [["geometry"], "broken"])
+def test_malformed_block_cannot_bypass_native_pmtiles_preflight(tmp_path, monkeypatch, columns):
+    """Preserve readable native evidence even when the optional geo block is malformed."""
+    table = _table(carrier="native")
+    geo = {"version": "2.0.0", "primary_column": "geometry", "columns": columns}
+    table = table.replace_schema_metadata({b"geo": json.dumps(geo).encode()})
+    source = tmp_path / "malformed.parquet"
+    pq.write_table(table, source)
+    output = tmp_path / "out.pmtiles"
+    output.write_bytes(b"keep existing archive")
+    run = Mock()
+    monkeypatch.setattr("geoparquet_io.core.pmtiles._check_tippecanoe", lambda: True)
+    monkeypatch.setattr("geoparquet_io.core.pmtiles._run_pipeline", run)
+    with pytest.raises(GeoParquetError, match="spherical"):
+        create_pmtiles_from_geoparquet(
+            str(source), str(output), include_cols="geometry", force=True
+        )
+    run.assert_not_called()
+    assert output.read_bytes() == b"keep existing archive"
