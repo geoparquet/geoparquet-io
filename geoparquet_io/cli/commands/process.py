@@ -18,6 +18,7 @@ from geoparquet_io.cli.decorators import (
     grid_aggregate_options,
     handle_geoparquet_errors,
     metric_nodata_option,
+    repair_geometry_option,
     row_group_options,
     show_sql_option,
     verbose_option,
@@ -688,6 +689,7 @@ def _parse_float_csv(value: str | None, option_name: str) -> list[float] | None:
     is_flag=True,
     help="Ignore the raster's mask/nodata and polygonize every pixel.",
 )
+@repair_geometry_option
 @row_group_options
 @compression_options
 @geoparquet_version_option
@@ -703,6 +705,7 @@ def process_polygonize(
     value_column,
     nodata,
     no_mask,
+    repair_geometry,
     row_group_size,
     row_group_size_mb,
     compression,
@@ -734,6 +737,7 @@ def process_polygonize(
                 value_column=value_column,
                 nodata=nodata,
                 use_mask=not no_mask,
+                repair_geometry=repair_geometry,
                 compression=compression.upper(),
                 compression_level=compression_level,
                 row_group_size_mb=row_group_size_mb,

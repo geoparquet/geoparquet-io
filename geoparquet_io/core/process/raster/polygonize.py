@@ -8,6 +8,7 @@ from __future__ import annotations
 import pyarrow as pa
 
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.logging_config import info
 from geoparquet_io.core.optional_deps import require_contourrs
 from geoparquet_io.core.process.raster.output import finalize_raster_table
@@ -25,12 +26,23 @@ def polygonize_array(
     values: list[float] | None = None,
     value_column: str = "value",
     connectivity: int = 4,
+    repair_geometry: bool = True,
     verbose: bool = False,
 ) -> pa.Table:
     """Polygonize a 2D array's classes into a GeoParquet-ready table.
 
     ``values`` keeps only the listed class values (default: every class that
     is not nodata/masked). ``mask`` is True-where-valid.
+
+    Where a class region pinches to a single shared pixel corner, contourrs
+    closes it as one self-touching ring, which is not OGC-valid -- 1.7-2.9% of
+    the output on the WorldCover crops measured in #1301, where rasterio and
+    GDAL emit the enclosed part as a hole and are 100% valid. The invalid count
+    is always reported; ``repair_geometry`` (the default, as everywhere else in
+    gpio) rewrites those rows with ``ST_MakeValid``, which preserves area and
+    type. It is the expensive half: the self-touching polygons are the large
+    sprawling regions, so repairing them can cost several times the
+    polygonization. ``repair_geometry=False`` keeps the count and skips the fix.
     """
     if value_column == "geometry":
         raise InvalidParameterError(
@@ -48,6 +60,11 @@ def polygonize_array(
         table = table.filter(
             pc.is_in(table[value_column], value_set=pa.array(values, pa.float64()))
         )
+    # The one owner for invalid geometry (core/geometry_repair.py), the same
+    # one convert and extract use: one DuckDB scan over the geometry column
+    # that counts, warns, and patches only the broken rows, so every valid
+    # row's WKB and the table's metadata survive byte for byte.
+    table, _ = repair_arrow_table_geometry(table, repair=repair_geometry)
     if verbose:
         info(f"Polygonized {table.num_rows} features")
     return table
@@ -62,6 +79,7 @@ def polygonize_raster(
     nodata: float | None = None,
     use_mask: bool = True,
     connectivity: int = 4,
+    repair_geometry: bool = True,
     verbose: bool = False,
 ) -> pa.Table:
     """Polygonize one raster band into a GeoParquet-ready table."""
@@ -75,6 +93,7 @@ def polygonize_raster(
         values=values,
         value_column=value_column,
         connectivity=connectivity,
+        repair_geometry=repair_geometry,
         verbose=verbose,
     )
 
@@ -89,6 +108,7 @@ def polygonize_file(
     nodata: float | None = None,
     use_mask: bool = True,
     connectivity: int = 4,
+    repair_geometry: bool = True,
     compression: str = "ZSTD",
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
@@ -105,6 +125,7 @@ def polygonize_file(
         nodata=nodata,
         use_mask=use_mask,
         connectivity=connectivity,
+        repair_geometry=repair_geometry,
         verbose=verbose,
     )
     write_geoparquet_table(

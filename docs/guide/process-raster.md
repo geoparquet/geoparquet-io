@@ -74,10 +74,54 @@ uv tool install geoparquet-io --with contourrs --with rasterio
 | `--value-column` | `value` | Name of the class attribute column |
 | `--nodata` | file's tag | Nodata value to exclude. An explicit value *replaces* the tag: pixels equal to a wrong tag become data again |
 | `--no-mask` | off | Ignore the raster's mask/nodata entirely |
+| `--repair-geometry` / `--no-repair-geometry` | on | Repair self-touching rings with `ST_MakeValid` (see below) |
 
 The traced polygons come out with counterclockwise exterior rings, as the
 GeoParquet spec recommends, and round-trip exactly: rasterizing the output
 reproduces the input array pixel for pixel.
+
+### Self-touching rings
+
+Where a class region pinches to a single shared pixel corner, the tracer closes
+it as one ring that revisits that vertex. That is valid WKB but not OGC-valid,
+and `rasterio.features.shapes` and `gdal_polygonize` emit the enclosed part as
+an interior ring instead. On the WorldCover crops measured in #1301 it affected
+1.7-2.9% of the output: 29, 1,354 and 5,776 polygons at 1024², 4096² and 8192².
+
+gpio repairs them by default, like every other command that writes geometry.
+The repair preserves what the polygons are *for*: row count, class column,
+per-class counts, and area to within float noise (worst per-class relative
+difference 1.5e-14 over 217k polygons), and every polygon stays a `Polygon` —
+the self-touch becomes its own interior ring, which is exactly what GDAL emits.
+
+The repair is the expensive half, because the self-touching polygons are the
+large sprawling regions: on that 8192² output, 5,776 invalid polygons hold 7.5
+million vertices, and repairing them takes about 36 s against roughly 5 s for
+the polygonization itself. Finding them is cheap (under a second).
+
+So if you only need class areas or a visualization, `--no-repair-geometry` is
+much faster and still tells you the count:
+
+=== "CLI"
+
+    <!-- doctest: skip="requires the optional raster extra (contourrs, Python 3.12+)" -->
+    ```bash
+    # Fast: reports the invalid count, writes the rings as traced
+    gpio process polygonize landcover.tif landcover.parquet --no-repair-geometry
+    ```
+
+=== "Python"
+
+    <!-- doctest: skip="requires the optional raster extra (contourrs, Python 3.12+)" -->
+    ```python
+    from geoparquet_io.api import ops
+
+    table = ops.polygonize('landcover.tif', repair_geometry=False)
+    ```
+
+Use the repair (the default) for anything that overlays, joins or dissolves the
+polygons, where an invalid ring is a correctness problem rather than a label.
+Contour output needs none of this: it measured 100% valid on every test DEM.
 
 ## Contour
 

@@ -3093,6 +3093,7 @@ def polygonize(
     value_column: str = "value",
     nodata: float | None = None,
     use_mask: bool = True,
+    repair_geometry: bool = True,
     verbose: bool = False,
 ) -> pa.Table:
     """
@@ -3108,6 +3109,12 @@ def polygonize(
         value_column: Name of the class attribute column (default: 'value')
         nodata: Nodata value to exclude (default: the raster's own tag)
         use_mask: Honor the raster's mask/nodata (default: True)
+        repair_geometry: Repair the self-touching rings contourrs emits where a
+            region pinches to one pixel corner -- not OGC-valid, where
+            rasterio's and GDAL's equivalent output is (default: True, as
+            everywhere else in gpio). The count is reported either way; the
+            repair itself can cost several times the polygonization, because
+            the self-touching polygons are the large sprawling regions.
         verbose: Whether to print verbose output
 
     Returns:
@@ -3122,6 +3129,7 @@ def polygonize(
         value_column=value_column,
         nodata=nodata,
         use_mask=use_mask,
+        repair_geometry=repair_geometry,
         verbose=verbose,
     )
 

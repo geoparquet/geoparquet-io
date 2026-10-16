@@ -816,6 +816,7 @@ class Table:
         value_column: str = "value",
         nodata: float | None = None,
         use_mask: bool = True,
+        repair_geometry: bool = True,
     ) -> Table:
         """
         Create a Table by polygonizing a categorical raster band (contourrs).
@@ -830,6 +831,9 @@ class Table:
             value_column: Name of the class attribute column (default: 'value')
             nodata: Nodata value to exclude (default: the raster's own tag)
             use_mask: Honor the raster's mask/nodata (default: True)
+            repair_geometry: Repair the self-touching rings contourrs emits
+                where a region pinches to one pixel corner (default: True).
+                The count is reported either way; see ``ops.polygonize``.
 
         Returns:
             Table with one feature per contiguous class region
@@ -848,6 +852,7 @@ class Table:
                 value_column=value_column,
                 nodata=nodata,
                 use_mask=use_mask,
+                repair_geometry=repair_geometry,
             )
         )
 
