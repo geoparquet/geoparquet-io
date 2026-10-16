@@ -7,12 +7,12 @@
 #
 # Developer workflow:
 # 1. Accumulate changes via normal PR merges
-# 2. When ready to release, create a PR running: uv run cz bump --changelog
+# 2. When ready to release, create a PR running: uv run cz bump --yes
 # 3. Merge bump PR -> this workflow creates tag and publishes
 #
 # Recovery workflow (when release fails after bump merge):
-# 1. Delete orphan tag if exists: git push origin :refs/tags/vX.Y.Z
-# 2. Trigger manually: gh workflow run release.yml --ref main
+# 1. Do not delete the tag. The upload is the last step, so nothing is half-published.
+# 2. Fix the cause on main, then trigger manually: gh workflow run publish.yml --ref main
 name: Release
 on:
   push:
