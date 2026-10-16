@@ -22,6 +22,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.crs_utils import NULL_CRS_HINT, is_default_crs, is_unknown_type_crs
 from geoparquet_io.core.duckdb_metadata import (
     get_geo_metadata,
@@ -359,7 +360,15 @@ def derive_v2_geo_metadata(
 
 
 def _rewrite_writer_kwargs(compression: str, compression_level: int | None) -> dict:
-    """ParquetWriter kwargs mirroring the codec the original writer used."""
+    """ParquetWriter kwargs mirroring the codec the original writer used.
+
+    An unset level resolves through the one owner
+    (:func:`validate_compression_settings`) rather than being left out of the
+    kwargs. Leaving it out is not "the default": it is pyarrow's own ZSTD
+    default of 1, 14 levels below what the funnel writes from the same data, so
+    a file that reached this fallback came out 10-35% larger than the same file
+    written by any other path (#1299).
+    """
     # Keys cover every normalized name callers can pass (DuckDB COPY names
     # from _plain_copy_to's compression_map plus pyarrow-style variants).
     codec_map = {
@@ -373,8 +382,14 @@ def _rewrite_writer_kwargs(compression: str, compression_level: int | None) -> d
         "LZ4_RAW": "lz4",
     }
     write_kwargs: dict = {"compression": codec_map.get(compression.upper(), "zstd")}
-    if compression_level is not None and write_kwargs["compression"] in ("zstd", "gzip", "brotli"):
-        write_kwargs["compression_level"] = compression_level
+    if write_kwargs["compression"] in ("zstd", "gzip", "brotli"):
+        # LZ4_RAW/NONE never reach here, so the codec name is one the owner
+        # knows; it fills in the default for this codec when the level is unset.
+        _, level, _ = validate_compression_settings(
+            write_kwargs["compression"].upper(), compression_level
+        )
+        if level is not None:
+            write_kwargs["compression_level"] = level
     return write_kwargs
 
 

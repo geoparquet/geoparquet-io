@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pyarrow as pa
 
+from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import info
 from geoparquet_io.core.optional_deps import require_contourrs
@@ -97,6 +98,7 @@ def polygonize_file(
     verbose: bool = False,
 ) -> None:
     """Polygonize one raster band into a GeoParquet file."""
+    compression_level = resolve_process_compression_level(compression, compression_level)
     table = polygonize_raster(
         input_raster,
         band=band,

@@ -21,6 +21,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.bbox_structure import bbox_covering_column_for
+from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
@@ -737,6 +738,11 @@ def simplify_file(
     """
     if "://" not in input_parquet and not os.path.exists(input_parquet):
         raise FileNotFoundGeoParquetError(input_parquet)
+    # Resolved once, here, so every branch below -- streamed, in-memory, or
+    # routed through add geometry-metrics -- writes at the same level. The
+    # streaming writer would otherwise inherit pyarrow's default of 1 and the
+    # funnel the global 15, from one unset argument (#1299).
+    compression_level = resolve_process_compression_level(compression, compression_level)
     if refresh_metrics:
         _simplify_then_refresh_metrics(
             input_parquet,
