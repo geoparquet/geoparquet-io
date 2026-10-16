@@ -136,6 +136,24 @@ class TestGlobalDefaultIsUnchanged:
         _, global_level, _ = validate_compression_settings("ZSTD", None)
         assert PROCESS_ZSTD_LEVEL < global_level
 
+    def test_a_levelless_codec_warns_only_about_a_level_the_caller_chose(self, caplog):
+        """The warning compares against the global ZSTD default, from one place.
+
+        Callers that pass a level unconditionally hand SNAPPY the ZSTD default,
+        which is not something to warn about; anything else is.
+        """
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            _, level, desc = validate_compression_settings("SNAPPY", 9, verbose=True)
+        assert level is None and desc == "SNAPPY"
+        assert "does not support compression levels" in caplog.text
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            validate_compression_settings("SNAPPY", 15, verbose=True)
+        assert caplog.text == ""
+
 
 class TestRewriteWriterKwargs:
     """An unset level must not fall through to pyarrow's own default of 1."""
