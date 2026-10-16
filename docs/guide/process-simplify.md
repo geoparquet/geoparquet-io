@@ -68,11 +68,25 @@ else in gpio works as before.
 | `--drop-empty` | off | Drop rows whose geometry is empty after simplification |
 | `--simplify-crs` | — | Project to this CRS for the simplification (tolerance in its units), then back; `auto-utm` picks the UTM zone from the data |
 | `--refresh-metrics` | off | Recompute vecorel `metrics:area`/`metrics:perimeter` from the simplified geometry |
+| `--compression-level` | 9 | ZSTD level. The `process` group's default; everywhere else in gpio it is 15 |
 
 Native **GeoParquet 2.0 inputs** are supported: the geometry arrives as a
 geoarrow WKB extension column, is simplified on its raw WKB, and the write
 preserves the 2.0 declaration (native geometry types and stats) — via the
 in-memory path, since the streaming writer covers plain-WKB 1.x outputs.
+
+### Why level 9
+
+An unset `--compression-level` resolves to ZSTD 9 here, where the rest of gpio
+uses 15. Measured on simplify's own output, 9 writes 2.8x faster for 0.6% more
+bytes; at 15 the write made `--coverage` slower end to end than calling
+`shapely.coverage_simplify` yourself on two of three test datasets, even though
+the Rust kernel beat shapely by 2.6-4.4x on all three.
+
+Pass `--compression-level 15` for the global default, or a lower level for
+intermediate files you will delete — level 3 is 20% larger on geometry-heavy
+tables, so it is not free. See
+[Compression](../concepts/best-practices.md#compression).
 
 ## What happens to the metadata
 
