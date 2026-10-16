@@ -141,7 +141,8 @@ def _first_wkb_of(column) -> bytes | None:
             continue
         present = chunk.drop_null()
         if len(present):
-            return present[0].as_py()
+            value: bytes = present[0].as_py()
+            return value
     return None
 
 

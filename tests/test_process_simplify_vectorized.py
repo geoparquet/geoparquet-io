@@ -519,3 +519,86 @@ class TestAccumulateStats:
         _accumulate_stats(shapely, np, geoms, np.full((1, 4), np.nan), types, bbox)
         assert bbox == [1.0, 2.0, 3.0, 4.0]
         assert types == {"Point"}
+
+
+class TestArrowHelpers:
+    """``_first_wkb_of`` and ``_one_array``, which replaced the to_pylist scans.
+
+    Unit-tested because their branches are reached from only two callers --
+    the ``--simplify-crs`` sample scan and coverage mode -- so going through
+    the commands leaves the shapes that matter (no chunks, one chunk, several,
+    an empty leading chunk) unexercised.
+    """
+
+    def test_first_wkb_of_a_plain_array(self):
+        from geoparquet_io.core.process.simplify import _first_wkb_of
+
+        assert _first_wkb_of(pa.array([b"a", b"b"], type=pa.binary())) == b"a"
+
+    def test_first_wkb_of_skips_leading_nulls(self):
+        from geoparquet_io.core.process.simplify import _first_wkb_of
+
+        assert _first_wkb_of(pa.array([None, None, b"c"], type=pa.binary())) == b"c"
+
+    def test_first_wkb_of_an_all_null_array(self):
+        from geoparquet_io.core.process.simplify import _first_wkb_of
+
+        assert _first_wkb_of(pa.array([None, None], type=pa.binary())) is None
+
+    def test_first_wkb_of_an_empty_array(self):
+        from geoparquet_io.core.process.simplify import _first_wkb_of
+
+        assert _first_wkb_of(pa.array([], type=pa.binary())) is None
+
+    def test_first_wkb_of_scans_past_an_empty_and_an_all_null_chunk(self):
+        from geoparquet_io.core.process.simplify import _first_wkb_of
+
+        column = pa.chunked_array(
+            [
+                pa.array([], type=pa.binary()),
+                pa.array([None], type=pa.binary()),
+                pa.array([b"found"], type=pa.binary()),
+            ]
+        )
+        assert _first_wkb_of(column) == b"found"
+
+    def test_first_wkb_of_a_chunked_array_with_no_chunks(self):
+        from geoparquet_io.core.process.simplify import _first_wkb_of
+
+        assert _first_wkb_of(pa.chunked_array([], type=pa.binary())) is None
+
+    def test_one_array_passes_a_plain_array_through(self):
+        from geoparquet_io.core.process.simplify import _one_array
+
+        arr = pa.array([b"a"], type=pa.binary())
+        assert _one_array(arr) is arr
+
+    def test_one_array_unwraps_a_single_chunk(self):
+        from geoparquet_io.core.process.simplify import _one_array
+
+        column = pa.chunked_array([pa.array([b"a", b"b"], type=pa.binary())])
+        out = _one_array(column)
+        assert isinstance(out, pa.Array)
+        assert out.to_pylist() == [b"a", b"b"]
+
+    def test_one_array_concatenates_several_chunks_in_order(self):
+        from geoparquet_io.core.process.simplify import _one_array
+
+        column = pa.chunked_array(
+            [
+                pa.array([b"a"], type=pa.binary()),
+                pa.array([None], type=pa.binary()),
+                pa.array([b"c"], type=pa.binary()),
+            ]
+        )
+        out = _one_array(column)
+        assert isinstance(out, pa.Array)
+        assert out.to_pylist() == [b"a", None, b"c"]
+
+    def test_one_array_of_a_chunked_array_with_no_chunks(self):
+        """``pa.concat_arrays([])`` raises, and geoarrow aborts on zero chunks."""
+        from geoparquet_io.core.process.simplify import _one_array
+
+        out = _one_array(pa.chunked_array([], type=pa.binary()))
+        assert len(out) == 0
+        assert out.type == pa.binary()
