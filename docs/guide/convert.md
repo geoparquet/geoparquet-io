@@ -205,6 +205,49 @@ gpio convert data.parquet output.csv --no-wkt
 gpio convert data.parquet output.csv --no-bbox
 ```
 
+### Filtering During Conversion
+
+`convert geopackage`, `convert flatgeobuf` and `convert csv` can filter rows on
+the way through, with the same `--bbox`, `--geometry` and `--where` options as
+`gpio extract` -- one step instead of extract-then-convert. A `--bbox` prunes on
+the input's bbox covering column when it has one.
+
+=== "CLI"
+
+    <!-- doctest: menu -->
+    ```bash
+    # Only the features in a bounding box
+    gpio convert geopackage data.parquet box.gpkg --bbox -0.5,10.0,0.5,11.0
+
+    # Features intersecting a geometry (GeoJSON, WKT, or @file)
+    gpio convert flatgeobuf data.parquet clipped.fgb \
+        --geometry "POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))"
+
+    # Attribute filter, DuckDB WHERE syntax
+    gpio convert csv data.parquet named.csv --where "name IS NOT NULL"
+
+    # Combined
+    gpio convert geopackage data.parquet combined.gpkg \
+        --bbox -0.5,10.0,0.5,11.0 --where "name IS NOT NULL"
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.read('data.parquet')
+
+    # Only the features in a bounding box
+    table.write('box.gpkg', bbox=(-0.5, 10.0, 0.5, 11.0))
+
+    # Features intersecting a geometry (GeoJSON or WKT text, or @file)
+    table.write('clipped.fgb', geometry='POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))')
+
+    # Attribute filter, DuckDB WHERE syntax
+    table.write('named.csv', where="name IS NOT NULL")
+    ```
+
 **GeoJSON:**
 
 <!-- doctest: menu -->

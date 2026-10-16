@@ -1233,6 +1233,10 @@ class Table:
         id_field: str | None = None,
         pretty: bool = False,
         keep_crs: bool = False,
+        bbox: str | tuple[float, float, float, float] | None = None,
+        geometry: str | None = None,
+        where: str | None = None,
+        use_first_geometry: bool = False,
     ) -> Path:
         """
         Write the table to any format (GeoParquet, GeoPackage, FlatGeobuf, CSV, Shapefile, GeoJSON).
@@ -1270,6 +1274,14 @@ class Table:
             id_field: Field to use as feature 'id' for GeoJSON
             pretty: Pretty-print GeoJSON output (default: False)
             keep_crs: Keep original CRS for GeoJSON instead of WGS84 (default: False)
+            bbox: Bounding box row filter for GeoPackage/FlatGeobuf/CSV,
+                (xmin, ymin, xmax, ymax) or "xmin,ymin,xmax,ymax"; prunes on
+                the bbox covering column when the table has one
+            geometry: Geometry row filter for GeoPackage/FlatGeobuf/CSV:
+                GeoJSON or WKT text, or @filepath
+            where: DuckDB WHERE clause row filter for GeoPackage/FlatGeobuf/CSV
+            use_first_geometry: Use the first geometry when ``geometry`` is a
+                FeatureCollection with several
 
         Returns:
             Path to written file (local temp path if uploaded to cloud)
@@ -1329,6 +1341,10 @@ class Table:
             id_field=id_field,
             pretty=pretty,
             keep_crs=keep_crs,
+            bbox=bbox,
+            geometry=geometry,
+            where=where,
+            use_first_geometry=use_first_geometry,
         )
 
     @staticmethod
@@ -1613,6 +1629,16 @@ class Table:
             # Write table to temp parquet first
             temp_parquet = self._table_to_temp_parquet()
 
+            # Row filters (#1308) apply to the formats whose writers filter
+            # in-query: GeoPackage, FlatGeobuf and CSV.
+            filter_options = {
+                key: format_options.get(key)
+                for key in ("bbox", "geometry", "where")
+                if format_options.get(key) is not None
+            }
+            if format_options.get("use_first_geometry"):
+                filter_options["use_first_geometry"] = True
+
             # Convert to target format
             if format == "geopackage":
                 from geoparquet_io.core.format_writers import write_geopackage
@@ -1624,6 +1650,7 @@ class Table:
                     layer_name=format_options.get("layer_name", "features"),
                     verbose=False,
                     profile=profile,
+                    **filter_options,
                 )
             elif format == "flatgeobuf":
                 from geoparquet_io.core.format_writers import write_flatgeobuf
@@ -1633,6 +1660,7 @@ class Table:
                     str(output_path),
                     verbose=False,
                     profile=profile,
+                    **filter_options,
                 )
             elif format == "csv":
                 from geoparquet_io.core.format_writers import write_csv
@@ -1644,6 +1672,7 @@ class Table:
                     include_bbox=format_options.get("include_bbox", True),
                     verbose=False,
                     profile=profile,
+                    **filter_options,
                 )
             elif format == "shapefile":
                 from geoparquet_io.core.format_writers import write_shapefile

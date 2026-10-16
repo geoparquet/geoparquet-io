@@ -104,6 +104,7 @@ from geoparquet_io.core import check_optimization as core_check_optimization
 from geoparquet_io.core import check_parquet_structure as core_check_structure
 from geoparquet_io.core import check_spatial_order as core_check_spatial
 from geoparquet_io.core import extract as core_extract
+from geoparquet_io.core import format_writers as core_format_writers
 from geoparquet_io.core import hilbert_order as core_hilbert
 from geoparquet_io.core import pmtiles as core_pmtiles
 from geoparquet_io.core import pmtiles_pyramid as core_pmtiles_pyramid
@@ -654,6 +655,101 @@ CASES: list[ParityCase] = [
             "Table.write resolves auto to a concrete version before it reaches the "
             "write boundary. Both mean 'auto'; the values cannot be equal here.",
         ),
+    ),
+    # The three filtered converters (#1308). Every door resolves its writer from
+    # core.format_writers inside the call, and the geopackage/flatgeobuf wrappers
+    # forward to write_gdal_format through their module globals -- so that one
+    # function is the shared seam all three doors are patched on.
+    ParityCase(
+        id="convert geopackage",
+        cli=_cli(
+            "write_gdal_format",
+            core_format_writers.write_gdal_format,
+            lambda c: ["convert", "geopackage", c.input_file, c.scratch("parity-cli.gpkg")],
+            module=core_format_writers,
+        ),
+        ops=_ops_via_table(
+            core_format_writers,
+            "write_gdal_format",
+            core_format_writers.write_gdal_format,
+            lambda c: ops.convert_to_geopackage(c.table, c.scratch("parity-ops.gpkg")),
+        ),
+        table=_table(
+            core_format_writers,
+            "write_gdal_format",
+            core_format_writers.write_gdal_format,
+            lambda c: c.gpio_table.write(c.scratch("parity-table.gpkg")),
+        ),
+        normalize={
+            "format_name": ("format_name", "format_name"),
+            "overwrite": ("overwrite", "overwrite"),
+            "layer_name": ("layer_name", "layer_name"),
+            "bbox": ("bbox", "bbox"),
+            "geometry": ("geometry", "geometry"),
+            "where": ("where", "where"),
+            "use_first_geometry": ("use_first_geometry", "use_first_geometry"),
+        },
+    ),
+    ParityCase(
+        id="convert flatgeobuf",
+        cli=_cli(
+            "write_gdal_format",
+            core_format_writers.write_gdal_format,
+            lambda c: ["convert", "flatgeobuf", c.input_file, c.scratch("parity-cli.fgb")],
+            module=core_format_writers,
+        ),
+        ops=_ops_via_table(
+            core_format_writers,
+            "write_gdal_format",
+            core_format_writers.write_gdal_format,
+            lambda c: ops.convert_to_flatgeobuf(c.table, c.scratch("parity-ops.fgb")),
+        ),
+        table=_table(
+            core_format_writers,
+            "write_gdal_format",
+            core_format_writers.write_gdal_format,
+            lambda c: c.gpio_table.write(c.scratch("parity-table.fgb")),
+        ),
+        normalize={
+            "format_name": ("format_name", "format_name"),
+            "bbox": ("bbox", "bbox"),
+            "geometry": ("geometry", "geometry"),
+            "where": ("where", "where"),
+            "use_first_geometry": ("use_first_geometry", "use_first_geometry"),
+        },
+        notes=(
+            "overwrite is not compared: the CLI exposes --overwrite while "
+            "ops.convert_to_flatgeobuf has no such knob.",
+        ),
+    ),
+    ParityCase(
+        id="convert csv",
+        cli=_cli(
+            "write_csv",
+            core_format_writers.write_csv,
+            lambda c: ["convert", "csv", c.input_file, c.scratch("parity-cli.csv")],
+            module=core_format_writers,
+        ),
+        ops=_ops_via_table(
+            core_format_writers,
+            "write_csv",
+            core_format_writers.write_csv,
+            lambda c: ops.convert_to_csv(c.table, c.scratch("parity-ops.csv")),
+        ),
+        table=_table(
+            core_format_writers,
+            "write_csv",
+            core_format_writers.write_csv,
+            lambda c: c.gpio_table.write(c.scratch("parity-table.csv")),
+        ),
+        normalize={
+            "include_wkt": ("include_wkt", "include_wkt"),
+            "include_bbox": ("include_bbox", "include_bbox"),
+            "bbox": ("bbox", "bbox"),
+            "geometry": ("geometry", "geometry"),
+            "where": ("where", "where"),
+            "use_first_geometry": ("use_first_geometry", "use_first_geometry"),
+        },
     ),
     ParityCase(
         id="partition h3",
@@ -1525,9 +1621,6 @@ NO_CALL_PARITY_CASE: dict[str, str] = {
             "partition admin",
             "convert reproject",
             "convert geojson",
-            "convert geopackage",
-            "convert flatgeobuf",
-            "convert csv",
             "convert shapefile",
             "partition string",
             "partition kdtree",

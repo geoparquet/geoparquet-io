@@ -741,6 +741,25 @@ def where_option(func):
     )(func)
 
 
+def spatial_filter_options(func):
+    """Add the ``--bbox``/``--geometry``/``--use-first-geometry`` spatial filter
+    options (same wording as `gpio extract`; pair with :func:`where_option`)."""
+    func = click.option(
+        "--use-first-geometry",
+        is_flag=True,
+        help="Use first geometry if FeatureCollection contains multiple",
+    )(func)
+    func = click.option(
+        "--geometry",
+        help="Geometry filter: GeoJSON, WKT, @filepath, or - for stdin",
+    )(func)
+    func = click.option(
+        "--bbox",
+        help="Bounding box filter: xmin,ymin,xmax,ymax",
+    )(func)
+    return func
+
+
 def metric_nodata_option(func):
     """Add the ``--metric-nodata`` NoData sentinel option for aggregate commands."""
     return click.option(

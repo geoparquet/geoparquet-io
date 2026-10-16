@@ -3953,6 +3953,38 @@
        "is_flag": false,
        "metavar": null,
        "multiple": false,
+       "name": "bbox",
+       "nargs": 1,
+       "opts": [
+        "--bbox"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "geometry",
+       "nargs": 1,
+       "opts": [
+        "--geometry"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
        "name": "input_file",
        "nargs": 1,
        "opts": [
@@ -4049,6 +4081,22 @@
        "is_flag": true,
        "metavar": null,
        "multiple": false,
+       "name": "use_first_geometry",
+       "nargs": 1,
+       "opts": [
+        "--use-first-geometry"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
        "name": "verbose",
        "nargs": 1,
        "opts": [
@@ -4059,6 +4107,22 @@
        "required": false,
        "secondary_opts": [],
        "type": "boolean"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "where",
+       "nargs": 1,
+       "opts": [
+        "--where"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
       }
      ]
     },
@@ -4077,6 +4141,38 @@
        "nargs": 1,
        "opts": [
         "--aws-profile"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "bbox",
+       "nargs": 1,
+       "opts": [
+        "--bbox"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "geometry",
+       "nargs": 1,
+       "opts": [
+        "--geometry"
        ],
        "param_type": "Option",
        "required": false,
@@ -4153,6 +4249,22 @@
        "is_flag": true,
        "metavar": null,
        "multiple": false,
+       "name": "use_first_geometry",
+       "nargs": 1,
+       "opts": [
+        "--use-first-geometry"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
        "name": "verbose",
        "nargs": 1,
        "opts": [
@@ -4163,6 +4275,22 @@
        "required": false,
        "secondary_opts": [],
        "type": "boolean"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "where",
+       "nargs": 1,
+       "opts": [
+        "--where"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
       }
      ]
     },
@@ -4443,6 +4571,38 @@
        "is_flag": false,
        "metavar": null,
        "multiple": false,
+       "name": "bbox",
+       "nargs": 1,
+       "opts": [
+        "--bbox"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "geometry",
+       "nargs": 1,
+       "opts": [
+        "--geometry"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
        "name": "input_file",
        "nargs": 1,
        "opts": [
@@ -4523,6 +4683,22 @@
        "is_flag": true,
        "metavar": null,
        "multiple": false,
+       "name": "use_first_geometry",
+       "nargs": 1,
+       "opts": [
+        "--use-first-geometry"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
        "name": "verbose",
        "nargs": 1,
        "opts": [
@@ -4533,6 +4709,22 @@
        "required": false,
        "secondary_opts": [],
        "type": "boolean"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "where",
+       "nargs": 1,
+       "opts": [
+        "--where"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
       }
      ]
     },

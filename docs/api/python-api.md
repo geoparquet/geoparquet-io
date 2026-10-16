@@ -1755,6 +1755,18 @@ table.write('output.csv',
            include_bbox=False)  # Exclude bbox column
 ```
 
+**Row filters (GeoPackage, FlatGeobuf, CSV):**
+
+GeoPackage, FlatGeobuf and CSV writes can filter rows on the way through, with
+the same semantics as `gpio extract`. A `bbox` prunes on the table's bbox
+covering column when it has one.
+
+```python
+table.write('subset.gpkg', bbox=(-0.5, 10.0, 0.5, 11.0))     # bounding box
+table.write('subset.fgb', geometry='POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))')
+table.write('subset.csv', where="name IS NOT NULL")           # DuckDB WHERE
+```
+
 **GeoJSON:**
 
 ```python
@@ -1781,6 +1793,10 @@ table = pq.read_table('data.parquet')
 ops.convert_to_geopackage(table, 'output.gpkg', layer_name='features')
 ops.convert_to_flatgeobuf(table, 'output.fgb')
 ops.convert_to_csv(table, 'output.csv', include_wkt=True)
+
+# Filter rows on the way through (GeoPackage, FlatGeobuf, CSV)
+ops.convert_to_geopackage(table, 'subset.gpkg', bbox=(-0.5, 10.0, 0.5, 11.0))
+ops.convert_to_csv(table, 'subset.csv', where="name IS NOT NULL")
 ops.convert_to_shapefile(table, 'output.shp', encoding='UTF-8')
 ops.convert_to_geojson(table, 'output.geojson', precision=7)
 ```
@@ -1933,9 +1949,9 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 | `ops.read_bigquery(table_id, project=None, credentials_file=None, where=None, bbox=None, bbox_mode='auto', bbox_threshold=500000, limit=None, columns=None, exclude_columns=None)` | Read BigQuery table (`None`/`[]` selects every column; a blank entry in the list raises) |
 | `ops.from_arcgis(service_url, token=None, where='1=1', bbox=None, include_cols=None, exclude_cols=None, limit=None, max_workers=1, output_crs=None, max_allowable_offset=None, repair_geometry=True, timeout=60.0, batch_size=None)` | Fetch ArcGIS Feature Service (`batch_size` lowers the page size for layers the server cannot serialize a full page of) |
 | `ops.convert_to_geojson(table, output, precision=7, write_bbox=False, id_field=None)` | Convert to GeoJSON |
-| `ops.convert_to_geopackage(table, output, layer_name='features', overwrite=False)` | Convert to GeoPackage |
-| `ops.convert_to_flatgeobuf(table, output)` | Convert to FlatGeobuf |
-| `ops.convert_to_csv(table, output, include_wkt=True, include_bbox=True)` | Convert to CSV |
+| `ops.convert_to_geopackage(table, output, layer_name='features', overwrite=False, bbox=None, geometry=None, where=None, use_first_geometry=False)` | Convert to GeoPackage, optionally filtering rows |
+| `ops.convert_to_flatgeobuf(table, output, bbox=None, geometry=None, where=None, use_first_geometry=False)` | Convert to FlatGeobuf, optionally filtering rows |
+| `ops.convert_to_csv(table, output, include_wkt=True, include_bbox=True, bbox=None, geometry=None, where=None, use_first_geometry=False)` | Convert to CSV, optionally filtering rows |
 | `ops.convert_to_shapefile(table, output, encoding='UTF-8', overwrite=False)` | Convert to Shapefile |
 | `ops.from_wfs(service_url, typename, version='auto', bbox=None, limit=None, max_workers=1, page_size=100000, auto_tile=True, ...)` | Fetch from WFS service |
 | `ops.from_wfs_layers(service_url, typenames, output_dir, parallel_layers=1, max_workers=1, page_size=100000, ...)` | Fetch multiple WFS layers to directory |
