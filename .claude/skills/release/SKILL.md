@@ -220,5 +220,5 @@ build backend or skipping verification.
   changelog is not the place for bot bumps and repo chores. A one-line note gives
   the counts, and the compare link and the GitHub release page still carry every
   one of them. Do not add them back by hand.
-- `docs/CHANGELOG.md` is generated from the root file by the `doc-sync`
-  pre-commit hook. Never edit it.
+- `docs/CHANGELOG.md` only includes the root file through a snippets include
+  (`--8<-- "CHANGELOG.md"`). Edit the root `CHANGELOG.md`, never the docs stub.

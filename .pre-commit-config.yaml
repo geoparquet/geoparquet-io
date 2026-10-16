@@ -286,7 +286,7 @@ repos:
         description: Auto-update generated doc sections (CLAUDE.md, SKILL.md, contributing.md)
         entry: uv run python scripts/doc_sync.py --update
         language: system
-        files: ^(CHANGELOG\.md|geoparquet_io/cli/main\.py|geoparquet_io/cli/commands/.*\.py|geoparquet_io/cli/decorators\.py|pyproject\.toml|geoparquet_io/core/.*\.py|scripts/doc_sync\.py|docs/contributing\.md)$
+        files: ^(geoparquet_io/cli/main\.py|geoparquet_io/cli/commands/.*\.py|geoparquet_io/cli/decorators\.py|pyproject\.toml|geoparquet_io/core/.*\.py|scripts/doc_sync\.py|docs/contributing\.md)$
         pass_filenames: false
 
       - id: sync-dependencies
