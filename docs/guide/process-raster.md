@@ -51,6 +51,9 @@ uv tool install geoparquet-io --with contourrs --with rasterio
     # Keep only classes 1 and 3, name the attribute column
     gpio process polygonize mask.tif buildings.parquet \
         --values 1,3 --value-column class_id
+
+    # Skip repairing self-touching rings: much faster, still reports the count
+    gpio process polygonize landcover.tif landcover.parquet --no-repair-geometry
     ```
 
 === "Python"
@@ -65,6 +68,9 @@ uv tool install geoparquet-io --with contourrs --with rasterio
 
     # Pure function returning a PyArrow table
     table = ops.polygonize('mask.tif', values=[1.0], value_column='class_id')
+
+    # Skip repairing self-touching rings (see below)
+    table = ops.polygonize('landcover.tif', repair_geometry=False)
     ```
 
 | Option | Default | Meaning |
@@ -99,28 +105,13 @@ large sprawling regions: on that 8192² output, 5,776 invalid polygons hold 7.5
 million vertices, and repairing them takes about 36 s against roughly 5 s for
 the polygonization itself. Finding them is cheap (under a second).
 
-So if you only need class areas or a visualization, `--no-repair-geometry` is
-much faster and still tells you the count:
+So if you only need class areas or a visualization, pass
+`--no-repair-geometry` (`repair_geometry=False` from Python, shown in the
+examples above): it still reports the invalid count and writes the rings as
+traced. Use the repair — the default — for anything that overlays, joins or
+dissolves the polygons, where an invalid ring is a correctness problem rather
+than a label.
 
-=== "CLI"
-
-    <!-- doctest: skip="requires the optional raster extra (contourrs, Python 3.12+)" -->
-    ```bash
-    # Fast: reports the invalid count, writes the rings as traced
-    gpio process polygonize landcover.tif landcover.parquet --no-repair-geometry
-    ```
-
-=== "Python"
-
-    <!-- doctest: skip="requires the optional raster extra (contourrs, Python 3.12+)" -->
-    ```python
-    from geoparquet_io.api import ops
-
-    table = ops.polygonize('landcover.tif', repair_geometry=False)
-    ```
-
-Use the repair (the default) for anything that overlays, joins or dissolves the
-polygons, where an invalid ring is a correctness problem rather than a label.
 Contour output needs none of this: it measured 100% valid on every test DEM.
 
 ## Contour

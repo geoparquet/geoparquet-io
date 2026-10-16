@@ -227,12 +227,14 @@ class TestPolygonizeFile:
 
         monkeypatch.setattr(mod, "read_band", lambda *a, **k: _raster_band())
 
-    def test_the_written_file_is_repaired(self, fake_contourrs, stub_reader, tmp_path):
+    @pytest.mark.usefixtures("stub_reader")
+    def test_the_written_file_is_repaired(self, fake_contourrs, tmp_path):
         out = tmp_path / "out.parquet"
         polygonize_file("in.tif", str(out))
         assert _invalid_count(pq.read_table(str(out))) == 0
 
-    def test_opting_out_writes_the_invalid_ring(self, fake_contourrs, stub_reader, tmp_path):
+    @pytest.mark.usefixtures("stub_reader")
+    def test_opting_out_writes_the_invalid_ring(self, fake_contourrs, tmp_path):
         out = tmp_path / "out.parquet"
         polygonize_file("in.tif", str(out), repair_geometry=False)
         assert _invalid_count(pq.read_table(str(out))) == 1
@@ -256,7 +258,8 @@ class TestCliAndApi:
         """Contour output measured 100% valid on every test DEM; the scan would be noise."""
         assert "repair-geometry" not in self._help(["process", "contour"])
 
-    def test_the_cli_passes_the_flag_through(self, fake_contourrs, stub_reader_cli, tmp_path):
+    @pytest.mark.usefixtures("stub_reader_cli")
+    def test_the_cli_passes_the_flag_through(self, fake_contourrs, tmp_path):
         from click.testing import CliRunner
 
         from geoparquet_io.cli.main import cli
