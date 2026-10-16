@@ -128,8 +128,9 @@ from geoparquet_io.core.write_strategies.base import (
 def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
     """Map geometry column -> non-planar edges value declared by the input.
 
-    Sources: the native GEOGRAPHY logical type's algorithm, and any non-planar
-    ``edges`` in the input's geo column metadata.
+    The geo block's explicit planar or recognized non-planar declaration wins
+    over the native GEOGRAPHY type, just as in ``table_nonplanar_edges``.
+    Unrecognized values say nothing, so the type remains the fallback.
     """
     edges_by_col: dict[str, str] = {}
     try:
@@ -141,8 +142,10 @@ def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
         geo_meta = get_geo_metadata(input_file) or {}
         for name, col_meta in (geo_meta.get("columns") or {}).items():
             edges = col_meta.get("edges") if isinstance(col_meta, dict) else None
-            if edges and edges != "planar":
-                edges_by_col.setdefault(name, edges)
+            if edges == "planar":
+                edges_by_col.pop(name, None)
+            elif edges in GEOGRAPHY_EDGE_ALGORITHMS:
+                edges_by_col[name] = edges
     except Exception as e:
         # Fail loudly: an empty answer reads as "planar", which re-enables the
         # planar geometry repair and drops the edges from the output (#1287).

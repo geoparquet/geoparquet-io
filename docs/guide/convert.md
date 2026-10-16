@@ -630,6 +630,14 @@ unchanged. An `edges` value that is not a GeoParquet edge algorithm is not a
 declaration gpio can honor, so that column keeps the planar repair. Repair on
 the sphere (via the S2 `geography` extension) is a planned follow-up.
 
+This pass-through applies to GeoParquet output. GeoJSON and PMTiles export
+instead refuse a non-planar geometry declaration before writing anything.
+Their Cartesian segments cannot carry geodesic edges, and their planar
+precision reduction can destroy valid spherical shapes even with repair off.
+`--no-repair-geometry` and `repair_geometry=False` do not bypass the refusal.
+See [non-planar GeoJSON inputs](geojson.md#non-planar-edges) for the CLI and
+Python API limitations.
+
 === "CLI"
 
     <!-- doctest: skip="needs an input declaring spherical edges" -->

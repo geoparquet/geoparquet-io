@@ -208,3 +208,46 @@ class TestGeographyEdgesFromLogical:
 
         assert _geography_edges_from_logical("Geometry(crs=OGC:CRS84)") is None
         assert _geography_edges_from_logical("") is None
+
+
+@pytest.mark.parametrize(
+    ("block_edges", "expected"),
+    [
+        (None, "spherical"),
+        ("planar", None),
+        ("karney", "karney"),
+        ("Planar", "spherical"),
+        ("bogus", "spherical"),
+        (7, "spherical"),
+    ],
+)
+def test_file_edges_follow_declared_block_precedence(tmp_path, block_edges, expected):
+    """File and Arrow edge readers agree about explicit and unrecognized declarations."""
+    import geoarrow.pyarrow as ga
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.write_funnels import collect_nonplanar_edges
+
+    array = pa.ExtensionArray.from_storage(
+        ga.wkb().with_edge_type(ga.EdgeType.SPHERICAL), pa.array([], type=pa.binary())
+    )
+    table = pa.table({"geometry": array})
+    if block_edges is not None:
+        geo = {
+            "version": "2.0.0",
+            "primary_column": "geometry",
+            "columns": {"geometry": {"encoding": "WKB", "edges": block_edges}},
+        }
+        table = table.replace_schema_metadata({b"geo": json.dumps(geo).encode()})
+    source = tmp_path / "native.parquet"
+    pq.write_table(table, source)
+    assert collect_nonplanar_edges(str(source)).get("geometry") == expected
+
+
+@pytest.mark.parametrize("edges", ["Planar", "bogus", 7])
+def test_file_edges_ignore_unrecognized_geo_only_declarations(tmp_path, edges):
+    from geoparquet_io.core.write_funnels import collect_nonplanar_edges
+
+    source = _make_edges_input(tmp_path, edges)
+    assert collect_nonplanar_edges(str(source)) == {}

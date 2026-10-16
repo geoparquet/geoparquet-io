@@ -545,6 +545,15 @@ full_meta = table.metadata(include_parquet_metadata=True)
 
 Convert to GeoJSON.
 
+An exported geometry column declaring spherical or ellipsoidal edges raises
+`GeoParquetError` before output is created or overwritten. This includes
+point-only and empty inputs with that declaration. The same restriction applies
+to `Table.write('output.geojson')`, `ops.convert_to_geojson()`,
+`gpio convert geojson` and `gpio pmtiles`. Keeping non-planar data in GeoParquet
+preserves its meaning. A geodesic-aware tool must densify and cut it into a
+planar representation before GeoJSON export. Disabling geometry repair does not
+make that conversion safe.
+
 ```python
 # Write to file
 table.to_geojson('output.geojson')
