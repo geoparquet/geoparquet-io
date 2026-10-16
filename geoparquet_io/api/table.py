@@ -652,6 +652,10 @@ class Table:
         # different bytes, so its checks are prospective.
         return derived
 
+    def _wrap_geographic(self, table: pa.Table, geometry_column: str | None) -> Table:
+        """Wrap new grid or admin boundaries in their output CRS, not the source CRS."""
+        return self._wrap(table, geometry_column, crs="OGC:CRS84" if geometry_column else None)
+
     def _detect_geometry_column(self) -> str | None:
         """Detect geometry column from metadata or common names."""
         from geoparquet_io.core.streaming import find_geometry_column_from_table
@@ -2041,7 +2045,7 @@ class Table:
             breakdown_metric=breakdown_metric,
             memory_limit=memory_limit,
         )
-        return self._wrap(result, "geometry" if out_geometry != "none" else None)
+        return self._wrap_geographic(result, "geometry" if out_geometry != "none" else None)
 
     def aggregate_h3(
         self,
@@ -2099,7 +2103,7 @@ class Table:
             breakdown_metric=breakdown_metric,
             memory_limit=memory_limit,
         )
-        return self._wrap(result, "geometry" if out_geometry != "none" else None)
+        return self._wrap_geographic(result, "geometry" if out_geometry != "none" else None)
 
     def aggregate_admin(
         self,
@@ -2156,7 +2160,7 @@ class Table:
             breakdown_metric=breakdown_metric,
             memory_limit=memory_limit,
         )
-        return self._wrap(result, "geometry" if out_geometry != "none" else None)
+        return self._wrap_geographic(result, "geometry" if out_geometry != "none" else None)
 
     def overview(
         self,
@@ -2195,7 +2199,7 @@ class Table:
             memory_limit=memory_limit,
         )
         has_geometry = "geometry" in result.column_names
-        return self._wrap(result, "geometry" if has_geometry else None)
+        return self._wrap_geographic(result, "geometry" if has_geometry else None)
 
     def add_s2(
         self,

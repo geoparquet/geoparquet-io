@@ -1137,6 +1137,11 @@ stats = table.partition_by_admin('output/', vecorel=True)
 
 ### Aggregation Methods {#aggregation}
 
+Aggregate and overview methods generate new geometry in OGC:CRS84 longitude
+and latitude, including when the input comes from a projected `gpio.convert()`
+table. Their results use that output CRS when written. Counts-only results
+have no geometry or CRS.
+
 #### `aggregate_a5(resolution, metric=None, breakdown=None, breakdown_limit=20, out_geometry='polygon', where=None, metric_nodata=None, bucket_point='geometry', bbox_column=None, breakdown_metric=None, memory_limit=None)`
 
 Aggregate features into A5 grid cells with per-cell statistics for low-zoom visualization.

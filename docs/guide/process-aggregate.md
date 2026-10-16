@@ -638,6 +638,12 @@ Regardless of the chosen bucket scheme, every output file contains:
 
 ### Cells at the antimeridian and the poles
 
+Aggregation outputs use OGC:CRS84 longitude and latitude, even when the source
+uses a projected CRS. This applies to both CLI output and Python `Table`
+results, including tables created with `gpio.convert()`. Overview methods
+likewise regenerate geographic parent geometry. Counts-only output has no
+geometry or CRS.
+
 A grid cell is a region of the sphere, and a few of them cannot be drawn as a
 single flat polygon. Those are written the way [RFC 7946
 3.1.9](https://datatracker.ietf.org/doc/html/rfc7946#section-3.1.9) prescribes:

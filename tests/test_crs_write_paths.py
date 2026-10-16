@@ -505,8 +505,8 @@ class TestTableAPICRSPreservation:
         if metadata_crs is not None:
             assert extract_epsg_code(metadata_crs) == 4326
 
-    def test_every_chained_op_carries_the_crs_hint(self, buildings_gpkg_6933, monkeypatch):
-        """All derived-Table constructors must propagate the CRS hint (review
+    def test_geometry_preserving_ops_carry_the_crs_hint(self, buildings_gpkg_6933, monkeypatch):
+        """Operations retaining source geometry must propagate its CRS hint (review
         follow-up on #625): heavy delegates are stubbed so each Table method's
         return path runs without optional deps or network."""
         if not os.path.exists(buildings_gpkg_6933):
@@ -518,22 +518,13 @@ class TestTableAPICRSPreservation:
         assert source._crs_hint is not None
         passthrough = lambda *args, **kwargs: source._table  # noqa: E731
 
-        import geoparquet_io.api.ops as ops_mod
         import geoparquet_io.core.add.a5 as a5_mod
-        import geoparquet_io.core.process.aggregate.by_a5 as agg_a5_mod
-        import geoparquet_io.core.process.aggregate.by_h3 as agg_h3_mod
 
         monkeypatch.setattr(a5_mod, "add_a5_table", passthrough)
-        monkeypatch.setattr(agg_a5_mod, "aggregate_a5_table", passthrough)
-        monkeypatch.setattr(agg_h3_mod, "aggregate_h3_table", passthrough)
-        monkeypatch.setattr(ops_mod, "aggregate_admin", passthrough)
         monkeypatch.setattr(Table, "_with_temp_io_files", lambda self, fn, **_kw: source._table)
 
         derived = {
             "add_a5": source.add_a5(),
-            "aggregate_a5": source.aggregate_a5(10),
-            "aggregate_h3": source.aggregate_h3(7),
-            "aggregate_admin": source.aggregate_admin(),
             "add_geometry_metrics": source.add_geometry_metrics(),
             "add_admin_divisions": source.add_admin_divisions(),
         }
