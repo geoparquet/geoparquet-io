@@ -153,27 +153,18 @@ wrote, plus a link back to the changelog anchor. This drops GitHub's own listing
 of the internal and dependency pull requests, which is the intent: the compare
 link at the end of the section still reaches all of them.
 
-```bash
-python3 - <<'PY' > /tmp/notes.md
-import pathlib, re
-v = "<version>"
-t = pathlib.Path("CHANGELOG.md").read_text()
-start = t.index(f"## v{v} ")
-end = t.find("\n## ", start + 1)
-heading, body = t[start:end].split("\n", 1)
-# GitHub's anchor: the heading lowercased, anything but a letter, digit, space
-# or hyphen dropped, then spaces to hyphens. "## v1.4.0 (2026-08-30)" gives
-# "v140-2026-08-30" - the dots go, so do not build this from the version string.
-anchor = re.sub(r"[^a-z0-9 -]", "", heading[3:].lower()).replace(" ", "-")
-print(body.strip())
-print()
-print(f"Full changelog entry: https://github.com/geoparquet/geoparquet-io/blob/main/CHANGELOG.md#{anchor}")
-PY
+`--release-body` prints that body from the `CHANGELOG.md` section. It rewrites
+each `[@user](https://github.com/user)` author link to a plain `@user`, because
+GitHub's Contributors section on a release page only counts plain mentions.
 
-gh release edit v<version> --notes-file /tmp/notes.md
+```bash
+notes="$(mktemp)"
+uv run python scripts/release_notes.py <version> --release-body > "$notes"
+gh release edit v<version> --notes-file "$notes"
 ```
 
-Open the printed link and confirm it lands on the heading before you finish.
+Open the changelog link at the end of the body (`tail -1 "$notes"`) and confirm
+it lands on the heading before you finish.
 
 ## 8. Verify
 
@@ -182,10 +173,13 @@ Check the published artifact, not the local tree:
 ```bash
 uv run --isolated --no-project --with "geoparquet-io==<version>" gpio --version
 gh release view v<version> --json assets --jq '[.assets[].name]'
+gh release view v<version> --json body --jq .body | grep -c '\[@'
 ```
 
 The release should carry four assets: the wheel, the sdist, and an
-attestation for each.
+attestation for each. The last command must print `0`. Any author link left in
+the body is a contributor missing from the release page's Contributors list, so
+re-run step 7 until it does.
 
 ## If the publish fails after the tag is pushed
 
@@ -220,5 +214,11 @@ build backend or skipping verification.
   changelog is not the place for bot bumps and repo chores. A one-line note gives
   the counts, and the compare link and the GitHub release page still carry every
   one of them. Do not add them back by hand.
+- **The GitHub release body uses plain `@user` mentions, never
+  `[@user](https://github.com/user)` links.** GitHub's Contributors section on a
+  release page only counts plain mentions and ignores the links. `CHANGELOG.md`
+  keeps the links, since the docs site renders it and a bare mention links
+  nothing there, so only the release body is rewritten (step 7 does it, step 8
+  checks it). v1.6.0 and earlier missed this, and v1.7.0 was corrected by hand.
 - `docs/CHANGELOG.md` only includes the root file through a snippets include
   (`--8<-- "CHANGELOG.md"`). Edit the root `CHANGELOG.md`, never the docs stub.
