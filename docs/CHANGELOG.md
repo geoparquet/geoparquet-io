@@ -14,6 +14,7 @@ New DuckDB connections default to a budget based on 50% of the lower of physical
 
 Check commands now exit with status 1 when a check fails. Use --strict to fail on warnings too, and update scripts that relied on successful exit codes for failed checks or unmatched globs. Dictionary coverings without a bbox member are omitted from output, including H3, S2, A5, kdtree, quadkey and custom coverings. Add a bbox column when consumers need covering metadata. Planar geometry repair is skipped for declared non-planar edges, including explicit repair requests. Use a tool that supports spherical geometry to repair such data. WFS bbox values are read in the CRS requested from the layer, in x,y order, and are never automatically reprojected. Supply projected coordinates for a projected request CRS. A layer CRS that gpio cannot resolve is refused.
 
+We got two new people who contributed to this release, though neither actually show up directly as authors to PR's. @jimmyrocks made #1240, which landed as #1271, but he did all the actual work, on a nice fix for more robust ArcGIS support. And @isaaccorley built underlying libraries to enable the new simplify, polygonize and contour processes, but since he didn't do the gpio wrappers he didn't show up. We appreciate both their contributions.
 ### Breaking
 
 - perf(convert)!: bound 2.0 writes by a cgroup-aware memory limit and sort the input once by [@cholmes](https://github.com/cholmes) in [#1154](https://github.com/geoparquet/geoparquet-io/pull/1154)
