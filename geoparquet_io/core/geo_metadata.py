@@ -23,8 +23,6 @@ from collections.abc import Collection, Sequence
 from functools import cache, lru_cache
 from typing import TYPE_CHECKING
 
-import duckdb
-
 from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
     _get_query_column_type,
@@ -36,6 +34,7 @@ from geoparquet_io.core.logging_config import debug, warn
 if TYPE_CHECKING:
     from collections.abc import Collection
 
+    import duckdb
     import pyarrow as pa
 
 # =============================================================================
@@ -1391,6 +1390,8 @@ def compute_bbox_via_sql(
     # top of the sort the COPY already does (#1177).
     query = _strip_trailing_order_by(query)
 
+    import duckdb
+
     # Check if geometry column exists in query result
     try:
         columns = _get_query_columns(con, query)
@@ -1469,6 +1470,8 @@ def _geo_stats_unsupported(con, query: str, geometry_column: str) -> bool:
     the query result obviously cannot be aggregated. Both cases fall back to the
     single-stat helpers, which already handle them.
     """
+    import duckdb
+
     try:
         col_type = _get_query_column_type(con, query, geometry_column) or ""
         if "STRUCT" in col_type:

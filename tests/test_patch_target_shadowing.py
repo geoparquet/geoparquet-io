@@ -1,15 +1,21 @@
 """Forbid dotted ``mock.patch`` targets that walk through ``geoparquet_io.cli``.
 
-``geoparquet_io/__init__.py`` does ``from geoparquet_io.cli.main import cli``.
-That import binds the *name* ``cli`` inside the ``geoparquet_io`` package to the
-Click ``Group`` object, shadowing the ``geoparquet_io.cli`` **subpackage** as an
-attribute of its own parent::
+``geoparquet_io/__init__.py`` resolves the name ``cli`` lazily (PEP 562, #1307)
+to the Click ``Group`` object, shadowing the ``geoparquet_io.cli``
+**subpackage** as an attribute of its own parent — exactly as the old eager
+``from geoparquet_io.cli.main import cli`` did. In a fresh interpreter::
 
-    >>> import geoparquet_io, geoparquet_io.cli
+    >>> import geoparquet_io
     >>> type(geoparquet_io.cli)
     <class 'click.core.Group'>
     >>> hasattr(geoparquet_io.cli, "_shared")
     False
+
+Since #1307 the shadowing is lazier: a process that imports the subpackage
+directly (``import geoparquet_io.cli.main``) *before* anything resolves the
+``cli`` attribute sees the subpackage there instead. That makes the hazard
+below rarer, not gone — which order a given process hits is exactly the kind
+of thing that differs between test runs.
 
 ``mock.patch`` resolves a dotted string target by importing the longest prefix
 it can and then walking the rest with ``getattr``. When the walk reaches
@@ -92,14 +98,30 @@ def test_no_dotted_patch_target_walks_through_the_cli_package():
 
 
 def test_the_shadowing_this_guard_exists_for_is_real():
-    """If the shadowing ever goes away, this guard can go with it."""
-    import click
+    """If the shadowing ever goes away, this guard can go with it.
 
-    import geoparquet_io
-    import geoparquet_io.cli  # noqa: F401  -- imported for its side effect
+    Since the package root went lazy (#1307) the shadowing fires only when the
+    ``cli`` attribute is resolved before the subpackage is imported directly.
+    This pytest process imported ``geoparquet_io.cli.main`` long ago, so the
+    proof needs a fresh interpreter.
+    """
+    import subprocess
+    import sys
 
-    assert isinstance(geoparquet_io.cli, click.Group), (
+    code = (
+        "import click\n"
+        "import geoparquet_io\n"
+        "assert isinstance(geoparquet_io.cli, click.Group), type(geoparquet_io.cli)\n"
+        "import geoparquet_io.cli\n"
+        "assert isinstance(geoparquet_io.cli, click.Group), type(geoparquet_io.cli)\n"
+        "print('shadowed')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0 and result.stdout.strip() == "shadowed", (
         "`geoparquet_io.cli` no longer resolves to the Click Group, so the "
         "patch-target hazard this module guards may be gone. Re-check before "
-        "deleting: the guard is cheap and the failure mode is version-specific."
+        "deleting: the guard is cheap and the failure mode is version-specific.\n"
+        f"{result.stderr}"
     )

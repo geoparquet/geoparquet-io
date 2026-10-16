@@ -92,6 +92,57 @@ jobs:
           # shellcheck disable=SC2086
           uv run pip-audit $IGNORE_ARGS
 
+  embeddable-import:
+    # The embeddable core surface (#1307, docs/guide/embedding.md) must import
+    # in a host application that ships neither DuckDB nor click — a QGIS plugin
+    # vendoring these modules as source files. A fresh venv with only pyarrow
+    # proves it. import-linter cannot enforce this: it counts function-body
+    # imports as edges, so "top-level only" is not expressible as a contract.
+    # tests/test_embeddable_imports.py keeps this module list in sync.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Build a bare venv (pyarrow only — no duckdb, no click)
+        run: |
+          uv venv bare-venv --python 3.11
+          uv pip install -p bare-venv/bin/python 'pyarrow>=23.0.1'
+
+      - name: Import the embeddable surface without duckdb or click
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          bare-venv/bin/python - <<'EOF'
+          import sys
+
+          import geoparquet_io
+
+          assert "click" not in sys.modules, "`import geoparquet_io` pulled in click"
+          assert "duckdb" not in sys.modules, "`import geoparquet_io` pulled in duckdb"
+
+          import geoparquet_io.core.bbox_structure
+          import geoparquet_io.core.duckdb_metadata
+          import geoparquet_io.core.extract
+          import geoparquet_io.core.format_writers
+          import geoparquet_io.core.geo_metadata
+          import geoparquet_io.core.remote
+
+          assert "click" not in sys.modules, "the embeddable surface pulled in click"
+          assert "duckdb" not in sys.modules, "the embeddable surface pulled in duckdb"
+          print("embeddable surface imports cleanly without duckdb or click")
+          EOF
+
   test:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45

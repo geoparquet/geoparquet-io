@@ -25,7 +25,6 @@ import copy
 import json
 from collections.abc import Collection
 
-import duckdb
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import (
@@ -727,6 +726,8 @@ def _probe_output_columns(con, query: str, verbose: bool, purpose: str) -> list[
     Best-effort by design: every caller treats an unreadable schema as "unknown"
     rather than aborting the write.
     """
+    import duckdb
+
     try:
         return _get_query_columns(con, query)
     except (duckdb.Error, RuntimeError, ValueError, AttributeError) as e:

@@ -15,7 +15,6 @@ import json
 import re
 from typing import Any
 
-import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -434,6 +433,8 @@ def count_kv_key(parquet_file: str, key: str, con=None) -> int:
 
 def _read_kv_entries(parquet_file: str, con=None) -> list[tuple[bytes | None, bytes | None]]:
     """Every footer key/value entry, in order and with repeats, read by DuckDB."""
+    import duckdb
+
     metadata_path = _metadata_path(parquet_file)
     connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
 
@@ -485,6 +486,8 @@ def get_geo_metadata(parquet_file: str, con=None) -> dict | None:
         return _pyarrow_get_geo_metadata(resolved_path)
 
     # Slow path: use DuckDB for remote files or when connection is provided
+    import duckdb
+
     metadata_path = _metadata_path(parquet_file)
     connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
 
