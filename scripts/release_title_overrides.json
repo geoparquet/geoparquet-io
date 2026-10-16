@@ -30,5 +30,5 @@
   "1210": "perf(memory)!: bound every DuckDB connection and keep a caller's stricter memory limit",
   "1187": "build(deps): upgrade vulnerable dependencies (automated)",
   "1288": "fix(convert)!: stop planar repair from mangling geometries with spherical edges",
-  "1167": "fix(partition)!: omit H3, S2, A5, kdtree and quadkey coverings without a bbox member"
+  "1167": "fix(partition)!: omit dictionary coverings without a bbox member"
 }
