@@ -264,6 +264,147 @@ class TestChunkedInput:
 
 
 @requires_coarsen
+class TestRowBoundsLandOnTheirOwnRow:
+    """The per-row bounds scatter, which a declared covering column exposes.
+
+    ``_row_bounds`` writes into ``bounds[idx]``, so a bug here does not raise
+    and loses no rows -- it silently files row *k*'s box against row *j*. A
+    covering column that no longer bounds its own geometry is a reader-visible
+    data error (a query pruning on it skips matching rows), and nulls are what
+    make ``idx`` differ from ``arange``, so they have to be interleaved for the
+    difference to show.
+    """
+
+    def _covering_table(self, wkb):
+        import json
+
+        np = _np()
+        shapely = _shapely()
+        bounds = shapely.bounds(shapely.from_wkb(np.array(wkb, dtype=object)))
+        bbox = pa.StructArray.from_arrays(
+            [pa.array(bounds[:, i], type=pa.float32()) for i in range(4)],
+            names=["xmin", "ymin", "xmax", "ymax"],
+        )
+        geo = {
+            "version": "1.1.0",
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {
+                    "encoding": "WKB",
+                    "geometry_types": ["Polygon"],
+                    "covering": {
+                        "bbox": {
+                            "xmin": ["bbox", "xmin"],
+                            "ymin": ["bbox", "ymin"],
+                            "xmax": ["bbox", "xmax"],
+                            "ymax": ["bbox", "ymax"],
+                        }
+                    },
+                }
+            },
+        }
+        return pa.table(
+            {"geometry": pa.array(wkb, type=pa.binary()), "bbox": bbox},
+            schema=pa.schema(
+                [pa.field("geometry", pa.binary()), pa.field("bbox", bbox.type)],
+                metadata={b"geo": json.dumps(geo).encode()},
+            ),
+        )
+
+    def test_each_covering_row_still_bounds_its_own_geometry(self):
+        shapely = _shapely()
+        from geoparquet_io.core.process.simplify import simplify_table
+
+        # Spread far apart, so a box filed against the wrong row cannot
+        # accidentally still contain it.
+        wkb = [
+            None if i % 3 == 1 else shapely.to_wkb(_jagged(i * 100.0, i * 50.0)) for i in range(9)
+        ]
+        out = simplify_table(self._covering_table(wkb), 0.05)
+        boxes = out.column("bbox").to_pylist()
+        geoms = out.column("geometry").to_pylist()
+        for row, raw in zip(boxes, geoms, strict=True):
+            if raw is None:
+                continue
+            xmin, ymin, xmax, ymax = shapely.from_wkb(raw).bounds
+            assert row["xmin"] <= xmin and row["ymin"] <= ymin
+            assert row["xmax"] >= xmax and row["ymax"] >= ymax
+            assert row["xmin"] == pytest.approx(xmin, abs=0.01)
+            assert row["ymax"] == pytest.approx(ymax, abs=0.01)
+
+    def test_a_null_row_gets_no_box(self):
+        import math
+
+        shapely = _shapely()
+        from geoparquet_io.core.process.simplify import simplify_table
+
+        wkb = [None, shapely.to_wkb(_jagged(0, 0)), None]
+        out = simplify_table(self._covering_table(wkb), 0.05)
+        boxes = out.column("bbox").to_pylist()
+        for i in (0, 2):
+            # A null geometry gets a null struct, not a struct of NaNs.
+            assert boxes[i] is None or math.isnan(boxes[i]["xmin"])
+        assert boxes[1]["xmin"] == pytest.approx(0.0, abs=0.01)
+
+
+@requires_coarsen
+class TestCoverageMode:
+    """Coverage mode needs every geometry at once, chunked or not.
+
+    It is the only caller that concatenates the column, so a chunked input is
+    the case where "just take the first chunk" would quietly drop rows.
+    """
+
+    def _coverage_grid(self, cells=9):
+        """Cells sharing jagged edges -- a valid polygonal coverage."""
+        shapely = _shapely()
+        return [
+            shapely.Polygon(
+                [
+                    (float(i), 0),
+                    (i + 0.5, 0.02),
+                    (float(i) + 1, 0),
+                    (float(i) + 1, 1),
+                    (i + 0.5, 0.98),
+                    (float(i), 1),
+                ]
+            )
+            for i in range(cells)
+        ]
+
+    @pytest.mark.parametrize("chunks", [1, 2, 4])
+    def test_chunked_coverage_keeps_every_row(self, chunks):
+        shapely = _shapely()
+        from geoparquet_io.core.process.simplify import simplify_table
+
+        wkb = [shapely.to_wkb(g) for g in self._coverage_grid()]
+        out = simplify_table(_table(wkb, chunks=chunks), 0.05, coverage=True)
+        assert out.num_rows == len(wkb)
+        assert out.column("geometry").null_count == 0
+        reference = simplify_table(_table(wkb, chunks=1), 0.05, coverage=True)
+        assert out.column("geometry").to_pylist() == reference.column("geometry").to_pylist()
+
+    def test_chunked_coverage_with_nulls(self):
+        shapely = _shapely()
+        from geoparquet_io.core.process.simplify import simplify_table
+
+        wkb = [shapely.to_wkb(g) for g in self._coverage_grid(6)]
+        wkb.insert(2, None)
+        wkb.append(None)
+        out = simplify_table(_table(wkb, chunks=3), 0.05, coverage=True)
+        got = out.column("geometry").to_pylist()
+        assert len(got) == len(wkb)
+        assert got[2] is None and got[-1] is None
+        assert all(v is not None for i, v in enumerate(got) if wkb[i] is not None)
+
+    def test_an_empty_coverage_column(self):
+        from geoparquet_io.core.process.simplify import simplify_table
+
+        out = simplify_table(_table([]), 0.05, coverage=True)
+        assert out.num_rows == 0
+
+
+@requires_coarsen
 class TestDropEmpty:
     """``drop_empty`` inverts the empty mask; nulls are not empties."""
 
