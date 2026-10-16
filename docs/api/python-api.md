@@ -1958,6 +1958,7 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 | `ops.polygonize(input_raster, band=1, values=None, value_column='value', nodata=None, use_mask=True)` | Polygonize a categorical raster band (requires the `raster` extra, Python 3.12+) |
 | `ops.contour(input_raster, levels=None, interval=None, base=0.0, band=1, nodata=None, min_column='min', max_column='max')` | Extract filled contour bands from a raster band (requires the `raster` extra, Python 3.12+) |
 | `ops.get_row_group_geo_stats(parquet_file)` | Per-row-group geo bbox statistics |
+| `ops.preview_bbox_filter(parquet_file, bbox, geometry_column=None)` | Preview the row groups a bbox read would touch, with estimated rows/bytes, before reading |
 | `ops.compression_stats(path)` | Per-column compression ratios |
 | `ops.explain_analyze(file_path, query=None)` | DuckDB EXPLAIN ANALYZE query plan |
 
@@ -2145,6 +2146,36 @@ for rg in stats:
 # Works with both:
 # - Native Parquet geo stats (GeoParquet 2.0, parquet-geo-only)
 # - Bbox column statistics (files with a bbox column)
+```
+
+### Bbox Query Preview
+
+Preview which row groups a bbox-filtered read would touch — and how many rows
+and compressed bytes they hold — before reading any data. Useful for a real
+progress bar or a size warning ahead of a large (remote) read:
+
+```python
+from geoparquet_io.api import ops
+
+preview = ops.preview_bbox_filter(
+    'https://example.com/places.parquet',
+    bbox=(-122.5, 37.7, -122.3, 37.9),
+)
+
+if preview.has_estimate:
+    print(f"{len(preview.row_groups)} of {preview.total_row_groups} row groups, "
+          f"~{preview.est_rows} rows, ~{preview.est_bytes} bytes")
+else:
+    # The file has no usable per-row-group spatial statistics: the preview
+    # says so instead of guessing. The total_* fields are still real.
+    print(f"No estimate: {preview.reason} "
+          f"(file holds {preview.total_rows} rows, {preview.total_bytes} bytes)")
+
+# The estimate is an upper bound derived from the same statistics DuckDB
+# prunes with, in the same order as get_row_group_geo_stats:
+# - Native Parquet geo stats (stats_source == "native")
+# - Bbox covering column chunk statistics (stats_source == "bbox_struct")
+# A row group without statistics cannot be pruned, so it is counted.
 ```
 
 ## See Also
