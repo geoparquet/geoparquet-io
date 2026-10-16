@@ -88,6 +88,7 @@ def build_read_parquet_expr(
     allow_schema_diff: bool = False,
     hive_input: bool | None = None,
     verbose: bool = False,
+    files: list[str] | None = None,
 ) -> str:
     """
     Build a DuckDB read_parquet() expression for the given path.
@@ -104,6 +105,10 @@ def build_read_parquet_expr(
         allow_schema_diff: If True, add union_by_name=true for schema merging
         hive_input: Explicitly enable/disable hive partitioning. None = auto-detect.
         verbose: Print debug messages
+        files: RAW file paths to read instead of ``path`` — a pruned subset of
+            what ``path`` matches (file-name extent pruning, #1309). ``path``
+            still decides the read options, so hive auto-detection is the same
+            whether or not the listing was pruned.
 
     Returns:
         str: DuckDB read_parquet() expression like
@@ -123,12 +128,17 @@ def build_read_parquet_expr(
     if allow_schema_diff:
         options.append("union_by_name=true")
 
+    if files:
+        source = "[" + ", ".join(sql_path(f) for f in files) + "]"
+    else:
+        source = sql_path(raw_path)
+
     # Build expression
     if options:
         options_str = ", ".join(options)
-        return f"read_parquet({sql_path(raw_path)}, {options_str})"
+        return f"read_parquet({source}, {options_str})"
     else:
-        return f"read_parquet({sql_path(raw_path)})"
+        return f"read_parquet({source})"
 
 
 def get_partition_info(path: str, verbose: bool = False) -> dict:

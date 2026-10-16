@@ -61,7 +61,12 @@ DOCS_ROOT = GUIDE_DIR.parent
 # no gpio command writes that declaration onto the seeded sample data, and
 # hand-building one inline would drown the two-line example it illustrates.
 # tests/test_skip_planar_repair_spherical_edges.py runs the real thing.
-MAX_SKIPPED_BLOCKS = 255
+# 255 -> 257: the file-name extent pruning CLI/Python pair in extract.md
+# (#1309). It globs VIDA's by_country_s2 buildings on S3 - the dataset whose
+# S2-named files motivate the feature - and even the pruned read fetches a
+# country-sized file, too heavy for the docs lane. The behavior runs for real
+# against local S2-named files in tests/test_extract_filename_pruning.py.
+MAX_SKIPPED_BLOCKS = 257
 MIN_EXECUTED_BLOCKS = 217
 
 #: Looks like a command rather than prose or sample output.

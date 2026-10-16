@@ -48,9 +48,11 @@ from geoparquet_io.core.file_utils import (
     get_all_parquet_files,
     get_first_parquet_file,
     handle_output_overwrite,
+    has_glob_pattern,
     is_partition_path,
     resolve_file_url,
 )
+from geoparquet_io.core.filename_extents import prune_files_by_extent
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
     prune_geo_metadata_to_columns,
@@ -600,6 +602,63 @@ def build_spatial_filter(
     return " AND ".join(conditions) if conditions else None
 
 
+def _list_partition_files(input_parquet: str) -> list[str] | None:
+    """Every file a multi-file input matches, or None when it cannot be listed.
+
+    Local directories and globs are listed from the filesystem. A remote glob
+    is listed through DuckDB's ``glob()`` — one listing request instead of one
+    footer fetch per file. Any listing failure returns None, which callers
+    treat as "leave the input alone".
+    """
+    if not is_remote_url(input_parquet):
+        return get_all_parquet_files(input_parquet)
+    if not has_glob_pattern(input_parquet):
+        return None
+    try:
+        raw_url = resolve_file_url(input_parquet, verbose=False)
+        con = get_duckdb_connection_for_s3(input_parquet, load_spatial=False)
+        try:
+            rows = con.execute(f"SELECT file FROM glob({sql_path(raw_url)})").fetchall()
+        finally:
+            con.close()
+        return [row[0] for row in rows]
+    except Exception as e:
+        debug(f"Could not list files for file-name pruning: {e}")
+        return None
+
+
+def _prune_input_files(
+    input_parquet: str,
+    bbox: tuple[float, float, float, float] | None,
+) -> list[str] | None:
+    """File paths to read instead of the whole glob, or None to leave it alone.
+
+    The file-name extent pruning fallback (#1309): when every file in a
+    multi-file input has a name a known convention decodes (S2 cell token,
+    quadkey, lon/lat grid tile), only the files whose extent intersects the
+    bbox are read — the rest are skipped before any Parquet footer is fetched.
+    One unrecognized name disables pruning for the entire input.
+    """
+    if bbox is None or not is_partition_path(input_parquet):
+        return None
+    if not looks_like_latlong_bbox(bbox):
+        # File names encode WGS84 extents; a bbox in projected units cannot be
+        # compared against them
+        return None
+    files = _list_partition_files(input_parquet)
+    if not files or len(files) < 2:
+        return None
+    selected = prune_files_by_extent(files, bbox)
+    if selected is None:
+        return None
+    if not selected:
+        # No file overlaps: keep one so the read still yields the schema, as a
+        # zero-row result rather than an error
+        selected = [min(files)]
+    info(f"File-name extent pruning: reading {len(selected)} of {len(files)} files")
+    return selected
+
+
 def build_extract_query(
     input_path: str,
     columns: list[str],
@@ -608,8 +667,14 @@ def build_extract_query(
     limit: int | None = None,
     allow_schema_diff: bool = False,
     hive_input: bool = False,
+    source_files: list[str] | None = None,
 ) -> str:
-    """Build the complete extraction query."""
+    """Build the complete extraction query.
+
+    ``source_files`` is the pruned subset of the files ``input_path`` matches
+    (see :func:`_prune_input_files`); when given, the query reads exactly those
+    files instead of the glob.
+    """
 
     col_list = ", ".join(quote_identifier(c) for c in columns)
     # Use partition reader to build read_parquet expression with proper options
@@ -618,6 +683,7 @@ def build_extract_query(
         allow_schema_diff=allow_schema_diff,
         hive_input=hive_input,
         verbose=False,
+        files=source_files,
     )
     query = f"SELECT {col_list} FROM {read_expr}"
 
@@ -1480,6 +1546,12 @@ def _extract_impl(
     geometry_wkt = parse_geometry_input(geometry, use_first_geometry) if geometry else None
     spatial_filter = build_spatial_filter(bbox_tuple, geometry_wkt, bbox_info, geometry_col)
 
+    source_files = _prune_input_files(input_parquet, bbox_tuple)
+    if source_files is not None:
+        # Counting the input total would fetch the footer of every file the
+        # pruning just skipped, so the "out of N total" message is given up.
+        skip_count = True
+
     query = build_extract_query(
         input_parquet,
         selected_columns,
@@ -1488,6 +1560,7 @@ def _extract_impl(
         limit,
         allow_schema_diff=allow_schema_diff,
         hive_input=hive_input,
+        source_files=source_files,
     )
     if dry_run:
         _print_dry_run_output(

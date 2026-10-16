@@ -175,6 +175,44 @@ Filter features by a rectangular bounding box. The bbox is specified as `xmin,ym
 
 **CRS Awareness**: The tool detects coordinate system mismatches. If your bbox looks like lat/long coordinates but the data uses a projected CRS, you'll get a helpful warning showing the data's actual bounds.
 
+!!! note "File-name extent pruning for multi-file globs"
+    Some published datasets encode each file's extent only in its name — S2
+    cell tokens (VIDA's `by_country_s2` buildings), quadkeys (OpenBuildingMap)
+    or lon/lat grid tiles (GlobalBuildingAtlas). DuckDB cannot prune those (no
+    hive partitioning, no bbox covering), so a bbox query over a thousand-file
+    glob would fetch a thousand Parquet footers before reading a byte of data.
+
+    When a `--bbox` query runs over a glob or directory and *every* matched
+    file name decodes under one of those conventions, `extract` skips the
+    non-overlapping files up front — before any footer is fetched. This is a
+    fallback with correctness over speed: a single unrecognized file name
+    disables pruning for the whole glob, the bbox has to look like lon/lat
+    (the conventions encode WGS84), and the results are identical either way —
+    the bbox filter still runs over every file that is read. When pruning
+    engages, the input-total row count is skipped (counting it would fetch the
+    pruned footers) and a message reports `reading N of M files`.
+
+    === "CLI"
+
+        <!-- doctest: skip="reads a large public S3 dataset" -->
+        ```bash
+        # Only the S2 cells overlapping the bbox are opened
+        gpio extract "s3://us-west-2.opendata.source.coop/vida/google-microsoft-osm-open-buildings/geoparquet/by_country_s2/*/*.parquet" \
+          nan_buildings.parquet --bbox 100.76,18.77,100.79,18.80
+        ```
+
+    === "Python"
+
+        <!-- doctest: skip="reads a large public S3 dataset" -->
+        ```python
+        import geoparquet_io as gpio
+
+        # Only the S2 cells overlapping the bbox are opened
+        gpio.read(
+            's3://us-west-2.opendata.source.coop/vida/google-microsoft-osm-open-buildings/geoparquet/by_country_s2/*/*.parquet'
+        ).extract(bbox=(100.76, 18.77, 100.79, 18.80)).write('nan_buildings.parquet')
+        ```
+
 !!! note "Metadata `bbox` and `geometry_types` describe the output"
     The GeoParquet metadata `bbox` and `geometry_types` are derived from the
     data, so `extract` recomputes them whenever the output is not a faithful

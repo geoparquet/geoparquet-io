@@ -442,7 +442,9 @@ verbose = false
 # tests/data/canonical/README.md - checked, which a working directory skip
 # would have swallowed.
 skip = ".git,*.lock,*.parquet,*.json,*.csv,*.geojson,geoparquet-testing,.venv,uv.lock,site,mutants"
-ignore-words-list = "nd,ot,crs,inout,hel,bu"
+# "tha": Thailand's ISO 3166-1 alpha-3 code, in VIDA by_country_s2 paths
+# (country_iso=THA) used by the file-name pruning tests.
+ignore-words-list = "nd,ot,crs,inout,hel,bu,tha"
 check-filenames = true
 
 [tool.coverage.run]
