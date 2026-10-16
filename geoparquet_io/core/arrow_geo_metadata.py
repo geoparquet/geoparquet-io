@@ -356,7 +356,9 @@ _DESCRIPTIVE_SECONDARY_KEYS = frozenset(
 )
 
 
-def table_geometry_info(table, primary_column: str, carried_geo: dict | None = None) -> dict | None:
+def table_geometry_info(
+    table, primary_column: str | None, carried_geo: dict | None = None
+) -> dict | None:
     """``geometry_info`` for an in-memory table whose caller supplied none.
 
     The table entry points -- ``write_geoparquet_table``, each strategy's
@@ -379,6 +381,8 @@ def table_geometry_info(table, primary_column: str, carried_geo: dict | None = N
     same answer, read off an in-memory table rather than a written file, which is
     the line between this module and that one.
 
+    ``primary_column=None`` includes every geometry field, for an input boundary
+    that must carry its complete description before DuckDB drops field types.
     Returns None when the table has no secondary geometry column.
     """
     declared = (carried_geo or {}).get("columns") or {}

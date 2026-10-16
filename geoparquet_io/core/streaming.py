@@ -26,6 +26,7 @@ import pyarrow.ipc as ipc
 
 from geoparquet_io.core.crs_utils import _crs_from_geoarrow_field, geoarrow_crs_to_projjson
 from geoparquet_io.core.geo_metadata import (
+    GEOGRAPHY_EDGE_ALGORITHMS,
     backfill_derived_stats,
     carried_column_name,
     carried_geometry_column,
@@ -429,6 +430,7 @@ def apply_geoarrow_extension_type(
     table: pa.Table,
     geometry_column: str,
     crs: dict | str | None = None,
+    edges: str | None = None,
 ) -> pa.Table:
     """
     Convert geometry column to geoarrow extension type.
@@ -440,6 +442,7 @@ def apply_geoarrow_extension_type(
         table: PyArrow Table with geometry column
         geometry_column: Name of the geometry column
         crs: CRS as PROJJSON dict, string identifier, or None
+        edges: Recognized edge algorithm, or planar, to carry in the field type
 
     Returns:
         Table with geometry column converted to geoarrow extension type
@@ -473,9 +476,16 @@ def apply_geoarrow_extension_type(
         # Convert to geoarrow WKB extension type
         wkb_arr = ga.as_wkb(geom_col)
 
-        # Apply CRS if provided
+        # Keep both parts of the geometry model in the IPC field. The next
+        # process may have no geo block to recover a lost declaration from.
+        new_type = wkb_arr.type
         if crs:
             new_type = wkb_arr.type.with_crs(crs)
+        if edges == "planar" or edges in GEOGRAPHY_EDGE_ALGORITHMS:
+            new_type = new_type.with_edge_type(ga.EdgeType[edges.upper()])
+        # PyArrow extension equality ignores the serialized CRS and edges.
+        # Rewrap whenever either was supplied, even when the types compare equal.
+        if crs or edges == "planar" or edges in GEOGRAPHY_EDGE_ALGORITHMS:
             # Use from_storage to preserve CRS (cast() resets it)
             new_chunks = []
             for chunk in wkb_arr.chunks:

@@ -14,6 +14,7 @@ Key abstractions:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
@@ -21,9 +22,11 @@ from typing import TYPE_CHECKING
 import duckdb
 import pyarrow as pa
 
+from geoparquet_io.core.arrow_geo_metadata import table_geometry_info
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.crs_utils import (
     crs_string_from_geo_meta,
+    entry_crs_is_unknown,
     parse_geo_metadata_from_schema,
     source_crs_string,
 )
@@ -36,10 +39,12 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
+    carried_geometry_column,
     gate_carried_covering,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
 )
+from geoparquet_io.core.geometry_detection import native_geometry_types_from_query
 from geoparquet_io.core.logging_config import progress, warn
 from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.streaming import (
@@ -54,7 +59,11 @@ from geoparquet_io.core.streaming import (
     validate_output,
     write_arrow_stream,
 )
-from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+from geoparquet_io.core.write_funnels import (
+    collect_nonplanar_edges,
+    table_nonplanar_edges,
+    write_parquet_with_metadata,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -110,6 +119,8 @@ def open_input(
     path: str,
     con: duckdb.DuckDBPyConnection | None = None,
     verbose: bool = False,
+    *,
+    stream_output: bool = False,
 ) -> Iterator[tuple[str, dict | None, bool, duckdb.DuckDBPyConnection]]:
     """
     Open input source (file or stream) and prepare for DuckDB processing.
@@ -121,6 +132,7 @@ def open_input(
         path: Input path (file path or "-" for stdin)
         con: Optional existing DuckDB connection (one will be created if None)
         verbose: Whether to print verbose output
+        stream_output: Carry native field descriptions for an IPC producer
 
     Yields:
         Tuple of (source_reference, original_metadata, is_streaming, connection)
@@ -136,7 +148,7 @@ def open_input(
     if is_stdin(path):
         yield from _open_stdin_input(con, verbose)
     else:
-        yield from _open_file_input(path, con, verbose)
+        yield from _open_file_input(path, con, verbose, stream_output=stream_output)
 
 
 def _open_stdin_input(
@@ -144,8 +156,10 @@ def _open_stdin_input(
     verbose: bool,
 ) -> Iterator[tuple[str, dict | None, bool, duckdb.DuckDBPyConnection]]:
     """Handle streaming input from stdin."""
+    import geoarrow.pyarrow  # noqa: F401 - register IPC field types before reading
+
     table = read_arrow_stream()
-    metadata = dict(table.schema.metadata) if table.schema.metadata else {}
+    metadata = _stream_input_metadata(table)
 
     created_connection = con is None
     if created_connection:
@@ -156,7 +170,9 @@ def _open_stdin_input(
         register_arrow(con, "input_stream", table)
 
         # Find geometry column and create view with proper geometry type
-        geom_col = find_geometry_column_from_table(table)
+        geom_col = find_geometry_column_from_metadata(metadata) or find_geometry_column_from_table(
+            table
+        )
         source_ref = _create_view_with_geometry(con, "input_stream", geom_col)
 
         yield source_ref, metadata, True, con
@@ -169,25 +185,81 @@ def _open_file_input(
     path: str,
     con: duckdb.DuckDBPyConnection | None,
     verbose: bool,
+    *,
+    stream_output: bool = False,
 ) -> Iterator[tuple[str, dict | None, bool, duckdb.DuckDBPyConnection]]:
     """Handle file-based input."""
+    import geoarrow.pyarrow  # noqa: F401 - retain native geo field descriptions
+
     raw_url = resolve_file_url(path, verbose=verbose)
-    file_metadata, _ = get_parquet_metadata(path, verbose=verbose)
+    file_metadata, schema = get_parquet_metadata(path, verbose=verbose)
 
     created_connection = con is None
     if created_connection:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path))
 
     try:
-        yield f"read_parquet({sql_path(raw_url)})", file_metadata, False, con
+        source = f"read_parquet({sql_path(raw_url)})"
+        if stream_output:
+            file_metadata = _file_stream_metadata(con, source, path, schema, file_metadata)
+        yield source, file_metadata, False, con
     finally:
         if created_connection:
             con.close()
 
 
+def _file_stream_metadata(con, source, path, schema, metadata) -> dict:
+    """Expose a file's field descriptions only when it becomes an IPC stream."""
+    if isinstance(schema, pa.Schema):
+        described = pa.Table.from_batches([], schema=schema)
+    else:
+        # The remote schema adapter has no Arrow field types. This zero-row
+        # result carries each CRS, and the file reader supplies the edges
+        # DuckDB does not understand. No source geometry rows are materialized.
+        described = con.execute(f"SELECT * FROM {source} LIMIT 0").arrow().read_all()
+        for name, edges in collect_nonplanar_edges(path).items():
+            described = apply_geoarrow_extension_type(described, name, edges=edges)
+    return _stream_input_metadata(described.replace_schema_metadata(metadata))
+
+
+def _stream_input_metadata(table: pa.Table) -> dict:
+    """Carry every input geometry's CRS and resolved edges before registration.
+
+    The I/O interface passes KV metadata alongside a DuckDB source, whose Arrow
+    field types are gone. Fill the description from those fields once, using
+    the same block-over-type edge authority as the table write and repair paths.
+    """
+    metadata = dict(table.schema.metadata or {})
+    geo = sanitized_carried_geo(metadata)
+    geometry_info = table_geometry_info(table, None, geo)
+    if geometry_info is None:
+        return metadata
+    inferred_columns = geometry_info["metadata"]
+    primary = carried_geometry_column(geo, inferred_columns)
+    if primary not in inferred_columns:
+        primary = next(iter(inferred_columns))
+    edges_by_col = table_nonplanar_edges(table, primary, None)
+    columns = {}
+    for name, inferred in inferred_columns.items():
+        column = {"encoding": "WKB", **inferred, **geo.get("columns", {}).get(name, {})}
+        # Normalize the declaration with the shared reader, so an unknown value
+        # cannot become a non-planar model merely by crossing a pipe.
+        column["edges"] = edges_by_col.get(name, "planar")
+        columns[name] = column
+    metadata[b"geo"] = json.dumps(
+        {
+            **geo,
+            "version": geo.get("version", "2.0.0"),
+            "primary_column": primary,
+            "columns": columns,
+        }
+    ).encode("utf-8")
+    return metadata
+
+
 def _wrap_query_with_wkb_conversion(
     query: str,
-    geometry_column: str | None,
+    geometry_column: str | list[str] | None,
 ) -> str:
     """
     Wrap query to convert DuckDB geometry back to WKB for Arrow export.
@@ -197,7 +269,7 @@ def _wrap_query_with_wkb_conversion(
 
     Args:
         query: Original SQL query
-        geometry_column: Name of geometry column, or None to skip conversion
+        geometry_column: Geometry column name or names, or None to skip conversion
 
     Returns:
         Query wrapped with WKB conversion if needed
@@ -205,10 +277,13 @@ def _wrap_query_with_wkb_conversion(
     if not geometry_column:
         return query
 
-    quoted_geom = quote_identifier(geometry_column)
+    columns = [geometry_column] if isinstance(geometry_column, str) else geometry_column
+    replacements = ", ".join(
+        f"ST_AsWKB({quote_identifier(name)}) AS {quote_identifier(name)}" for name in columns
+    )
     return f"""
         WITH __stream_source AS ({query})
-        SELECT * REPLACE (ST_AsWKB({quoted_geom}) AS {quoted_geom})
+        SELECT * REPLACE ({replacements})
         FROM __stream_source
     """
 
@@ -337,16 +412,24 @@ def _write_stream_output(
         geometry_column = find_geometry_column_from_metadata(original_metadata)
 
     # Convert geometry to WKB (DuckDB's Arrow export uses native format)
-    stream_query = _wrap_query_with_wkb_conversion(query, geometry_column)
+    native_columns = native_geometry_types_from_query(con, query)
+    stream_query = _wrap_query_with_wkb_conversion(query, list(native_columns))
 
     result = con.execute(stream_query)
     table = result.arrow().read_all()
 
     # Convert WKB binary to geoarrow extension type for streaming
     # This enables native geometry performance in downstream operations
-    if geometry_column:
-        crs = _extract_crs_from_metadata(original_metadata, geometry_column)
-        table = apply_geoarrow_extension_type(table, geometry_column, crs)
+    columns = sanitized_carried_geo(original_metadata).get("columns", {})
+    geometry_columns = dict.fromkeys([*native_columns, *columns, geometry_column])
+    for name in geometry_columns:
+        if name is None or name not in table.column_names:
+            continue
+        crs = _extract_crs_from_metadata(original_metadata, name)
+        if entry_crs_is_unknown(columns.get(name)):
+            crs = "srid:0"
+        edges = columns.get(name, {}).get("edges", "planar")
+        table = apply_geoarrow_extension_type(table, name, crs, edges=edges)
 
     # Apply metadata to output table, the way the file path does (#722):
     # first drop entries for columns a projection removed -- a dropped secondary
@@ -499,7 +582,9 @@ def execute_transform(
     if should_stream_output(output_path):
         verbose = False
 
-    with open_input(input_path, verbose=verbose) as (source, metadata, is_stream, con):
+    with open_input(
+        input_path, verbose=verbose, stream_output=should_stream_output(output_path)
+    ) as (source, metadata, is_stream, con):
         # Detect the input's CRS once so a transform-aware query fn can reproject
         # non-CRS84 input (e.g. lon/lat grid keying, #525). Streamed input is an
         # Arrow IPC stream, so its CRS comes from the schema metadata, not a file.

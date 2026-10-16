@@ -970,7 +970,9 @@ def _extract_streaming(
     if should_stream_output(output_path):
         verbose = False
 
-    with open_input(input_path, verbose=verbose) as (source, metadata, is_stream, con):
+    with open_input(
+        input_path, verbose=verbose, stream_output=should_stream_output(output_path)
+    ) as (source, metadata, is_stream, con):
         # Get column names from query result (works with both table names and read_parquet)
         sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
         all_columns = [col[0] for col in sample]
@@ -1011,10 +1013,9 @@ def _extract_streaming(
             query,
             geom_col,
             repair_geometry,
-            # A stdin stream has no file to re-read; its KV dict is the witness.
-            nonplanar_edges=declared_nonplanar_edges(
-                None if is_stream else input_path, metadata
-            ).get(geom_col),
+            # open_input carries the resolved field model in metadata before
+            # DuckDB registration. It is also the only witness on later hops.
+            nonplanar_edges=declared_nonplanar_edges(None, metadata).get(geom_col),
         )
 
         if verbose:

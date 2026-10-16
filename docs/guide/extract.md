@@ -208,6 +208,13 @@ Filter features by a rectangular bounding box. The bbox is specified as `xmin,ym
     An unfiltered, unrepaired, single-file column-only extract preserves the
     input's `bbox`/`geometry_types` unchanged.
 
+    Arrow IPC pipes also keep each geometry column's CRS and edge interpolation,
+    including native `GEOGRAPHY` inputs with no `geo` key. A receiving extract
+    sees the spherical declaration before its repair decision, so passing data
+    through another command does not enable planar repair. See
+    [native geometry through a pipe](piping.md#native-geometry-through-a-pipe)
+    for CLI and Python examples.
+
     Recomputing costs one extra aggregate pass over the (already filtered)
     query — on the order of 30% of a plain copy for a few million rows. Use
     `--verbose` to see when it runs.
