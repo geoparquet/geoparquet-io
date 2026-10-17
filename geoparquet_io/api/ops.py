@@ -40,7 +40,10 @@ from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE, str_order_table
 from geoparquet_io.core.wfs import DEFAULT_WFS_PAGE_SIZE
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
+
+    from geoparquet_io.core.preview import BboxFilterPreview
 
 
 def add_bbox(
@@ -2761,7 +2764,11 @@ def get_row_group_geo_stats(parquet_file: str) -> list[dict]:
     return _merge_row_counts(rg_stats, num_rows_per_rg)
 
 
-def preview_bbox_filter(parquet_file, bbox, geometry_column=None):
+def preview_bbox_filter(
+    parquet_file: str,
+    bbox: Sequence[float],
+    geometry_column: str | None = None,
+) -> BboxFilterPreview:
     """
     Preview the row groups a bbox-filtered read would touch, before reading.
 
@@ -2787,8 +2794,9 @@ def preview_bbox_filter(parquet_file, bbox, geometry_column=None):
         ``total_bytes``. Check ``has_estimate`` before using the estimates.
 
     Raises:
-        InvalidParameterError: If ``bbox`` is not four numbers with
-            xmin <= xmax and ymin <= ymax.
+        InvalidParameterError: If ``bbox`` is not four finite numbers with
+            xmin <= xmax and ymin <= ymax, or if ``geometry_column`` names
+            a column the file does not have.
 
     Example:
         >>> from geoparquet_io.api import ops

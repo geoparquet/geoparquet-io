@@ -18,6 +18,7 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
@@ -246,6 +247,64 @@ class TestBboxValidation:
     def test_inverted_bbox_raises(self):
         with pytest.raises(InvalidParameterError, match="xmin"):
             preview_bbox_filter(str(PLACES), (2.0, 0.0, 1.0, 1.0))
+
+    def test_nan_bbox_raises_instead_of_matching_everything(self):
+        """NaN compares False everywhere, so unrejected it would "match" every group."""
+        nan = float("nan")
+        with pytest.raises(InvalidParameterError, match="finite"):
+            preview_bbox_filter(str(PLACES), (nan, nan, nan, nan))
+
+
+class TestGeometryColumnArgument:
+    """An explicit ``geometry_column`` must be honored, not silently remapped."""
+
+    def test_a_missing_column_raises_instead_of_diagnosing_the_file(self):
+        """A typo'd column is the caller's fault, not a file without statistics."""
+        with pytest.raises(InvalidParameterError, match="no_such_col"):
+            preview_bbox_filter(str(GPQ2), WORLD, geometry_column="no_such_col")
+
+    def test_a_non_geometry_column_never_borrows_the_primary_covering(self, sorted_places):
+        """The bbox covering belongs to the primary column; pruning another
+        column's read on it would break the upper-bound guarantee."""
+        preview = preview_bbox_filter(sorted_places, WORLD, geometry_column="name")
+        assert not preview.has_estimate
+
+    def test_the_primary_column_named_explicitly_matches_the_default(self, sorted_places):
+        explicit = preview_bbox_filter(sorted_places, WORLD, geometry_column="geometry")
+        assert explicit == preview_bbox_filter(sorted_places, WORLD)
+
+    def test_a_plain_parquet_with_an_explicit_column_reports_no_estimate(self, tmp_path):
+        """No geometry anywhere: the primary lookup fails and the explicit
+        column has no covering, so the honest answer is no estimate."""
+        out = tmp_path / "plain.parquet"
+        pa_table = pa.table({"id": [1, 2, 3]})
+        pq.write_table(pa_table, out)
+        preview = preview_bbox_filter(str(out), WORLD, geometry_column="id")
+        assert not preview.has_estimate
+
+
+class TestAntimeridianWrappedStats:
+    """Native geo statistics may wrap the antimeridian (xmin > xmax); such a
+    group must never be pruned away from a query it really contains rows for."""
+
+    SIZES = [{"row_group_id": 0, "num_rows": 10, "compressed_bytes": 100}]
+    #: A Fiji-area row group spanning 170 east through the antimeridian to -170.
+    WRAPPED = [{"row_group_id": 0, "xmin": 170.0, "ymin": -10.0, "xmax": -170.0, "ymax": 10.0}]
+
+    def _matches(self, bbox: tuple[float, float, float, float]) -> bool:
+        return bool(_matching_row_groups(self.WRAPPED, self.SIZES, bbox))
+
+    def test_the_eastern_lobe_matches(self):
+        assert self._matches((171.0, -5.0, 175.0, 5.0))
+
+    def test_the_western_lobe_matches(self):
+        assert self._matches((-175.0, -5.0, -172.0, 5.0))
+
+    def test_a_query_between_the_lobes_is_pruned(self):
+        assert not self._matches((0.0, -5.0, 10.0, 5.0))
+
+    def test_a_y_disjoint_query_is_pruned_even_when_x_wraps(self):
+        assert not self._matches((171.0, 20.0, 175.0, 30.0))
 
 
 class TestApiFrontDoor:
