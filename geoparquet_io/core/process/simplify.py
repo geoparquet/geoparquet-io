@@ -28,7 +28,6 @@ from geoparquet_io.core.exceptions import (
 )
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.geoarrow_encoding import is_wkb_extension_field
-from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, info, warn
 from geoparquet_io.core.optional_deps import load_module, require_coarsen
 from geoparquet_io.core.parquet_writer import (
@@ -195,13 +194,28 @@ def _simplify_values(
     idx = [i for i, v in enumerate(values) if v is not None]
     if not idx:
         return list(values), 0, [False] * len(values), np.empty(0, dtype=object), []
+    wkb_in = np.array([values[i] for i in idx], dtype=object)
     try:
-        geoms = shapely.from_wkb(np.array([values[i] for i in idx], dtype=object))
+        geoms = shapely.from_wkb(wkb_in)
     except Exception as e:
         raise GeoParquetError(f"could not parse a WKB geometry in the input: {e}") from e
     if forward is not None:
         geoms = shapely.transform(geoms, forward)
-    if coverage:
+    if coverage and forward is None and inverse is None:
+        # simplify_wkb is coarsen's coverage kernel that consumes WKB directly,
+        # so we skip the WKB->shapely->WKB round-trips that the coverage_simplify
+        # wrapper adds around it (#1223). It returns WKB, which we parse once for
+        # the downstream shapely fold (bounds/is_empty/has_z/get_type_id).
+        try:
+            out_wkb = coarsen.simplify_wkb(
+                wkb_in, tolerance, simplify_boundary=simplify_boundary, threads=threads
+            )
+        except ValueError as e:
+            # Mirror the error type coverage_simplify raised for non-polygon
+            # input so the user-facing message does not regress.
+            raise TypeError(str(e)) from e
+        out = shapely.from_wkb(out_wkb)
+    elif coverage:
         out = coarsen.coverage_simplify(
             geoms, tolerance, simplify_boundary=simplify_boundary, threads=threads
         )
@@ -345,7 +359,6 @@ def simplify_table(
     if tolerance < 0:
         raise InvalidParameterError("tolerance", "must be >= 0")
     geom_col = _geometry_column_of(table, geometry_column)
-    warn_planar_math("simplify", table, geom_col)
     declared_edges = table_nonplanar_edges(table, geom_col, None).get(geom_col)
     table = _with_wkb_storage(table, geom_col)
     column = table.column(geom_col)
@@ -791,8 +804,6 @@ def simplify_file(
                 input_parquet, output_parquet, tolerance, drop_columns=_drop_columns, **kwargs
             )
             return
-        # The in-memory branches run simplify_table, which warns itself.
-        warn_planar_math_for_file("simplify", input_parquet, geom_col)
         _simplify_file_streaming(
             pf,
             output_parquet,

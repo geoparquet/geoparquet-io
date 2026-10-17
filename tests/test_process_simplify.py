@@ -1214,3 +1214,43 @@ class TestCliSimplifyValueErrors:
         )
         assert result.exit_code != 0
         assert "Traceback" not in result.output
+@requires_coarsen
+class TestCoverageShortcutMatchesWrapped:
+    """#1223: the direct coarsen.simplify_wkb path must be byte-identical to the
+    coverage_simplify wrapper it replaces, so the hot-path speedup changes no
+    output."""
+
+    def test_coverage_output_matches_wrapped_kernel(self):
+        coarsen = pytest.importorskip("coarsen")
+        shapely = _shapely()
+        np = pytest.importorskip("numpy")
+        rng = np.random.default_rng(20261016)
+        for _ in range(20):
+            n = int(rng.integers(1, 60))
+            polys = [
+                shapely.buffer(shapely.Point(rng.random(), rng.random()), 0.05)
+                for _ in range(n)
+            ]
+            table = _wkb_table(polys)
+            tol = float(rng.choice([0.05, 0.1, 0.5]))
+            out = simplify_table(table, tol, coverage=True)
+            out_wkb = np.array(out.column("geometry").to_pylist(), dtype=object)
+            geoms = shapely.from_wkb(
+                np.array([shapely.to_wkb(p) for p in polys], dtype=object)
+            )
+            wrapped = shapely.to_wkb(
+                coarsen.coverage_simplify(
+                    geoms, tol, simplify_boundary=True, threads=None
+                )
+            )
+            assert np.array_equal(out_wkb, wrapped), (tol, n)
+
+    def test_coverage_non_polygon_raises_typeerror(self):
+        shapely = _shapely()
+        point = shapely.Point(0, 0)
+        geo = _geo_block(geometry_types=["Point"])
+        table = pa.table(
+            {"geometry": pa.array([shapely.to_wkb(point)], type=pa.binary())}
+        ).replace_schema_metadata({b"geo": json.dumps(geo).encode("utf-8")})
+        with pytest.raises(TypeError, match="Polygon/MultiPolygon"):
+            simplify_table(table, 0.1, coverage=True)
