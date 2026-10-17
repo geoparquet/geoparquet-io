@@ -136,6 +136,7 @@ jobs:
           import geoparquet_io.core.extract
           import geoparquet_io.core.format_writers
           import geoparquet_io.core.geo_metadata
+          import geoparquet_io.core.preview
           import geoparquet_io.core.remote
 
           assert "click" not in sys.modules, "the embeddable surface pulled in click"

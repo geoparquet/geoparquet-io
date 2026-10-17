@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import textwrap
 from pathlib import Path
 
 import pyarrow as pa
@@ -318,27 +317,13 @@ class TestApiFrontDoor:
 def test_preview_module_imports_without_duckdb():
     """The embeddable contract (#1311): importing the module must not pull duckdb.
 
-    The root package still imports duckdb today (#1307 is removing that), so the
-    subprocess stubs the package skeleton and imports the module through it: what
-    is measured is this module's own imports, transitive ones included.
+    Since the lazy root (#1307) a plain subprocess import proves it; the
+    module is also in tests/test_embeddable_imports.py's EMBEDDABLE_MODULES,
+    which the bare-venv CI job (no duckdb installed at all) enforces.
     """
-    import geoparquet_io
-
-    package_dir = Path(geoparquet_io.__file__).parent
-    code = textwrap.dedent(
-        f"""
-        import sys, types
-
-        root = types.ModuleType("geoparquet_io")
-        root.__path__ = [{str(package_dir)!r}]
-        sys.modules["geoparquet_io"] = root
-        core = types.ModuleType("geoparquet_io.core")
-        core.__path__ = [{str(package_dir / "core")!r}]
-        sys.modules["geoparquet_io.core"] = core
-
-        import geoparquet_io.core.preview
-
-        assert "duckdb" not in sys.modules, "core.preview must defer its duckdb imports"
-        """
+    code = (
+        "import sys\n"
+        "import geoparquet_io.core.preview\n"
+        "assert 'duckdb' not in sys.modules, 'core.preview must defer its duckdb imports'\n"
     )
     subprocess.run([sys.executable, "-c", code], check=True, timeout=120)

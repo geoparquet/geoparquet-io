@@ -17,6 +17,7 @@ These modules are the declared, semver-tracked embeddable surface:
 | `geoparquet_io/core/geo_metadata.py` | the `geo` block: parse, sanitize, versions, WKB type codes |
 | `geoparquet_io/core/format_writers.py` | GeoPackage/FlatGeobuf/CSV/GeoJSON export |
 | `geoparquet_io/core/extract.py` | column/row extraction with spatial predicates |
+| `geoparquet_io/core/preview.py` | bbox query-plan preview from the Parquet footer |
 | `geoparquet_io/core/remote.py` | remote-URL detection and `needs_httpfs` |
 
 Vendor them together with the internal modules they import (`duckdb_utils`,

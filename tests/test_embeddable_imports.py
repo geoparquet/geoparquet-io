@@ -29,6 +29,7 @@ EMBEDDABLE_MODULES = (
     "geoparquet_io.core.extract",
     "geoparquet_io.core.format_writers",
     "geoparquet_io.core.geo_metadata",
+    "geoparquet_io.core.preview",
     "geoparquet_io.core.remote",
 )
 
