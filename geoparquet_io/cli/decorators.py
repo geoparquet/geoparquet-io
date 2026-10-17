@@ -10,6 +10,7 @@ import math
 
 import click
 
+from geoparquet_io.core.compression import COMPRESSION_RANGES, PROCESS_ZSTD_LEVEL
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
     SPATIAL_BAND_TOP_ROWS,
@@ -207,14 +208,23 @@ def resolve_kdtree_options(
     return None, sample_size, ("rows", target_rows)
 
 
-def compression_options(func):
-    """
-    Add compression-related options to a command.
+def _compression_level_help(zstd_default: int) -> str:
+    """The ``--compression-level`` help, which has to name the right ZSTD default.
 
-    Adds:
-    - --compression: Type of compression (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
-    - --compression-level: Compression level for formats that support it
+    Two strings, because there are two defaults: ``gpio process`` resolves an
+    unset ZSTD level to ``PROCESS_ZSTD_LEVEL`` and everything else to the
+    global 15 (#1299). Both numbers are imported, not typed, so help text
+    cannot drift from what the writers actually do -- the mistake #967 made
+    with the row-group number.
     """
+    return (
+        f"Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 "
+        f"(default: {zstd_default}), BROTLI: 1-11 (default: 6). "
+        "Ignored for LZ4/SNAPPY."
+    )
+
+
+def _add_compression_options(func, level_help: str):
     func = click.option(
         "--compression",
         default="ZSTD",
@@ -226,9 +236,35 @@ def compression_options(func):
     func = click.option(
         "--compression-level",
         type=click.IntRange(1, 22),
-        help="Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 (default: 15), BROTLI: 1-11 (default: 6). Ignored for LZ4/SNAPPY.",
+        help=level_help,
     )(func)
     return func
+
+
+def compression_options(func):
+    """
+    Add compression-related options to a command.
+
+    Adds:
+    - --compression: Type of compression (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
+    - --compression-level: Compression level for formats that support it
+
+    For a ``gpio process`` command use :func:`process_compression_options`
+    instead, so the help names that group's lower ZSTD default.
+    """
+    return _add_compression_options(func, _compression_level_help(COMPRESSION_RANGES["ZSTD"][2]))
+
+
+def process_compression_options(func):
+    """``compression_options`` for the ``gpio process`` group.
+
+    Identical options; the help names ZSTD 9 instead of 15, because these
+    commands compute a whole table and then write it, and the write is a large
+    share of their wall clock. The resolution itself lives in the cores
+    (``core/compression.resolve_process_compression_level``), so the Python API
+    gets it too -- this decorator only keeps ``--help`` honest.
+    """
+    return _add_compression_options(func, _compression_level_help(PROCESS_ZSTD_LEVEL))
 
 
 # Help text for --row-group-size. One string, because there is now one rule.

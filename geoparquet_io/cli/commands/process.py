@@ -13,11 +13,11 @@ from geoparquet_io.cli.decorators import (
     aggregate_memory_option,
     breakdown_metric_option,
     bucket_point_options,
-    compression_options,
     geoparquet_version_option,
     grid_aggregate_options,
     handle_geoparquet_errors,
     metric_nodata_option,
+    process_compression_options,
     row_group_options,
     show_sql_option,
     verbose_option,
@@ -139,7 +139,7 @@ def process(ctx):
     "--cell-detail. Only with --overview-out.",
 )
 @aggregate_memory_option
-@compression_options
+@process_compression_options
 @verbose_option
 @geoparquet_version_option
 @show_sql_option
@@ -240,7 +240,7 @@ def process_aggregate(ctx):
     help="A5 resolution (0-30). Required unless --auto.",
 )
 @grid_aggregate_options
-@compression_options
+@process_compression_options
 @verbose_option
 @geoparquet_version_option
 @show_sql_option
@@ -330,7 +330,7 @@ def process_aggregate_a5(
     help="H3 resolution (0-15). Required unless --auto.",
 )
 @grid_aggregate_options
-@compression_options
+@process_compression_options
 @verbose_option
 @geoparquet_version_option
 @show_sql_option
@@ -446,7 +446,7 @@ def process_aggregate_h3(
 @where_option
 @bucket_point_options
 @aggregate_memory_option
-@compression_options
+@process_compression_options
 @verbose_option
 @geoparquet_version_option
 @show_sql_option
@@ -581,7 +581,7 @@ def process_aggregate_admin(
     ),
 )
 @row_group_options
-@compression_options
+@process_compression_options
 @geoparquet_version_option
 @verbose_option
 @handle_geoparquet_errors
@@ -689,7 +689,7 @@ def _parse_float_csv(value: str | None, option_name: str) -> list[float] | None:
     help="Ignore the raster's mask/nodata and polygonize every pixel.",
 )
 @row_group_options
-@compression_options
+@process_compression_options
 @geoparquet_version_option
 @verbose_option
 @handle_geoparquet_errors
@@ -791,7 +791,7 @@ def process_polygonize(
     help="Name of the band's upper-break attribute column.",
 )
 @row_group_options
-@compression_options
+@process_compression_options
 @geoparquet_version_option
 @verbose_option
 @handle_geoparquet_errors

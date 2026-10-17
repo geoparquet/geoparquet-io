@@ -124,6 +124,12 @@ edges.
 
 Both commands write through gpio's normal pipeline: the raster's CRS
 becomes the `geo` block's PROJJSON `crs`, `geometry_types` and `bbox` are
-computed from the actual output, and row groups, compression and
-GeoParquet version behave exactly as in every other gpio write (all the
-usual `--compression`, `--row-group-size`, `--version` options apply).
+computed from the actual output, and row groups and GeoParquet version
+behave exactly as in every other gpio write (all the usual
+`--compression`, `--row-group-size`, `--version` options apply).
+
+One default differs: an unset `--compression-level` resolves to ZSTD 9, not
+the global 15. These two commands spend 67-90% of their wall clock in the
+write, and level 9 is 2.8-8.2x faster for output no larger — on a 217k-row
+polygonize table it is smaller as well. See
+[Compression](../concepts/best-practices.md#compression).
