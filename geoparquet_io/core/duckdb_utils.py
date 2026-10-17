@@ -367,9 +367,17 @@ _MAX_CHAIN = 32
 
 
 def _is_interrupt_itself(exc: BaseException) -> bool:
-    import duckdb
+    # KeyboardInterrupt first: this always runs inside an exception handler,
+    # and in a duckdb-less vendoring host the import below would mask the
+    # interrupt with a ModuleNotFoundError.
+    if isinstance(exc, KeyboardInterrupt):
+        return True
+    try:
+        import duckdb
+    except ModuleNotFoundError:
+        return isinstance(exc, RuntimeError) and str(exc) == _QUERY_INTERRUPTED
 
-    if isinstance(exc, (KeyboardInterrupt, duckdb.InterruptException)):
+    if isinstance(exc, duckdb.InterruptException):
         return True
     return isinstance(exc, (RuntimeError, duckdb.Error)) and str(exc) == _QUERY_INTERRUPTED
 
@@ -626,9 +634,9 @@ def _dangerous_keywords_in(where_clause: str) -> list[str]:
     plus ``--`` and ``/* */`` comments. If the lexer is unavailable, fall back to
     a conservative whole-word regex over the raw clause.
     """
-    import duckdb
-
     try:
+        import duckdb
+
         tokens = duckdb.tokenize(where_clause)
         word_types = {duckdb.token_type.keyword, duckdb.token_type.identifier}
         words = set()
@@ -675,8 +683,6 @@ def validate_where_clause(where_clause: str) -> None:
         ValidationError: If dangerous SQL keywords are found, if the clause does
             not parse, or if it composes into more than one statement.
     """
-    import duckdb
-
     found_keywords = _dangerous_keywords_in(where_clause)
     if found_keywords:
         raise ValidationError(
@@ -684,6 +690,13 @@ def validate_where_clause(where_clause: str) -> None:
             "Only SELECT-style filtering expressions are allowed in --where. "
             "Run data-modifying statements against the source system directly."
         )
+
+    try:
+        import duckdb
+    except ModuleNotFoundError:
+        # A duckdb-less vendoring host (#1307) keeps the keyword blocklist
+        # above; the parser gate needs the engine that would run the query.
+        return
 
     probe_query = f"SELECT 1 WHERE {where_condition_fragment(where_clause)}"
     try:
@@ -1047,12 +1060,19 @@ def spill_directory(base_dir: str | os.PathLike | None = None) -> str:
 #: ``from ... import INPUT_FILE_DUCKDB_ERRORS`` still works while a plain
 #: ``import geoparquet_io.core.duckdb_utils`` never imports duckdb.
 def _input_file_duckdb_errors() -> tuple[type[BaseException], ...]:
-    import duckdb
+    cached = globals().get("INPUT_FILE_DUCKDB_ERRORS")
+    if cached is None:
+        import duckdb
 
-    return (
-        duckdb.InvalidInputException,
-        duckdb.IOException,
-    )
+        cached = (
+            duckdb.InvalidInputException,
+            duckdb.IOException,
+        )
+        # Cache into the module namespace so every later access -- attribute or
+        # :func:`is_input_file_duckdb_error` -- reads one tuple, and a test that
+        # monkeypatches ``duckdb_utils.INPUT_FILE_DUCKDB_ERRORS`` is honored.
+        globals()["INPUT_FILE_DUCKDB_ERRORS"] = cached
+    return cached
 
 
 def __getattr__(name: str):
