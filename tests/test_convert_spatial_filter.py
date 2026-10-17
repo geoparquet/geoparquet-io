@@ -212,13 +212,13 @@ class TestFilterSemantics:
     def test_csv_where(self, tmp_path):
         out = tmp_path / "out.csv"
         write_csv(PLACES, str(out), where="name LIKE 'A%'")
-        lines = Path(out).read_text().strip().splitlines()
+        lines = Path(out).read_text(encoding="utf-8").strip().splitlines()
         assert 1 < len(lines) < TOTAL_ROWS  # header plus a proper subset
 
     def test_csv_bbox(self, tmp_path):
         out = tmp_path / "out.csv"
         write_csv(PLACES, str(out), bbox=BBOX)
-        lines = Path(out).read_text().strip().splitlines()
+        lines = Path(out).read_text(encoding="utf-8").strip().splitlines()
         assert len(lines) == BBOX_ROWS + 1  # header
 
     def test_bbox_accepts_a_tuple(self, tmp_path):
@@ -407,7 +407,7 @@ class TestCLI:
         out = tmp_path / "out.csv"
         result = runner.invoke(cli, ["convert", "csv", PLACES, str(out), "--bbox", BBOX])
         assert result.exit_code == 0, result.output
-        assert len(Path(out).read_text().strip().splitlines()) == BBOX_ROWS + 1
+        assert len(Path(out).read_text(encoding="utf-8").strip().splitlines()) == BBOX_ROWS + 1
 
     def test_geometry_from_file(self, runner, tmp_path):
         boundary = tmp_path / "boundary.wkt"
@@ -445,7 +445,7 @@ class TestPythonAPI:
 
         out = tmp_path / "ops.csv"
         ops.convert_to_csv(pq.read_table(PLACES), str(out), bbox=BBOX_TUPLE)
-        assert len(Path(out).read_text().strip().splitlines()) == BBOX_ROWS + 1
+        assert len(Path(out).read_text(encoding="utf-8").strip().splitlines()) == BBOX_ROWS + 1
 
     def test_table_write_passes_the_filters(self, tmp_path):
         import geoparquet_io as gpio
@@ -482,3 +482,55 @@ class TestPythonAPI:
         out = tmp_path / "first.gpkg"
         gpio.read(PLACES).write(out, geometry=collection, use_first_geometry=True)
         assert len(_gpkg_values(out)) == BBOX_ROWS
+
+
+class TestFiltersOnUnsupportedFormats:
+    """A filter the writer cannot honor must refuse, not silently write everything.
+
+    Same principle as #1176's geometry-name check: every format refuses a bad
+    parameter alike. Without the guard, ``write('all.parquet', bbox=...)``
+    delivered the complete dataset under the subset's filename.
+    """
+
+    def test_parquet_write_with_a_filter_raises(self, tmp_path):
+        import geoparquet_io as gpio
+
+        with pytest.raises(InvalidParameterError, match="parquet"):
+            gpio.read(PLACES).write(tmp_path / "all.parquet", bbox=BBOX_TUPLE)
+
+    def test_geojson_write_with_a_filter_raises(self, tmp_path):
+        import geoparquet_io as gpio
+
+        with pytest.raises(InvalidParameterError, match="geojson"):
+            gpio.read(PLACES).write(tmp_path / "all.geojson", where="1=0")
+
+    def test_shapefile_write_with_a_filter_raises(self, tmp_path):
+        import geoparquet_io as gpio
+
+        with pytest.raises(InvalidParameterError, match="shapefile"):
+            gpio.read(PLACES).write(tmp_path / "all.shp", use_first_geometry=True)
+
+    def test_the_supported_formats_still_accept_filters(self, tmp_path):
+        import geoparquet_io as gpio
+
+        out = tmp_path / "guarded.gpkg"
+        gpio.read(PLACES).write(out, bbox=BBOX_TUPLE)
+        assert len(_gpkg_values(out)) == BBOX_ROWS
+
+
+class TestWriteFormatRouter:
+    def test_the_csv_branch_forwards_the_filters(self, tmp_path):
+        out = tmp_path / "routed.csv"
+        format_writers.write_format(PLACES, str(out), "csv", bbox=BBOX)
+        assert len(Path(out).read_text(encoding="utf-8").strip().splitlines()) == BBOX_ROWS + 1
+
+
+class TestNonFiniteBbox:
+    def test_a_nan_bbox_raises_instead_of_reaching_sql(self, tmp_path):
+        """float('nan') used to be interpolated as the bare SQL token ``nan``."""
+        with pytest.raises(InvalidParameterError, match="finite"):
+            write_csv(PLACES, str(tmp_path / "nan.csv"), bbox=(float("nan"), 0.0, 1.0, 2.0))
+
+    def test_a_nan_bbox_string_raises_too(self, tmp_path):
+        with pytest.raises(InvalidParameterError, match="finite"):
+            write_csv(PLACES, str(tmp_path / "nan.csv"), bbox="nan,0,1,2")

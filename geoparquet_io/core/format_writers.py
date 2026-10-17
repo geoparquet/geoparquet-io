@@ -11,6 +11,7 @@ Writers handle local file output only; remote uploads are handled by the upload 
 """
 
 import json
+import math
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -170,15 +171,19 @@ def _normalize_bbox(
         return None
     from geoparquet_io.core.extract import parse_bbox
 
-    if isinstance(bbox, str):
-        return parse_bbox(bbox)
-    try:
-        text = ",".join(str(float(value)) for value in bbox)
-    except (TypeError, ValueError) as e:
-        raise InvalidParameterError(
-            "bbox", f"expected 4 numeric values (xmin,ymin,xmax,ymax), got {bbox!r}"
-        ) from e
-    return parse_bbox(text)
+    if not isinstance(bbox, str):
+        try:
+            bbox = ",".join(str(float(value)) for value in bbox)
+        except (TypeError, ValueError) as e:
+            raise InvalidParameterError(
+                "bbox", f"expected 4 numeric values (xmin,ymin,xmax,ymax), got {bbox!r}"
+            ) from e
+    parsed = parse_bbox(bbox)
+    if not all(math.isfinite(value) for value in parsed):
+        # NaN slips past parse_bbox's reversed-coordinate check (NaN compares
+        # False) and would be interpolated as the bare SQL token ``nan``.
+        raise InvalidParameterError("bbox", f"coordinates must be finite, got {bbox!r}")
+    return parsed
 
 
 def _build_convert_filter(
@@ -442,14 +447,13 @@ def write_gdal_format(
                 f"attribute data only (no spatial features)."
             )
 
-        # Build layer creation options
+        # Build layer creation options, as RAW strings: the one escape happens
+        # at the join below, so a future part cannot be appended unescaped.
         lco_parts = []
         if config.get("layer_option"):
-            safe_layer_name = _escape_sql_string(layer_name)
-            lco_parts.append(f"{config['layer_option']}={safe_layer_name}")
+            lco_parts.append(f"{config['layer_option']}={layer_name}")
         if config.get("encoding_option"):
-            safe_encoding = _escape_sql_string(encoding)
-            lco_parts.append(f"{config['encoding_option']}={safe_encoding}")
+            lco_parts.append(f"{config['encoding_option']}={encoding}")
         if format_name == "geopackage":
             lco_parts.extend(
                 _gpkg_collision_options([field.name for field in schema], geometry_col)
@@ -461,7 +465,7 @@ def write_gdal_format(
 
         # The list form: DuckDB hands a bare string to GDAL as ONE key=value
         # pair, so space-separating several options silently corrupts them all.
-        lco_options = ", ".join(f"'{part}'" for part in lco_parts)
+        lco_options = ", ".join(f"'{_escape_sql_string(part)}'" for part in lco_parts)
         lco_clause = f", LAYER_CREATION_OPTIONS ({lco_options})" if lco_parts else ""
 
         compatible_cols = _gdal_select_exprs(schema, geometry_col, input_path)
@@ -821,6 +825,10 @@ def write_format(
             overwrite=format_options.get("overwrite", False),
             verbose=verbose,
             profile=profile,
+            bbox=format_options.get("bbox"),
+            geometry=format_options.get("geometry"),
+            where=format_options.get("where"),
+            use_first_geometry=format_options.get("use_first_geometry", False),
         )
     elif format_lower == "geojson":
         return write_geojson(

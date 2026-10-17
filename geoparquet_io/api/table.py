@@ -1312,6 +1312,21 @@ class Table:
         # Normalize to lowercase for case-insensitive comparison
         detected_format = format.lower() if format else self._detect_format(path)
 
+        # Same principle as the geometry-name check above (#1176): a filter
+        # the writer cannot honor must refuse, not silently write every row
+        # under the subset's filename.
+        filters_requested = (
+            bbox is not None or geometry is not None or where is not None or use_first_geometry
+        )
+        if filters_requested and detected_format not in ("geopackage", "flatgeobuf", "csv"):
+            from geoparquet_io.core.exceptions import InvalidParameterError
+
+            raise InvalidParameterError(
+                "bbox/geometry/where/use_first_geometry",
+                f"row filters are not supported for {detected_format} output; "
+                "they apply to geopackage, flatgeobuf and csv",
+            )
+
         # Handle GeoParquet format
         if detected_format == "parquet":
             return self._write_geoparquet(
