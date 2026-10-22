@@ -111,11 +111,29 @@ gpio convert input.shp output.parquet
 | Use Case | Compression | Level | Rationale |
 |----------|-------------|-------|-----------|
 | General purpose | ZSTD | 15 | Best balance of size and speed |
+| Computed output (`gpio process`) | ZSTD | 9 | Near-identical size, far faster write |
 | Maximum compression | ZSTD | 22 | Smaller files, slower write |
 | Fast decompression | LZ4 | - | Analytics workloads |
 | Wide compatibility | GZIP | 6 | Older tools |
 
-gpio uses **ZSTD level 15** by default.
+gpio's write funnel defaults to **ZSTD level 15**, except for the `gpio
+process` commands, which default to **level 9**. Commands that write through
+a plain DuckDB `COPY` (most others, when no `--compression-level` is given)
+currently fall to DuckDB's own default of 3 — #1335 tracks unifying that.
+
+### Why the process commands differ
+
+`gpio process` computes a whole table and then writes it, so the write is a
+large share of the command's wall clock — 67-90% of it for `polygonize` and
+`contour`. Measured on their own outputs, level 9 writes 2.8-8.2x faster than
+level 15 for at most 4.9% more bytes, and on a 217k-row polygonize table it is
+both faster *and* smaller — level 15's long-range matching buys nothing on a
+column of short, high-entropy WKB blobs and costs bytes of window bookkeeping.
+
+Level 9 is the only level that is close to free. Below it the size cost stops
+being noise — level 3 is 15-20% larger on geometry-heavy tables and level 1 is
+34-35% larger — so reach lower only for intermediate files you intend to
+delete.
 
 ### Why ZSTD?
 
@@ -125,16 +143,58 @@ gpio uses **ZSTD level 15** by default.
 
 ### How to Apply
 
-```bash
-# Default ZSTD compression
-gpio convert input.shp output.parquet
+=== "CLI"
 
-# Maximum compression
-gpio convert input.shp output.parquet --compression ZSTD --compression-level 22
+    ```bash
+    # Default ZSTD compression
+    gpio convert input.shp output.parquet
 
-# Fast decompression
-gpio convert input.shp output.parquet --compression LZ4
-```
+    # The process group's default (level 9)
+    gpio process simplify input.parquet output.parquet --tolerance 0.001
+
+    # Ask a process command for the global default explicitly
+    gpio process simplify input.parquet output.parquet --tolerance 0.001 \
+        --compression-level 15
+
+    # Maximum compression
+    gpio convert input.shp output.parquet --compression ZSTD --compression-level 22
+
+    # Fast decompression
+    gpio convert input.shp output.parquet --compression LZ4
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+    from geoparquet_io import ops
+
+    # Default ZSTD compression
+    gpio.convert('input.shp').write('output.parquet')
+
+    # A process function that writes the file takes the group's default (level 9)
+    ops.create_overviews('cells.parquet', levels=[4, 7])
+
+    # ...and still honours an explicit level
+    ops.create_overviews('cells.parquet', levels=[4, 7], compression_level=15)
+
+    # Maximum compression
+    gpio.convert('input.shp').write(
+        'output.parquet', compression='ZSTD', compression_level=22
+    )
+    ```
+
+!!! note "Which Python calls get level 9"
+
+    The level-9 default belongs to the functions that write the output file
+    themselves: every `gpio process` CLI command, and `ops.create_overviews` /
+    `ops.create_overview_file` in the Python API.
+
+    `ops.simplify`, `ops.polygonize`, `ops.contour`, `ops.aggregate_*` and
+    `Table.simplify` hand you a table instead. Writing that table with
+    `.write()` is an ordinary write at `.write()`'s own default (see #1335 for
+    what an unset level means there today) — pass `compression_level=9`
+    explicitly to match the process CLI's level from the Python API.
 
 ## Row Group Sizing
 

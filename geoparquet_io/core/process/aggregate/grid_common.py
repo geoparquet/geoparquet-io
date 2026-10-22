@@ -19,6 +19,7 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import _detect_bbox_column_from_table
 from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.crs_utils import (
     crs_transform_sql_expr,
     extract_crs_from_parquet,
@@ -889,6 +890,7 @@ def aggregate_grid_file(
     memory_limit: str | None = None,
 ) -> None:
     """Aggregate a GeoParquet file into grid cells. Writes the output file."""
+    compression_level = resolve_process_compression_level(compression, compression_level)
     configure_verbose(verbose)
     cell_column = cell_column or scheme.default_column
     _validate_out_geometry(out_geometry)

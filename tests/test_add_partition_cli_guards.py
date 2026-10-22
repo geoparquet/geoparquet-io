@@ -372,8 +372,29 @@ class TestAddKdtreeGuards:
         assert "--approx and --exact are mutually exclusive" in result.output
         impl.assert_not_called()
 
+    def test_exact_with_the_default_approx_typed_is_rejected(self, places_test_file, tmp_path):
+        # --approx 100000 equals the default; typing it alongside --exact is
+        # still a contradiction (#951), which the old value comparison missed.
+        runner = CliRunner()
+        with patch.object(cli_add, "add_kdtree_column_impl") as impl:
+            result = runner.invoke(
+                add,
+                [
+                    "kdtree",
+                    places_test_file,
+                    str(tmp_path / "out.parquet"),
+                    "--approx",
+                    "100000",
+                    "--exact",
+                ],
+            )
+
+        assert result.exit_code == 2
+        assert "--approx and --exact are mutually exclusive" in result.output
+        impl.assert_not_called()
+
     def test_exact_alone_is_accepted(self, places_test_file, tmp_path):
-        """The guard keys off an explicitly changed --approx, not --exact on its own."""
+        """The guard keys off a typed --approx, not --exact on its own."""
         runner = CliRunner()
         with patch.object(cli_add, "add_kdtree_column_impl") as impl:
             result = runner.invoke(
@@ -525,3 +546,36 @@ class TestPartitionKdtreeGuards:
         assert result.exit_code == 2
         assert "--approx and --exact are mutually exclusive" in result.output
         impl.assert_not_called()
+
+    def test_exact_with_the_default_approx_typed_is_rejected(self, places_test_file, tmp_path):
+        # Same contradiction with --approx equal to its default (#951): the
+        # source, not the value, is what counts.
+        runner = CliRunner()
+        with patch.object(cli_partition, "partition_by_kdtree_impl") as impl:
+            result = runner.invoke(
+                partition,
+                [
+                    "kdtree",
+                    places_test_file,
+                    str(tmp_path / "out"),
+                    "--approx",
+                    "100000",
+                    "--exact",
+                ],
+            )
+
+        assert result.exit_code == 2
+        assert "--approx and --exact are mutually exclusive" in result.output
+        impl.assert_not_called()
+
+    def test_exact_alone_is_accepted(self, places_test_file, tmp_path):
+        """A bare --exact must not read as a conflict: its --approx stays unsourced."""
+        runner = CliRunner()
+        with patch.object(cli_partition, "partition_by_kdtree_impl") as impl:
+            result = runner.invoke(
+                partition, ["kdtree", places_test_file, str(tmp_path / "out"), "--exact"]
+            )
+
+        assert result.exit_code == 0, result.output
+        # sample_size is the 13th positional argument of partition_by_kdtree_impl.
+        assert impl.call_args.args[12] is None
