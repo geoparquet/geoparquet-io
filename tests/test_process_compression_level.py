@@ -426,7 +426,7 @@ class TestSimplify:
         DuckDB COPY passes, the vecorel metadata rewrite, the id column, and
         the schema fix — have to carry the resolved level rather than fall to
         their own defaults on the way through. The pq spy sees the pyarrow
-        writes; the DuckDB COPYs are spied at ``add_computed_column``.
+        writes; the DuckDB COPY writes are spied at ``add_computed_column``.
         """
         import geoparquet_io.core.add.geometry_metrics as gm
         import geoparquet_io.core.constants as consts
