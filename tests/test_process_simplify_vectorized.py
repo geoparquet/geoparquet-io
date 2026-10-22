@@ -494,6 +494,166 @@ class TestCoverageMode:
 
 
 @requires_coarsen
+class TestCoverageWkbShortcut:
+    """Coverage mode may feed coarsen's WKB kernel directly (#1223, rebuilt from #1294).
+
+    ``coarsen.simplify_wkb`` is the same coverage kernel ``coverage_simplify``
+    wraps, minus the wrapper's ``to_wkb`` pass over the inputs -- and its output
+    bytes can land in the result column without a second serialization. Taking
+    it must change nothing observable: byte-identical output, the same
+    TypeError for non-polygonal input, and a quiet fallback to the wrapped
+    kernel when a ``--simplify-crs`` transform rewrote the geometries or the
+    installed coarsen does not export the symbol (it is not documented API).
+    """
+
+    def _grid_wkb(self, cells=6):
+        shapely = _shapely()
+        return [
+            shapely.to_wkb(
+                shapely.Polygon(
+                    [
+                        (float(i), 0),
+                        (i + 0.5, 0.02),
+                        (float(i) + 1, 0),
+                        (float(i) + 1, 1),
+                        (i + 0.5, 0.98),
+                        (float(i), 1),
+                    ]
+                )
+            )
+            for i in range(cells)
+        ]
+
+    def _wrapped_reference(self, wkb):
+        """What the wrapped kernel produces for ``wkb`` (nulls pass through)."""
+        coarsen = pytest.importorskip("coarsen")
+        shapely = _shapely()
+        np = _np()
+        present = [v for v in wkb if v is not None]
+        out = iter(
+            shapely.to_wkb(
+                coarsen.coverage_simplify(
+                    shapely.from_wkb(np.array(present, dtype=object)),
+                    0.05,
+                    simplify_boundary=True,
+                    threads=None,
+                )
+            )
+        )
+        return [None if v is None else next(out) for v in wkb]
+
+    def test_byte_identical_to_the_wrapped_kernel(self):
+        """Polygons, a MultiPolygon, an empty polygon and nulls: same bytes."""
+        shapely = _shapely()
+        from geoparquet_io.core.process.simplify import simplify_table
+
+        wkb = self._grid_wkb()
+        wkb.append(
+            shapely.to_wkb(
+                shapely.MultiPolygon(
+                    [
+                        shapely.buffer(shapely.Point(20, 0), 0.3),
+                        shapely.buffer(shapely.Point(22, 0), 0.3),
+                    ]
+                )
+            )
+        )
+        wkb.append(shapely.to_wkb(shapely.from_wkt("POLYGON EMPTY")))
+        wkb.insert(1, None)
+        out = simplify_table(_table(wkb, chunks=2), 0.05, coverage=True)
+        assert out.column("geometry").to_pylist() == self._wrapped_reference(wkb)
+
+    def test_the_shortcut_is_actually_taken(self, monkeypatch):
+        """With no CRS transform, ``coverage_simplify`` is never called."""
+        coarsen = pytest.importorskip("coarsen")
+        if not hasattr(coarsen, "simplify_wkb"):
+            pytest.skip("this coarsen does not export simplify_wkb")
+        from geoparquet_io.core.process.simplify import simplify_table
+
+        def wrapper_must_not_run(*args, **kwargs):
+            raise AssertionError("the WKB shortcut should have run instead")
+
+        monkeypatch.setattr(coarsen, "coverage_simplify", wrapper_must_not_run)
+        out = simplify_table(_table(self._grid_wkb(), chunks=1), 0.05, coverage=True)
+        assert out.column("geometry").null_count == 0
+
+    @staticmethod
+    def _hide_shortcut(monkeypatch):
+        """Make gpio's coarsen lookup see no ``simplify_wkb``.
+
+        ``delattr`` on the module would be the obvious simulation, but
+        ``coverage_simplify`` itself calls the module-global ``simplify_wkb``,
+        so deleting it breaks the wrapper we are falling back to. A proxy
+        hides the symbol from gpio alone.
+        """
+        coarsen = pytest.importorskip("coarsen")
+        from geoparquet_io.core.process import simplify as simplify_mod
+
+        class NoShortcut:
+            def __getattr__(self, name):
+                if name == "simplify_wkb":
+                    raise AttributeError(name)
+                return getattr(coarsen, name)
+
+        monkeypatch.setattr(simplify_mod, "require_coarsen", lambda: NoShortcut())
+
+    def test_falls_back_when_coarsen_lacks_the_symbol(self, monkeypatch):
+        """``simplify_wkb`` is undocumented; its absence must not break coverage."""
+        from geoparquet_io.core.process.simplify import simplify_table
+
+        wkb = self._grid_wkb()
+        self._hide_shortcut(monkeypatch)
+        out = simplify_table(_table(wkb, chunks=1), 0.05, coverage=True)
+        assert out.column("geometry").to_pylist() == self._wrapped_reference(wkb)
+
+    def test_falls_back_under_a_simplify_crs_transform(self, monkeypatch):
+        """A ``--simplify-crs`` transform rewrites the geometries, so the
+        column's original WKB is no longer the kernel's input: the shortcut
+        must stand down rather than simplify untransformed bytes."""
+        coarsen = pytest.importorskip("coarsen")
+        if not hasattr(coarsen, "simplify_wkb"):
+            pytest.skip("this coarsen does not export simplify_wkb")
+        pytest.importorskip("pyproj")
+        from geoparquet_io.core.process import simplify as simplify_mod
+        from geoparquet_io.core.process.simplify import simplify_table
+
+        # Trap gpio's call site only: patching the coarsen module attribute
+        # would also break coverage_simplify, which calls the same global.
+        def shortcut_must_not_run(*args, **kwargs):
+            raise AssertionError("the WKB shortcut must not run under a CRS transform")
+
+        class TrappedShortcut:
+            simplify_wkb = staticmethod(shortcut_must_not_run)
+
+            def __getattr__(self, name):
+                return getattr(coarsen, name)
+
+        monkeypatch.setattr(simplify_mod, "require_coarsen", lambda: TrappedShortcut())
+        out = simplify_table(
+            _table(self._grid_wkb(), chunks=1), 50.0, coverage=True, simplify_crs="EPSG:3857"
+        )
+        assert out.column("geometry").null_count == 0
+
+    @pytest.mark.parametrize("drop_symbol", [False, True])
+    def test_non_polygonal_input_keeps_the_wrapper_error(self, monkeypatch, drop_symbol):
+        """The kernel refuses a Point with its own ValueError; the wrapper (and
+        therefore gpio, before and after the shortcut) raises
+        ``TypeError('One of the Geometry inputs is of incorrect geometry
+        type.')``. The shortcut pre-checks the parsed types so the message is
+        the same whichever path runs."""
+        pytest.importorskip("coarsen")
+        shapely = _shapely()
+        from geoparquet_io.core.process.simplify import simplify_table
+
+        if drop_symbol:
+            self._hide_shortcut(monkeypatch)
+        wkb = self._grid_wkb(2)
+        wkb.append(shapely.to_wkb(shapely.Point(0, 0)))
+        with pytest.raises(TypeError, match="incorrect geometry type"):
+            simplify_table(_table(wkb, chunks=1), 0.05, coverage=True)
+
+
+@requires_coarsen
 class TestDropEmpty:
     """``drop_empty`` inverts the empty mask; nulls are not empties."""
 

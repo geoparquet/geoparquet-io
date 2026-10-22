@@ -251,9 +251,18 @@ def _simplify_values(
         raise GeoParquetError(f"could not parse a WKB geometry in the input: {e}") from e
     if forward is not None:
         geoms = shapely.transform(geoms, forward)
+    out_wkb = None
     if coverage:
-        out = coarsen.coverage_simplify(
-            geoms, tolerance, simplify_boundary=simplify_boundary, threads=threads
+        out, out_wkb = _coverage_out(
+            coarsen,
+            shapely,
+            np,
+            geoms,
+            wkb_all[idx],
+            tolerance,
+            simplify_boundary=simplify_boundary,
+            threads=threads,
+            transformed=forward is not None or inverse is not None,
         )
     else:
         out = coarsen.simplify(geoms, tolerance, preserve_topology, threads=threads)
@@ -264,10 +273,54 @@ def _simplify_values(
     # Scatter by index instead of walking the rows: nulls keep their None and
     # everything else takes its new WKB in one assignment.
     result = np.full(n_rows, None, dtype=object)
-    result[idx] = shapely.to_wkb(out)
+    result[idx] = shapely.to_wkb(out) if out_wkb is None else out_wkb
     empty_mask = np.zeros(n_rows, dtype=bool)
     empty_mask[idx] = out_empty
     return result, max(collapsed, 0), empty_mask, out, idx
+
+
+def _coverage_out(
+    coarsen,
+    shapely,
+    np,
+    geoms,
+    wkb_in,
+    tolerance: float,
+    *,
+    simplify_boundary: bool,
+    threads: int | None,
+    transformed: bool,
+) -> tuple[Any, Any]:
+    """Coverage-simplify ``geoms``, via coarsen's WKB kernel when it applies.
+
+    ``coarsen.simplify_wkb`` is the coverage kernel ``coverage_simplify``
+    wraps, taking and returning WKB directly: handing it the column's own
+    bytes skips the wrapper's ``to_wkb`` pass over the inputs, and its output
+    lands in the result column without a second serialization (#1223). It is
+    undocumented API and skippable by design: when a ``--simplify-crs``
+    transform rewrote the geometries (``transformed`` — the column's WKB is
+    no longer the kernel's input) or the installed coarsen does not export
+    the symbol, the wrapped kernel runs exactly as before.
+
+    Returns ``(out_geoms, out_wkb)``; ``out_wkb`` is None on the wrapped
+    path, where the caller serializes ``out_geoms`` itself. The non-polygonal
+    pre-check reproduces the wrapper's own refusal — same TypeError, same
+    message — because the kernel's is a differently-typed, differently-worded
+    ``ValueError`` (pinned in TestCoverageWkbShortcut).
+    """
+    simplify_wkb = getattr(coarsen, "simplify_wkb", None)
+    if transformed or simplify_wkb is None:
+        out = coarsen.coverage_simplify(
+            geoms, tolerance, simplify_boundary=simplify_boundary, threads=threads
+        )
+        return out, None
+    if not np.isin(shapely.get_type_id(geoms), (3, 6)).all():
+        raise TypeError("One of the Geometry inputs is of incorrect geometry type.")
+    out_wkb = np.array(
+        simplify_wkb(list(wkb_in), tolerance, simplify_boundary=simplify_boundary, threads=threads),
+        dtype=object,
+    )
+    return shapely.from_wkb(out_wkb), out_wkb
 
 
 def _row_bounds(shapely, np, n_rows: int, geoms: Any, idx: Any) -> Any:
