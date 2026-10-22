@@ -216,7 +216,7 @@ zooms; tylertoo derives zooms from `gsd` otherwise.
 | `--write-memory` | half the memory ceiling | DuckDB memory limit for the rollups (e.g. `8GB`). The default follows the container or Slurm job cap when that is lower than RAM |
 
 Compression (`--compression`, `--compression-level`), `--geoparquet-version`, `--verbose`, and `--show-sql` behave as elsewhere in gpio,
-except that an unset `--compression-level` resolves to ZSTD 9 rather than the global 15 — see
+except that an unset `--compression-level` resolves to ZSTD 9 rather than the write funnel's 15 — see
 [Compression](../concepts/best-practices.md#compression) for why.
 
 ## See Also

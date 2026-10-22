@@ -29,9 +29,9 @@ does ``from geoparquet_io.cli.main import cli``, which rebinds the
 ``Group``'s ``.commands`` is a dict of its subcommands. So
 ``geoparquet_io.cli.commands.add`` resolves against that dict and fails with a
 confusing ``'dict' object has no attribute 'add'``, even though
-``import geoparquet_io.cli.commands.add`` itself succeeds. The re-export is
-forced by the ``gpio = "geoparquet_io:cli"`` entry point, so the shadow stays
-(tracked separately). Use the ``from`` form, as the tests do::
+``import geoparquet_io.cli.commands.add`` itself succeeds. The shadow is a kept
+compatibility quirk of the package root (the entry point itself is
+``gpio = "geoparquet_io.cli.main:main"``), so it stays (tracked separately). Use the ``from`` form, as the tests do::
 
     from geoparquet_io.cli.commands import add as cli_add
 """

@@ -264,18 +264,17 @@ the network lane only.
 Uses commitizen + automated CI workflow:
 
 ```bash
-# 1. Create bump PR (updates version + changelog)
-uv run cz bump --changelog
+# 1. Create bump PR (updates versions only, the changelog section is reviewed first)
+uv run cz bump --yes
 git push origin HEAD
 
 # 2. Open PR, merge to main
 # 3. CI automatically: creates tag, publishes to PyPI, creates GitHub Release
 ```
 
-**Recovery** (if release fails after merge):
+**Recovery** (if release fails after merge). Do not delete the tag. The upload is the last step, so nothing is half-published. Fix the cause on `main`, then re-run:
 ```bash
-git push origin :refs/tags/vX.Y.Z  # Delete orphan tag
-gh workflow run release.yml --ref main  # Retry
+gh workflow run publish.yml --ref main
 ```
 
 ## License

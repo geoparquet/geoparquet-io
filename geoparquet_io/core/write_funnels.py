@@ -25,7 +25,6 @@ import copy
 import json
 from collections.abc import Collection
 
-import duckdb
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import (
@@ -128,8 +127,9 @@ from geoparquet_io.core.write_strategies.base import (
 def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
     """Map geometry column -> non-planar edges value declared by the input.
 
-    Sources: the native GEOGRAPHY logical type's algorithm, and any non-planar
-    ``edges`` in the input's geo column metadata.
+    The geo block's explicit planar or recognized non-planar declaration wins
+    over the native GEOGRAPHY type, just as in ``table_nonplanar_edges``.
+    Unrecognized values say nothing, so the type remains the fallback.
     """
     edges_by_col: dict[str, str] = {}
     try:
@@ -141,16 +141,19 @@ def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
         geo_meta = get_geo_metadata(input_file) or {}
         for name, col_meta in (geo_meta.get("columns") or {}).items():
             edges = col_meta.get("edges") if isinstance(col_meta, dict) else None
-            if edges and edges != "planar":
-                edges_by_col.setdefault(name, edges)
+            if edges == "planar":
+                edges_by_col.pop(name, None)
+            elif edges in GEOGRAPHY_EDGE_ALGORITHMS:
+                edges_by_col[name] = edges
     except Exception as e:
-        # Fail loudly: an empty answer reads as "planar", which re-enables the
-        # planar geometry repair and drops the edges from the output (#1287).
-        warn(
-            f"Could not read the edges metadata of {input_file}; treating its geometry "
-            f"as planar: {e}"
+        # A broken optional geo block must not erase native declarations already
+        # read. An empty answer would re-enable destructive planar work (#1287).
+        fallback = (
+            "keeping known non-planar declarations"
+            if edges_by_col
+            else "treating its geometry as planar"
         )
-        return {}
+        warn(f"Could not read the edges metadata of {input_file}; {fallback}: {e}")
     return edges_by_col
 
 
@@ -723,6 +726,8 @@ def _probe_output_columns(con, query: str, verbose: bool, purpose: str) -> list[
     Best-effort by design: every caller treats an unreadable schema as "unknown"
     rather than aborting the write.
     """
+    import duckdb
+
     try:
         return _get_query_columns(con, query)
     except (duckdb.Error, RuntimeError, ValueError, AttributeError) as e:
@@ -1613,7 +1618,9 @@ def write_parquet_with_metadata(
 
         # Auto-fix vecorel schema compliance when collection metadata is present
         if not is_remote:
-            _auto_fix_vecorel_if_needed(actual_output, extra_kv_metadata, original_metadata)
+            _auto_fix_vecorel_if_needed(
+                actual_output, extra_kv_metadata, original_metadata, compression_level
+            )
 
         if is_remote:
             upload_if_remote(
@@ -1691,8 +1698,15 @@ def _auto_fix_vecorel_if_needed(
     output_path: str,
     extra_kv_metadata: dict | None,
     original_metadata: dict | None,
+    compression_level: int | None = None,
 ) -> None:
-    """Fix vecorel schema compliance if the output has collection metadata."""
+    """Fix vecorel schema compliance if the output has collection metadata.
+
+    ``compression_level`` is the level the funnel just wrote the file at; the
+    in-place schema fix must keep writing at it, or it silently undoes the
+    level of the write it is fixing (unset, the fix falls to the detected
+    codec's own default).
+    """
     has_collection = False
     if extra_kv_metadata and "collection" in extra_kv_metadata:
         has_collection = True
@@ -1712,7 +1726,7 @@ def _auto_fix_vecorel_if_needed(
         pf.close()
         non_nullable = [c for c in VECOREL_NON_NULLABLE if c in columns]
         if non_nullable:
-            _fix_vecorel_schema(output_path, non_nullable)
+            _fix_vecorel_schema(output_path, non_nullable, compression_level=compression_level)
 
 
 def write_geoparquet_table(

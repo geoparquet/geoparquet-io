@@ -23,15 +23,16 @@ COMPRESSION_RANGES = {
 #:
 #: Measured on their own output tables (#1299, benchmarks on #1195): level 9
 #: writes 2.8-8.2x faster than 15 for at most 4.9% more bytes, and on a
-#: 217k-row polygonize table it is both faster *and* smaller -- at 15 ZSTD's
-#: long-range matching fights the dictionary encoding on a column of short WKB
+#: 217k-row polygonize table it is both faster *and* smaller -- level 15's
+#: long-range matching buys nothing on a column of short, high-entropy WKB
 #: blobs. Below 9 the size cost stops being noise: level 3 is 15-20% larger on
 #: geometry-heavy tables and level 1 is 34-35% larger, the wrong trade for
 #: files people host and pay egress on.
 #:
 #: These commands compute a whole table and then write it, so the write is a
 #: large share of their wall clock -- 67-90% on the raster two. Every other
-#: command keeps 15.
+#: write-funnel path keeps 15 (plain DuckDB COPY commands with no level fall
+#: to DuckDB's own 3; #1335 tracks unifying that).
 PROCESS_ZSTD_LEVEL = 9
 
 
@@ -42,6 +43,9 @@ def resolve_process_compression_level(compression, compression_level):
     explicit ``--compression-level`` always wins. Only an *unset* level moves,
     and only for ZSTD: GZIP and BROTLI have their own curves and keep the
     defaults in :data:`COMPRESSION_RANGES`, because nothing has measured them.
+    A ``None`` or empty codec is also left alone -- the write funnels treat an
+    unset codec as ZSTD and fill in their own default (15), so a caller
+    passing ``compression=None`` gets the funnel default, not 9.
 
     Call this at the entry of a process command's core, not deeper. The
     resolved number has to be the one that reaches the write funnel, which

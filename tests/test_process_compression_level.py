@@ -136,6 +136,24 @@ class TestGlobalDefaultIsUnchanged:
         _, global_level, _ = validate_compression_settings("ZSTD", None)
         assert PROCESS_ZSTD_LEVEL < global_level
 
+    def test_a_levelless_codec_warns_only_about_a_level_the_caller_chose(self, caplog):
+        """The warning compares against the global ZSTD default, from one place.
+
+        Callers that pass a level unconditionally hand SNAPPY the ZSTD default,
+        which is not something to warn about; anything else is.
+        """
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            _, level, desc = validate_compression_settings("SNAPPY", 9, verbose=True)
+        assert level is None and desc == "SNAPPY"
+        assert "does not support compression levels" in caplog.text
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            validate_compression_settings("SNAPPY", 15, verbose=True)
+        assert caplog.text == ""
+
 
 class TestRewriteWriterKwargs:
     """An unset level must not fall through to pyarrow's own default of 1."""
@@ -152,10 +170,80 @@ class TestRewriteWriterKwargs:
     def test_a_levelless_codec_gets_no_level(self, codec):
         assert "compression_level" not in _rewrite_writer_kwargs(codec, None)
 
+    @pytest.mark.parametrize("codec", ["GZIP", "BROTLI"])
+    def test_unset_gzip_and_brotli_resolve_to_their_codec_default(self, codec):
+        # Deliberate: these now get gpio's documented default of 6 instead of
+        # pyarrow's own implicit default, the same unset-means-the-documented-
+        # number rule as ZSTD. Nothing has measured other levels for them.
+        assert _rewrite_writer_kwargs(codec, None)["compression_level"] == 6
+
     def test_the_codec_still_round_trips(self):
         assert _rewrite_writer_kwargs("SNAPPY", None)["compression"] == "snappy"
         assert _rewrite_writer_kwargs("ZSTD", None)["compression"] == "zstd"
         assert _rewrite_writer_kwargs("UNCOMPRESSED", None)["compression"] == "none"
+
+
+class TestVecorelSchemaFixLevel:
+    """The in-place vecorel rewrite must not undo the file's level.
+
+    ``_fix_vecorel_schema`` detects the codec from the file but Parquet
+    footers carry no level, so an omitted ``compression_level`` silently fell
+    to pyarrow's ZSTD 1 — undoing the level of the write it was fixing.
+    """
+
+    def _nullable_id_file(self, tmp_path):
+        table = pa.table({"id": pa.array(["a", "b"], type=pa.string())})
+        path = tmp_path / "vecorel.parquet"
+        pq.write_table(table, str(path), compression="ZSTD")
+        return str(path)
+
+    def test_an_unset_level_resolves_to_the_codec_default(self, tmp_path, levels):
+        from geoparquet_io.core.constants import _fix_vecorel_schema
+
+        path = self._nullable_id_file(tmp_path)
+        levels.clear()
+        _fix_vecorel_schema(path, ["id"])
+        assert levels == [15]
+
+    def test_a_caller_resolved_level_passes_through(self, tmp_path, levels):
+        from geoparquet_io.core.constants import _fix_vecorel_schema
+
+        path = self._nullable_id_file(tmp_path)
+        levels.clear()
+        _fix_vecorel_schema(path, ["id"], compression_level=PROCESS_ZSTD_LEVEL)
+        assert levels == [PROCESS_ZSTD_LEVEL]
+
+
+class TestVecorelMetadataRewriteCodec:
+    """The vecorel metadata rewrite keeps the caller's codec.
+
+    Passing the settings through only when a level was set re-encoded a GZIP
+    output as ZSTD on this one rewrite (the funnel's defaults took over).
+    """
+
+    def test_the_requested_codec_reaches_the_rewrite(self, tmp_path, monkeypatch):
+        import geoparquet_io.core.add.geometry_metrics as gm
+        import geoparquet_io.core.duckdb_utils as du
+
+        src = tmp_path / "in.parquet"
+        pq.write_table(pa.table({"id": ["a"]}), str(src), compression="GZIP")
+        seen: dict = {}
+
+        def fake_write(con, query, out, **kwargs):
+            seen.update(kwargs)
+            pq.write_table(pa.table({"id": ["a"]}), out, compression="GZIP")
+
+        class FakeCon:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(gm, "write_parquet_with_metadata", fake_write)
+        monkeypatch.setattr(du, "get_duckdb_connection", lambda **k: FakeCon())
+        gm._add_vecorel_metadata_to_file(
+            str(src), False, None, compression="GZIP", compression_level=None
+        )
+        assert seen["compression"] == "GZIP"
+        assert seen["compression_level"] is None
 
 
 class TestHelpTextNamesTheRightDefault:
@@ -342,17 +430,51 @@ class TestSimplify:
         simplify_file(src, str(tmp_path / "out.parquet"), 0.01, compression_level=15)
         assert levels and all(level == 15 for level in levels)
 
-    def test_the_streamed_level_survives_a_refresh_metrics_detour(self, tmp_path, levels):
+    def _metrics_input(self, tmp_path):
+        """An input that actually has metric columns, so the detour runs.
+
+        Without them ``_simplify_then_refresh_metrics`` warns "nothing to
+        refresh" and does a plain simplify — which is how the first version of
+        this test stayed green while the detour's final writes went out at
+        DuckDB's 3 and pyarrow's 1.
+        """
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        base = _wkb_table(rows=8)
+        table = base.append_column(
+            "metrics:area", pa.array([1.0] * base.num_rows, type=pa.float64())
+        ).append_column("metrics:perimeter", pa.array([4.0] * base.num_rows, type=pa.float64()))
+        src = tmp_path / "in_metrics.parquet"
+        write_geoparquet_table(table, str(src))
+        return str(src)
+
+    def test_the_streamed_level_survives_a_refresh_metrics_detour(
+        self, tmp_path, levels, monkeypatch
+    ):
         """``--refresh-metrics`` re-enters through another command's core.
 
         The resolve happens once at ``simplify_file``'s entry, so the temp
-        sibling *and* the final write that ``add geometry-metrics`` performs
-        both have to carry the resolved level rather than re-resolving to the
-        global 15 on the way through.
+        sibling *and* every write ``add geometry-metrics`` performs — its two
+        DuckDB COPY passes, the vecorel metadata rewrite, the id column, and
+        the schema fix — have to carry the resolved level rather than fall to
+        their own defaults on the way through. The pq spy sees the pyarrow
+        writes; the DuckDB COPY writes are spied at ``add_computed_column``.
         """
+        import geoparquet_io.core.add.geometry_metrics as gm
+        import geoparquet_io.core.constants as consts
         from geoparquet_io.core.process.simplify import simplify_file
 
-        src = self._input(tmp_path)
+        duckdb_levels: list[int | None] = []
+        real_add = gm.add_computed_column
+
+        def spy_add(*args, **kwargs):
+            duckdb_levels.append(kwargs.get("compression_level"))
+            return real_add(*args, **kwargs)
+
+        monkeypatch.setattr(gm, "add_computed_column", spy_add)
+        monkeypatch.setattr(consts, "add_computed_column", spy_add)
+        src = self._metrics_input(tmp_path)
         levels.clear()
         simplify_file(src, str(tmp_path / "out.parquet"), 0.01, refresh_metrics=True)
         assert levels and all(level == PROCESS_ZSTD_LEVEL for level in levels)
+        assert duckdb_levels and all(level == PROCESS_ZSTD_LEVEL for level in duckdb_levels)

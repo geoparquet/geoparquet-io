@@ -7,12 +7,12 @@
 #
 # Developer workflow:
 # 1. Accumulate changes via normal PR merges
-# 2. When ready to release, create a PR running: uv run cz bump --changelog
+# 2. When ready to release, create a PR running: uv run cz bump --yes
 # 3. Merge bump PR -> this workflow creates tag and publishes
 #
 # Recovery workflow (when release fails after bump merge):
-# 1. Delete orphan tag if exists: git push origin :refs/tags/vX.Y.Z
-# 2. Trigger manually: gh workflow run release.yml --ref main
+# 1. Do not delete the tag. The upload is the last step, so nothing is half-published.
+# 2. Fix the cause on main, then trigger manually: gh workflow run publish.yml --ref main
 name: Release
 on:
   push:
@@ -40,7 +40,7 @@ jobs:
           fetch-depth: 0  # Full history for tag creation
 
       - name: Install uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           # No cache in the publish path: a poisoned cache must never be able
           # to influence artifacts shipped to PyPI (zizmor cache-poisoning).

@@ -205,6 +205,49 @@ gpio convert data.parquet output.csv --no-wkt
 gpio convert data.parquet output.csv --no-bbox
 ```
 
+### Filtering During Conversion
+
+`convert geopackage`, `convert flatgeobuf` and `convert csv` can filter rows on
+the way through, with the same `--bbox`, `--geometry` and `--where` options as
+`gpio extract` -- one step instead of extract-then-convert. A `--bbox` prunes on
+the input's bbox covering column when it has one.
+
+=== "CLI"
+
+    <!-- doctest: menu -->
+    ```bash
+    # Only the features in a bounding box
+    gpio convert geopackage data.parquet box.gpkg --bbox -0.5,10.0,0.5,11.0
+
+    # Features intersecting a geometry (GeoJSON, WKT, or @file)
+    gpio convert flatgeobuf data.parquet clipped.fgb \
+        --geometry "POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))"
+
+    # Attribute filter, DuckDB WHERE syntax
+    gpio convert csv data.parquet named.csv --where "name IS NOT NULL"
+
+    # Combined
+    gpio convert geopackage data.parquet combined.gpkg \
+        --bbox -0.5,10.0,0.5,11.0 --where "name IS NOT NULL"
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.read('data.parquet')
+
+    # Only the features in a bounding box
+    table.write('box.gpkg', bbox=(-0.5, 10.0, 0.5, 11.0))
+
+    # Features intersecting a geometry (GeoJSON or WKT text, or @file)
+    table.write('clipped.fgb', geometry='POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))')
+
+    # Attribute filter, DuckDB WHERE syntax
+    table.write('named.csv', where="name IS NOT NULL")
+    ```
+
 **GeoJSON:**
 
 <!-- doctest: menu -->
@@ -629,6 +672,14 @@ repair is actively destructive on spherical data. The geometry passes through
 unchanged. An `edges` value that is not a GeoParquet edge algorithm is not a
 declaration gpio can honor, so that column keeps the planar repair. Repair on
 the sphere (via the S2 `geography` extension) is a planned follow-up.
+
+This pass-through applies to GeoParquet output. GeoJSON and PMTiles export
+instead refuse a non-planar geometry declaration before writing anything.
+Their Cartesian segments cannot carry geodesic edges, and their planar
+precision reduction can destroy valid spherical shapes even with repair off.
+`--no-repair-geometry` and `repair_geometry=False` do not bypass the refusal.
+See [non-planar GeoJSON inputs](geojson.md#non-planar-edges) for the CLI and
+Python API limitations.
 
 === "CLI"
 

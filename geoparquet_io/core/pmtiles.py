@@ -17,7 +17,9 @@ from typing import IO
 
 from geoparquet_io.core.column_selection import split_column_list
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.geojson_stream import require_planar_geojson_file
 from geoparquet_io.core.logging_config import debug, success
+from geoparquet_io.core.streaming import is_stdin
 
 
 class TippecanoeNotFoundError(Exception):
@@ -639,6 +641,13 @@ def create_pmtiles_from_geoparquet(
     """
     _validate_path(input_path)
     _validate_path(output_path)
+    if is_stdin(input_path):
+        raise InvalidParameterError(
+            "input_path",
+            "PMTiles needs an inspectable file before starting the tiler. "
+            "First save the Arrow IPC stream as GeoParquet with "
+            "'gpio extract geoparquet - saved.parquet', then pass saved.parquet to PMTiles.",
+        )
     if layer and layer_by_column:
         raise ValueError(
             "When creating pmtiles, you cannot specify both 'layer' which defines one layer name "
@@ -653,6 +662,13 @@ def create_pmtiles_from_geoparquet(
 
     if not _check_tippecanoe():
         raise TippecanoeNotFoundError()
+
+    # Check the source before an extract/reproject child can lose its edge
+    # declaration, and before tippecanoe can create or overwrite an archive.
+    preprocessed = bbox or where or cols or src_crs is not None or chunks
+    require_planar_geojson_file(
+        input_path, profile=profile, use_primary_geometry=bool(preprocessed)
+    )
 
     if chunks:
         # Deferred: pmtiles_chunks tiles each chunk through this function.

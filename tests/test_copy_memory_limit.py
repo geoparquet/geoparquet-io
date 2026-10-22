@@ -344,11 +344,13 @@ class TestCgroupMemory:
         assert memory_limits._cgroup_limit(proc, root) is None
 
     def _point_at(self, monkeypatch, proc, root, ram):
+        # memory_limits defers `import psutil` to call time (#1307), so patch
+        # psutil at source rather than as a module attribute it no longer has.
+        import psutil
+
         monkeypatch.setattr(memory_limits, "_PROC_SELF_CGROUP", proc)
         monkeypatch.setattr(memory_limits, "_CGROUP_ROOT", root)
-        monkeypatch.setattr(
-            memory_limits.psutil, "virtual_memory", lambda: SimpleNamespace(total=ram)
-        )
+        monkeypatch.setattr(psutil, "virtual_memory", lambda: SimpleNamespace(total=ram))
 
     def test_ceiling_is_the_cgroup_when_it_is_lower(self, tmp_path, monkeypatch):
         proc, root = _fake_cgroups(tmp_path, ["0::/job"], {"job/memory.max": str(2 * GIB)})

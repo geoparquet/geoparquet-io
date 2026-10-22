@@ -5,6 +5,8 @@ This module defines constants that are shared across multiple modules to ensure
 consistency and make it easy to change values in one place.
 """
 
+from typing import Any
+
 from geoparquet_io.core.common import add_computed_column
 from geoparquet_io.core.duckdb_metadata import get_column_names
 
@@ -108,14 +110,21 @@ def build_collection_metadata(
 VECOREL_NON_NULLABLE = {"id", "geometry", "admin:country_code"}
 
 
-def ensure_vecorel_columns(parquet_file: str, verbose: bool = False) -> None:
+def ensure_vecorel_columns(
+    parquet_file: str,
+    verbose: bool = False,
+    compression: str | None = None,
+    compression_level: int | None = None,
+) -> None:
     """Ensure a Parquet file has Vecorel-required columns with correct schema.
 
     - Adds a row-number 'id' column if one doesn't exist.
     - Sets required columns to non-nullable in the Parquet schema.
     - Converts UTC timestamps to millisecond precision.
 
-    Rewrites the file in place.
+    Rewrites the file in place. ``compression`` and ``compression_level`` are
+    the caller's already-resolved write settings; left unset, the rewrites
+    keep the file's codec and that codec's global default level.
     """
     import os
     import tempfile
@@ -128,11 +137,16 @@ def ensure_vecorel_columns(parquet_file: str, verbose: bool = False) -> None:
         os.close(fd)
         os.unlink(temp_out)
         try:
+            write_kwargs: dict[str, Any] = {}
+            if compression is not None:
+                write_kwargs["compression"] = compression
+                write_kwargs["compression_level"] = compression_level
             add_computed_column(
                 parquet_file,
                 temp_out,
                 column_name="id",
                 sql_expression="CAST(row_number() OVER () AS VARCHAR)",
+                **write_kwargs,
             )
             os.replace(temp_out, parquet_file)
         finally:
@@ -145,10 +159,12 @@ def ensure_vecorel_columns(parquet_file: str, verbose: bool = False) -> None:
     # sent `out''_gm.parquet` on to pyarrow (issue #718).
     columns = get_column_names(parquet_file)
     non_nullable = [c for c in VECOREL_NON_NULLABLE if c in columns]
-    _fix_vecorel_schema(parquet_file, non_nullable)
+    _fix_vecorel_schema(parquet_file, non_nullable, compression_level=compression_level)
 
 
-def _fix_vecorel_schema(parquet_file: str, non_nullable_columns: list[str]) -> None:
+def _fix_vecorel_schema(
+    parquet_file: str, non_nullable_columns: list[str], compression_level: int | None = None
+) -> None:
     """Fix Parquet schema for Vecorel compliance.
 
     - Sets specified columns to non-nullable
@@ -255,6 +271,15 @@ def _fix_vecorel_schema(parquet_file: str, non_nullable_columns: list[str]) -> N
         # write funnel kept out of the dictionary (#1122). The geo block and the
         # geoarrow extension types name the geometry columns.
         writer_kwargs = without_geometry_dictionary({"compression": pa_compression}, new_schema)
+        # An omitted level is not "the default": pyarrow fills ZSTD level 1,
+        # 14 under the global 15 the file was most likely written at. Resolve
+        # the caller's level (or the codec's own default) through the owner.
+        if pa_compression != "NONE":
+            from geoparquet_io.core.compression import validate_compression_settings
+
+            _, resolved_level, _ = validate_compression_settings(pa_compression, compression_level)
+            if resolved_level is not None:
+                writer_kwargs["compression_level"] = resolved_level
         with pq.ParquetWriter(temp_out, new_schema, **writer_kwargs) as writer:
             for rg_idx in range(pf.metadata.num_row_groups):
                 rg_table = pf.read_row_group(rg_idx)

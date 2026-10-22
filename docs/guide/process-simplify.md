@@ -68,7 +68,7 @@ else in gpio works as before.
 | `--drop-empty` | off | Drop rows whose geometry is empty after simplification |
 | `--simplify-crs` | — | Project to this CRS for the simplification (tolerance in its units), then back; `auto-utm` picks the UTM zone from the data |
 | `--refresh-metrics` | off | Recompute vecorel `metrics:area`/`metrics:perimeter` from the simplified geometry |
-| `--compression-level` | 9 | ZSTD level. The `process` group's default; everywhere else in gpio it is 15 |
+| `--compression-level` | 9 | ZSTD level. The `process` group's default; the write funnel's default elsewhere is 15 |
 
 Native **GeoParquet 2.0 inputs** are supported: the geometry arrives as a
 geoarrow WKB extension column, is simplified on its raw WKB, and the write

@@ -6,6 +6,100 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## v1.7.0 (2026-10-16)
+
+The theme of this release is getting data in and out of gpio without losing what it means. Shapefiles in Shift_JIS and other codepages now decode to valid UTF-8, so Japanese and other non-Latin attribute text survives conversion, and gpio refuses to write invalid strings. A CRS with no EPSG code, such as a custom projection, is now reprojected correctly instead of being read as lon/lat, and an unknown CRS stays unknown instead of being guessed, marked `srid:0` on native 2.0 types. Every command reads the primary geometry's CRS, CARTO extracts carry the table's real CRS, and CRS and non-planar edges survive writes, partitions, IPC pipes and Table API aggregation and overviews. Native GEOGRAPHY output now carries geodesic file and row-group bounds, and Table operations accept spherical geometry and warn when they use planar math.
+
+This release also adds three new processing operations, simplify (from [coarsen](https://github.com/taylor-geospatial/coarsen)), polygonize and contour (from [contourrs](https://github.com/taylor-geospatial/contourrs)). Thanks to @isaaccorley for building the underlying Rust libraries. Simplify needs the simplify extra, and polygonize and contour need the raster extra and Python 3.12 or newer. The aggregate command gained the ability to aggregate by the percentage of a cell covered, with `pct_cell`. The `convert` command can now build geometry from latitude and longitude or WKT columns in ordinary Parquet files. BigQuery extraction supports views, materialized views and custom GoogleSQL, and a new `stac-metadata` command writes the stac-geoparquet info to the footer. New DuckDB connections now default to a memory budget of 50% of the lower of physical RAM and the container limit when that ceiling can be detected, and otherwise keep DuckDB's own default. Set `--write-memory` or `memory_limit=` where supported to choose an explicit limit, and gpio keeps a stricter limit you set on your own connection. Streaming rewrites, fewer sorts and fewer copies reduce memory use and write overhead.
+
+Several changes are breaking. Check commands now exit with status 1 when a check fails. Use `--strict` to fail on warnings too, and update scripts that relied on successful exit codes for failed checks or unmatched globs. Dictionary coverings without a bbox member are omitted from output, including H3, S2, A5, kdtree, quadkey and custom coverings. Add a bbox column when consumers need covering metadata. Planar geometry repair is skipped for declared non-planar edges, including explicit repair requests. Use a tool that supports spherical geometry to repair such data. GeoJSON and PMTiles export now refuse an exported geometry declared spherical or ellipsoidal, including point-only and empty inputs. Keep the data in GeoParquet, or use a geodesic-aware tool to densify and cut shapes into a planar representation before export. Disabling repair does not bypass this check. PMTiles requires a file input, so save an IPC stream as GeoParquet first. WFS bbox values are read in the CRS requested from the layer, in x,y order, and are never automatically reprojected. Supply projected coordinates for a projected request CRS. A layer CRS that gpio cannot resolve is refused. The new memory defaults are listed as breaking too, because they change the limits that writes and connections run under.
+
+Two people contributed to this release, though neither shows up directly as a PR author. @jimmyrocks wrote [#1240](https://github.com/geoparquet/geoparquet-io/pull/1240), which landed as [#1271](https://github.com/geoparquet/geoparquet-io/pull/1271), and did all the actual work on a nice fix for more robust ArcGIS support. @isaaccorley built the underlying libraries behind the new simplify, polygonize and contour processes, but since he didn't write the gpio wrappers he doesn't show up either. We appreciate both their contributions and look forward to more.
+
+### Breaking
+
+- perf(convert)!: bound 2.0 writes by a cgroup-aware memory limit and sort the input once by [@cholmes](https://github.com/cholmes) in [#1154](https://github.com/geoparquet/geoparquet-io/pull/1154)
+- perf(partition)!: bound direct COPY writes (partition, admin, pmtiles) by the write memory limit by [@cholmes](https://github.com/cholmes) in [#1166](https://github.com/geoparquet/geoparquet-io/pull/1166)
+- fix(partition)!: omit dictionary coverings without a bbox member by [@cholmes](https://github.com/cholmes) in [#1167](https://github.com/geoparquet/geoparquet-io/pull/1167)
+- fix(process)!: cap aggregate/overview memory and read only the aggregated columns by [@cholmes](https://github.com/cholmes) in [#1183](https://github.com/geoparquet/geoparquet-io/pull/1183)
+- perf(memory)!: bound every DuckDB connection and keep a caller's stricter memory limit by [@cholmes](https://github.com/cholmes) in [#1210](https://github.com/geoparquet/geoparquet-io/pull/1210)
+- fix(check)!: exit 1 when a check fails, add --strict for warnings, and fail on a glob that matches nothing by [@cholmes](https://github.com/cholmes) in [#1252](https://github.com/geoparquet/geoparquet-io/pull/1252)
+- fix(convert)!: stop planar repair from mangling geometries with spherical edges by [@cholmes](https://github.com/cholmes) in [#1288](https://github.com/geoparquet/geoparquet-io/pull/1288)
+- fix(wfs)!: send --bbox in the layer's CRS and refuse a layer CRS gpio cannot resolve by [@yharby](https://github.com/yharby) in [#1278](https://github.com/geoparquet/geoparquet-io/pull/1278)
+- fix(geojson)!: refuse exports that would lose non-planar edges by [@yharby](https://github.com/yharby) in [#1297](https://github.com/geoparquet/geoparquet-io/pull/1297)
+
+### Added
+
+- feat(extract): advertise --geoparquet-version 2.0 when a merge would carry no row-group spatial stats by [@cholmes](https://github.com/cholmes) in [#1182](https://github.com/geoparquet/geoparquet-io/pull/1182)
+- feat(aggregate): add pct_cell metric for percent of cell area covered by [@cholmes](https://github.com/cholmes) in [#1186](https://github.com/geoparquet/geoparquet-io/pull/1186)
+- feat(convert): build geometry from lat/lon or WKT columns in a Parquet file that has none by [@cholmes](https://github.com/cholmes) in [#1189](https://github.com/geoparquet/geoparquet-io/pull/1189)
+- feat(process): add simplify, polygonize and contour commands by [@cholmes](https://github.com/cholmes) in [#1195](https://github.com/geoparquet/geoparquet-io/pull/1195)
+- feat(process): add --drop-empty to gpio process simplify by [@cholmes](https://github.com/cholmes) in [#1201](https://github.com/geoparquet/geoparquet-io/pull/1201)
+- feat(process): simplify accepts native GeoParquet 2.0 inputs by [@cholmes](https://github.com/cholmes) in [#1202](https://github.com/geoparquet/geoparquet-io/pull/1202)
+- feat(process): add --simplify-crs for metric tolerances on geographic data by [@cholmes](https://github.com/cholmes) in [#1203](https://github.com/geoparquet/geoparquet-io/pull/1203)
+- feat(process): add --refresh-metrics to gpio process simplify by [@cholmes](https://github.com/cholmes) in [#1204](https://github.com/geoparquet/geoparquet-io/pull/1204)
+- feat(check): flag a covering with no bbox member in check spec, and drop it with --fix by [@cholmes](https://github.com/cholmes) in [#1208](https://github.com/geoparquet/geoparquet-io/pull/1208)
+- feat(extract): read a BigQuery view or materialized view by [@cholmes](https://github.com/cholmes) in [#1224](https://github.com/geoparquet/geoparquet-io/pull/1224)
+- feat(extract): add --sql to run your own GoogleSQL against BigQuery by [@cholmes](https://github.com/cholmes) in [#1228](https://github.com/geoparquet/geoparquet-io/pull/1228)
+- feat(add): write the stac-geoparquet footer key by [@cholmes](https://github.com/cholmes) in [#1231](https://github.com/geoparquet/geoparquet-io/pull/1231)
+- feat(check): fail a bbox column that does not cover its geometry by [@cholmes](https://github.com/cholmes) in [#1239](https://github.com/geoparquet/geoparquet-io/pull/1239)
+- feat(core): profile DuckDB queries with GPIO_DUCKDB_PROFILE by [@cholmes](https://github.com/cholmes) in [#1284](https://github.com/geoparquet/geoparquet-io/pull/1284)
+- feat(write): write a geodesic bounding box for GEOGRAPHY columns in 2.0 outputs by [@cholmes](https://github.com/cholmes) in [#1286](https://github.com/geoparquet/geoparquet-io/pull/1286)
+
+### Changed
+
+- perf(convert): stream the XYM/XYZM 2.0 geo-metadata rewrite instead of reading the file into memory by [@cholmes](https://github.com/cholmes) in [#1162](https://github.com/geoparquet/geoparquet-io/pull/1162)
+- perf(write): stop re-sorting the input for derived stats and re-encoding the file for the XYM 2.0 geo repair by [@cholmes](https://github.com/cholmes) in [#1213](https://github.com/geoparquet/geoparquet-io/pull/1213)
+- perf(write): patch the footer once for M/ZM 2.0 outputs with non-planar edges by [@cholmes](https://github.com/cholmes) in [#1283](https://github.com/geoparquet/geoparquet-io/pull/1283)
+- perf(core): stop whole-table DuckDB round-trips in sort, bbox and repair by [@cholmes](https://github.com/cholmes) in [#1285](https://github.com/geoparquet/geoparquet-io/pull/1285)
+
+### Fixed
+
+- fix(extract): write plain Parquet with no geo block when --exclude-cols drops the geometry column by [@cholmes](https://github.com/cholmes) in [#1163](https://github.com/geoparquet/geoparquet-io/pull/1163)
+- fix(convert): Hilbert-sort CSV WKT output when --skip-invalid is set by [@cholmes](https://github.com/cholmes) in [#1164](https://github.com/geoparquet/geoparquet-io/pull/1164)
+- fix(convert): compute the bbox column under a free name when 'bbox' is taken, and declare the covering over it by [@cholmes](https://github.com/cholmes) in [#1168](https://github.com/geoparquet/geoparquet-io/pull/1168)
+- fix(metadata): never declare another column's bbox struct as the primary geometry's covering by [@cholmes](https://github.com/cholmes) in [#1169](https://github.com/geoparquet/geoparquet-io/pull/1169)
+- fix(metadata): describe secondary geometry columns in geo.columns and recompute their emptied geometry_types by [@cholmes](https://github.com/cholmes) in [#1170](https://github.com/geoparquet/geoparquet-io/pull/1170)
+- fix(extract): do not advise GeoParquet 2.0 for a merge that has no geometry by [@cholmes](https://github.com/cholmes) in [#1196](https://github.com/geoparquet/geoparquet-io/pull/1196)
+- fix(convert): column-name collisions in convert, add bbox, Table.write and extract arcgis by [@cholmes](https://github.com/cholmes) in [#1211](https://github.com/geoparquet/geoparquet-io/pull/1211)
+- fix(metadata): write the same bbox covering whichever write path runs by [@cholmes](https://github.com/cholmes) in [#1212](https://github.com/geoparquet/geoparquet-io/pull/1212)
+- fix(metadata): read a bbox column for the primary geometry only, not a secondary's by [@cholmes](https://github.com/cholmes) in [#1209](https://github.com/geoparquet/geoparquet-io/pull/1209)
+- fix(metadata): describe a secondary geometry column on remote, glob, fast-path, convert, partition and Table API writes by [@cholmes](https://github.com/cholmes) in [#1214](https://github.com/geoparquet/geoparquet-io/pull/1214)
+- fix(write): write one geo entry with covering and CRS for 2.0 outputs that carry a geo block by [@yharby](https://github.com/yharby) in [#1227](https://github.com/geoparquet/geoparquet-io/pull/1227)
+- fix(check): fail a footer that carries more than one geo entry by [@yharby](https://github.com/yharby) in [#1230](https://github.com/geoparquet/geoparquet-io/pull/1230)
+- fix(add): close bbox-metadata's DuckDB connection when the rewrite fallback fails by [@yharby](https://github.com/yharby) in [#1246](https://github.com/geoparquet/geoparquet-io/pull/1246)
+- fix(write): name the declared geometry column as primary in 2.0 outputs when a secondary comes first by [@cholmes](https://github.com/cholmes) in [#1237](https://github.com/geoparquet/geoparquet-io/pull/1237)
+- fix(convert): keep the primary geometry's CRS when a secondary geometry column comes first by [@cholmes](https://github.com/cholmes) in [#1235](https://github.com/geoparquet/geoparquet-io/pull/1235)
+- fix(partition): keep a native-geo-only input's CRS and GEOGRAPHY edges by [@cholmes](https://github.com/cholmes) in [#1238](https://github.com/geoparquet/geoparquet-io/pull/1238)
+- fix(wfs): probe uses its own http client to avoid pinning shared timeout by [@bertt](https://github.com/bertt) in [#1206](https://github.com/geoparquet/geoparquet-io/pull/1206)
+- fix(crs): read the primary geometry's CRS in every command, and compute geometry metrics on projected input by [@yharby](https://github.com/yharby) in [#1250](https://github.com/geoparquet/geoparquet-io/pull/1250)
+- fix(convert): decode Shift_JIS and other codepage shapefiles to valid UTF-8, and refuse to write invalid strings by [@yharby](https://github.com/yharby) in [#1255](https://github.com/geoparquet/geoparquet-io/pull/1255)
+- fix(inspect): emit valid JSON for date, time and non-finite stats, and keep geo metadata on converted tables by [@yharby](https://github.com/yharby) in [#1251](https://github.com/geoparquet/geoparquet-io/pull/1251)
+- fix(check): report unreadable or empty geometries instead of crashing, and run every check in check all by [@yharby](https://github.com/yharby) in [#1256](https://github.com/geoparquet/geoparquet-io/pull/1256)
+- fix(inspect): report TIMESTAMPTZ min and max in inspect stats without needing pytz by [@yharby](https://github.com/yharby) in [#1259](https://github.com/geoparquet/geoparquet-io/pull/1259)
+- fix(crs): reproject a CRS with no authority code instead of reading it as lon/lat by [@yharby](https://github.com/yharby) in [#1265](https://github.com/geoparquet/geoparquet-io/pull/1265)
+- fix(arcgis): read EsriJSON pages whose features precede their metadata by [@cholmes](https://github.com/cholmes) in [#1271](https://github.com/geoparquet/geoparquet-io/pull/1271)
+- fix(write): keep a GEOGRAPHY column GEOGRAPHY in GeoParquet 2.0 outputs by [@cholmes](https://github.com/cholmes) in [#1254](https://github.com/geoparquet/geoparquet-io/pull/1254)
+- fix(carto): tag the output with the table's real CRS instead of always CRS84 by [@yharby](https://github.com/yharby) in [#1273](https://github.com/geoparquet/geoparquet-io/pull/1273)
+- fix(convert): keep the UTC offset of GeoJSON timestamps by [@yharby](https://github.com/yharby) in [#1275](https://github.com/geoparquet/geoparquet-io/pull/1275)
+- fix(extract): cap Retry-After and check server page sizes in ArcGIS and WFS by [@yharby](https://github.com/yharby) in [#1279](https://github.com/geoparquet/geoparquet-io/pull/1279)
+- fix(write): stop carrying a stale pandas key into rewritten GeoParquet by [@yharby](https://github.com/yharby) in [#1281](https://github.com/geoparquet/geoparquet-io/pull/1281)
+- fix(remote): stop an aws_profile argument from changing AWS_PROFILE for the whole process by [@yharby](https://github.com/yharby) in [#1274](https://github.com/geoparquet/geoparquet-io/pull/1274)
+- fix(write): keep non-geo schema keys and non-planar edges, and stop dictionary-encoding geometry by [@yharby](https://github.com/yharby) in [#1280](https://github.com/geoparquet/geoparquet-io/pull/1280)
+- fix(crs): keep an unknown crs unknown on read and write, and mark it srid:0 on 2.0 types by [@yharby](https://github.com/yharby) in [#1277](https://github.com/geoparquet/geoparquet-io/pull/1277)
+- fix(api): run Table methods on a native GEOGRAPHY table instead of failing on non-planar edges by [@yharby](https://github.com/yharby) in [#1290](https://github.com/geoparquet/geoparquet-io/pull/1290)
+- fix(stream): keep GEOGRAPHY edges and CRS through IPC pipes by [@yharby](https://github.com/yharby) in [#1298](https://github.com/geoparquet/geoparquet-io/pull/1298)
+- fix(api): label aggregate and overview geometry with its output CRS by [@yharby](https://github.com/yharby) in [#1296](https://github.com/geoparquet/geoparquet-io/pull/1296)
+
+### Documentation
+
+- docs(extract): merge a directory, not a quoted glob, in the 2.0 merge example by [@cholmes](https://github.com/cholmes) in [#1194](https://github.com/geoparquet/geoparquet-io/pull/1194)
+- docs: add the geoparquet-io logo and brand colors, and build the site with Zensical by [@nlebovits](https://github.com/nlebovits) in [#1221](https://github.com/geoparquet/geoparquet-io/pull/1221)
+
+_7 internal changes and 8 dependency updates are not listed here; the full changelog has them._
+
+**Full Changelog**: https://github.com/geoparquet/geoparquet-io/compare/v1.6.0...v1.7.0
+
 ## v1.6.0 (2026-09-23)
 
 This release makes PMTiles and overviews workable on large inputs. `gpio pmtiles` can move tippecanoe's scratch space off `/tmp` with `--temporary-directory`, and can tile a large input in `--chunks` so the scratch space stays bounded. A pyramid can be given explicit zoom `--bands` instead of having them inferred. `gpio process overview --overview-out` writes the whole level ladder into one levelled overview GeoParquet, and `aggregate --breakdown` can carry a metric other than COUNT. @cayetanobv sent seven pull requests that make `convert` far more forgiving of real-world sources: `--force-2d` drops Z and M values, `--encoding` reads files whose text encoding GDAL can't detect, curved geometry is linearized under `--skip-hilbert` instead of failing, two columns whose names differ only by case are both kept, the geometry column keeps its own spelling in the `geo` metadata, and a rounded `--row-group-size` now names the size actually written.

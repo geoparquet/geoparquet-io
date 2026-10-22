@@ -23,5 +23,12 @@
   "669": "build(deps): raise the pip floor to 26.2 for PYSEC-2026-3721",
   "778": "fix(deps)!: require duckdb>=1.5.2 and withdraw S2 until the geography extension returns",
   "841": "fix(api)!: return the same dict from partition_by_admin as the other partition methods",
-  "860": "docs: S2 is available again -- the geography extension is published for DuckDB 1.5.5"
+  "860": "docs: S2 is available again -- the geography extension is published for DuckDB 1.5.5",
+  "1154": "perf(convert)!: bound 2.0 writes by a cgroup-aware memory limit and sort the input once",
+  "1166": "perf(partition)!: bound direct COPY writes (partition, admin, pmtiles) by the write memory limit",
+  "1183": "fix(process)!: cap aggregate/overview memory and read only the aggregated columns",
+  "1210": "perf(memory)!: bound every DuckDB connection and keep a caller's stricter memory limit",
+  "1187": "build(deps): upgrade vulnerable dependencies (automated)",
+  "1288": "fix(convert)!: stop planar repair from mangling geometries with spherical edges",
+  "1167": "fix(partition)!: omit dictionary coverings without a bbox member"
 }

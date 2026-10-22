@@ -19,7 +19,6 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
-import duckdb
 import pyarrow as pa
 
 from geoparquet_io.core.arrow_geo_metadata import table_geometry_info
@@ -67,6 +66,8 @@ from geoparquet_io.core.write_funnels import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    import duckdb
 
 
 def _create_view_with_geometry(

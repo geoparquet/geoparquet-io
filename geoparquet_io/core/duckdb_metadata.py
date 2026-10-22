@@ -15,7 +15,6 @@ import json
 import re
 from typing import Any
 
-import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -434,6 +433,8 @@ def count_kv_key(parquet_file: str, key: str, con=None) -> int:
 
 def _read_kv_entries(parquet_file: str, con=None) -> list[tuple[bytes | None, bytes | None]]:
     """Every footer key/value entry, in order and with repeats, read by DuckDB."""
+    import duckdb
+
     metadata_path = _metadata_path(parquet_file)
     connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
 
@@ -485,6 +486,8 @@ def get_geo_metadata(parquet_file: str, con=None) -> dict | None:
         return _pyarrow_get_geo_metadata(resolved_path)
 
     # Slow path: use DuckDB for remote files or when connection is provided
+    import duckdb
+
     metadata_path = _metadata_path(parquet_file)
     connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
 
@@ -1186,6 +1189,41 @@ def get_row_group_stats_summary(parquet_file: str, con=None) -> dict:
             "total_size": total_size,
             "avg_group_size": total_size / num_groups if num_groups > 0 else 0,
         }
+    finally:
+        if should_close:
+            connection.close()
+
+
+def get_row_group_sizes(parquet_file: str, con=None) -> list[dict]:
+    """Per-row-group row counts and compressed byte sizes.
+
+    The physical cost of touching each row group: what a reader downloads
+    (every column chunk's compressed bytes) and how many rows it gets back.
+    The bbox preview (:mod:`geoparquet_io.core.preview`) prices its selected
+    groups with this.
+
+    Returns:
+        One dict per row group, ordered by row_group_id, with ``row_group_id``,
+        ``num_rows`` and ``compressed_bytes`` (summed over all column chunks).
+    """
+    metadata_path = _metadata_path(parquet_file)
+    # parquet_metadata() only: no spatial extension, which is most of a connection's cost.
+    connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
+
+    try:
+        result = connection.execute(f"""
+            SELECT
+                row_group_id,
+                MIN(row_group_num_rows) AS num_rows,
+                SUM(total_compressed_size)::BIGINT AS compressed_bytes
+            FROM parquet_metadata({sql_path(metadata_path)})
+            GROUP BY row_group_id
+            ORDER BY row_group_id
+        """).fetchall()
+        return [
+            {"row_group_id": row[0], "num_rows": int(row[1]), "compressed_bytes": int(row[2])}
+            for row in result
+        ]
     finally:
         if should_close:
             connection.close()

@@ -14,9 +14,6 @@ skill (geoparquet.md) sections:
 - Check commands
 - Compression options
 
-Also syncs:
-- docs/CHANGELOG.md from root CHANGELOG.md (MkDocs can't follow symlinks)
-
 Usage:
     python scripts/doc_sync.py              # Show what would change
     python scripts/doc_sync.py --update     # Update all docs
@@ -449,37 +446,6 @@ def sync_contributing_md(project_root: Path, update: bool, check: bool) -> tuple
     return True, messages
 
 
-def sync_changelog(project_root: Path, update: bool, check: bool) -> tuple[bool, list[str]]:
-    """Sync CHANGELOG.md from root to docs/.
-
-    The root CHANGELOG.md is the source of truth. docs/CHANGELOG.md is a copy
-    for MkDocs (which doesn't follow symlinks outside docs/).
-
-    Returns:
-        Tuple of (changed, messages).
-    """
-    root_changelog = project_root / "CHANGELOG.md"
-    docs_changelog = project_root / "docs" / "CHANGELOG.md"
-
-    if not root_changelog.exists():
-        return False, ["ERROR: CHANGELOG.md not found"]
-
-    root_content = root_changelog.read_text(encoding="utf-8")
-
-    if docs_changelog.exists():
-        docs_content = docs_changelog.read_text(encoding="utf-8")
-        if root_content == docs_content:
-            return False, ["docs/CHANGELOG.md: up to date"]
-    else:
-        docs_content = ""
-
-    if update:
-        docs_changelog.write_text(root_content, encoding="utf-8")
-        return True, ["docs/CHANGELOG.md: synced from root"]
-
-    return True, ["docs/CHANGELOG.md: out of sync with root CHANGELOG.md"]
-
-
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(description="Sync generated documentation sections from code")
@@ -514,12 +480,6 @@ def main() -> int:
     # Sync contributing.md
     if not args.claude and not args.skill:
         changed, messages = sync_contributing_md(project_root, args.update, args.check)
-        any_changed = any_changed or changed
-        all_messages.extend(messages)
-
-    # Sync CHANGELOG.md (root → docs/)
-    if not args.claude and not args.skill:
-        changed, messages = sync_changelog(project_root, args.update, args.check)
         any_changed = any_changed or changed
         all_messages.extend(messages)
 

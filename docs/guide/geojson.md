@@ -9,6 +9,37 @@ The `gpio convert geojson` command supports two modes:
 1. **Streaming Mode** (default): Outputs newline-delimited GeoJSON (GeoJSONSeq) to stdout, designed for piping to tools like tippecanoe
 2. **File Mode**: Writes a standard GeoJSON FeatureCollection to a file
 
+### Non-planar edges
+
+GeoJSON defines straight Cartesian segments, so the same coordinates cannot
+preserve spherical or ellipsoidal edges. gpio refuses GeoJSON and PMTiles export
+when the exported geometry column declares a recognized non-planar algorithm,
+including a native Parquet `GEOGRAPHY` type or a GeoArrow edge declaration.
+This prevents planar repair or precision reduction from turning a valid polar
+polygon into lines or an empty polygon. See
+[RFC 7946 section 3.1.1](https://www.rfc-editor.org/rfc/rfc7946#section-3.1.1).
+
+The restriction applies to file and Arrow IPC input, GeoJSONSeq and
+FeatureCollection output, and PMTiles create, chunks and pyramids. It also applies
+to `Table.to_geojson()`, `Table.write('output.geojson')` and
+`ops.convert_to_geojson()`. No output is written or overwritten when this check
+fails. `--no-repair-geometry`, `repair_geometry=False` and `--keep-crs` do not
+bypass it.
+
+The declaration sets the conversion contract even for point-only, null or empty
+input. A planar exported geometry can still be written when a secondary column
+declares non-planar edges. An explicit `edges: planar` in the geo block takes
+precedence over a GeoArrow or native edge type, matching GeoParquet writes.
+
+Keep non-planar data in GeoParquet, or first use a geodesic-aware tool to densify
+and cut the shapes into a planar representation. gpio does not yet provide that
+conversion. Removing the edge declaration alone changes the geometry's meaning.
+
+`gpio pmtiles create` and `ops.create_pmtiles()` require an inspectable file
+before starting tippecanoe. They reject `-` as input. First save an Arrow IPC
+stream with `gpio extract geoparquet - saved.parquet`, then pass `saved.parquet`
+to PMTiles. GeoJSON conversion still accepts planar Arrow IPC input directly.
+
 ## Streaming to tippecanoe for PMTiles
 
 The primary use case is generating PMTiles or MBTiles from GeoParquet data by piping to [tippecanoe](https://github.com/felt/tippecanoe):

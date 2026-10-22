@@ -383,13 +383,12 @@ def _rewrite_writer_kwargs(compression: str, compression_level: int | None) -> d
     }
     write_kwargs: dict = {"compression": codec_map.get(compression.upper(), "zstd")}
     if write_kwargs["compression"] in ("zstd", "gzip", "brotli"):
-        # LZ4_RAW/NONE never reach here, so the codec name is one the owner
-        # knows; it fills in the default for this codec when the level is unset.
-        _, level, _ = validate_compression_settings(
+        # LZ4_RAW/NONE never reach here, so the codec is one of the three the
+        # owner gives a level to, and it always returns one: this codec's
+        # default when the caller left the level unset, the caller's otherwise.
+        _, write_kwargs["compression_level"], _ = validate_compression_settings(
             write_kwargs["compression"].upper(), compression_level
         )
-        if level is not None:
-            write_kwargs["compression_level"] = level
     return write_kwargs
 
 
