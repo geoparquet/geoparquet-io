@@ -129,38 +129,23 @@ def _first_wkb(values_iter) -> bytes | None:
 def _first_wkb_of(column) -> bytes | None:
     """The first non-null WKB value in an Arrow array or chunked array.
 
-    Scans chunk by chunk and drops the nulls with an Arrow kernel, so a column
-    whose first batches are all null costs a bitmap read rather than a
-    materialized Python list per chunk — which is what the generator over
-    ``to_pylist()`` cost, lazy or not, because ``to_pylist`` builds the whole
-    list before the generator sees its first element.
+    Scans chunk by chunk and locates the first valid row with an index kernel
+    over the validity bitmap, so a column whose first batches are all null
+    costs a bitmap read — not the materialized Python list per chunk that the
+    generator over ``to_pylist()`` cost (lazy or not, ``to_pylist`` builds the
+    whole list before the generator sees its first element), and not the
+    filtered copy of a chunk's non-null bytes that ``drop_null()`` builds just
+    to read one element.
     """
     chunks = column.chunks if isinstance(column, pa.ChunkedArray) else [column]
     for chunk in chunks:
         if not len(chunk):
             continue
-        present = chunk.drop_null()
-        if len(present):
-            value: bytes = present[0].as_py()
+        i = pc.index(pc.is_valid(chunk), True).as_py()
+        if i >= 0:
+            value: bytes = chunk[i].as_py()
             return value
     return None
-
-
-def _one_array(column):
-    """One contiguous Arrow array for ``column``, which may be chunked.
-
-    Coverage mode has to hand the kernel every geometry at once. A chunked
-    array with no chunks at all cannot be concatenated, so it becomes an empty
-    array of the right type instead (``pa.concat_arrays([])`` raises, and
-    geoarrow aborts the process on a zero-chunk array).
-    """
-    if not isinstance(column, pa.ChunkedArray):
-        return column
-    if column.num_chunks == 1:
-        return column.chunk(0)
-    if column.num_chunks == 0:
-        return pa.array([], type=column.type)
-    return pa.concat_arrays(column.chunks)
 
 
 def _geometry_column_of(table: pa.Table, override: str | None) -> str:
@@ -218,7 +203,7 @@ def _simplify_values(
     forward=None,
     inverse=None,
 ) -> tuple[Any, int, Any, Any, Any]:
-    """Simplify one Arrow WKB array (nulls pass through).
+    """Simplify one Arrow WKB array or chunked array (nulls pass through).
 
     Returns the new WKB values as an object array, the count of geometries the
     operation collapsed to empty, a per-row boolean mask that is True where the
@@ -226,13 +211,20 @@ def _simplify_values(
     geometry array for the non-null rows, and those rows' positions — so
     callers fold stats and bounds without re-parsing the output WKB.
 
+    A chunked column is taken as-is: ``to_numpy`` and ``pc.is_valid`` fold it
+    chunk by chunk, so coverage mode never concatenates at the Arrow level —
+    on a ``binary`` column past 2 GiB of WKB that concat overflows the int32
+    offsets (ArrowInvalid), and below it it holds a second full copy of the
+    column (#1285 fixed the same hazard in ``hilbert_order``).
+
     Everything per-row here is a numpy or Arrow kernel, never a Python loop.
     These costs are flat per row, so on a file of many small geometries they,
     not the Rust kernel, set the pace: in a 1M-building profile
     ``coarsen._core`` was 7% of the time and the loops this replaced were most
-    of the rest (#1300). ``column`` is an Arrow array rather than a list for
-    the same reason — ``to_pylist`` on a million-row chunk built a million
-    Python objects that were immediately thrown away.
+    of the rest (#1300). ``column`` is an Arrow (chunked) array rather than a
+    list for the same reason — the bytes objects still have to exist for
+    shapely, but the per-row Scalar boxing and the second list that
+    ``to_pylist`` plus a comprehension built are gone.
     """
     coarsen = require_coarsen()
     shapely = load_module("shapely")
@@ -244,17 +236,17 @@ def _simplify_values(
     # than by testing a million values for None.
     valid = pc.is_valid(column).to_numpy(zero_copy_only=False)
     idx = np.flatnonzero(valid)
-    wkb_in = column.to_numpy(zero_copy_only=False)
+    wkb_all = column.to_numpy(zero_copy_only=False)
     if idx.size == 0:
         return (
-            wkb_in,
+            wkb_all,
             0,
             np.zeros(n_rows, dtype=bool),
             np.empty(0, dtype=object),
             idx,
         )
     try:
-        geoms = shapely.from_wkb(wkb_in[idx])
+        geoms = shapely.from_wkb(wkb_all[idx])
     except Exception as e:
         raise GeoParquetError(f"could not parse a WKB geometry in the input: {e}") from e
     if forward is not None:
@@ -442,7 +434,7 @@ def simplify_table(
                 f"coverage simplification holds all {table.num_rows:,} geometries "
                 "in memory at once to preserve shared edges"
             )
-        new_values, collapsed, flags, geoms, idx = run(_one_array(column))
+        new_values, collapsed, flags, geoms, idx = run(column)
         chunks = [pa.array(new_values, type=column.type)]
         flag_parts.append(flags)
         bounds_parts.append(_row_bounds(shapely, np, len(flags), geoms, idx))
@@ -673,7 +665,7 @@ def _simplify_file_streaming(
                         table = table.drop_columns(drop_columns)
                     table = table.replace_schema_metadata(schema.metadata)
                     values, n, empty_flags, geoms, idx = _simplify_values(
-                        _one_array(table.column(geom_col)),
+                        table.column(geom_col),
                         tolerance,
                         coverage=False,
                         preserve_topology=preserve_topology,

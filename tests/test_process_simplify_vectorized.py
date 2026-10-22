@@ -219,6 +219,68 @@ class TestFooterStats:
         assert "bbox" not in geo or geo["bbox"] is None
         assert geo["geometry_types"] == []
 
+    def test_streamed_drop_empty_with_nulls_keeps_the_footer_honest(self, tmp_path, monkeypatch):
+        """The one line where three index spaces meet: ``geoms = geoms[keep[idx]]``.
+
+        A batch with a null *before* a dropped row makes ``idx`` differ from
+        ``arange``, so a scatter mistake (``keep`` applied without ``idx``, or
+        the line dropped) either IndexErrors or leaks a dropped row's type into
+        the footer. Three 3-row batches with different types also pin the
+        cross-batch union of ``geometry_types`` and the running bbox, which no
+        single-batch test can.
+        """
+        import json
+
+        import pyarrow.parquet as pq
+
+        shapely = _shapely()
+        import geoparquet_io.core.process.simplify as simp
+
+        sliver = shapely.to_wkb(shapely.Polygon([(0, 0), (0.001, 0), (0.001, 0.001), (0, 0)]))
+        wkb = [
+            None,
+            sliver,
+            shapely.to_wkb(shapely.Point(5, 5)),
+            None,
+            None,
+            None,
+            shapely.to_wkb(shapely.LineString([(6, 6), (6.5, 6.01), (7, 6)])),
+            sliver,
+            None,
+        ]
+        streaming_runs = []
+        real_streaming = simp._simplify_file_streaming
+
+        def spy(*args, **kwargs):
+            streaming_runs.append(True)
+            return real_streaming(*args, **kwargs)
+
+        monkeypatch.setattr(simp, "_simplify_file_streaming", spy)
+        src, out = tmp_path / "in.parquet", tmp_path / "out.parquet"
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        write_geoparquet_table(_table(wkb), str(src))
+        simp.simplify_file(
+            str(src),
+            str(out),
+            0.01,
+            drop_empty=True,
+            preserve_topology=False,
+            row_group_rows=3,
+        )
+        assert streaming_runs, "the streaming path did not run; the footer fold went untested"
+        written = pq.read_table(str(out))
+        block = json.loads(pq.ParquetFile(str(out)).schema_arrow.metadata[b"geo"])
+        geo = block["columns"][block["primary_column"]]
+        # Both slivers dropped, all five nulls kept.
+        assert written.num_rows == 7
+        assert written.column("geometry").to_pylist().count(None) == 5
+        # The dropped slivers' type must not leak into the footer, and the
+        # union must span batches (Point from batch 1, LineString from batch 3).
+        assert sorted(geo["geometry_types"]) == ["LineString", "Point"]
+        # The slivers sat at (0, 0); the bbox must exclude them.
+        assert geo["bbox"][0] >= 5.0
+
 
 @requires_coarsen
 class TestChunkedInput:
@@ -275,7 +337,7 @@ class TestRowBoundsLandOnTheirOwnRow:
     difference to show.
     """
 
-    def _covering_table(self, wkb):
+    def _covering_table(self, wkb, chunks=1):
         import json
 
         np = _np()
@@ -303,24 +365,33 @@ class TestRowBoundsLandOnTheirOwnRow:
                 }
             },
         }
+        geometry: pa.Array | pa.ChunkedArray = pa.array(wkb, type=pa.binary())
+        bbox_col: pa.Array | pa.ChunkedArray = bbox
+        if chunks > 1:
+            size = max(1, -(-len(wkb) // chunks))
+            cuts = list(range(0, len(wkb), size))
+            geometry = pa.chunked_array([geometry.slice(i, size) for i in cuts])
+            bbox_col = pa.chunked_array([bbox.slice(i, size) for i in cuts])
         return pa.table(
-            {"geometry": pa.array(wkb, type=pa.binary()), "bbox": bbox},
+            {"geometry": geometry, "bbox": bbox_col},
             schema=pa.schema(
                 [pa.field("geometry", pa.binary()), pa.field("bbox", bbox.type)],
                 metadata={b"geo": json.dumps(geo).encode()},
             ),
         )
 
-    def test_each_covering_row_still_bounds_its_own_geometry(self):
+    @pytest.mark.parametrize("chunks", [1, 3])
+    def test_each_covering_row_still_bounds_its_own_geometry(self, chunks):
         shapely = _shapely()
         from geoparquet_io.core.process.simplify import simplify_table
 
         # Spread far apart, so a box filed against the wrong row cannot
-        # accidentally still contain it.
+        # accidentally still contain it. With chunks > 1 the per-chunk bounds
+        # must land back on their own rows after np.concatenate.
         wkb = [
             None if i % 3 == 1 else shapely.to_wkb(_jagged(i * 100.0, i * 50.0)) for i in range(9)
         ]
-        out = simplify_table(self._covering_table(wkb), 0.05)
+        out = simplify_table(self._covering_table(wkb, chunks=chunks), 0.05)
         boxes = out.column("bbox").to_pylist()
         geoms = out.column("geometry").to_pylist()
         for row, raw in zip(boxes, geoms, strict=True):
@@ -333,8 +404,6 @@ class TestRowBoundsLandOnTheirOwnRow:
             assert row["ymax"] == pytest.approx(ymax, abs=0.01)
 
     def test_a_null_row_gets_no_box(self):
-        import math
-
         shapely = _shapely()
         from geoparquet_io.core.process.simplify import simplify_table
 
@@ -342,8 +411,8 @@ class TestRowBoundsLandOnTheirOwnRow:
         out = simplify_table(self._covering_table(wkb), 0.05)
         boxes = out.column("bbox").to_pylist()
         for i in (0, 2):
-            # A null geometry gets a null struct, not a struct of NaNs.
-            assert boxes[i] is None or math.isnan(boxes[i]["xmin"])
+            # A null geometry gets a null struct, not a struct of NaNs or zeros.
+            assert boxes[i] is None
         assert boxes[1]["xmin"] == pytest.approx(0.0, abs=0.01)
 
 
@@ -403,6 +472,26 @@ class TestCoverageMode:
         out = simplify_table(_table([]), 0.05, coverage=True)
         assert out.num_rows == 0
 
+    def test_chunked_coverage_never_concatenates_at_the_arrow_level(self, monkeypatch):
+        """``pa.concat_arrays`` on a ``binary`` column past 2 GiB of WKB
+        overflows its int32 offsets (ArrowInvalid), and below that it holds a
+        second full copy of the column -- the hazard #1285 fixed in
+        ``hilbert_order``. The chunked column goes to the kernel via per-chunk
+        numpy conversion instead, so a concat call here is a regression.
+        """
+        shapely = _shapely()
+        from geoparquet_io.core.process.simplify import simplify_table
+
+        def no_concat(*args, **kwargs):
+            raise AssertionError("coverage mode must not concatenate Arrow chunks")
+
+        monkeypatch.setattr(pa, "concat_arrays", no_concat)
+        wkb = [shapely.to_wkb(g) for g in self._coverage_grid(6)]
+        wkb.insert(3, None)
+        out = simplify_table(_table(wkb, chunks=4), 0.05, coverage=True)
+        reference = simplify_table(_table(wkb, chunks=1), 0.05, coverage=True)
+        assert out.column("geometry").to_pylist() == reference.column("geometry").to_pylist()
+
 
 @requires_coarsen
 class TestDropEmpty:
@@ -418,7 +507,8 @@ class TestDropEmpty:
         shapely = _shapely()
         return shapely.Polygon([(x, 0), (x + 0.001, 0), (x + 0.001, 0.001), (x, 0)])
 
-    def test_nulls_survive_drop_empty(self):
+    @pytest.mark.parametrize("chunks", [1, 3])
+    def test_nulls_survive_drop_empty(self, chunks):
         shapely = _shapely()
         from geoparquet_io.core.process.simplify import simplify_table
 
@@ -429,7 +519,9 @@ class TestDropEmpty:
             None,
             shapely.to_wkb(_jagged(7, 7)),
         ]
-        out = simplify_table(_table(wkb), 0.01, drop_empty=True, preserve_topology=False)
+        out = simplify_table(
+            _table(wkb, chunks=chunks), 0.01, drop_empty=True, preserve_topology=False
+        )
         got = out.column("geometry").to_pylist()
         names = out.column("name").to_pylist()
         # The two nulls stay, the collapsed sliver goes.
@@ -522,12 +614,12 @@ class TestAccumulateStats:
 
 
 class TestArrowHelpers:
-    """``_first_wkb_of`` and ``_one_array``, which replaced the to_pylist scans.
+    """``_first_wkb_of``, which replaced the to_pylist sample scan.
 
-    Unit-tested because their branches are reached from only two callers --
-    the ``--simplify-crs`` sample scan and coverage mode -- so going through
-    the commands leaves the shapes that matter (no chunks, one chunk, several,
-    an empty leading chunk) unexercised.
+    Unit-tested because its branches are reached from only one caller --
+    the ``--simplify-crs`` sample scan -- so going through the commands
+    leaves the shapes that matter (no chunks, one chunk, several, an empty
+    leading chunk) unexercised.
     """
 
     def test_first_wkb_of_a_plain_array(self):
@@ -567,38 +659,10 @@ class TestArrowHelpers:
 
         assert _first_wkb_of(pa.chunked_array([], type=pa.binary())) is None
 
-    def test_one_array_passes_a_plain_array_through(self):
-        from geoparquet_io.core.process.simplify import _one_array
+    def test_first_wkb_of_a_chunk_mixing_nulls_and_values(self):
+        # The mixed case is the one where a filtered copy (drop_null) would
+        # have been built just to read one element; the index kernel must
+        # land on the same sample.
+        from geoparquet_io.core.process.simplify import _first_wkb_of
 
-        arr = pa.array([b"a"], type=pa.binary())
-        assert _one_array(arr) is arr
-
-    def test_one_array_unwraps_a_single_chunk(self):
-        from geoparquet_io.core.process.simplify import _one_array
-
-        column = pa.chunked_array([pa.array([b"a", b"b"], type=pa.binary())])
-        out = _one_array(column)
-        assert isinstance(out, pa.Array)
-        assert out.to_pylist() == [b"a", b"b"]
-
-    def test_one_array_concatenates_several_chunks_in_order(self):
-        from geoparquet_io.core.process.simplify import _one_array
-
-        column = pa.chunked_array(
-            [
-                pa.array([b"a"], type=pa.binary()),
-                pa.array([None], type=pa.binary()),
-                pa.array([b"c"], type=pa.binary()),
-            ]
-        )
-        out = _one_array(column)
-        assert isinstance(out, pa.Array)
-        assert out.to_pylist() == [b"a", None, b"c"]
-
-    def test_one_array_of_a_chunked_array_with_no_chunks(self):
-        """``pa.concat_arrays([])`` raises, and geoarrow aborts on zero chunks."""
-        from geoparquet_io.core.process.simplify import _one_array
-
-        out = _one_array(pa.chunked_array([], type=pa.binary()))
-        assert len(out) == 0
-        assert out.type == pa.binary()
+        assert _first_wkb_of(pa.array([None, b"b", b"c"], type=pa.binary())) == b"b"
