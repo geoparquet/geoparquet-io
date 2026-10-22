@@ -84,7 +84,11 @@ uv tool install geoparquet-io --with contourrs --with rasterio
 
 The traced polygons come out with counterclockwise exterior rings, as the
 GeoParquet spec recommends, and round-trip exactly: rasterizing the output
-reproduces the input array pixel for pixel.
+reproduces the input array pixel for pixel. The exception is rows the repair
+below rebuilt: GEOS returns those with clockwise exteriors, so a repaired file
+mixes windings. gpio declares no `orientation`, so either winding is
+spec-legal; pass `--no-repair-geometry` if uniform winding matters more to you
+than validity.
 
 ### Self-touching rings
 
@@ -94,11 +98,12 @@ and `rasterio.features.shapes` and `gdal_polygonize` emit the enclosed part as
 an interior ring instead. On the WorldCover crops measured in #1301 it affected
 1.7-2.9% of the output: 29, 1,354 and 5,776 polygons at 1024², 4096² and 8192².
 
-gpio repairs them by default, like every other command that writes geometry.
-The repair preserves what the polygons are *for*: row count, class column,
-per-class counts, and area to within float noise (worst per-class relative
-difference 1.5e-14 over 217k polygons), and every polygon stays a `Polygon` —
-the self-touch becomes its own interior ring, which is exactly what GDAL emits.
+gpio repairs them by default, like convert, extract and pmtiles. The repair
+preserves what the polygons are *for*: row count, class column, per-class
+counts, and area to within float noise (worst per-class relative difference
+1.5e-14 over 217k polygons), and every polygon stays a `Polygon` — the
+self-touch becomes its own interior ring, the same shape GDAL emits (vertex
+order and winding may differ).
 
 The repair is the expensive half, because the self-touching polygons are the
 large sprawling regions: on that 8192² output, 5,776 invalid polygons hold 7.5

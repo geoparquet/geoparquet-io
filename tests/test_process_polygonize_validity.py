@@ -23,6 +23,7 @@ import json
 import logging
 import sys
 import types
+from importlib.util import find_spec
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -163,7 +164,7 @@ class TestPolygonizeArray:
         with caplog.at_level(logging.WARNING):
             table = polygonize_array(_array())
         assert _invalid_count(table) == 0
-        assert "1" in caplog.text and "invalid" in caplog.text.lower()
+        assert "Repaired 1 invalid geometry" in caplog.text
 
     def test_the_repair_keeps_every_row_and_the_class_column(self, fake_contourrs):
         table = polygonize_array(_array())
@@ -182,11 +183,27 @@ class TestPolygonizeArray:
         table = polygonize_array(_array())
         assert table.column("geometry")[1].as_py() == shapely.to_wkb(_valid_square())
 
+    def test_repaired_rows_come_back_with_a_clockwise_exterior(self, fake_contourrs):
+        """Pins GEOS's winding so the docs stay honest, not because it is wanted.
+
+        The tracer emits counterclockwise exteriors; ``ST_MakeValid`` rebuilds
+        a pinched ring with a clockwise one (both GEOS methods), so a repaired
+        file mixes windings. gpio declares no ``orientation``, which is what
+        keeps that spec-legal -- if this test ever fails because GEOS starts
+        preserving winding, delete it and drop the caveat in
+        docs/guide/process-raster.md.
+        """
+        table = polygonize_array(_array())
+        repaired = shapely.from_wkb(table.column("geometry")[0].as_py())
+        untouched = shapely.from_wkb(table.column("geometry")[1].as_py())
+        assert not shapely.is_ccw(repaired.exterior)
+        assert shapely.is_ccw(untouched.exterior)
+
     def test_opting_out_counts_but_does_not_repair(self, fake_contourrs, caplog):
         with caplog.at_level(logging.WARNING):
             table = polygonize_array(_array(), repair_geometry=False)
         assert _invalid_count(table) == 1
-        assert "1" in caplog.text
+        assert "Left unrepaired 1 invalid geometry" in caplog.text
         assert "no-repair-geometry" in caplog.text
 
     def test_a_fully_valid_output_says_nothing(self, fake_contourrs, caplog):
@@ -295,3 +312,84 @@ class TestCliAndApi:
         assert (
             _invalid_count(gpio.Table.polygonize("in.tif", repair_geometry=False).to_arrow()) == 1
         )
+
+    def test_ops_polygonize_appended_the_flag_after_verbose(self):
+        """ops signatures are positional-or-keyword, so a released function's
+        new parameter is appended last (the convention at ops.py's polygonize
+        section). Inserted mid-signature, ``ops.polygonize(p, 1, None, "value",
+        None, True, False)`` would silently flip the repair off where it used
+        to mean ``verbose=False``.
+        """
+        import inspect
+
+        from geoparquet_io.api import ops
+
+        params = list(inspect.signature(ops.polygonize).parameters)
+        assert params.index("repair_geometry") == len(params) - 1
+        assert params.index("verbose") == params.index("repair_geometry") - 1
+
+
+class TestRealTracerValidity:
+    """The headline claim against the real tracer, not the stand-in.
+
+    Every other test here fakes contourrs through ``sys.modules``, which
+    exercises the repair but never checks that the real ring assembly still
+    produces the pinch this PR exists to fix -- or that the repair handles
+    whatever it produces.
+    """
+
+    requires_contourrs = pytest.mark.skipif(
+        find_spec("contourrs") is None,
+        reason="requires the raster extra (contourrs, Python 3.12+)",
+    )
+
+    @requires_contourrs
+    def test_a_pinched_horseshoe_repairs_to_valid_output(self):
+        import numpy as np
+
+        # A class-1 horseshoe whose enclosed pocket touches the exterior at
+        # exactly one pixel corner -- the shape that makes the tracer close a
+        # self-touching ring.
+        array = np.array(
+            [
+                [0, 0, 0, 0, 0],
+                [0, 1, 1, 1, 0],
+                [0, 1, 0, 1, 0],
+                [0, 1, 1, 0, 0],
+                [0, 0, 0, 0, 0],
+            ],
+            dtype="uint8",
+        )
+        table = polygonize_array(array)
+        geoms = shapely.from_wkb(table.column("geometry").to_pylist())
+        assert all(shapely.is_valid(g) for g in geoms)
+        # Pixel areas must survive the repair: 7 class-1 pixels, 18 class-0.
+        areas = {0.0: 0.0, 1.0: 0.0}
+        for value, geom in zip(table.column("value").to_pylist(), geoms, strict=True):
+            areas[value] += geom.area
+        assert areas[1.0] == pytest.approx(7.0)
+        assert areas[0.0] == pytest.approx(18.0)
+
+    @requires_contourrs
+    def test_opting_out_reports_at_most_the_one_pinch(self, caplog):
+        import numpy as np
+
+        array = np.array(
+            [
+                [0, 0, 0, 0, 0],
+                [0, 1, 1, 1, 0],
+                [0, 1, 0, 1, 0],
+                [0, 1, 1, 0, 0],
+                [0, 0, 0, 0, 0],
+            ],
+            dtype="uint8",
+        )
+        with caplog.at_level(logging.WARNING):
+            table = polygonize_array(array, repair_geometry=False)
+        invalid = sum(
+            0 if shapely.is_valid(shapely.from_wkb(w)) else 1
+            for w in table.column("geometry").to_pylist()
+        )
+        # `in (0, 1)` rather than == 1: if contourrs fixes its ring assembly
+        # upstream, the output becomes valid and this test must keep passing.
+        assert invalid in (0, 1)

@@ -38,9 +38,10 @@ def polygonize_array(
     closes it as one self-touching ring, which is not OGC-valid -- 1.7-2.9% of
     the output on the WorldCover crops measured in #1301, where rasterio and
     GDAL emit the enclosed part as a hole and are 100% valid. The invalid count
-    is always reported; ``repair_geometry`` (the default, as everywhere else in
-    gpio) rewrites those rows with ``ST_MakeValid``, which preserves area and
-    type. It is the expensive half: the self-touching polygons are the large
+    is always reported; ``repair_geometry`` (the default, as in every command
+    that offers ``--repair-geometry``) rewrites those rows with
+    ``ST_MakeValid``, which preserves area and, under the 4-connectivity the
+    CLI and API always use, the ``Polygon`` type. It is the expensive half: the self-touching polygons are the large
     sprawling regions, so repairing them can cost several times the
     polygonization. ``repair_geometry=False`` keeps the count and skips the fix.
     """
@@ -64,7 +65,7 @@ def polygonize_array(
     # one convert and extract use: one DuckDB scan over the geometry column
     # that counts, warns, and patches only the broken rows, so every valid
     # row's WKB and the table's metadata survive byte for byte.
-    table, _ = repair_arrow_table_geometry(table, repair=repair_geometry)
+    table, _ = repair_arrow_table_geometry(table, "geometry", repair=repair_geometry)
     if verbose:
         info(f"Polygonized {table.num_rows} features")
     return table
