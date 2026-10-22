@@ -214,6 +214,38 @@ class TestVecorelSchemaFixLevel:
         assert levels == [PROCESS_ZSTD_LEVEL]
 
 
+class TestVecorelMetadataRewriteCodec:
+    """The vecorel metadata rewrite keeps the caller's codec.
+
+    Passing the settings through only when a level was set re-encoded a GZIP
+    output as ZSTD on this one rewrite (the funnel's defaults took over).
+    """
+
+    def test_the_requested_codec_reaches_the_rewrite(self, tmp_path, monkeypatch):
+        import geoparquet_io.core.add.geometry_metrics as gm
+        import geoparquet_io.core.duckdb_utils as du
+
+        src = tmp_path / "in.parquet"
+        pq.write_table(pa.table({"id": ["a"]}), str(src), compression="GZIP")
+        seen: dict = {}
+
+        def fake_write(con, query, out, **kwargs):
+            seen.update(kwargs)
+            pq.write_table(pa.table({"id": ["a"]}), out, compression="GZIP")
+
+        class FakeCon:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(gm, "write_parquet_with_metadata", fake_write)
+        monkeypatch.setattr(du, "get_duckdb_connection", lambda **k: FakeCon())
+        gm._add_vecorel_metadata_to_file(
+            str(src), False, None, compression="GZIP", compression_level=None
+        )
+        assert seen["compression"] == "GZIP"
+        assert seen["compression_level"] is None
+
+
 class TestHelpTextNamesTheRightDefault:
     """``--help`` has to name the number the writers actually use.
 

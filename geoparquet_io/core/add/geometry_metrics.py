@@ -329,13 +329,15 @@ def _add_vecorel_metadata_to_file(
     os.close(fd)
     os.unlink(temp_out)
 
-    # An unset level keeps the funnel's own default (15); an explicit None
-    # here would instead emit no COMPRESSION_LEVEL and land on DuckDB's 3.
-    level_kwargs: dict[str, Any] = (
-        {"compression": compression, "compression_level": compression_level}
-        if compression_level is not None
-        else {}
-    )
+    # The caller's codec always goes through -- dropping it when the level is
+    # unset re-encoded a GZIP output as ZSTD on this one rewrite. An unset
+    # level stays None, the same "no COMPRESSION_LEVEL in the COPY" the
+    # command's other writes already mean by it (#1335 tracks what unset
+    # resolves to across the COPY paths).
+    level_kwargs: dict[str, Any] = {
+        "compression": compression,
+        "compression_level": compression_level,
+    }
     try:
         try:
             write_parquet_with_metadata(
