@@ -545,6 +545,15 @@ full_meta = table.metadata(include_parquet_metadata=True)
 
 Convert to GeoJSON.
 
+An exported geometry column declaring spherical or ellipsoidal edges raises
+`GeoParquetError` before output is created or overwritten. This includes
+point-only and empty inputs with that declaration. The same restriction applies
+to `Table.write('output.geojson')`, `ops.convert_to_geojson()`,
+`gpio convert geojson` and `gpio pmtiles`. Keeping non-planar data in GeoParquet
+preserves its meaning. A geodesic-aware tool must densify and cut it into a
+planar representation before GeoJSON export. Disabling geometry repair does not
+make that conversion safe.
+
 ```python
 # Write to file
 table.to_geojson('output.geojson')
@@ -1746,6 +1755,18 @@ table.write('output.csv',
            include_bbox=False)  # Exclude bbox column
 ```
 
+**Row filters (GeoPackage, FlatGeobuf, CSV):**
+
+GeoPackage, FlatGeobuf and CSV writes can filter rows on the way through, with
+the same semantics as `gpio extract`. A `bbox` prunes on the table's bbox
+covering column when it has one.
+
+```python
+table.write('subset.gpkg', bbox=(-0.5, 10.0, 0.5, 11.0))     # bounding box
+table.write('subset.fgb', geometry='POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))')
+table.write('subset.csv', where="name IS NOT NULL")           # DuckDB WHERE
+```
+
 **GeoJSON:**
 
 ```python
@@ -1772,6 +1793,10 @@ table = pq.read_table('data.parquet')
 ops.convert_to_geopackage(table, 'output.gpkg', layer_name='features')
 ops.convert_to_flatgeobuf(table, 'output.fgb')
 ops.convert_to_csv(table, 'output.csv', include_wkt=True)
+
+# Filter rows on the way through (GeoPackage, FlatGeobuf, CSV)
+ops.convert_to_geopackage(table, 'subset.gpkg', bbox=(-0.5, 10.0, 0.5, 11.0))
+ops.convert_to_csv(table, 'subset.csv', where="name IS NOT NULL")
 ops.convert_to_shapefile(table, 'output.shp', encoding='UTF-8')
 ops.convert_to_geojson(table, 'output.geojson', precision=7)
 ```
@@ -1924,9 +1949,9 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 | `ops.read_bigquery(table_id, project=None, credentials_file=None, where=None, bbox=None, bbox_mode='auto', bbox_threshold=500000, limit=None, columns=None, exclude_columns=None)` | Read BigQuery table (`None`/`[]` selects every column; a blank entry in the list raises) |
 | `ops.from_arcgis(service_url, token=None, where='1=1', bbox=None, include_cols=None, exclude_cols=None, limit=None, max_workers=1, output_crs=None, max_allowable_offset=None, repair_geometry=True, timeout=60.0, batch_size=None)` | Fetch ArcGIS Feature Service (`batch_size` lowers the page size for layers the server cannot serialize a full page of) |
 | `ops.convert_to_geojson(table, output, precision=7, write_bbox=False, id_field=None)` | Convert to GeoJSON |
-| `ops.convert_to_geopackage(table, output, layer_name='features', overwrite=False)` | Convert to GeoPackage |
-| `ops.convert_to_flatgeobuf(table, output)` | Convert to FlatGeobuf |
-| `ops.convert_to_csv(table, output, include_wkt=True, include_bbox=True)` | Convert to CSV |
+| `ops.convert_to_geopackage(table, output, layer_name='features', overwrite=False, bbox=None, geometry=None, where=None, use_first_geometry=False)` | Convert to GeoPackage, optionally filtering rows |
+| `ops.convert_to_flatgeobuf(table, output, bbox=None, geometry=None, where=None, use_first_geometry=False)` | Convert to FlatGeobuf, optionally filtering rows |
+| `ops.convert_to_csv(table, output, include_wkt=True, include_bbox=True, bbox=None, geometry=None, where=None, use_first_geometry=False)` | Convert to CSV, optionally filtering rows |
 | `ops.convert_to_shapefile(table, output, encoding='UTF-8', overwrite=False)` | Convert to Shapefile |
 | `ops.from_wfs(service_url, typename, version='auto', bbox=None, limit=None, max_workers=1, page_size=100000, auto_tile=True, ...)` | Fetch from WFS service |
 | `ops.from_wfs_layers(service_url, typenames, output_dir, parallel_layers=1, max_workers=1, page_size=100000, ...)` | Fetch multiple WFS layers to directory |
@@ -1946,9 +1971,10 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 | `ops.sub_partition_by_quadkey(directory, min_size, resolution=None, partition_resolution=None, use_centroid=False, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into quadkey sub-partitions (pass both resolutions, or `auto=True`) |
 | `ops.sub_partition_by_s2(directory, min_size, level=None, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into S2 sub-partitions |
 | `ops.simplify(table, tolerance, coverage=False, preserve_topology=True, simplify_boundary=True, threads=None, geometry_column=None, drop_empty=False, simplify_crs=None)` | Simplify geometries with coarsen (requires the `simplify` extra; `coverage=True` preserves shared edges) |
-| `ops.polygonize(input_raster, band=1, values=None, value_column='value', nodata=None, use_mask=True)` | Polygonize a categorical raster band (requires the `raster` extra, Python 3.12+) |
+| `ops.polygonize(input_raster, band=1, values=None, value_column='value', nodata=None, use_mask=True, verbose=False, repair_geometry=True)` | Polygonize a categorical raster band (requires the `raster` extra, Python 3.12+). `repair_geometry=False` skips repairing the tracer's self-touching rings, which is much faster and still reports the count |
 | `ops.contour(input_raster, levels=None, interval=None, base=0.0, band=1, nodata=None, min_column='min', max_column='max')` | Extract filled contour bands from a raster band (requires the `raster` extra, Python 3.12+) |
 | `ops.get_row_group_geo_stats(parquet_file)` | Per-row-group geo bbox statistics |
+| `ops.preview_bbox_filter(parquet_file, bbox, geometry_column=None)` | Preview the row groups a bbox read would touch, with estimated rows/bytes, before reading |
 | `ops.compression_stats(path)` | Per-column compression ratios |
 | `ops.explain_analyze(file_path, query=None)` | DuckDB EXPLAIN ANALYZE query plan |
 
@@ -2136,6 +2162,36 @@ for rg in stats:
 # Works with both:
 # - Native Parquet geo stats (GeoParquet 2.0, parquet-geo-only)
 # - Bbox column statistics (files with a bbox column)
+```
+
+### Bbox Query Preview
+
+Preview which row groups a bbox-filtered read would touch — and how many rows
+and compressed bytes they hold — before reading any data. Useful for a real
+progress bar or a size warning ahead of a large (remote) read:
+
+```python
+from geoparquet_io.api import ops
+
+preview = ops.preview_bbox_filter(
+    'https://example.com/places.parquet',
+    bbox=(-122.5, 37.7, -122.3, 37.9),
+)
+
+if preview.has_estimate:
+    print(f"{len(preview.row_groups)} of {preview.total_row_groups} row groups, "
+          f"~{preview.est_rows} rows, ~{preview.est_bytes} bytes")
+else:
+    # The file has no usable per-row-group spatial statistics: the preview
+    # says so instead of guessing. The total_* fields are still real.
+    print(f"No estimate: {preview.reason} "
+          f"(file holds {preview.total_rows} rows, {preview.total_bytes} bytes)")
+
+# The estimate is an upper bound derived from the same statistics DuckDB
+# prunes with, in the same order as get_row_group_geo_stats:
+# - Native Parquet geo stats (stats_source == "native")
+# - Bbox covering column chunk statistics (stats_source == "bbox_struct")
+# A row group without statistics cannot be pruned, so it is counted.
 ```
 
 ## See Also

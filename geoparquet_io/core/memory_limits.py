@@ -21,9 +21,10 @@ import os
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import TYPE_CHECKING
 
-import duckdb
-import psutil
+if TYPE_CHECKING:
+    import duckdb
 
 from geoparquet_io.core.duckdb_utils import (
     _current_setting,
@@ -160,6 +161,8 @@ def _cgroup_limit(proc_self_cgroup: str, cgroup_root: str) -> int | None:
 
 def memory_ceiling() -> int | None:
     """Bytes this process may use in total: its cgroup cap or physical RAM, the lower."""
+    import psutil
+
     candidates = [_cgroup_limit(_PROC_SELF_CGROUP, _CGROUP_ROOT), psutil.virtual_memory().total]
     return min((v for v in candidates if v), default=None)
 

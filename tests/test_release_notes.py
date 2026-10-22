@@ -266,3 +266,57 @@ class TestOmittedSections:
     def test_uncategorized_is_still_shown_so_triage_cannot_be_skipped(self):
         out = rn.render(rn.parse(SAMPLE), version="1.4.0", date="2026-08-30")
         assert "### Uncategorized" in out
+
+
+class TestReleaseBody:
+    CHANGELOG_TEXT = (
+        "# Changelog\n\n"
+        "## v1.4.0 (2026-08-30)\n\n"
+        "Highlights, thanks to @newbie.\n\n"
+        "### Added\n\n"
+        "- feat(sort): add STR by [@oakhill87](https://github.com/oakhill87) "
+        "in [#766](https://github.com/geoparquet/geoparquet-io/pull/766)\n"
+        "- fix: a thing by [@dependabot[bot]](https://github.com/apps/dependabot) "
+        "in [#7](https://github.com/geoparquet/geoparquet-io/pull/7)\n\n"
+        "## v1.3.0 (2026-06-11)\n\nolder\n"
+    )
+
+    def test_mentions_authors_plainly(self):
+        # GitHub's release-page Contributors list only counts plain @mentions.
+        body = rn.release_body(self.CHANGELOG_TEXT, "1.4.0")
+        assert "by @oakhill87 in" in body
+        assert "[@oakhill87]" not in body
+
+    def test_leaves_other_links_alone(self):
+        body = rn.release_body(self.CHANGELOG_TEXT, "1.4.0")
+        assert "[#766](https://github.com/geoparquet/geoparquet-io/pull/766)" in body
+        assert "[@dependabot[bot]](https://github.com/apps/dependabot)" in body
+
+    def test_takes_only_this_section_without_its_heading(self):
+        body = rn.release_body(self.CHANGELOG_TEXT, "1.4.0")
+        assert body.startswith("Highlights, thanks to @newbie.")
+        assert "## v1.4.0" not in body
+        assert "older" not in body
+
+    def test_ends_with_the_changelog_anchor(self):
+        body = rn.release_body(self.CHANGELOG_TEXT, "1.4.0")
+        assert body.endswith(
+            "Full changelog entry: "
+            "https://github.com/geoparquet/geoparquet-io/blob/main/CHANGELOG.md#v140-2026-08-30\n"
+        )
+
+    def test_refuses_a_version_the_changelog_lacks(self):
+        with pytest.raises(rn.ReleaseNotesError, match="v9.9.9"):
+            rn.release_body(self.CHANGELOG_TEXT, "9.9.9")
+
+    def test_cli_reads_the_changelog_without_asking_github(self, tmp_path, monkeypatch, capsys):
+        changelog = tmp_path / "CHANGELOG.md"
+        changelog.write_text(self.CHANGELOG_TEXT)
+        monkeypatch.setattr(rn, "CHANGELOG", changelog)
+
+        def _no_network(*_args, **_kwargs):
+            raise AssertionError("--release-body must not call GitHub")
+
+        monkeypatch.setattr(rn, "generate", _no_network)
+        assert rn.main(["1.4.0", "--release-body"]) == 0
+        assert "by @oakhill87 in" in capsys.readouterr().out

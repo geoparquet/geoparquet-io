@@ -25,7 +25,6 @@ belongs here.
 
 import os
 
-import duckdb
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
@@ -252,6 +251,8 @@ def compute_geometry_types_via_sql(
     # order does not change.
     query = _strip_trailing_order_by(query)
 
+    import duckdb
+
     # Check if geometry column exists in query result
     try:
         columns = _get_query_columns(con, query)
@@ -311,6 +312,8 @@ def compute_geometry_dimensions_via_sql(
     # `compute_geo_stats_via_sql`, which strips, so this was the last sorted
     # extra scan on the 1.1-geoarrow path (#1177).
     query = _strip_trailing_order_by(query)
+
+    import duckdb
 
     try:
         columns = _get_query_columns(con, query)

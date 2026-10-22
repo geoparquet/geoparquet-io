@@ -40,7 +40,10 @@ from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE, str_order_table
 from geoparquet_io.core.wfs import DEFAULT_WFS_PAGE_SIZE
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
+
+    from geoparquet_io.core.preview import BboxFilterPreview
 
 
 def add_bbox(
@@ -2272,6 +2275,10 @@ def convert_to_geopackage(
     output_path: str,
     overwrite: bool = False,
     layer_name: str = "features",
+    bbox: str | tuple[float, float, float, float] | None = None,
+    geometry: str | None = None,
+    where: str | None = None,
+    use_first_geometry: bool = False,
 ) -> str:
     """
     Convert a GeoParquet table to GeoPackage format.
@@ -2283,6 +2290,13 @@ def convert_to_geopackage(
         output_path: Output file path (must be local, not cloud URL)
         overwrite: Overwrite existing file (default: False)
         layer_name: Layer name in GeoPackage (default: 'features')
+        bbox: Bounding box filter, (xmin, ymin, xmax, ymax) or
+            "xmin,ymin,xmax,ymax"; prunes on the bbox covering column when
+            the table has one
+        geometry: Geometry filter: GeoJSON or WKT text, or @filepath
+        where: DuckDB WHERE clause for filtering rows
+        use_first_geometry: Use the first geometry when ``geometry`` is a
+            FeatureCollection with several
 
     Returns:
         Output path
@@ -2296,12 +2310,20 @@ def convert_to_geopackage(
         "geopackage",
         overwrite=overwrite,
         layer_name=layer_name,
+        bbox=bbox,
+        geometry=geometry,
+        where=where,
+        use_first_geometry=use_first_geometry,
     )
 
 
 def convert_to_flatgeobuf(
     table: pa.Table,
     output_path: str,
+    bbox: str | tuple[float, float, float, float] | None = None,
+    geometry: str | None = None,
+    where: str | None = None,
+    use_first_geometry: bool = False,
 ) -> str:
     """
     Convert a GeoParquet table to FlatGeobuf format.
@@ -2311,6 +2333,12 @@ def convert_to_flatgeobuf(
     Args:
         table: Input PyArrow Table with geometry column
         output_path: Output file path (must be local, not cloud URL)
+        bbox: Bounding box filter, (xmin, ymin, xmax, ymax) or
+            "xmin,ymin,xmax,ymax"
+        geometry: Geometry filter: GeoJSON or WKT text, or @filepath
+        where: DuckDB WHERE clause for filtering rows
+        use_first_geometry: Use the first geometry when ``geometry`` is a
+            FeatureCollection with several
 
     Returns:
         Output path
@@ -2322,6 +2350,10 @@ def convert_to_flatgeobuf(
         output_path,
         write_flatgeobuf,
         "flatgeobuf",
+        bbox=bbox,
+        geometry=geometry,
+        where=where,
+        use_first_geometry=use_first_geometry,
     )
 
 
@@ -2330,6 +2362,10 @@ def convert_to_csv(
     output_path: str,
     include_wkt: bool = True,
     include_bbox: bool = True,
+    bbox: str | tuple[float, float, float, float] | None = None,
+    geometry: str | None = None,
+    where: str | None = None,
+    use_first_geometry: bool = False,
 ) -> str:
     """
     Convert a GeoParquet table to CSV format.
@@ -2342,6 +2378,12 @@ def convert_to_csv(
         output_path: Output file path (must be local, not cloud URL)
         include_wkt: Include WKT geometry column (default: True)
         include_bbox: Include bbox column if present (default: True)
+        bbox: Bounding box filter, (xmin, ymin, xmax, ymax) or
+            "xmin,ymin,xmax,ymax"
+        geometry: Geometry filter: GeoJSON or WKT text, or @filepath
+        where: DuckDB WHERE clause for filtering rows
+        use_first_geometry: Use the first geometry when ``geometry`` is a
+            FeatureCollection with several
 
     Returns:
         Output path
@@ -2355,6 +2397,10 @@ def convert_to_csv(
         "csv",
         include_wkt=include_wkt,
         include_bbox=include_bbox,
+        bbox=bbox,
+        geometry=geometry,
+        where=where,
+        use_first_geometry=use_first_geometry,
     )
 
 
@@ -2763,6 +2809,56 @@ def get_row_group_geo_stats(parquet_file: str) -> list[dict]:
     return _merge_row_counts(rg_stats, num_rows_per_rg)
 
 
+def preview_bbox_filter(
+    parquet_file: str,
+    bbox: Sequence[float],
+    geometry_column: str | None = None,
+) -> BboxFilterPreview:
+    """
+    Preview the row groups a bbox-filtered read would touch, before reading.
+
+    Answers from the Parquet footer alone: which row groups can match the
+    query bbox, and how many rows and compressed bytes those groups hold --
+    a real denominator for a progress bar, or a size warning before a large
+    download. The estimate comes from per-row-group spatial statistics
+    (native Parquet geo statistics, or a bbox covering column's chunk
+    statistics); a file with neither gets an explicit "no estimate", never
+    a guess.
+
+    Args:
+        parquet_file: Path or URL of the (Geo)Parquet file
+        bbox: Query bounds as (xmin, ymin, xmax, ymax) in the file's CRS
+        geometry_column: Geometry column whose native statistics to read
+            (auto-detected if None)
+
+    Returns:
+        A ``BboxFilterPreview`` (from ``geoparquet_io.core.preview``) with
+        ``has_estimate``, ``reason``, ``stats_source``, ``row_groups``
+        (row_group_id, num_rows, compressed_bytes each), ``est_rows``,
+        ``est_bytes`` and the file's ``total_row_groups`` / ``total_rows`` /
+        ``total_bytes``. Check ``has_estimate`` before using the estimates.
+
+    Raises:
+        InvalidParameterError: If ``bbox`` is not four finite numbers with
+            xmin <= xmax and ymin <= ymax, or if ``geometry_column`` names
+            a column the file does not have.
+
+    Example:
+        >>> from geoparquet_io.api import ops
+        >>> preview = ops.preview_bbox_filter(
+        ...     'https://example.com/places.parquet',
+        ...     bbox=(-122.5, 37.7, -122.3, 37.9),
+        ... )
+        >>> if preview.has_estimate:
+        ...     print(f"~{preview.est_rows} rows, ~{preview.est_bytes} bytes")
+        ... else:
+        ...     print(f"no estimate: {preview.reason}")
+    """
+    from geoparquet_io.core.preview import preview_bbox_filter as _preview_bbox_filter
+
+    return _preview_bbox_filter(parquet_file, bbox, geometry_column=geometry_column)
+
+
 def compression_stats(path: str) -> list[dict]:
     """
     Get per-column compression ratios for a Parquet file.
@@ -3096,6 +3192,7 @@ def polygonize(
     nodata: float | None = None,
     use_mask: bool = True,
     verbose: bool = False,
+    repair_geometry: bool = True,
 ) -> pa.Table:
     """
     Polygonize a categorical raster band into a GeoParquet-ready table.
@@ -3111,6 +3208,15 @@ def polygonize(
         nodata: Nodata value to exclude (default: the raster's own tag)
         use_mask: Honor the raster's mask/nodata (default: True)
         verbose: Whether to print verbose output
+        repair_geometry: Repair the self-touching rings contourrs emits where a
+            region pinches to one pixel corner -- not OGC-valid, where
+            rasterio's and GDAL's equivalent output is (default: True, as in
+            every command that offers ``--repair-geometry``). Appended last:
+            ops signatures are positional-or-keyword, so inserting it
+            mid-signature would silently re-map existing positional calls.
+            The count is reported either way; the repair itself can cost
+            several times the polygonization, because the self-touching
+            polygons are the large sprawling regions.
 
     Returns:
         PyArrow Table with one feature per contiguous class region
@@ -3124,6 +3230,7 @@ def polygonize(
         value_column=value_column,
         nodata=nodata,
         use_mask=use_mask,
+        repair_geometry=repair_geometry,
         verbose=verbose,
     )
 

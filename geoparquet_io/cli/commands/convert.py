@@ -21,7 +21,9 @@ from geoparquet_io.cli.decorators import (
     parse_row_group_options,
     repair_geometry_option,
     show_sql_option,
+    spatial_filter_options,
     verbose_option,
+    where_option,
 )
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.crs_utils import transform_source_label
@@ -710,6 +712,8 @@ def convert_geojson(
     show_default=True,
     help="Layer name in GeoPackage",
 )
+@spatial_filter_options
+@where_option
 @verbose_option
 @aws_profile_option
 @show_sql_option
@@ -720,6 +724,10 @@ def convert_geopackage(
     output_file,
     overwrite,
     layer_name,
+    bbox,
+    geometry,
+    use_first_geometry,
+    where,
     verbose,
     aws_profile,
     show_sql,
@@ -730,6 +738,10 @@ def convert_geopackage(
     GeoPackage is an OGC standard based on SQLite, supporting spatial indexing
     and multiple layers. Output includes a spatial index by default.
 
+    Rows can be filtered on the way through with --bbox, --geometry and
+    --where (same semantics as `gpio extract`); --bbox prunes on the bbox
+    covering column when the input has one.
+
     \b
     Examples:
       # Convert to GeoPackage
@@ -737,6 +749,13 @@ def convert_geopackage(
 
       # With custom layer name
       gpio convert geopackage data.parquet output.gpkg --layer-name buildings
+
+      # Only the features in a bounding box
+      gpio convert geopackage data.parquet output.gpkg --bbox -122.5,37.5,-122.0,38.0
+
+      # Attribute and geometry filters combined
+      gpio convert geopackage data.parquet output.gpkg \\
+          --geometry @boundary.geojson --where "population > 10000"
 
       # Overwrite existing file
       gpio convert geopackage data.parquet output.gpkg --overwrite
@@ -758,6 +777,10 @@ def convert_geopackage(
             output_path=output_file,
             overwrite=overwrite,
             layer_name=layer_name,
+            bbox=bbox,
+            geometry=geometry,
+            where=where,
+            use_first_geometry=use_first_geometry,
             verbose=verbose,
             profile=aws_profile,
         )
@@ -767,6 +790,8 @@ def convert_geopackage(
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
 @overwrite_option
+@spatial_filter_options
+@where_option
 @verbose_option
 @aws_profile_option
 @show_sql_option
@@ -776,6 +801,10 @@ def convert_flatgeobuf(
     input_file,
     output_file,
     overwrite,
+    bbox,
+    geometry,
+    use_first_geometry,
+    where,
     verbose,
     aws_profile,
     show_sql,
@@ -787,10 +816,16 @@ def convert_flatgeobuf(
     for efficient streaming and HTTP range requests. Spatial index is created
     automatically.
 
+    Rows can be filtered on the way through with --bbox, --geometry and
+    --where (same semantics as `gpio extract`).
+
     \b
     Examples:
       # Convert to FlatGeobuf
       gpio convert flatgeobuf data.parquet output.fgb
+
+      # Only the features in a bounding box
+      gpio convert flatgeobuf data.parquet output.fgb --bbox -122.5,37.5,-122.0,38.0
 
       # Auto-detection (no subcommand needed)
       gpio convert data.parquet output.fgb
@@ -808,6 +843,10 @@ def convert_flatgeobuf(
             input_path=input_file,
             output_path=output_file,
             overwrite=overwrite,
+            bbox=bbox,
+            geometry=geometry,
+            where=where,
+            use_first_geometry=use_first_geometry,
             verbose=verbose,
             profile=aws_profile,
         )
@@ -827,6 +866,8 @@ def convert_flatgeobuf(
     is_flag=True,
     help="Exclude bbox column if present in input",
 )
+@spatial_filter_options
+@where_option
 @verbose_option
 @aws_profile_option
 @show_sql_option
@@ -838,6 +879,10 @@ def convert_csv(
     overwrite,
     no_wkt,
     no_bbox,
+    bbox,
+    geometry,
+    use_first_geometry,
+    where,
     verbose,
     aws_profile,
     show_sql,
@@ -847,6 +892,9 @@ def convert_csv(
 
     By default, includes geometry as WKT (Well-Known Text) and bbox column if present.
     Complex types (STRUCT, LIST, MAP) are JSON-encoded.
+
+    Rows can be filtered on the way through with --bbox, --geometry and
+    --where (same semantics as `gpio extract`).
 
     \b
     Examples:
@@ -858,6 +906,10 @@ def convert_csv(
 
       # Exclude bbox column
       gpio convert csv data.parquet output.csv --no-bbox
+
+      # Only the rows matching a filter
+      gpio convert csv data.parquet output.csv --bbox -122.5,37.5,-122.0,38.0 \\
+          --where "population > 10000"
 
       # Auto-detection (no subcommand needed)
       gpio convert data.parquet output.csv
@@ -877,6 +929,10 @@ def convert_csv(
             include_wkt=not no_wkt,
             include_bbox=not no_bbox,
             overwrite=overwrite,
+            bbox=bbox,
+            geometry=geometry,
+            where=where,
+            use_first_geometry=use_first_geometry,
             verbose=verbose,
             profile=aws_profile,
         )

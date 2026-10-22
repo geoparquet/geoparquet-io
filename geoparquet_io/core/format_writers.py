@@ -11,6 +11,8 @@ Writers handle local file output only; remote uploads are handled by the upload 
 """
 
 import json
+import math
+from collections.abc import Sequence
 from pathlib import Path
 
 import pyarrow as pa
@@ -23,15 +25,18 @@ from geoparquet_io.core.crs_utils import (
 )
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
+    free_column_name,
     get_duckdb_connection,
     quote_identifier,
     sql_path,
     uses_aws_profile,
+    validate_where_clause,
 )
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
     InvalidParameterError,
+    ValidationError,
 )
 from geoparquet_io.core.file_utils import resolve_file_url, validate_output_path
 from geoparquet_io.core.geometry_detection import detect_parquet_geometry_column
@@ -148,6 +153,172 @@ def _get_srs_parameter(input_path: str, verbose: bool = False) -> str | None:
     return json.dumps(crs)
 
 
+#: The temp table a GDAL write stages its features into. COPY ... (FORMAT GDAL)
+#: scans on one thread; staging first lets DuckDB read the row groups in
+#: parallel (adapted from portolan-registry-qgis core/parquet_query.py,
+#: Apache-2.0). The table lives and dies with the writer's own connection.
+_STAGED_TABLE = "__gpio_convert_staged"
+
+#: Single geometry type -> the multi type of its family.
+_MULTI_TYPES = {"Point": "MultiPoint", "LineString": "MultiLineString", "Polygon": "MultiPolygon"}
+
+
+def _normalize_bbox(
+    bbox: str | Sequence[float] | None,
+) -> tuple[float, float, float, float] | None:
+    """Parse a bbox given as ``"xmin,ymin,xmax,ymax"`` text or four numbers."""
+    if bbox is None:
+        return None
+    from geoparquet_io.core.extract import parse_bbox
+
+    if not isinstance(bbox, str):
+        try:
+            bbox = ",".join(str(float(value)) for value in bbox)
+        except (TypeError, ValueError) as e:
+            raise InvalidParameterError(
+                "bbox", f"expected 4 numeric values (xmin,ymin,xmax,ymax), got {bbox!r}"
+            ) from e
+    parsed = parse_bbox(bbox)
+    if not all(math.isfinite(value) for value in parsed):
+        # NaN slips past parse_bbox's reversed-coordinate check (NaN compares
+        # False) and would be interpolated as the bare SQL token ``nan``.
+        raise InvalidParameterError("bbox", f"coordinates must be finite, got {bbox!r}")
+    return parsed
+
+
+def _build_convert_filter(
+    input_path: str,
+    geometry_col: str | None,
+    bbox: str | Sequence[float] | None,
+    geometry: str | None,
+    where: str | None,
+    use_first_geometry: bool = False,
+) -> str | None:
+    """Compose the SQL filter for a filtered conversion (#1308).
+
+    Reuses extract's covering-aware builder (:func:`core.extract.build_spatial_filter`):
+    a bbox prunes on the file's bbox covering column when it has one (four-sided
+    overlap on quoted identifiers) and falls back to ``ST_Intersects`` otherwise;
+    ``geometry`` becomes an intersection test against the parsed WKT; ``where``
+    is validated as a single filter expression. Returns the composed clause, or
+    ``None`` when no filter was asked for.
+    """
+    if bbox is None and geometry is None and where is None:
+        return None
+    from geoparquet_io.core.bbox_structure import check_bbox_structure
+    from geoparquet_io.core.extract import (
+        _warn_if_crs_mismatch,
+        build_spatial_filter,
+        parse_geometry_input,
+    )
+
+    if where:
+        validate_where_clause(where)
+    bbox_tuple = _normalize_bbox(bbox)
+    geometry_wkt = parse_geometry_input(geometry, use_first_geometry) if geometry else None
+    spatial_filter = None
+    if bbox_tuple or geometry_wkt:
+        if not geometry_col:
+            raise InvalidParameterError(
+                "bbox" if bbox_tuple else "geometry",
+                "spatial filtering requires a geometry column, and none was found",
+            )
+        bbox_info: dict = (
+            dict(check_bbox_structure(input_path, verbose=False)) if bbox_tuple else {}
+        )
+        if bbox_tuple:
+            _warn_if_crs_mismatch(bbox_tuple, input_path, geometry_col)
+        spatial_filter = build_spatial_filter(bbox_tuple, geometry_wkt, bbox_info, geometry_col)
+    conditions = [f"({condition})" for condition in (spatial_filter, where) if condition]
+    return " AND ".join(conditions) if conditions else None
+
+
+def _should_promote_to_multi(input_path: str, geometry_col: str) -> bool:
+    """True when the geo metadata declares mixed single+multi types of one family.
+
+    A GDAL layer holds one geometry type, so ``Polygon`` next to ``MultiPolygon``
+    promotes to the multi type with ``ST_Multi`` (adapted from
+    portolan-registry-qgis core/geoparquet.py, Apache-2.0). Mixed families, one
+    declared type, or no metadata leave the geometry alone.
+    """
+    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+
+    geo = get_geo_metadata(input_path) or {}
+    columns = geo.get("columns") or {}
+    info = columns.get(geometry_col) or {}
+    types = info.get("geometry_types") or []
+    names = {t.split(" ")[0] for t in types if isinstance(t, str)}
+    return len(names) > 1 and len({_MULTI_TYPES.get(name, name) for name in names}) == 1
+
+
+def _gdal_select_exprs(schema: pa.Schema, geometry_col: str | None, input_path: str) -> list[str]:
+    """Column expressions GDAL can hold: complex types dropped, mixed
+    single/multi geometry promoted to its multi type."""
+    promote = geometry_col is not None and _should_promote_to_multi(input_path, geometry_col)
+    exprs = []
+    for field in schema:
+        if (
+            pa.types.is_struct(field.type)
+            or pa.types.is_list(field.type)
+            or pa.types.is_map(field.type)
+        ):
+            continue
+        ident = quote_identifier(field.name)
+        if promote and field.name == geometry_col:
+            exprs.append(f"ST_Multi({ident}) AS {ident}")
+        else:
+            exprs.append(ident)
+    return exprs
+
+
+def _gpkg_collision_options(column_names: list[str], geometry_col: str | None) -> list[str]:
+    """``FID=``/``GEOMETRY_NAME=`` creation options that step around a source column.
+
+    GDAL keeps the GeoPackage feature id in ``fid`` and names the written
+    geometry column ``geom``; a source attribute with either name makes GDAL
+    refuse the write or silently drop the attribute (donor regression,
+    portolan-registry-qgis core/geoparquet.py, Apache-2.0). Only emitted on a
+    collision, so the common case keeps GDAL's defaults. The generated names are
+    ``fid``/``geom`` plus a numeric suffix, never raw user input.
+    """
+    attributes = [name for name in column_names if name != geometry_col]
+    options = []
+    fid = free_column_name("fid", attributes)
+    if fid != "fid":
+        options.append(f"FID={fid}")
+    geometry_name = free_column_name("geom", [*attributes, fid])
+    if geometry_name != "geom":
+        options.append(f"GEOMETRY_NAME={geometry_name}")
+    return options
+
+
+def _drop_gpkg_geometry_column(path: str) -> None:
+    """Turn the one layer of a geometry-less GeoPackage into an attribute table.
+
+    DuckDB's GDAL writer always adds a geometry column; for a source with no
+    geometry it stays NULL. Deregistering and dropping it lets GDAL and QGIS
+    open the layer as a plain attribute table (adapted from
+    portolan-registry-qgis core/parquet_query.py, Apache-2.0).
+    """
+    import sqlite3
+    from contextlib import closing
+
+    with closing(sqlite3.connect(path)) as gpkg:
+        row = gpkg.execute("SELECT table_name, column_name FROM gpkg_geometry_columns").fetchone()
+        if row is None:
+            return
+        table, column = (str(part) for part in row)
+        with gpkg:
+            gpkg.execute("DELETE FROM gpkg_geometry_columns WHERE table_name = ?", [table])
+            gpkg.execute(
+                "UPDATE gpkg_contents SET data_type = 'attributes' WHERE table_name = ?", [table]
+            )
+            # DROP COLUMN needs SQLite 3.35 (March 2021).
+            gpkg.execute(
+                f"ALTER TABLE {quote_identifier(table)} DROP COLUMN {quote_identifier(column)}"
+            )
+
+
 @uses_aws_profile
 def write_gdal_format(
     input_path: str,
@@ -158,6 +329,10 @@ def write_gdal_format(
     encoding: str = "UTF-8",
     verbose: bool = False,
     profile: str | None = None,
+    bbox: str | Sequence[float] | None = None,
+    geometry: str | None = None,
+    where: str | None = None,
+    use_first_geometry: bool = False,
 ) -> str:
     """
     Write GeoParquet to a GDAL-supported format via DuckDB.
@@ -173,6 +348,13 @@ def write_gdal_format(
         encoding: Character encoding (for Shapefile)
         verbose: Print verbose output
         profile: AWS profile for S3 input files
+        bbox: Bounding box filter, "xmin,ymin,xmax,ymax" or four numbers.
+            Prunes on the bbox covering column when the file has one.
+        geometry: Geometry filter: GeoJSON, WKT, @filepath, or "-" for stdin
+            (same forms as ``gpio extract --geometry``)
+        where: DuckDB WHERE clause for filtering rows
+        use_first_geometry: Use the first geometry when ``geometry`` is a
+            FeatureCollection with several
 
     Returns:
         Path to output file
@@ -237,21 +419,6 @@ def write_gdal_format(
             srs_clause = ""
             debug("No CRS metadata found or using default CRS")
 
-        # Build layer creation options
-        lco_parts = []
-        if config.get("layer_option"):
-            safe_layer_name = _escape_sql_string(layer_name)
-            lco_parts.append(f"{config['layer_option']}={safe_layer_name}")
-        if config.get("encoding_option"):
-            safe_encoding = _escape_sql_string(encoding)
-            lco_parts.append(f"{config['encoding_option']}={safe_encoding}")
-
-        lco_clause = f", LAYER_CREATION_OPTIONS '{' '.join(lco_parts)}'" if lco_parts else ""
-
-        # Execute write with SQL-escaped paths
-        # Note: DuckDB's COPY statement doesn't support parameterized paths,
-        # so we use SQL standard escaping (double single quotes)
-
         # GDAL formats don't support complex types (STRUCT, LIST, MAP), so select only compatible columns
         # Read schema to filter out incompatible columns
         # Use fsspec to support remote URLs (HTTP/HTTPS)
@@ -262,7 +429,8 @@ def write_gdal_format(
             schema = pf.schema_arrow
 
         # Check for geometry column using GeoParquet metadata first, then name-based fallback
-        has_geometry = detect_parquet_geometry_column(input_url, verbose=verbose) is not None
+        geometry_col = detect_parquet_geometry_column(input_url, verbose=verbose)
+        has_geometry = geometry_col is not None
 
         # FlatGeobuf requires geometry - fail early with a clear message
         if not has_geometry and format_name == "flatgeobuf":
@@ -279,37 +447,69 @@ def write_gdal_format(
                 f"attribute data only (no spatial features)."
             )
 
-        compatible_cols = []
-        for field in schema:
-            # Skip complex types that GDAL can't handle
-            if not (
-                pa.types.is_struct(field.type)
-                or pa.types.is_list(field.type)
-                or pa.types.is_map(field.type)
-            ):
-                compatible_cols.append(quote_identifier(field.name))
+        # Build layer creation options, as RAW strings: the one escape happens
+        # at the join below, so a future part cannot be appended unescaped.
+        lco_parts = []
+        if config.get("layer_option"):
+            lco_parts.append(f"{config['layer_option']}={layer_name}")
+        if config.get("encoding_option"):
+            lco_parts.append(f"{config['encoding_option']}={encoding}")
+        if format_name == "geopackage":
+            lco_parts.extend(
+                _gpkg_collision_options([field.name for field in schema], geometry_col)
+            )
+            if not has_geometry:
+                # The placeholder geometry column is dropped below; writing it
+                # without a spatial index lets it drop cleanly.
+                lco_parts.append("SPATIAL_INDEX=NO")
 
+        # The list form: DuckDB hands a bare string to GDAL as ONE key=value
+        # pair, so space-separating several options silently corrupts them all.
+        lco_options = ", ".join(f"'{_escape_sql_string(part)}'" for part in lco_parts)
+        lco_clause = f", LAYER_CREATION_OPTIONS ({lco_options})" if lco_parts else ""
+
+        compatible_cols = _gdal_select_exprs(schema, geometry_col, input_path)
         if not compatible_cols:
             raise GeoParquetError(ERROR_NO_COMPATIBLE_COLUMNS.format(format=config["description"]))
 
-        select_clause = ", ".join(compatible_cols)
+        where_filter = _build_convert_filter(
+            input_path, geometry_col, bbox, geometry, where, use_first_geometry
+        )
 
+        # Note: DuckDB's COPY statement doesn't support parameterized paths,
+        # so sql_path() supplies the quoted, escaped literal.
+        source_query = (
+            f"SELECT {', '.join(compatible_cols)} FROM read_parquet({sql_path(input_path)})"
+        )
+        if where_filter:
+            source_query += f" WHERE {where_filter}"
+
+        staging = f"CREATE OR REPLACE TEMP TABLE {_STAGED_TABLE} AS {source_query}"
         query = f"""
-            COPY (SELECT {select_clause} FROM read_parquet({sql_path(input_path)}))
+            COPY (SELECT * FROM {_STAGED_TABLE})
             TO {sql_path(output_path)}
             WITH (FORMAT GDAL, DRIVER '{config["driver"]}'{lco_clause}{srs_clause})
         """
 
-        debug(f"Executing: {query}")
         # No `--write-memory` on the export commands, so this is the
         # ceiling-based default; the export used to run at DuckDB's own
         # 80%-of-host default, blind to a container or job cgroup (#1174).
         with scoped_write_memory_limit(con, None, verbose):
+            debug(f"Executing: {staging}")
+            con.execute(staging)
+            debug(f"Executing: {query}")
             con.execute(query)
+
+        if format_name == "geopackage" and not has_geometry:
+            _drop_gpkg_geometry_column(output_path)
 
         success(f"Created {config['description']}: {output_path}")
         return output_path
 
+    except (InvalidParameterError, ValidationError):
+        # Parameter problems (a reversed bbox, a multi-statement --where) are
+        # the caller's to read as such, not a conversion failure.
+        raise
     except Exception as e:
         error_msg = str(e)
         if "already exists" in error_msg.lower():
@@ -332,6 +532,10 @@ def write_csv(
     overwrite: bool = False,
     verbose: bool = False,
     profile: str | None = None,
+    bbox: str | Sequence[float] | None = None,
+    geometry: str | None = None,
+    where: str | None = None,
+    use_first_geometry: bool = False,
 ) -> str:
     """
     Convert GeoParquet to CSV format with optional WKT geometry.
@@ -347,6 +551,11 @@ def write_csv(
         overwrite: Overwrite existing file if True (default: False)
         verbose: Print verbose output
         profile: AWS profile for S3 input files
+        bbox: Bounding box filter, "xmin,ymin,xmax,ymax" or four numbers
+        geometry: Geometry filter: GeoJSON, WKT, @filepath, or "-" for stdin
+        where: DuckDB WHERE clause for filtering rows
+        use_first_geometry: Use the first geometry when ``geometry`` is a
+            FeatureCollection with several
 
     Returns:
         Path to output file
@@ -419,13 +628,18 @@ def write_csv(
         if not select_cols:
             raise GeoParquetError("No columns to export after filtering geometry.")
 
+        where_filter = _build_convert_filter(
+            input_path, geom_col, bbox, geometry, where, use_first_geometry
+        )
+        filter_clause = f"\n                WHERE {where_filter}" if where_filter else ""
+
         # Note: DuckDB's COPY statement doesn't support parameterized paths,
         # so sql_path() supplies the quoted, escaped literal.
 
         query = f"""
             COPY (
                 SELECT {", ".join(select_cols)}
-                FROM read_parquet({sql_path(input_path)})
+                FROM read_parquet({sql_path(input_path)}){filter_clause}
             )
             TO {sql_path(output_path)}
             WITH (HEADER TRUE, DELIMITER ',')
@@ -438,6 +652,8 @@ def write_csv(
         success(f"Created CSV: {output_path}")
         return output_path
 
+    except (InvalidParameterError, ValidationError):
+        raise
     except Exception as e:
         raise GeoParquetError(ERROR_CONVERSION_FAILED.format(format="CSV", error=str(e))) from e
     finally:
@@ -609,6 +825,10 @@ def write_format(
             overwrite=format_options.get("overwrite", False),
             verbose=verbose,
             profile=profile,
+            bbox=format_options.get("bbox"),
+            geometry=format_options.get("geometry"),
+            where=format_options.get("where"),
+            use_first_geometry=format_options.get("use_first_geometry", False),
         )
     elif format_lower == "geojson":
         return write_geojson(

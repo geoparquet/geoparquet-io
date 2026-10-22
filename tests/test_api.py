@@ -831,6 +831,8 @@ OPS_ONLY_SURFACE: dict[str, str] = {
     "add_stac_metadata_table": "`Table.add_stac_metadata` is the method-side spelling; "
     "`ops.add_stac_metadata` is taken by the file form, which patches a footer on disk",
     "get_row_group_geo_stats": "inspection helper: reads row-group stats off a path",
+    "preview_bbox_filter": "inspection helper: previews a bbox read off a path's "
+    "row-group statistics before anything is read; there is no table on either end",
     "read_bigquery": "`Table.from_bigquery` <-> `ops.read_bigquery`, differently spelled twin",
     # Directory sub-partitioning (#853) is deliberately `Table`-twin-less: the
     # unit of work is a directory of files on disk, splitting each oversized one

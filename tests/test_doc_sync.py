@@ -8,6 +8,11 @@ from pathlib import Path
 
 import pytest
 
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover
+    import tomli as tomllib  # type: ignore[no-redef]
+
 # Repo tooling checks: these exercise the doc_sync script that the CI lint job
 # already runs via pre-commit, several of them through subprocesses, so they
 # live in the meta lane instead of the fast suite.
@@ -365,3 +370,27 @@ class TestSkillGeneration:
         assert "<!-- BEGIN GENERATED: check-commands -->" in section
         assert "<!-- END GENERATED: check-commands -->" in section
         assert "gpio check" in section
+
+
+class TestChangelogSingleSource:
+    """docs/CHANGELOG.md includes the root file instead of holding a copy."""
+
+    def test_docs_changelog_is_include_stub(self):
+        """The docs page is only a snippets include of the root CHANGELOG.md."""
+        stub = (PROJECT_ROOT / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
+        lines = [line for line in stub.splitlines() if line.strip()]
+        assert lines == ['--8<-- "CHANGELOG.md"'], stub
+        assert "## v" not in stub
+
+    def test_snippets_resolve_repo_root_before_docs(self):
+        """Root must come first in base_path, or the stub would include itself."""
+        config = tomllib.loads((PROJECT_ROOT / "zensical.toml").read_text(encoding="utf-8"))
+        snippets = config["project"]["markdown_extensions"]["pymdownx.snippets"]
+        base_path = snippets["base_path"]
+        assert isinstance(base_path, list)
+        assert base_path.index(".") < base_path.index("docs")
+
+    def test_doc_sync_no_longer_copies_changelog(self):
+        """The copy step is gone, so nothing regenerates docs/CHANGELOG.md."""
+        mod = _load_module()
+        assert not hasattr(mod, "sync_changelog")

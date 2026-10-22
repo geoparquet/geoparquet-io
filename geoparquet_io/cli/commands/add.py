@@ -902,7 +902,7 @@ def add_kdtree(
         validate_parquet_extension(output_parquet, any_extension)
 
         iterations, sample_size, auto_target = resolve_kdtree_options(
-            partitions, auto, approx, exact
+            partitions, auto, approx, exact, ctx.get_parameter_source("approx")
         )
 
         # Parse row group options

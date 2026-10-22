@@ -3,7 +3,15 @@ DuckDB connection management utilities.
 
 This module provides functions for creating and managing DuckDB connections
 with appropriate extensions loaded for GeoParquet operations.
+
+``import duckdb`` is deferred into the functions that touch it (#1307): the
+embeddable core modules (see docs/guide/embedding.md) import this module for
+``quote_identifier``/``_escape_sql_string``/``sql_path``-style helpers, and a
+host application without DuckDB installed must be able to import them and fail
+only when a connection is actually asked for.
 """
+
+from __future__ import annotations
 
 import datetime
 import functools
@@ -19,9 +27,10 @@ import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
-import duckdb
+if TYPE_CHECKING:
+    import duckdb
 
 from geoparquet_io.core.exceptions import ExtensionUnavailableError, ValidationError
 from geoparquet_io.core.logging_config import debug, warn
@@ -310,6 +319,8 @@ def restore_duckdb_settings(
 
     ``saved`` keys are setting names from gpio's own code, never user input.
     """
+    import duckdb
+
     for key, value in saved.items():
         if not _SETTING_KEY_RE.fullmatch(key):
             raise ValueError(f"Not a DuckDB setting name: {key!r}")
@@ -356,7 +367,17 @@ _MAX_CHAIN = 32
 
 
 def _is_interrupt_itself(exc: BaseException) -> bool:
-    if isinstance(exc, (KeyboardInterrupt, duckdb.InterruptException)):
+    # KeyboardInterrupt first: this always runs inside an exception handler,
+    # and in a duckdb-less vendoring host the import below would mask the
+    # interrupt with a ModuleNotFoundError.
+    if isinstance(exc, KeyboardInterrupt):
+        return True
+    try:
+        import duckdb
+    except ModuleNotFoundError:
+        return isinstance(exc, RuntimeError) and str(exc) == _QUERY_INTERRUPTED
+
+    if isinstance(exc, duckdb.InterruptException):
         return True
     return isinstance(exc, (RuntimeError, duckdb.Error)) and str(exc) == _QUERY_INTERRUPTED
 
@@ -614,6 +635,8 @@ def _dangerous_keywords_in(where_clause: str) -> list[str]:
     a conservative whole-word regex over the raw clause.
     """
     try:
+        import duckdb
+
         tokens = duckdb.tokenize(where_clause)
         word_types = {duckdb.token_type.keyword, duckdb.token_type.identifier}
         words = set()
@@ -660,7 +683,6 @@ def validate_where_clause(where_clause: str) -> None:
         ValidationError: If dangerous SQL keywords are found, if the clause does
             not parse, or if it composes into more than one statement.
     """
-
     found_keywords = _dangerous_keywords_in(where_clause)
     if found_keywords:
         raise ValidationError(
@@ -668,6 +690,13 @@ def validate_where_clause(where_clause: str) -> None:
             "Only SELECT-style filtering expressions are allowed in --where. "
             "Run data-modifying statements against the source system directly."
         )
+
+    try:
+        import duckdb
+    except ModuleNotFoundError:
+        # A duckdb-less vendoring host (#1307) keeps the keyword blocklist
+        # above; the parser gate needs the engine that would run the query.
+        return
 
     probe_query = f"SELECT 1 WHERE {where_condition_fragment(where_clause)}"
     try:
@@ -1025,10 +1054,31 @@ def spill_directory(base_dir: str | os.PathLike | None = None) -> str:
 #: covered by the first entry anyway. gpio writes every ``CAST`` it runs, so
 #: whether such a failure is the data's fault or gpio's choice of target type is
 #: not decidable from the exception, and membership here has to be decidable.
-INPUT_FILE_DUCKDB_ERRORS = (
-    duckdb.InvalidInputException,
-    duckdb.IOException,
-)
+#:
+#: Deferred like every other duckdb touch in this module (#1307): the tuple is
+#: built on first attribute access through the module ``__getattr__`` below, so
+#: ``from ... import INPUT_FILE_DUCKDB_ERRORS`` still works while a plain
+#: ``import geoparquet_io.core.duckdb_utils`` never imports duckdb.
+def _input_file_duckdb_errors() -> tuple[type[BaseException], ...]:
+    cached = globals().get("INPUT_FILE_DUCKDB_ERRORS")
+    if cached is None:
+        import duckdb
+
+        cached = (
+            duckdb.InvalidInputException,
+            duckdb.IOException,
+        )
+        # Cache into the module namespace so every later access -- attribute or
+        # :func:`is_input_file_duckdb_error` -- reads one tuple, and a test that
+        # monkeypatches ``duckdb_utils.INPUT_FILE_DUCKDB_ERRORS`` is honored.
+        globals()["INPUT_FILE_DUCKDB_ERRORS"] = cached
+    return cached
+
+
+def __getattr__(name: str):
+    if name == "INPUT_FILE_DUCKDB_ERRORS":
+        return _input_file_duckdb_errors()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def is_input_file_duckdb_error(exc: BaseException) -> bool:
@@ -1043,7 +1093,7 @@ def is_input_file_duckdb_error(exc: BaseException) -> bool:
     wrapper is gpio saying what it thinks happened, and its own class is the
     answer to use.
     """
-    return isinstance(exc, INPUT_FILE_DUCKDB_ERRORS)
+    return isinstance(exc, _input_file_duckdb_errors())
 
 
 #: DuckDB's own words when the *spill volume* fills up. The message it prints is
@@ -1246,7 +1296,7 @@ class ProfiledConnection:
     safe.
     """
 
-    def __init__(self, con: "duckdb.DuckDBPyConnection", directory: str):
+    def __init__(self, con: duckdb.DuckDBPyConnection, directory: str):
         self._con = con
         self._directory = directory
         self._prefix = _profile_file_prefix()
@@ -1380,6 +1430,8 @@ def get_duckdb_connection(
         unannotated because the many helpers typed ``duckdb.DuckDBPyConnection``
         that receive it use only the methods the proxy forwards.
     """
+    import duckdb
+
     config = {}
     if threads is not None:
         config["threads"] = threads
@@ -1483,6 +1535,7 @@ def load_community_extension(con, name: str, feature: str | None = None) -> None
     Raises:
         ExtensionUnavailableError: If the extension cannot be installed or loaded.
     """
+    import duckdb
 
     _opt_out_of_extension_telemetry()
     try:
@@ -1509,6 +1562,8 @@ def require_community_extension(name: str, feature: str | None = None) -> None:
     Raises:
         ExtensionUnavailableError: If the extension cannot be installed or loaded.
     """
+    import duckdb
+
     con = duckdb.connect()
     try:
         load_community_extension(con, name, feature=feature)
@@ -1522,7 +1577,7 @@ def get_duckdb_connection_for_s3(
     s3_endpoint: str | None = None,
     s3_region: str | None = None,
     s3_use_ssl: bool | None = None,
-) -> "duckdb.DuckDBPyConnection | ProfiledConnection":
+) -> duckdb.DuckDBPyConnection | ProfiledConnection:
     """
     Get DuckDB connection configured for S3 access.
 

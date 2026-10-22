@@ -10,8 +10,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-import duckdb
-
 from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
     quote_identifier,
@@ -67,6 +65,8 @@ def detect_parquet_geometry_column(parquet_file: str, verbose: bool = False) -> 
     Returns:
         The name of the detected geometry column, or None if not found.
     """
+    import duckdb
+
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
 

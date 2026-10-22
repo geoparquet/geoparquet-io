@@ -106,4 +106,4 @@ toc.permalink = true
 "pymdownx.superfences" = {}
 "pymdownx.tabbed".alternate_style = true
 "pymdownx.highlight" = {}
-"pymdownx.snippets" = { base_path = "docs", check_paths = true }
+"pymdownx.snippets" = { base_path = [".", "docs"], check_paths = true }
