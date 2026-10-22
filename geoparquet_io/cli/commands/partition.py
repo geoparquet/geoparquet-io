@@ -887,7 +887,7 @@ def partition_kdtree(
     """
     with _activate_s3(ctx):
         iterations, sample_size, auto_target = resolve_kdtree_options(
-            partitions, auto, approx, exact
+            partitions, auto, approx, exact, ctx.get_parameter_source("approx")
         )
 
         # If preview mode, output_folder is not required

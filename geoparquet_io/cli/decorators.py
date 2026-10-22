@@ -9,6 +9,7 @@ import functools
 import math
 
 import click
+from click.core import ParameterSource
 
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
@@ -133,11 +134,8 @@ def parse_row_group_options(
 
 
 # ``--approx``'s default. ``gpio add kdtree`` and ``gpio partition kdtree`` both
-# declare the option with this value, and exclusivity against ``--exact`` is
-# detected by comparing the received value against it (see the note in
-# ``resolve_kdtree_options``), so the declarations import it from here rather
-# than repeating the literal: a second copy that drifted would make a bare
-# ``--exact`` start reporting a conflict with an ``--approx`` nobody typed.
+# declare the option with this value, so the declarations import it from here
+# rather than repeating the literal.
 DEFAULT_KDTREE_APPROX = 100000
 
 # Rows per partition targeted when the user asks for neither ``--partitions``
@@ -151,6 +149,7 @@ def resolve_kdtree_options(
     auto: int | None,
     approx: int,
     exact: bool,
+    approx_source: ParameterSource | None,
 ) -> tuple[int | None, int | None, tuple[str, int] | None]:
     """Resolve the four KD-tree sizing options into what the core layer takes.
 
@@ -166,6 +165,8 @@ def resolve_kdtree_options(
         auto: ``--auto``, a target row count per partition.
         approx: ``--approx``, the sample size for approximate medians.
         exact: ``--exact``, computing medians over the full dataset instead.
+        approx_source: where ``approx`` came from, as reported by
+            ``ctx.get_parameter_source("approx")``.
 
     Returns:
         ``(iterations, sample_size, auto_target)`` -- the recursion depth
@@ -174,17 +175,9 @@ def resolve_kdtree_options(
         when the partition count was explicit).
 
     Raises:
-        click.UsageError: ``--partitions`` with ``--auto``, ``--exact`` with a
-            non-default ``--approx``, or a ``--partitions`` value that is not a
-            power of two of at least 2.
-
-    Note:
-        The ``--approx``/``--exact`` check compares ``approx`` against its
-        declared default rather than asking Click whether the user typed it, so
-        ``--exact --approx 100000`` is accepted silently. That is preserved
-        verbatim from both call sites: correcting it with a
-        ``ctx.get_parameter_source`` check would change behaviour, and belongs in
-        its own change (#951).
+        click.UsageError: ``--partitions`` with ``--auto``, ``--exact`` with an
+            ``--approx`` the user supplied, or a ``--partitions`` value that is
+            not a power of two of at least 2.
     """
     if sum([partitions is not None, auto is not None]) > 1:
         raise click.UsageError("--partitions and --auto are mutually exclusive")
@@ -195,7 +188,7 @@ def resolve_kdtree_options(
     if partitions is not None and (partitions < 2 or (partitions & (partitions - 1)) != 0):
         raise click.UsageError(f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}")
 
-    if exact and approx != DEFAULT_KDTREE_APPROX:
+    if exact and approx_source is not ParameterSource.DEFAULT:
         raise click.UsageError("--approx and --exact are mutually exclusive")
 
     sample_size = None if exact else approx
