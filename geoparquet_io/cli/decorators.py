@@ -166,7 +166,10 @@ def resolve_kdtree_options(
         approx: ``--approx``, the sample size for approximate medians.
         exact: ``--exact``, computing medians over the full dataset instead.
         approx_source: where ``approx`` came from, as reported by
-            ``ctx.get_parameter_source("approx")``.
+            ``ctx.get_parameter_source("approx")``. Any source but
+            ``ParameterSource.DEFAULT`` counts as a supplied ``--approx`` --
+            ``None`` (unknown) included, so an unwired caller fails closed
+            rather than reviving the #951 quirk.
 
     Returns:
         ``(iterations, sample_size, auto_target)`` -- the recursion depth
