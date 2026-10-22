@@ -677,7 +677,8 @@ def create_overview_file(
         output_dir: Directory for the per-level sibling files (default:
             beside the input).
         compression: Parquet compression codec (default ZSTD).
-        compression_level: Optional compression level.
+        compression_level: Optional compression level. Unset ZSTD resolves
+            to the process group's default of 9, not the funnel's 15.
         geoparquet_version: GeoParquet spec version to write.
         force: Overwrite an existing ``overview_out`` or sibling file.
         memory_limit: DuckDB memory limit for the rollups (e.g. "8GB").
@@ -757,7 +758,8 @@ def create_overviews(
             e.g. H3 ids stored as integers
         output_dir: Directory for overview files (default: beside the input)
         compression: Parquet compression codec (default: ZSTD)
-        compression_level: Optional compression level
+        compression_level: Optional compression level. Unset ZSTD resolves
+            to the process group's default of 9, not the funnel's 15
         geoparquet_version: GeoParquet version to write
         force: Overwrite existing overview output files
         verbose: Enable verbose output

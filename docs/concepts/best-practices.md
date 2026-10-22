@@ -116,8 +116,10 @@ gpio convert input.shp output.parquet
 | Fast decompression | LZ4 | - | Analytics workloads |
 | Wide compatibility | GZIP | 6 | Older tools |
 
-gpio uses **ZSTD level 15** by default, except for the `gpio process`
-commands, which default to **level 9**.
+gpio's write funnel defaults to **ZSTD level 15**, except for the `gpio
+process` commands, which default to **level 9**. Commands that write through
+a plain DuckDB `COPY` (most others, when no `--compression-level` is given)
+currently fall to DuckDB's own default of 3 — #1335 tracks unifying that.
 
 ### Why the process commands differ
 
@@ -125,8 +127,8 @@ commands, which default to **level 9**.
 large share of the command's wall clock — 67-90% of it for `polygonize` and
 `contour`. Measured on their own outputs, level 9 writes 2.8-8.2x faster than
 level 15 for at most 4.9% more bytes, and on a 217k-row polygonize table it is
-both faster *and* smaller: at level 15 ZSTD's long-range matching works against
-the dictionary encoding on a column of short WKB blobs.
+both faster *and* smaller — level 15's long-range matching buys nothing on a
+column of short, high-entropy WKB blobs and costs bytes of window bookkeeping.
 
 Level 9 is the only level that is close to free. Below it the size cost stops
 being noise — level 3 is 15-20% larger on geometry-heavy tables and level 1 is
@@ -144,7 +146,7 @@ delete.
 === "CLI"
 
     ```bash
-    # Default ZSTD compression (level 15)
+    # Default ZSTD compression
     gpio convert input.shp output.parquet
 
     # The process group's default (level 9)
@@ -167,7 +169,7 @@ delete.
     import geoparquet_io as gpio
     from geoparquet_io import ops
 
-    # Default ZSTD compression (level 15)
+    # Default ZSTD compression
     gpio.convert('input.shp').write('output.parquet')
 
     # A process function that writes the file takes the group's default (level 9)
@@ -190,9 +192,9 @@ delete.
 
     `ops.simplify`, `ops.polygonize`, `ops.contour`, `ops.aggregate_*` and
     `Table.simplify` hand you a table instead. Writing that table with
-    `.write()` is an ordinary write, at the global level 15 — pass
-    `compression_level=9` to `.write()` if you want the CLI's bytes from the
-    Python API.
+    `.write()` is an ordinary write at `.write()`'s own default (see #1335 for
+    what an unset level means there today) — pass `compression_level=9`
+    explicitly to match the process CLI's level from the Python API.
 
 ## Row Group Sizing
 
