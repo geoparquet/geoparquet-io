@@ -67,6 +67,25 @@ assert "duckdb" not in sys.modules
 print("imports stayed lazy")
 ```
 
+## What a host must supply
+
+**Python 3.10 or newer, to import.** Modules in the surface's closure —
+`logging_config` and `remote` among them — write `X | None` in signatures without
+`from __future__ import annotations`, so an older interpreter fails at import
+with a `TypeError`. gpio itself requires 3.10; this matters only to a host whose
+embedded Python is older.
+
+**More than pyarrow, to call.** Each of these is imported inside the function
+that needs it, so its absence surfaces as `ModuleNotFoundError` at that call,
+not at import:
+
+| Package | First needed by |
+|---------|-----------------|
+| `duckdb` | any function that opens a connection |
+| `fsspec` | GeoPackage, FlatGeobuf, Shapefile and CSV export (`format_writers.write_gdal_format`, `write_csv`), which read the input's schema through it — local files included. HTTP(S) inputs also need `aiohttp`; S3 inputs need `s3fs` |
+| `pyproj` | CRS normalization in `crs_utils`, `duckdb_metadata`, `geodesic_bbox` and the write funnels |
+| `geoarrow-pyarrow` | the Arrow-side geometry paths: geometry types or a bbox computed from the data (`geo_metadata`), and pyarrow reads and writes that must keep a native Parquet `GEOMETRY`/`GEOGRAPHY` type and its CRS |
+
 ## Detecting a missing DuckDB from a host
 
 A vendoring host should probe for DuckDB once, up front, and turn the result
