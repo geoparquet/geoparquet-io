@@ -170,6 +170,24 @@ def test_docs_page_names_every_embeddable_module():
     )
 
 
+def test_docs_page_states_the_python_floor():
+    """docs/guide/embedding.md names the interpreter floor pyproject declares.
+
+    The surface writes ``X | None`` in signatures without ``from __future__
+    import annotations``, so a vendoring host's embedded Python must meet
+    ``requires-python`` just to import it.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    floor = re.search(r'^requires-python\s*=\s*">=\s*(\d+\.\d+)"', pyproject, re.MULTILINE)
+    assert floor, "requires-python is no longer a plain >= floor"
+    text = (root / "docs" / "guide" / "embedding.md").read_text(encoding="utf-8")
+    assert f"Python {floor.group(1)} or newer" in text
+
+
 def test_bare_venv_ci_job_covers_every_embeddable_module():
     """The tests.yml bare-venv job imports exactly this surface."""
     from pathlib import Path
