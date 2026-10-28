@@ -232,7 +232,7 @@ class TestCheckSpatialOrderBboxStats:
         assert result["judged"] is False
         assert result["passed"] is True, "no failure found"
         assert result["issues"] == []
-        assert result["fix_available"] is False
+        assert result["fix_available"] is True, "unjudged is not known-ordered; a fix sorts"
         assert any("not judged below 8 row groups" in w for w in result["warnings"])
 
     def test_issues_and_recommendations_when_failed(self, unsorted_test_file, monkeypatch):
@@ -571,7 +571,7 @@ class TestSpatialLocalitySecondaryCheck:
         assert result["ratio"] == 1.0, "All consecutive pairs overlap"
         assert result["judged"] is False, "five row groups: the verdict is withheld"
         assert result["passed"] is True, "no failure found"
-        assert result["fix_available"] is False
+        assert result["fix_available"] is True, "unjudged is not known-ordered; a fix sorts"
         assert result["issues"] == []
 
     def test_print_path_reflects_secondary_pass(self, caplog):
