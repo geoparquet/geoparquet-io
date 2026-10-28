@@ -6,16 +6,25 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 
 ``MultiFileCheckRunner`` below is the group's own progress/summary helper. It is
 used by exactly this group, so it lives here rather than in ``cli/_shared.py``.
+
+Exit codes are one contract across the group (#1241): a failure exits 1, a
+warning exits 0 unless ``--strict``, and an input that matches no files exits 1
+(#1091). A check that could not run is a failure (#624). Severity -- per result
+and per issue, including "could not run" -- is stated by the core checks and
+read through :mod:`geoparquet_io.core.check_verdict`; the runner keeps each
+file's verdict and :meth:`MultiFileCheckRunner.finish` settles the exit code,
+so no subcommand decides it on its own.
 """
 
 import os
+import traceback
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from typing import TypeVar
 
 import click
-import duckdb
+from click.core import ParameterSource
 
 from geoparquet_io.cli._shared import _activate_s3, create_default_group, init_group_context
 from geoparquet_io.cli.decorators import (
@@ -24,21 +33,34 @@ from geoparquet_io.cli.decorators import (
     enable_verbose_logging,
     handle_geoparquet_errors,
     overwrite_option,
+    strict_option,
     verbose_option,
 )
-from geoparquet_io.cli.fix_helpers import (
-    NoBackupConfirmation,
-    display_spatial_result,
-    handle_fix_common,
-    no_fix_needed_message,
-)
+from geoparquet_io.cli.fix_helpers import NoBackupConfirmation, handle_fix_common
+from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
+from geoparquet_io.core.check_spatial_order import SPATIAL_ORDER_CHECK
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
-from geoparquet_io.core.check_spatial_order import (
-    pushdown_readiness_from_locality,
-    spatial_verdict_withheld,
+from geoparquet_io.core.check_verdict import (
+    COULD_NOT_RUN_KEY,
+    FAILURE_GLYPH,
+    PASS_GLYPH,
+    SEVERITY_KEY,
+    WARNING_GLYPH,
+    Verdict,
+    all_checks_result,
+    could_not_run,
+    exit_code,
+    is_could_not_run,
+    labelled_issues,
+    not_geoparquet_result,
+    result_verdict,
+    validation_verdict,
+    worst,
 )
+from geoparquet_io.core.duckdb_utils import is_interrupt
+from geoparquet_io.core.file_utils import is_same_file_path
 from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT
 from geoparquet_io.core.logging_config import configure_verbose
 
@@ -59,11 +81,67 @@ def check(ctx):
 
     When run without a subcommand, all checks are performed. Options like --fix
     can be used directly without specifying 'all'.
+
+    Exit codes, the same for every subcommand: 0 when nothing failed (warnings
+    allowed), 1 when a check failed or could not run, or when the input matched
+    no files. Pass --strict to exit 1 on warnings too.
     """
     init_group_context(ctx)
 
 
 T = TypeVar("T")
+
+_CHECK_GLYPHS = {
+    Verdict.PASS: (PASS_GLYPH, "green"),
+    Verdict.WARNING: (WARNING_GLYPH, "yellow"),
+    Verdict.FAILURE: (FAILURE_GLYPH, "red"),
+}
+
+
+def exit_for_verdict(verdict: Verdict, *, strict: bool) -> None:
+    """Exit with the code :func:`~geoparquet_io.core.check_verdict.exit_code` gives.
+
+    A failure has already been reported by the check that found it; a warning
+    that exits 1 only because of ``--strict`` says so on stderr, since nothing
+    on stdout looks like a reason to stop.
+    """
+    code = exit_code(verdict, strict=strict)
+    if not code:
+        return
+    if verdict is Verdict.WARNING:
+        click.echo("Warnings found; exiting 1 because --strict is set.", err=True)
+    raise click.exceptions.Exit(code)
+
+
+def quiet_recheck(check_func: Callable[..., dict], *args, **kwargs) -> Callable[[str], dict]:
+    """``check_func`` re-run silently on a fixed file, to judge what ``--fix`` left."""
+    return lambda path: check_func(path, *args, return_results=True, quiet=True, **kwargs)
+
+
+class _VerifyCapture:
+    """The two checks ``check all --fix`` re-runs on its output, keeping their results.
+
+    ``verify_fixes`` already re-reads the fixed file; judging it from those
+    results plus the spec spares a third read of the same bytes.
+    """
+
+    def __init__(self) -> None:
+        self.structure: dict = {}
+        self.spatial: object = {}
+
+    def check_structure(self, *args, **kwargs):
+        self.structure = check_structure_impl(*args, **kwargs)
+        return self.structure
+
+    def check_spatial(self, *args, **kwargs):
+        self.spatial = check_spatial_impl(*args, **kwargs)
+        return self.spatial
+
+    def recheck(self, output_path: str) -> dict:
+        from geoparquet_io.core.validate import validate_geoparquet
+
+        spec = validate_geoparquet(output_path, validate_data=True, sample_size=1000, verbose=False)
+        return all_checks_result(self.structure, self.spatial, spec)
 
 
 class MultiFileCheckRunner:
@@ -78,8 +156,18 @@ class MultiFileCheckRunner:
         fix_output: str | None = None,
         overwrite: bool = False,
         confirmation: NoBackupConfirmation | None = None,
+        strict: bool = False,
+        matched: int | None = None,
     ):
         self.files = files
+        #: How many files the input matched; more than ``files`` when sampled.
+        self.matched = matched if matched is not None else len(files)
+        #: ``--strict``: a warning exits 1 too.
+        self.strict = strict
+        #: Each file's verdict -- after its fix, when one was applied.
+        self.verdicts: dict[str, Verdict] = {}
+        #: The re-check of each fixed file, behind its post-fix verdict.
+        self.rechecks: dict[str, dict] = {}
         self.verbose = verbose
         self.max_issues_shown = max_issues_shown
         self.fix_output = fix_output
@@ -87,12 +175,13 @@ class MultiFileCheckRunner:
         #: The run's one ``--no-backup`` prompt, shared by every file it fixes.
         self.confirmation = confirmation or NoBackupConfirmation(False)
         self.passed = 0
-        self.not_judged = 0
         self.warnings = 0
         self.failed = 0
         self.issues: list[tuple[str, str, str]] = []  # (file, level, message)
         self.fixed: list[tuple[str, str | None]] = []  # (output path, backup path)
         self.fix_failures: list[tuple[str, str]] = []  # (file, error)
+        self.check_errors: list[tuple[str, str]] = []  # (file, why a check could not run)
+        self._interrupted = False
         self.current_index = 0
         self.is_multi_file = len(files) > 1
 
@@ -108,15 +197,20 @@ class MultiFileCheckRunner:
             msg += f", {self.failed} failed"
         click.echo(f"\r{msg}", nl=False)
 
-    def _record_issue(self, file_path: str, level: str, message: str):
-        """Record an issue and print it if under the limit."""
+    def _record_issue(self, file_path: str, verdict: Verdict, message: str, *, always=False):
+        """Record an issue and print it if under the limit, labelled by its own verdict.
+
+        ``always`` prints it whatever the limit and ``--verbose``: a check that
+        could not run has no detailed output of its own to say so.
+        """
+        level = "error" if verdict is Verdict.FAILURE else "warning"
         self.issues.append((file_path, level, message))
-        if not self.verbose and len(self.issues) <= self.max_issues_shown:
+        if always or (not self.verbose and len(self.issues) <= self.max_issues_shown):
             # Clear progress line and print issue
             click.echo("\r" + " " * 80 + "\r", nl=False)
-            color = "yellow" if level == "warning" else "red"
+            glyph, color = _CHECK_GLYPHS[max(verdict, Verdict.WARNING)]
             filename = Path(file_path).name
-            click.echo(click.style(f"  {level.upper()}: {filename} - {message}", fg=color))
+            click.echo(click.style(f"  {glyph} {level.upper()}: {filename} - {message}", fg=color))
 
     def start_file(self, file_path: str):
         """Called before checking each file."""
@@ -130,67 +224,235 @@ class MultiFileCheckRunner:
             click.echo(click.style(f"{'=' * 60}", fg="bright_black"))
 
     def record_result(self, file_path: str, result: dict):
-        """Record the result of checking a file.
+        """Record the result of checking a file; its verdict settles the exit code.
 
-        A check that withheld its verdict (``judged`` False: the spatial-order
-        check on too few row groups) is counted on its own, so the summary does
-        not claim a pass the check never gave.
+        The verdict is the result's own (:func:`result_verdict`): a check that
+        could not run says so itself. Each issue is printed at its own level.
         """
-        if not result.get("passed", True):
-            self._record_not_passed(file_path, result)
-        elif spatial_verdict_withheld(result):
-            self.not_judged += 1
-        else:
+        verdict = result_verdict(result)
+        self.verdicts[file_path] = verdict
+        could_not = result.get(COULD_NOT_RUN_KEY) or []
+        if could_not:
+            self.check_errors.append((file_path, "; ".join(could_not)))
+        if verdict is Verdict.PASS:
             self.passed += 1
+        else:
+            if verdict is Verdict.FAILURE:
+                self.failed += 1
+            else:
+                self.warnings += 1
+            for level, issue in labelled_issues(result):
+                self._record_issue(file_path, level, issue, always=issue in could_not)
         self._update_progress()
 
-    def _record_not_passed(self, file_path: str, result: dict) -> None:
-        """A failed check is an error or a warning, by what its result carries."""
-        issues = result.get("issues", [])
-        has_error_flag = bool(result.get("failed", False))
-        has_error_issues = any("❌" in str(i) for i in issues)
-        has_error = has_error_flag or has_error_issues
-        if has_error or result.get("size_status") == "poor" or result.get("row_status") == "poor":
-            self.failed += 1
-            for issue in issues:
-                self._record_issue(file_path, "error", issue)
+    def record_failure(self, file_path: str, message: str) -> None:
+        """Record a file that failed before its check could run."""
+        self.record_result(
+            file_path, {"passed": False, SEVERITY_KEY: Verdict.FAILURE.label, "issues": [message]}
+        )
+        if self.verbose:
+            click.echo(click.style(f"{FAILURE_GLYPH} {message}", fg="red"))
+
+    def recheck(self, file_path: str, output_path: str, check: Callable[[str], dict]) -> None:
+        """Judge a fixed file by what ``--fix`` wrote, replacing its earlier verdict.
+
+        A check that could not run on the input stays a failure (#624): the fix
+        cannot vouch for a check that never ran. A re-check that cannot run is
+        a failure too.
+        """
+        result = self._attempt(partial(check, output_path), "Re-check", gate=True)
+        for line in (result.get(COULD_NOT_RUN_KEY) or []) if is_could_not_run(result) else []:
+            self._echo_could_not_run(file_path, line)
+        verdict = result_verdict(result)
+        self.verdicts[file_path] = Verdict.FAILURE if self.errored(file_path) else verdict
+        self.rechecks[file_path] = result
+
+    def echo_fixed(
+        self, file_path: str, applied: tuple[str, str | None], success: str, action: str
+    ) -> None:
+        """What ``--fix`` wrote, judged by its re-check -- never "success" for a file that fails.
+
+        A fix can repair one thing and leave another: ``check bbox --fix`` adds
+        a missing covering but cannot recompute wrong values. Then it says what
+        it did, that the file still fails, each failure, and the repair to run.
+        """
+        output_path, backup_path = applied
+        still_fails = self.verdicts.get(file_path) is Verdict.FAILURE
+        if still_fails:
+            click.echo(
+                click.style(f"\n{WARNING_GLYPH} {action}, but the file still fails:", fg="yellow")
+            )
+            result = self.rechecks.get(file_path, {})
+            for level, issue in labelled_issues(result):
+                if level is Verdict.FAILURE:
+                    click.echo(click.style(f"  {FAILURE_GLYPH} {issue}", fg="red"))
+            recommendations = result.get("recommendations") or []
+            if recommendations:
+                click.echo(f"  {recommendations[0]}")
         else:
-            self.warnings += 1
-            for issue in issues:
-                self._record_issue(file_path, "warning", issue)
+            click.echo(click.style(f"\n{PASS_GLYPH} {success}", fg="green"))
+        click.echo(f"{'Written to' if still_fails else 'Optimized file'}: {output_path}")
+        if backup_path:
+            click.echo(f"Backup: {backup_path}")
+
+    def finish(self) -> None:
+        """Summarize the run and exit with its code: the one place a check run ends."""
+        self.print_summary()
+        self._note_sampling()
+        self.raise_if_any_fix_failed()
+        exit_for_verdict(worst(self.verdicts.values()), strict=self.strict)
+
+    def _note_sampling(self) -> None:
+        """Say so when the exit code speaks for fewer files than the input matched."""
+        if self.matched <= len(self.files):
+            return
+        click.echo(
+            f"Note: the verdict covers {len(self.files)} of {self.matched} files; "
+            "pass --all-files to check every file.",
+            err=True,
+        )
 
     def record_fix(self, output_path: str, backup_path: str | None):
         """Record a file this run rewrote, for the end-of-run summary."""
         self.fixed.append((output_path, backup_path))
 
     def _guard(self, file_path: str, call: Callable[[], T], stage: str) -> T | None:
-        """Run one per-file step; in a multi-file run a failure is recorded, not fatal.
+        """Run one per-file fix step; in a multi-file run a failure is recorded, not fatal.
 
         A single-file run keeps its old shape -- the exception propagates with
         its message. Click's own exceptions always propagate: a declined
         prompt or a bad parameter is a verdict on the invocation, not on this
-        file. So does an interrupt: DuckDB raises Ctrl-C as a plain
-        ``InterruptException``, and treating that as "this file failed, next"
+        file. So does an interrupt: DuckDB raises Ctrl-C as an
+        ``InterruptException`` or a plain ``RuntimeError``, and treating that as "this file failed, next"
         would keep rewriting files after the user asked it to stop.
         """
         try:
             return call()
         except (click.Abort, click.ClickException, click.exceptions.Exit):
             raise
-        except (KeyboardInterrupt, duckdb.InterruptException):
-            self._print_fix_summary()
+        except KeyboardInterrupt:
+            self._on_interrupt()
             raise
         except Exception as e:
+            self._raise_if_interrupt(e)
             if not self.is_multi_file:
                 raise
             self.fix_failures.append((file_path, str(e)))
             click.echo("\r" + " " * 80 + "\r", nl=False)
-            click.echo(click.style(f"  ✗ {stage} failed: {Path(file_path).name} - {e}", fg="red"))
+            click.echo(
+                click.style(
+                    f"  {FAILURE_GLYPH} {stage} failed: {Path(file_path).name} - {e}", fg="red"
+                )
+            )
             return None
 
-    def run_check(self, file_path: str, check_call: Callable[[], dict]) -> dict | None:
-        """The check stage for one file, or None when it could not be checked."""
-        return self._guard(file_path, check_call, "Check")
+    def run_check(
+        self, file_path: str, check_call: Callable[[], dict], stage: str = "Check"
+    ) -> dict | None:
+        """The check stage for one file, or None when it gave no result to act on.
+
+        A file that is not GeoParquet at all fails here, before any check or
+        fix runs on it: every ``check`` subcommand answers that the same way.
+        So does a check that could not run -- one that raised, in a single-file
+        run as in a multi-file one, or one whose result says so -- recorded as
+        the failure it is rather than a traceback.
+        """
+        refused = not_geoparquet_result(file_path)
+        if refused is not None:
+            self.record_failure(file_path, refused["issues"][0])
+            return None
+        result = self._attempt(check_call, stage, gate=True)
+        if is_could_not_run(result):
+            self.record_result(file_path, result)
+            return None
+        return result
+
+    def run_stage(self, file_path: str, call: Callable[[], T], stage: str) -> T | dict:
+        """One check of several on a file: its result, or why it could not run.
+
+        ``check all`` is a report, so one check that dies must not take the
+        others with it (#1082). A check that raises comes back as
+        :func:`~geoparquet_io.core.check_verdict.could_not_run`'s failure, and
+        is printed with the file's other issues.
+        """
+        return self._attempt(call, stage)
+
+    def _attempt(self, call: Callable[[], T], stage: str, *, gate: bool = False) -> T | dict:
+        """``call()``, or a could-not-run failure naming ``stage`` when it raises.
+
+        Click exceptions and interrupts propagate, as in :meth:`_guard`. So,
+        for a ``gate`` stage in a single-file run, does an error the CLI's
+        boundary renders itself -- gpio's own errors and the DuckDB failures an
+        input file causes get their ``Error:`` line there, and ``--verbose``
+        its traceback (#983). Anything else is this check not running: never a
+        traceback, and under ``--verbose`` the traceback is still printed.
+        """
+        try:
+            return call()
+        except (click.Abort, click.ClickException, click.exceptions.Exit):
+            raise
+        except KeyboardInterrupt:
+            self._on_interrupt()
+            raise
+        except Exception as e:
+            self._raise_if_interrupt(e)
+            if gate and not self.is_multi_file and _boundary_renders(e):
+                raise
+            if self.verbose:
+                click.echo(traceback.format_exc(), err=True)
+            return could_not_run(stage, str(e))
+
+    def _raise_if_interrupt(self, error: Exception) -> None:
+        """Turn ``error`` into ``KeyboardInterrupt`` when it is Ctrl-C.
+
+        DuckDB reports a SIGINT as ``InterruptException`` or as a plain
+        ``RuntimeError("Query interrupted")``. Either one means stop, never
+        "this check failed, carry on and --fix the file". Raised as
+        ``KeyboardInterrupt``, Click ends the run with "Aborted!" instead of a
+        traceback.
+        """
+        if is_interrupt(error):
+            self._on_interrupt()
+            raise KeyboardInterrupt(str(error)) from error
+
+    def _on_interrupt(self) -> None:
+        """Print the fix summary once, however many guards the interrupt crosses."""
+        if not self._interrupted:
+            self._interrupted = True
+            self._print_fix_summary()
+
+    def _echo_could_not_run(self, file_path: str, line: str) -> None:
+        click.echo("\r" + " " * 80 + "\r", nl=False)
+        click.echo(click.style(f"  {FAILURE_GLYPH} {Path(file_path).name} - {line}", fg="red"))
+
+    def errored(self, file_path: str) -> bool:
+        """Whether a check could not run on ``file_path``: the one rule ``--fix`` cannot lift."""
+        return any(path == file_path for path, _ in self.check_errors)
+
+    def no_fix(self, file_path: str, result: dict, already_fine: str, *, show: bool) -> None:
+        """``--fix`` had nothing to apply: say why, and still write ``--fix-output``.
+
+        "No fix needed" only for a file that passed; a warning or failure that
+        no fix covers says so, with the check's own hint. A pipeline that names
+        ``--fix-output`` expects that file, so a file with nothing to repair is
+        copied there -- unless it failed, which no copy makes usable.
+        """
+        verdict = self.verdicts.get(file_path, result_verdict(result))
+        if show:
+            _echo_no_fix(verdict, result, already_fine)
+        if verdict is not Verdict.FAILURE:
+            self.copy_unfixed(file_path)
+
+    def copy_unfixed(self, file_path: str) -> None:
+        """Copy a file ``--fix`` did not need to rewrite to its ``--fix-output``."""
+        output = fix_output_for(self.fix_output, file_path)
+        if not output or is_same_file_path(output, file_path):
+            return
+        copied = self._guard(
+            file_path, partial(_copy_to_fix_output, file_path, output, self.overwrite), "Copy"
+        )
+        if copied is not None and not (self.is_multi_file and not self.verbose):
+            click.echo(f"Nothing to fix; copied to {output}")
 
     def apply_fix(self, file_path: str, fix_call: Callable[[], tuple[str, str | None] | None]):
         """Run one file's fix, recording it -- or its failure -- and carrying on (#1041).
@@ -205,9 +467,13 @@ class MultiFileCheckRunner:
         self.record_fix(*outcome)
         return outcome
 
-    def fix_file(self, file_path: str, fix_func, *, verbose: bool):
-        """Fix one file with this run's ``--fix-output``/``--no-backup``/``--overwrite``."""
-        return self.apply_fix(
+    def fix_file(self, file_path: str, fix_func, *, verbose: bool, recheck: Callable[[str], dict]):
+        """Fix one file with this run's ``--fix-output``/``--no-backup``/``--overwrite``.
+
+        ``recheck`` re-runs the check on the written file, so a repaired
+        failure exits 0 and a repair that left something behind does not.
+        """
+        outcome = self.apply_fix(
             file_path,
             partial(
                 handle_fix_common,
@@ -221,6 +487,9 @@ class MultiFileCheckRunner:
                 quiet=self.is_multi_file and not self.verbose,
             ),
         )
+        if outcome is not None:
+            self.recheck(file_path, outcome[0], recheck)
+        return outcome
 
     def raise_if_any_fix_failed(self) -> None:
         """Exit non-zero when any matched file went unrepaired."""
@@ -277,8 +546,6 @@ class MultiFileCheckRunner:
         summary_parts = []
         if self.passed:
             summary_parts.append(click.style(f"{self.passed} passed", fg="green"))
-        if self.not_judged:
-            summary_parts.append(f"{self.not_judged} not judged")
         if self.warnings:
             summary_parts.append(click.style(f"{self.warnings} warnings", fg="yellow"))
         if self.failed:
@@ -287,6 +554,37 @@ class MultiFileCheckRunner:
         summary = ", ".join(summary_parts) if summary_parts else "0 checked"
         click.echo(f"Summary: {summary} ({total} files checked)")
         self._print_fix_summary()
+
+
+def _boundary_renders(error: Exception) -> bool:
+    """Whether the root group turns ``error`` into an ``Error:`` line of its own."""
+    from geoparquet_io.cli.exception_handler import cli_error_for
+    from geoparquet_io.core.exceptions import GeoParquetError
+
+    return isinstance(error, GeoParquetError) or cli_error_for(error) is not None
+
+
+def _echo_no_fix(verdict: Verdict, result: dict, already_fine: str) -> None:
+    """The line ``--fix`` prints when it has nothing to apply to a file."""
+    if verdict is Verdict.PASS:
+        click.echo(click.style(f"\n{PASS_GLYPH} No fix needed - {already_fine}", fg="green"))
+        return
+    glyph, color = _CHECK_GLYPHS[verdict]
+    problem = result.get("covering_problem")
+    if problem:
+        hint = f" - {problem}. {BBOX_REWRITE_HINT}"
+    else:
+        recommendations = result.get("recommendations") or []
+        hint = f". {recommendations[0]}" if recommendations else ""
+    click.echo(click.style(f"\n{glyph} No automatic fix available{hint}", fg=color))
+
+
+def _copy_to_fix_output(file_path: str, output: str, overwrite: bool) -> str:
+    from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
+
+    handle_output_overwrite(output, overwrite, file_path)
+    copy_file(file_path, output)
+    return output
 
 
 def refuse_shared_fix_output(files_to_check: list[str], fix: bool, fix_output: str | None) -> None:
@@ -326,6 +624,26 @@ def refuse_shared_fix_output(files_to_check: list[str], fix: bool, fix_output: s
         seen[key] = source
 
 
+def refuse_no_parquet_match(path: str) -> None:
+    """Exit 1 for a local glob or directory that holds no parquet files (#1091).
+
+    For the subcommands that take one file (``check spec``): the runner ones
+    refuse an empty match in :func:`begin_check_run`. A plain path is left to
+    the check, which reports a file it cannot read.
+    """
+    from geoparquet_io.core.partition.reader import select_files_to_check
+    from geoparquet_io.core.remote import is_remote_url
+
+    if is_remote_url(path) or not (any(c in path for c in "*?[") or Path(path).is_dir()):
+        return
+    try:
+        files, _, _ = select_files_to_check(path, check_all=True)
+    except FileNotFoundError:
+        files = []
+    if not files:
+        raise click.ClickException(f"No parquet files found in {path}")
+
+
 def fix_output_for(fix_output: str | None, file_path: str) -> str | None:
     """This file's share of ``--fix-output``: its own name inside a directory."""
     if fix_output and Path(fix_output).is_dir():
@@ -343,16 +661,19 @@ def begin_check_run(
     fix_output: str | None,
     no_backup: bool,
     overwrite: bool = False,
-) -> MultiFileCheckRunner | None:
+    strict: bool = False,
+) -> MultiFileCheckRunner:
     """Resolve the input to files and build the runner every ``check`` command shares.
 
-    Returns None when the input matched no parquet files, the caller's cue to
-    return. A ``--fix-output`` that cannot take one output per input is refused
-    here, before any file is checked.
+    An input that matched no parquet files -- a glob that resolves to nothing,
+    an empty directory -- is an error (exit 1), with or without ``--fix``: a
+    script fixing ``"data/*.parquet"`` against a mistyped path must not be told
+    it succeeded (#1091). A ``--fix-output`` that cannot take one output per
+    input is refused here, before any file is checked.
     """
-    from geoparquet_io.core.partition.reader import get_files_to_check
+    from geoparquet_io.core.partition.reader import select_files_to_check
 
-    files_to_check, notice = get_files_to_check(
+    files_to_check, notice, matched = select_files_to_check(
         parquet_file,
         check_all=check_all_files,
         check_sample=check_sample,
@@ -360,12 +681,12 @@ def begin_check_run(
         fix=fix,
     )
 
+    if not files_to_check:
+        nothing_fixed = "; nothing was fixed" if fix else ""
+        raise click.ClickException(f"No parquet files found in {parquet_file}{nothing_fixed}")
+
     if notice:
         click.echo(click.style(f"📁 {notice}", fg="cyan"))
-
-    if not files_to_check:
-        click.echo(click.style("No parquet files found", fg="red"))
-        return None
 
     refuse_shared_fix_output(files_to_check, fix, fix_output)
 
@@ -375,7 +696,41 @@ def begin_check_run(
         fix_output=fix_output,
         overwrite=overwrite,
         confirmation=NoBackupConfirmation(no_backup, len(files_to_check)),
+        strict=strict,
+        matched=matched,
     )
+
+
+def _echo_spec_result(spec_result, spec_details: bool) -> None:
+    """Print the spec validation block of ``check all``."""
+    if is_could_not_run(spec_result):
+        click.echo(click.style(f"  {FAILURE_GLYPH} Spec validation could not run", fg="red"))
+        return
+    if spec_details:
+        from geoparquet_io.core.validate import format_terminal_output
+
+        format_terminal_output(spec_result)
+        return
+    if spec_result.failed_count > 0:
+        click.echo(
+            click.style(
+                f"  {FAILURE_GLYPH} {spec_result.failed_count} failed, "
+                f"{spec_result.passed_count} passed",
+                fg="red",
+            )
+        )
+    elif spec_result.warning_count > 0:
+        click.echo(
+            click.style(
+                f"  {WARNING_GLYPH} {spec_result.passed_count} passed, "
+                f"{spec_result.warning_count} warnings",
+                fg="yellow",
+            )
+        )
+    else:
+        click.echo(
+            click.style(f"  {PASS_GLYPH} {spec_result.passed_count} checks passed", fg="green")
+        )
 
 
 @check.command(name="all", cls=GlobAwareCommand)
@@ -428,6 +783,7 @@ def begin_check_run(
     is_flag=True,
     help="Generate PMTiles after fixing (requires tippecanoe)",
 )
+@strict_option
 @check_partition_options
 @click.pass_context
 def check_all(
@@ -445,8 +801,12 @@ def check_all(
     check_sample,
     profile,
     pmtiles,
+    strict,
 ):
-    """Check compression, bbox, row groups, spatial order, and spec compliance."""
+    """Check compression, bbox, row groups, spatial order, and spec compliance.
+
+    Exits 1 if any check fails, or on a warning with --strict.
+    """
     from geoparquet_io.core.remote import is_remote_url, show_remote_read_message
 
     configure_verbose(verbose)
@@ -460,9 +820,8 @@ def check_all(
             fix_output=fix_output,
             no_backup=no_backup,
             overwrite=overwrite,
+            strict=strict,
         )
-        if runner is None:
-            return
 
         # Check pmtiles requires --fix
         if pmtiles and not fix:
@@ -484,18 +843,6 @@ def check_all(
         for file_path in runner.files:
             runner.start_file(file_path)
 
-            # Early skip for non-GeoParquet files when --pmtiles is passed
-            # This avoids crashes in check_structure_impl which assumes geo metadata
-            if pmtiles:
-                from geoparquet_io.core.file_type import detect_geoparquet_file_type
-
-                file_info = detect_geoparquet_file_type(file_path)
-                if file_info["file_type"] == "unknown":
-                    click.echo(
-                        click.style(f"→ Skipping {file_path}: not a GeoParquet file", fg="yellow")
-                    )
-                    continue
-
             # Show single progress message for remote files (only in verbose mode for multi-file)
             if runner.verbose or not runner.is_multi_file:
                 show_remote_read_message(file_path, verbose=False)
@@ -510,6 +857,8 @@ def check_all(
             def run_all_checks(file_path=file_path, show_output=show_output, quiet=quiet):
                 from geoparquet_io.core.validate import validate_geoparquet
 
+                # The structure check is the gate. A file it cannot read fails
+                # as a whole (run_check), and is not spatially checked or fixed.
                 structure = check_structure_impl(
                     file_path,
                     verbose and show_output,
@@ -519,19 +868,34 @@ def check_all(
                 )
                 if show_output:
                     click.echo("\nSpatial Order Analysis:")
-                spatial = check_spatial_impl(
+                spatial = runner.run_stage(
                     file_path,
-                    random_sample_size,
-                    limit_rows,
-                    verbose and show_output,
-                    return_results=True,
-                    quiet=quiet,
+                    partial(
+                        check_spatial_impl,
+                        file_path,
+                        random_sample_size,
+                        limit_rows,
+                        verbose and show_output,
+                        return_results=True,
+                        quiet=quiet,
+                    ),
+                    SPATIAL_ORDER_CHECK,
                 )
-                spec = validate_geoparquet(
-                    file_path, validate_data=True, sample_size=1000, verbose=False
+                spec = runner.run_stage(
+                    file_path,
+                    partial(
+                        validate_geoparquet,
+                        file_path,
+                        validate_data=True,
+                        sample_size=1000,
+                        verbose=False,
+                    ),
+                    "Spec validation",
                 )
                 return {"structure": structure, "spatial": spatial, "spec": spec}
 
+            # A file that is not GeoParquet fails in run_check, before the
+            # structure checks (which assume geo metadata) or --pmtiles run.
             checked = runner.run_check(file_path, run_all_checks)
             if checked is None:
                 continue
@@ -539,57 +903,16 @@ def check_all(
             spatial_result = checked["spatial"]
             spec_result = checked["spec"]
 
-            from geoparquet_io.cli.fix_helpers import aggregate_check_results
-
-            display_spatial_result(spatial_result, show_output)
+            if show_output:
+                _echo_spatial_order(spatial_result)
 
             # Display spec validation results
             if show_output:
                 click.echo("\nSpec Validation:")
-                if spec_details:
-                    # Full output
-                    from geoparquet_io.core.validate import format_terminal_output
+                _echo_spec_result(spec_result, spec_details)
 
-                    format_terminal_output(spec_result)
-                else:
-                    # Summary only
-                    if spec_result.failed_count > 0:
-                        click.echo(
-                            click.style(
-                                f"  ✗ {spec_result.failed_count} failed, "
-                                f"{spec_result.passed_count} passed",
-                                fg="red",
-                            )
-                        )
-                    elif spec_result.warning_count > 0:
-                        click.echo(
-                            click.style(
-                                f"  ⚠ {spec_result.passed_count} passed, "
-                                f"{spec_result.warning_count} warnings",
-                                fg="yellow",
-                            )
-                        )
-                    else:
-                        click.echo(
-                            click.style(f"  ✓ {spec_result.passed_count} checks passed", fg="green")
-                        )
-
-            # Aggregate results for runner tracking (include spec failures)
-            combined_passed, combined_issues, _ = aggregate_check_results(
-                structure_results, spatial_result
-            )
-            # Include spec failures in passed status and issues summary
-            if spec_result.failed_count > 0:
-                combined_passed = False
-                combined_issues.append(f"Spec validation: {spec_result.failed_count} checks failed")
             runner.record_result(
-                file_path,
-                {
-                    "passed": combined_passed,
-                    "issues": combined_issues,
-                    "judged": not spatial_verdict_withheld(spatial_result),
-                    **structure_results,
-                },
+                file_path, all_checks_result(structure_results, spatial_result, spec_result)
             )
 
             # If --fix flag is set, apply fixes
@@ -597,6 +920,7 @@ def check_all(
                 from geoparquet_io.cli.fix_helpers import apply_check_all_fixes
 
                 per_file_output = fix_output_for(fix_output, file_path)
+                verified = _VerifyCapture()
 
                 all_results = {**structure_results, "spatial": spatial_result}
                 applied = runner.apply_fix(
@@ -609,8 +933,8 @@ def check_all(
                         overwrite=overwrite,
                         verbose=verbose,
                         profile=None,
-                        check_structure_impl=check_structure_impl,
-                        check_spatial_impl=check_spatial_impl,
+                        check_structure_impl=verified.check_structure,
+                        check_spatial_impl=verified.check_spatial,
                         random_sample_size=random_sample_size,
                         limit_rows=limit_rows,
                         confirmation=runner.confirmation,
@@ -618,7 +942,10 @@ def check_all(
                     ),
                 )
                 if applied is None:
+                    if not any(path == file_path for path, _ in runner.fix_failures):
+                        runner.no_fix(file_path, {}, "file is already optimal!", show=False)
                     continue
+                runner.recheck(file_path, applied[0], verified.recheck)
 
             # Generate PMTiles if requested (non-geo files already skipped at loop start)
             if pmtiles:
@@ -639,13 +966,72 @@ def check_all(
                         output_path=output_pmtiles,
                         verbose=verbose,
                     )
-                    click.echo(click.style(f"✓ Generated {output_pmtiles}", fg="green"))
+                    click.echo(click.style(f"{PASS_GLYPH} Generated {output_pmtiles}", fg="green"))
                 except Exception as e:
-                    click.echo(click.style(f"✗ PMTiles failed for {file_path}: {e}", fg="red"))
+                    click.echo(
+                        click.style(
+                            f"{FAILURE_GLYPH} PMTiles failed for {file_path}: {e}", fg="red"
+                        )
+                    )
 
-        # Print summary for multi-file checks
-        runner.print_summary()
-        runner.raise_if_any_fix_failed()
+        # Print summary for multi-file checks, and exit with the run's code
+        runner.finish()
+
+
+def _spatial_with_pushdown(file_path, random_sample_size, limit_rows, verbose, *, quiet):
+    """``check spatial``'s verdict: spatial order, with pushdown readiness folded in."""
+    from geoparquet_io.core.check_spatial_order import with_pushdown
+
+    spatial = check_spatial_impl(
+        file_path, random_sample_size, limit_rows, verbose, return_results=True, quiet=quiet
+    )
+    return with_pushdown(file_path, spatial, verbose=verbose)
+
+
+def _echo_spatial_order(result: dict) -> None:
+    ratio = result.get("ratio")
+    if ratio is None:
+        return
+    if result.get("passed", ratio < 0.5):
+        click.echo(click.style(f"{PASS_GLYPH} Data appears to be spatially ordered", fg="green"))
+    else:
+        click.echo(
+            click.style(
+                f"{WARNING_GLYPH}  Data may not be optimally spatially ordered\n"
+                "Consider running 'gpio sort hilbert' to improve spatial locality",
+                fg="yellow",
+            )
+        )
+
+
+def _echo_pushdown(pushdown: dict | None) -> None:
+    """The pushdown block of ``check spatial``, marked by the verdict it counts as."""
+    if pushdown is None:
+        return
+    click.echo("\nSpatial Filter Pushdown Readiness:")
+    warning = result_verdict(pushdown) is Verdict.WARNING
+    if not pushdown.get("has_geo_bbox"):
+        if warning:
+            message = (
+                f"  {WARNING_GLYPH}  No geo_bbox column found. "
+                "Add bbox with 'gpio add bbox' for pushdown support."
+            )
+            click.echo(click.style(message, fg="yellow"))
+        else:
+            click.echo(
+                "  ℹ️  No bbox column; native geo types carry per-row-group statistics, "
+                "so a bbox column is not needed for pushdown"
+            )
+        return
+    click.echo(f"  Row groups: {pushdown['num_row_groups']}")
+    click.echo(f"  Estimated skip rate: {pushdown['estimated_skip_rate'] * 100:.0f}%")
+    click.echo(f"  Avg bbox area ratio: {pushdown['avg_bbox_area_ratio']:.2f}")
+    if warning:
+        click.echo(click.style(f"  {WARNING_GLYPH}  Low pushdown efficiency", fg="yellow"))
+    elif pushdown.get("passed"):
+        click.echo(click.style(f"  {PASS_GLYPH} Good pushdown readiness", fg="green"))
+    else:
+        click.echo("  ℹ️  A single row group: nothing for a spatial filter to skip")
 
 
 @check.command(name="spatial", cls=GlobAwareCommand)
@@ -681,6 +1067,7 @@ def check_all(
     help="Skip .bak backup when fixing",
 )
 @overwrite_option
+@strict_option
 @check_partition_options
 @click.pass_context
 def check_spatial(
@@ -695,6 +1082,7 @@ def check_spatial(
     overwrite,
     check_all_files,
     check_sample,
+    strict,
 ):
     """Check spatial ordering."""
     from geoparquet_io.core.check_fixes import fix_spatial_ordering
@@ -711,9 +1099,8 @@ def check_spatial(
             fix_output=fix_output,
             no_backup=no_backup,
             overwrite=overwrite,
+            strict=strict,
         )
-        if runner is None:
-            return
 
         for file_path in runner.files:
             runner.start_file(file_path)
@@ -723,97 +1110,50 @@ def check_spatial(
             result = runner.run_check(
                 file_path,
                 partial(
-                    check_spatial_impl,
+                    _spatial_with_pushdown,
                     file_path,
                     random_sample_size,
                     limit_rows,
                     verbose and show_output,
-                    return_results=True,
                     quiet=quiet,
                 ),
+                SPATIAL_ORDER_CHECK,
             )
             if result is None:
                 continue
-            display_spatial_result(result, show_output)
 
-            # Pushdown readiness: from the numbers the ordering check just
-            # computed when it read the footer, else its own footer read.
             if show_output:
-                from geoparquet_io.core.check_spatial_order import check_spatial_pushdown_readiness
-
-                try:
-                    if "num_row_groups" in result:
-                        pushdown = pushdown_readiness_from_locality(
-                            result["num_row_groups"], result
-                        )
-                    else:
-                        pushdown = check_spatial_pushdown_readiness(
-                            file_path, verbose=verbose and show_output
-                        )
-                except Exception as e:
-                    if verbose:
-                        click.echo(f"  Debug: Pushdown check failed: {e}", err=True)
-                    pushdown = {"has_geo_bbox": False}
-
-                click.echo("\nSpatial Filter Pushdown Readiness:")
-                if pushdown.get("has_geo_bbox"):
-                    skip_pct = pushdown["estimated_skip_rate"] * 100
-                    click.echo(f"  Row groups: {pushdown['num_row_groups']}")
-                    click.echo(f"  Estimated skip rate: {skip_pct:.0f}%")
-                    click.echo(f"  Avg bbox area ratio: {pushdown['avg_bbox_area_ratio']:.2f}")
-                    if pushdown["passed"]:
-                        click.echo(click.style("  ✓ Good pushdown readiness", fg="green"))
-                    else:
-                        click.echo(click.style("  ⚠️  Low pushdown efficiency", fg="yellow"))
-                else:
-                    click.echo(
-                        click.style(
-                            "  ⚠️  No geo_bbox column found. "
-                            "Add bbox with 'gpio add bbox' for pushdown support.",
-                            fg="yellow",
-                        )
-                    )
+                _echo_spatial_order(result)
+                _echo_pushdown(result.get("pushdown"))
 
             # Record result for summary
             runner.record_result(file_path, result)
 
             if fix:
                 if not result.get("fix_available", False):
-                    if show_output:
-                        click.echo(no_fix_needed_message(result))
+                    runner.no_fix(file_path, result, "already spatially ordered!", show=show_output)
                     continue
 
                 if show_output:
                     click.echo("\nApplying Hilbert spatial ordering...")
-                applied = runner.fix_file(file_path, fix_spatial_ordering, verbose=verbose)
-                if applied is None:
-                    continue
-                output_path, backup_path = applied
-
-                if show_output:
-                    click.echo(
-                        click.style("\n✓ Spatial ordering applied successfully!", fg="green")
+                applied = runner.fix_file(
+                    file_path,
+                    fix_spatial_ordering,
+                    verbose=verbose,
+                    recheck=lambda path: _spatial_with_pushdown(
+                        path, random_sample_size, limit_rows, False, quiet=True
+                    ),
+                )
+                if applied is not None and show_output:
+                    runner.echo_fixed(
+                        file_path,
+                        applied,
+                        "Spatial ordering applied successfully!",
+                        "Applied Hilbert spatial ordering",
                     )
-                    # The output's own verdict: a small file comes out in fewer
-                    # row groups than it went in with, and can be unjudgeable.
-                    after = check_spatial_impl(
-                        output_path,
-                        random_sample_size,
-                        limit_rows,
-                        False,
-                        return_results=True,
-                        quiet=True,
-                    )
-                    if isinstance(after, dict) and "num_row_groups" in after:
-                        click.echo(f"Output has {after['num_row_groups']} row groups")
-                    display_spatial_result(after, True)
-                    click.echo(f"Optimized file: {output_path}")
-                    if backup_path:
-                        click.echo(f"Backup: {backup_path}")
 
-        # Print summary for multi-file checks
-        runner.print_summary()
-        runner.raise_if_any_fix_failed()
+        # Print summary for multi-file checks, and exit with the run's code
+        runner.finish()
 
 
 @check.command(name="compression", cls=GlobAwareCommand)
@@ -837,6 +1177,7 @@ def check_spatial(
     help="Skip .bak backup when fixing",
 )
 @overwrite_option
+@strict_option
 @check_partition_options
 @click.pass_context
 def check_compression_cmd(
@@ -849,6 +1190,7 @@ def check_compression_cmd(
     overwrite,
     check_all_files,
     check_sample,
+    strict,
 ):
     """Check geometry column compression."""
     from geoparquet_io.core.check_fixes import fix_compression
@@ -866,9 +1208,8 @@ def check_compression_cmd(
             fix_output=fix_output,
             no_backup=no_backup,
             overwrite=overwrite,
+            strict=strict,
         )
-        if runner is None:
-            return
 
         for file_path in runner.files:
             runner.start_file(file_path)
@@ -893,28 +1234,36 @@ def check_compression_cmd(
 
             if fix:
                 if not result.get("fix_available", False):
-                    if show_output:
-                        click.echo(
-                            click.style("\n✓ No fix needed - already using ZSTD!", fg="green")
-                        )
+                    runner.no_fix(file_path, result, "already using ZSTD!", show=show_output)
                     continue
 
                 if show_output:
                     click.echo("\nRe-compressing with ZSTD...")
-                applied = runner.fix_file(file_path, fix_compression, verbose=verbose)
-                if applied is None:
-                    continue
-                output_path, backup_path = applied
+                applied = runner.fix_file(
+                    file_path,
+                    fix_compression,
+                    verbose=verbose,
+                    recheck=quiet_recheck(check_compression, False),
+                )
+                if applied is not None and show_output:
+                    runner.echo_fixed(
+                        file_path,
+                        applied,
+                        "Compression optimized successfully!",
+                        "Re-compressed with ZSTD",
+                    )
 
-                if show_output:
-                    click.echo(click.style("\n✓ Compression optimized successfully!", fg="green"))
-                    click.echo(f"Optimized file: {output_path}")
-                    if backup_path:
-                        click.echo(f"Backup: {backup_path}")
+        # Print summary for multi-file checks, and exit with the run's code
+        runner.finish()
 
-        # Print summary for multi-file checks
-        runner.print_summary()
-        runner.raise_if_any_fix_failed()
+
+def _bbox_fix_action(needs_column: bool, needs_metadata: bool) -> str:
+    """What ``check bbox --fix`` did to a 1.x file, for the line that reports it."""
+    if needs_column:
+        return "Added the bbox column and its covering metadata"
+    if needs_metadata:
+        return "Added the bbox covering metadata"
+    return "Rewrote the bbox column"
 
 
 @check.command(name="bbox", cls=GlobAwareCommand)
@@ -937,7 +1286,20 @@ def check_compression_cmd(
     is_flag=True,
     help="Skip .bak backup when fixing",
 )
+@click.option(
+    "--sample-rows",
+    type=click.IntRange(min=0),
+    default=DEFAULT_BBOX_SAMPLE_ROWS,
+    show_default=True,
+    help="Rows to compare bbox values against geometry (0 to skip that comparison)",
+)
+@click.option(
+    "--all-rows",
+    is_flag=True,
+    help="Compare every row's bbox against its geometry, not a sample",
+)
 @overwrite_option
+@strict_option
 @check_partition_options
 @click.pass_context
 def check_bbox_cmd(
@@ -947,20 +1309,42 @@ def check_bbox_cmd(
     fix,
     fix_output,
     no_backup,
+    sample_rows,
+    all_rows,
     overwrite,
     check_all_files,
     check_sample,
+    strict,
 ):
     """Check bbox column and metadata (version-aware).
 
     For GeoParquet 1.x: bbox column is recommended for spatial filtering.
     For GeoParquet 2.0/parquet-geo-only: bbox column is NOT recommended
     (native Parquet geo types provide row group statistics).
+
+    Also compares each row's bbox against its geometry's real envelope. A bbox
+    that does not cover its geometry is a failure -- readers prune on the
+    covering, so those rows go missing from spatial query results with no error
+    anywhere -- as are a NULL or NaN bbox and a geometry that is not valid WKB.
+    A bbox larger than its geometry is a warning: readers over-fetch, but the
+    answer stays right.
+
+    The comparison decodes a seeded random sample (--sample-rows) or every row
+    (--all-rows); either way the geometry and bbox columns are read in full.
+    --fix repairs the column and metadata, not the values, so its output is
+    compared again and a wrong bbox still fails the run.
+
+    Exits 1 if any check fails, or on a warning with --strict.
     """
     from geoparquet_io.core.check_fixes import fix_bbox_all, fix_bbox_removal
-    from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+    from geoparquet_io.core.check_parquet_structure import check_bbox
 
     configure_verbose(verbose)
+    if all_rows and ctx.get_parameter_source("sample_rows") is not ParameterSource.DEFAULT:
+        raise click.UsageError(
+            "--all-rows compares every row; it cannot be combined with --sample-rows"
+        )
+    bbox_recheck = quiet_recheck(check_bbox, False, verify_rows=sample_rows, all_rows=all_rows)
 
     with _activate_s3(ctx):
         runner = begin_check_run(
@@ -972,9 +1356,8 @@ def check_bbox_cmd(
             fix_output=fix_output,
             no_backup=no_backup,
             overwrite=overwrite,
+            strict=strict,
         )
-        if runner is None:
-            return
 
         for file_path in runner.files:
             runner.start_file(file_path)
@@ -984,11 +1367,13 @@ def check_bbox_cmd(
             result = runner.run_check(
                 file_path,
                 partial(
-                    check_metadata_and_bbox,
+                    check_bbox,
                     file_path,
                     verbose and show_output,
                     return_results=True,
                     quiet=quiet,
+                    verify_rows=sample_rows,
+                    all_rows=all_rows,
                 ),
             )
             if result is None:
@@ -999,21 +1384,9 @@ def check_bbox_cmd(
 
             if fix:
                 if not result.get("fix_available", False):
-                    if show_output:
-                        # Not "optimal": `--fix` declines because the repair
-                        # rewrites the column, not the metadata (#1035).
-                        if result.get("cannot_declare_covering"):
-                            click.echo(
-                                click.style(
-                                    f"\n⚠ No fix available - {result['covering_problem']}. "
-                                    f"{BBOX_REWRITE_HINT}",
-                                    fg="yellow",
-                                )
-                            )
-                        else:
-                            click.echo(
-                                click.style("\n✓ No fix needed - bbox is optimal!", fg="green")
-                            )
+                    # Not "optimal" unless it passed: `--fix` declines a covering
+                    # whose repair rewrites the column, not the metadata (#1035).
+                    runner.no_fix(file_path, result, "bbox is optimal!", show=show_output)
                     continue
 
                 # Check if this is a removal (v2/parquet-geo-only) or addition (v1.x)
@@ -1028,16 +1401,16 @@ def check_bbox_cmd(
                             input_path, output_path, _col, verbose_flag, profile_name
                         )
 
-                    applied = runner.fix_file(file_path, bbox_fix_func, verbose=verbose)
-                    if applied is None:
-                        continue
-                    output_path, backup_path = applied
-
-                    if show_output:
-                        click.echo(click.style("\n✓ Bbox column removed successfully!", fg="green"))
-                        click.echo(f"Optimized file: {output_path}")
-                        if backup_path:
-                            click.echo(f"Backup: {backup_path}")
+                    applied = runner.fix_file(
+                        file_path, bbox_fix_func, verbose=verbose, recheck=bbox_recheck
+                    )
+                    if applied is not None and show_output:
+                        runner.echo_fixed(
+                            file_path,
+                            applied,
+                            "Bbox column removed successfully!",
+                            "Removed the bbox column",
+                        )
                 else:
                     # V1.x: add bbox column/metadata (existing logic)
                     needs_column = result.get("needs_bbox_column", False)
@@ -1060,20 +1433,19 @@ def check_bbox_cmd(
                             profile_name,
                         )
 
-                    applied = runner.fix_file(file_path, bbox_fix_func, verbose=verbose)
-                    if applied is None:
-                        continue
-                    output_path, backup_path = applied
+                    applied = runner.fix_file(
+                        file_path, bbox_fix_func, verbose=verbose, recheck=bbox_recheck
+                    )
+                    if applied is not None and show_output:
+                        runner.echo_fixed(
+                            file_path,
+                            applied,
+                            "Bbox optimized successfully!",
+                            _bbox_fix_action(needs_column, needs_metadata),
+                        )
 
-                    if show_output:
-                        click.echo(click.style("\n✓ Bbox optimized successfully!", fg="green"))
-                        click.echo(f"Optimized file: {output_path}")
-                        if backup_path:
-                            click.echo(f"Backup: {backup_path}")
-
-        # Print summary for multi-file checks
-        runner.print_summary()
-        runner.raise_if_any_fix_failed()
+        # Print summary for multi-file checks, and exit with the run's code
+        runner.finish()
 
 
 @check.command(name="row-group", cls=GlobAwareCommand)
@@ -1104,6 +1476,7 @@ def check_bbox_cmd(
     help="Check best practices for specific use case",
 )
 @overwrite_option
+@strict_option
 @check_partition_options
 @click.pass_context
 def check_row_group_cmd(
@@ -1117,6 +1490,7 @@ def check_row_group_cmd(
     check_all_files,
     check_sample,
     profile,
+    strict,
 ):
     """Check row group size."""
     from geoparquet_io.core.check_fixes import fix_row_groups
@@ -1134,9 +1508,8 @@ def check_row_group_cmd(
             fix_output=fix_output,
             no_backup=no_backup,
             overwrite=overwrite,
+            strict=strict,
         )
-        if runner is None:
-            return
 
         for file_path in runner.files:
             runner.start_file(file_path)
@@ -1162,38 +1535,40 @@ def check_row_group_cmd(
 
             if fix:
                 if not result.get("fix_available", False):
-                    if show_output:
-                        click.echo(
-                            click.style("\n✓ No fix needed - row groups are optimal!", fg="green")
-                        )
+                    runner.no_fix(file_path, result, "row groups are optimal!", show=show_output)
                     continue
 
                 if show_output:
                     click.echo("\nOptimizing row groups...")
-                applied = runner.fix_file(file_path, fix_row_groups, verbose=verbose)
-                if applied is None:
-                    continue
-                output_path, backup_path = applied
+                applied = runner.fix_file(
+                    file_path,
+                    fix_row_groups,
+                    verbose=verbose,
+                    recheck=quiet_recheck(check_row_groups, False, profile=profile),
+                )
+                if applied is not None and show_output:
+                    runner.echo_fixed(
+                        file_path,
+                        applied,
+                        "Row groups optimized successfully!",
+                        "Rewrote the row groups",
+                    )
 
-                if show_output:
-                    click.echo(click.style("\n✓ Row groups optimized successfully!", fg="green"))
-                    click.echo(f"Optimized file: {output_path}")
-                    if backup_path:
-                        click.echo(f"Backup: {backup_path}")
-
-        # Print summary for multi-file checks
-        runner.print_summary()
-        runner.raise_if_any_fix_failed()
+        # Print summary for multi-file checks, and exit with the run's code
+        runner.finish()
 
 
 @check.command(name="stac")
 @handle_geoparquet_errors
 @click.argument("stac_file")
 @verbose_option
+@strict_option
 @click.pass_context
-def check_stac_cmd(ctx, stac_file, verbose):
+def check_stac_cmd(ctx, stac_file, verbose, strict):
     """
     Validate STAC Item or Collection JSON.
+
+    Exits 1 when validation fails, or on a warning with --strict.
 
     Checks:
 
@@ -1211,16 +1586,13 @@ def check_stac_cmd(ctx, stac_file, verbose):
       gpio check stac output.json
     """
     with _activate_s3(ctx):
-        from geoparquet_io.core.remote import setup_aws_profile_if_needed, validate_profile_for_urls
+        from geoparquet_io.core.remote import validate_profile_for_urls
         from geoparquet_io.core.stac_check import check_stac
 
         # Validate profile is only used with S3
         validate_profile_for_urls(None, stac_file)
 
-        # Setup AWS profile if needed
-        setup_aws_profile_if_needed(None, stac_file)
-
-        check_stac(stac_file, verbose)
+        exit_for_verdict(check_stac(stac_file, verbose), strict=strict)
 
 
 @check.command(name="spec", cls=GlobAwareCommand)
@@ -1250,6 +1622,7 @@ def check_stac_cmd(ctx, stac_file, verbose):
     help="Number of rows to sample for data validation (0 = all rows)",
 )
 @verbose_option
+@strict_option
 @click.pass_context
 def check_spec(
     ctx,
@@ -1259,6 +1632,7 @@ def check_spec(
     skip_data_validation,
     sample_size,
     verbose,
+    strict,
 ):
     """
     Validate a GeoParquet file against specification requirements.
@@ -1271,9 +1645,8 @@ def check_spec(
 
     \b
     Exit codes:
-      0 - All checks passed
-      1 - One or more checks failed
-      2 - Warnings only (all required checks passed)
+      0 - No check failed (warnings allowed)
+      1 - One or more checks failed, or any warning with --strict
 
     \b
     Examples:
@@ -1292,10 +1665,7 @@ def check_spec(
       # Skip data validation for faster check
       gpio check spec data.parquet --skip-data-validation
     """
-    from geoparquet_io.core.remote import (
-        setup_aws_profile_if_needed,
-        validate_profile_for_urls,
-    )
+    from geoparquet_io.core.remote import validate_profile_for_urls
     from geoparquet_io.core.validate import (
         format_json_output as format_json,
     )
@@ -1311,7 +1681,7 @@ def check_spec(
     with _activate_s3(ctx):
         # Validate profile is only used with S3
         validate_profile_for_urls(None, parquet_file)
-        setup_aws_profile_if_needed(None, parquet_file)
+        refuse_no_parquet_match(parquet_file)
 
         result = validate_geoparquet(
             parquet_file,
@@ -1326,12 +1696,8 @@ def check_spec(
         else:
             format_terminal(result)
 
-        # Exit codes: 0=passed, 1=failed, 2=warnings only
-        if result.failed_count > 0:
-            raise click.exceptions.Exit(1)
-        elif result.warning_count > 0:
-            raise click.exceptions.Exit(2)
-        # Exit 0 is implicit when no exception is raised
+        verdict = validation_verdict(failed=result.failed_count, warnings=result.warning_count)
+        exit_for_verdict(verdict, strict=strict)
 
 
 @check.command(name="optimization", cls=GlobAwareCommand)
@@ -1343,6 +1709,7 @@ def check_spec(
     callback=enable_verbose_logging,
     is_eager=True,
 )
+@strict_option
 @check_partition_options
 @click.pass_context
 def check_optimization_cmd(
@@ -1351,6 +1718,7 @@ def check_optimization_cmd(
     verbose,
     check_all_files,
     check_sample,
+    strict,
 ):
     """Check combined spatial query optimization.
 
@@ -1369,29 +1737,29 @@ def check_optimization_cmd(
       3-4  Partially optimized, improvements possible
       0-2  Not optimized for spatial queries
 
+    Every factor is advice: a score below 5 is a warning (exit 0, or 1 with
+    --strict). A file that is not GeoParquet at all fails (exit 1).
+
     \b
     Examples:
       gpio check optimization data.parquet
       gpio check optimization data.parquet --verbose
     """
     from geoparquet_io.core.check_optimization import check_optimization
-    from geoparquet_io.core.partition.reader import get_files_to_check
 
     configure_verbose(verbose)
 
     with _activate_s3(ctx):
-        files_to_check, notice = get_files_to_check(
-            parquet_file, check_all=check_all_files, check_sample=check_sample, verbose=verbose
+        runner = begin_check_run(
+            parquet_file,
+            check_all_files=check_all_files,
+            check_sample=check_sample,
+            verbose=verbose,
+            fix=False,
+            fix_output=None,
+            no_backup=False,
+            strict=strict,
         )
-
-        if notice:
-            click.echo(click.style(f"\U0001f4c1 {notice}", fg="cyan"))
-
-        if not files_to_check:
-            click.echo(click.style("No parquet files found", fg="red"))
-            return
-
-        runner = MultiFileCheckRunner(files_to_check, verbose=verbose)
 
         for file_path in runner.files:
             runner.start_file(file_path)
@@ -1399,10 +1767,19 @@ def check_optimization_cmd(
             show_output = runner.verbose or not runner.is_multi_file
             quiet = not show_output
 
-            result = check_optimization(
-                file_path, verbose=verbose and show_output, return_results=True, quiet=quiet
+            result = runner.run_check(
+                file_path,
+                partial(
+                    check_optimization,
+                    file_path,
+                    verbose=verbose and show_output,
+                    return_results=True,
+                    quiet=quiet,
+                ),
             )
+            if result is None:
+                continue
 
             runner.record_result(file_path, result)
 
-        runner.print_summary()
+        runner.finish()

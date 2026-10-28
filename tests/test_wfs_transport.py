@@ -13,11 +13,13 @@ from __future__ import annotations
 import pyarrow.parquet as pq
 import pytest
 
+from geoparquet_io.core.http_retry import MAX_RETRY_AFTER
 from geoparquet_io.core.wfs import (
     LayerNotFoundError,
     WFSAuthenticationError,
     WFSError,
     _fetch_wfs_page,
+    _fetch_with_spatial_tiles,
     _get_feature_count,
     _make_request,
     _probe_startindex_limit,
@@ -198,20 +200,42 @@ def test_a_429_honours_an_integer_retry_after(monkeypatch):
     assert http.sleeps == [11.0]
 
 
-def test_an_http_date_retry_after_degrades_to_linear_backoff(monkeypatch):
-    """`Retry-After` is honoured only when `.isdigit()` (wfs.py:263-268).
+def test_a_huge_retry_after_is_capped(monkeypatch, caplog):
+    """A day-long Retry-After must not park ``gpio extract wfs`` for a day (#1052)."""
+    http = FakeTransport.install(monkeypatch)
+    http.respond(SERVICE, error_reply(503, retry_after=86400), xml_reply(b"<ok/>"))
 
-    RFC 9110 also allows an HTTP-date. gpio ignores that form and uses its own
-    backoff instead — graceful degradation, not a defect, but invisible unless
-    asserted. Pinning it here makes a future date-parsing change show up as a
-    failing test rather than a silent behaviour change.
-    """
+    with caplog.at_level("WARNING"):
+        assert _make_request(SERVICE) == b"<ok/>"
+
+    assert http.sleeps == [MAX_RETRY_AFTER]
+    assert "86400" in caplog.text
+
+
+def test_a_decimal_retry_after_is_honoured(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(SERVICE, error_reply(429, retry_after="2.5"), xml_reply(b"<ok/>"))
+
+    assert _make_request(SERVICE) == b"<ok/>"
+    assert http.sleeps == [2.5]
+
+
+def test_an_http_date_retry_after_is_honoured_and_capped(monkeypatch):
+    """RFC 9110 allows an HTTP-date. A date far ahead waits the cap, not the date."""
     http = FakeTransport.install(monkeypatch)
     http.respond(
         SERVICE,
-        error_reply(503, retry_after="Wed, 21 Oct 2026 07:28:00 GMT"),
+        error_reply(503, retry_after="Fri, 01 Jan 2100 00:00:00 GMT"),
         xml_reply(b"<ok/>"),
     )
+
+    assert _make_request(SERVICE) == b"<ok/>"
+    assert http.sleeps == [MAX_RETRY_AFTER]
+
+
+def test_an_unreadable_retry_after_degrades_to_linear_backoff(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(SERVICE, error_reply(503, retry_after="later"), xml_reply(b"<ok/>"))
 
     assert _make_request(SERVICE) == b"<ok/>"
     assert http.sleeps == [1.0]
@@ -411,7 +435,7 @@ def test_a_bbox_reaches_the_hits_probe(monkeypatch):
     _get_feature_count(SERVICE, TYPENAME, "1.1.0", bbox=(-1, -2, 3, 4), crs="EPSG:4326")
 
     assert http.last.params["bbox"].startswith("-1")
-    assert http.last.params["bbox"].endswith("EPSG:4326")
+    assert http.last.params["bbox"].endswith(",urn:ogc:def:crs:OGC:1.3:CRS84")
 
 
 def test_a_countless_answer_is_not_a_failure(monkeypatch, caplog):
@@ -489,6 +513,32 @@ def test_a_failed_startindex_probe_warns_about_unbounded_pagination(monkeypatch,
         assert _probe_startindex_limit(SERVICE, TYPENAME, "1.1.0") is None
 
     assert "pagination past a server's limit" in caplog.text
+
+
+def test_the_probe_does_not_pin_the_timeout_of_later_requests(monkeypatch):
+    """Probe first (30s builds the client), then a page and a plain request (#1184)."""
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_startindex_probe, geojson_reply(_geojson(0)))
+    http.respond(_is_hits, xml_reply(b'<wfs:FeatureCollection numberMatched="3"/>'))
+    http.respond(_is_getfeature, geojson_reply(_geojson(3)))
+
+    _probe_startindex_limit(SERVICE, TYPENAME, "1.1.0")
+    _fetch_wfs_page(SERVICE, output_format="application/json")
+    _make_request(SERVICE, params={"resultType": "hits"}, timeout=9.0)
+
+    assert [request.timeout for request in http.requests] == [30.0, 600.0, 9.0]
+
+
+def test_probe_handles_400_error_without_startindex_keyword(monkeypatch):
+    """A 400 response without 'startindex' keyword returns None."""
+    http = FakeTransport.install(monkeypatch)
+    http.respond(
+        _is_startindex_probe,
+        bytes_reply(b"Bad Request: Invalid parameter", status=400, content_type="text/plain"),
+    )
+
+    result = _probe_startindex_limit(SERVICE, TYPENAME, "1.1.0")
+    assert result is None
 
 
 # ---------------------------------------------------------------------------
@@ -709,6 +759,28 @@ def test_an_unknowable_count_falls_back_to_a_single_request(monkeypatch, caplog)
 # ---------------------------------------------------------------------------
 
 
+def test_every_request_runs_with_the_timeout_its_caller_asked_for(monkeypatch, tmp_path):
+    """The hits probe (60s) builds the shared client first; pages still get 600s (#1184).
+
+    The shared client keeps the timeout it was built with, so a timeout has to
+    travel with each request. A page fetch that took 80s failed because it ran
+    under the first caller's timeout, not the 600s it asked for.
+    """
+    http = stub_service(FakeTransport.install(monkeypatch), total=30)
+    wfs_capabilities(monkeypatch, CAPABILITIES, schema=SCHEMA)
+
+    convert_wfs_to_geoparquet(
+        SERVICE, TYPENAME, str(tmp_path / "out.parquet"), version="1.1.0", page_size=10
+    )
+
+    hits = [r.timeout for r in http.requests if _is_hits(r)]
+    probes = [r.timeout for r in http.requests if _is_startindex_probe(r)]
+    pages = [r.timeout for r in http.requests if _is_getfeature(r)]
+    assert hits == [60.0]
+    assert probes and set(probes) == {30.0}
+    assert len(pages) >= 3 and set(pages) == {600.0}
+
+
 def test_the_written_file_is_spec_clean(monkeypatch, tmp_path):
     http = FakeTransport.install(monkeypatch)
     wfs_capabilities(monkeypatch, CAPABILITIES, SCHEMA)
@@ -799,3 +871,216 @@ def test_a_service_url_query_parameter_survives_every_request(monkeypatch, tmp_p
 
     assert http.requests
     assert all(request.params.get("apikey") == "secret" for request in http.requests)
+
+
+# ---------------------------------------------------------------------------
+# --bbox on a projected layer (#640) and server CRS strings (#1046)
+# ---------------------------------------------------------------------------
+
+
+def _projected_capabilities(srs: str) -> bytes:
+    """The mock document with one layer CRS, so negotiation cannot pick 4326."""
+    xml = MOCK_CAPABILITIES_XML.replace(
+        "<wfs:OtherSRS>urn:ogc:def:crs:EPSG::3857</wfs:OtherSRS>", ""
+    ).replace("urn:ogc:def:crs:EPSG::4326", srs)
+    return xml.encode("utf-8")
+
+
+def _projected_pages(declared: str):
+    """A GeoJSON page in ETRS89 / UTM 30N that declares ``declared`` as its CRS."""
+
+    def _serve(request):
+        document = _geojson(3, crs=declared)
+        for index, feature in enumerate(document["features"]):
+            feature["geometry"]["coordinates"] = [441000.0 + index * 10, 4471000.0]
+        return geojson_reply(document)(request)
+
+    return _serve
+
+
+def _stub_projected_layer(monkeypatch, srs: str):
+    http = FakeTransport.install(monkeypatch)
+    wfs_capabilities(monkeypatch, _projected_capabilities(srs), SCHEMA)
+    http.respond(_is_hits, xml_reply(b'<wfs:FeatureCollection numberMatched="3"/>'))
+    http.respond(_is_startindex_probe, geojson_reply(_geojson(0)))
+    http.respond(_is_getfeature, _projected_pages(srs))
+    return http
+
+
+def test_a_bbox_on_a_projected_layer_is_labelled_with_the_layer_crs(monkeypatch, tmp_path):
+    """#640: the bbox names the layer CRS, so the server applies the filter."""
+    http = _stub_projected_layer(monkeypatch, "urn:ogc:def:crs:EPSG::25830")
+    out = tmp_path / "madrid.parquet"
+
+    convert_wfs_to_geoparquet(
+        SERVICE,
+        TYPENAME,
+        str(out),
+        version="1.1.0",
+        bbox=(440000.0, 4470000.0, 450000.0, 4480000.0),
+        bbox_mode="server",
+    )
+
+    pages = [r for r in http.requests if _is_getfeature(r)]
+    assert pages
+    assert {r.params["bbox"] for r in pages} == {"440000.0,4470000.0,450000.0,4480000.0,EPSG:25830"}
+    assert {r.params["srsName"] for r in pages} == {"urn:ogc:def:crs:EPSG::25830"}
+    assert spec_problems(out) == []
+    assert geo_block_crs_id(out) == {"authority": "EPSG", "code": 25830}
+
+
+def test_a_legacy_urn_layer_crs_is_written_as_its_epsg_code(monkeypatch, tmp_path):
+    """#1046: the legacy geographicCRS URN is EPSG:25830, not a CRS84 default."""
+    _stub_projected_layer(monkeypatch, "urn:EPSG:geographicCRS:25830")
+    out = tmp_path / "legacy.parquet"
+
+    convert_wfs_to_geoparquet(SERVICE, TYPENAME, str(out), version="1.1.0")
+
+    assert spec_problems(out) == []
+    assert geo_block_crs_id(out) == {"authority": "EPSG", "code": 25830}
+
+
+def test_an_unresolvable_layer_crs_is_refused_and_nothing_is_written(monkeypatch, tmp_path):
+    """#1046: a file that labels projected coordinates as lon/lat is worse than none."""
+    _stub_projected_layer(monkeypatch, "urn:EPSG:def:crs:::999999")
+    out = tmp_path / "refused.parquet"
+
+    with pytest.raises(WFSError, match="could not resolve"):
+        convert_wfs_to_geoparquet(SERVICE, TYPENAME, str(out), version="1.1.0")
+
+    assert not out.exists()
+
+
+def _hits_matching_the_bbox(request):
+    """396 features in the layer, 3 inside any bbox: what a real server counts."""
+    matched = 3 if "bbox" in request.params else 396
+    body = f'<wfs:FeatureCollection numberMatched="{matched}"/>'.encode()
+    return xml_reply(body)(request)
+
+
+def test_a_server_bbox_is_counted_with_the_bbox_so_a_small_result_is_not_a_cap(
+    monkeypatch, tmp_path
+):
+    """#640: the count gpio compares a page with is the filtered count.
+
+    Measured against the whole layer's count, a bbox that matches 3 features
+    looked like a server cap of 3, and gpio paged the rest one feature at a
+    time with sortBy, which MapServer rejects (seen live on wfs.nrw.de).
+    """
+    http = FakeTransport.install(monkeypatch)
+    wfs_capabilities(monkeypatch, _projected_capabilities("urn:ogc:def:crs:EPSG::25830"), SCHEMA)
+    http.respond(_is_hits, _hits_matching_the_bbox)
+    http.respond(_is_startindex_probe, geojson_reply(_geojson(0)))
+    http.respond(_is_getfeature, _projected_pages("urn:ogc:def:crs:EPSG::25830"))
+    out = tmp_path / "filtered.parquet"
+
+    convert_wfs_to_geoparquet(
+        SERVICE,
+        TYPENAME,
+        str(out),
+        version="1.1.0",
+        bbox=(440000.0, 4470000.0, 450000.0, 4480000.0),
+        limit=200,
+        skip_hilbert=True,
+    )
+
+    hits = [r for r in http.requests if _is_hits(r)]
+    pages = [r for r in http.requests if _is_getfeature(r)]
+    assert hits
+    assert all(r.params.get("bbox") for r in hits)
+    assert len(pages) == 1
+    assert "sortBy" not in pages[0].params
+    assert pq.read_metadata(out).num_rows == 3
+
+
+# ---------------------------------------------------------------------------
+# A geographic layer CRS whose authority order is lat,lon (#1278 review)
+# ---------------------------------------------------------------------------
+
+
+def _geographic_layer(monkeypatch, srs: str):
+    """A layer that offers only ``srs``, serving lon/lat points near Oslo."""
+    http = FakeTransport.install(monkeypatch)
+    wfs_capabilities(monkeypatch, _projected_capabilities(srs), SCHEMA)
+    http.respond(_is_hits, xml_reply(b'<wfs:FeatureCollection numberMatched="3"/>'))
+    http.respond(_is_startindex_probe, geojson_reply(_geojson(0)))
+
+    def _serve(request):
+        document = _geojson(3)
+        for index, feature in enumerate(document["features"]):
+            feature["geometry"]["coordinates"] = [10.7 + index * 0.01, 59.9]
+        return geojson_reply(document)(request)
+
+    http.respond(_is_getfeature, _serve)
+    return http
+
+
+@pytest.mark.parametrize(
+    "srs,code",
+    [
+        ("urn:ogc:def:crs:EPSG::4258", 4258),
+        ("EPSG:4269", 4269),
+    ],
+)
+def test_a_lat_lon_geographic_layer_gets_its_bbox_lat_lon_with_the_urn(
+    monkeypatch, tmp_path, srs, code
+):
+    """The short EPSG:4258 label is read lat,lon by MapServer and lon,lat by
+    GeoServer and deegree. The URN in authority order reads the same on all."""
+    http = _geographic_layer(monkeypatch, srs)
+    out = tmp_path / "oslo.parquet"
+
+    convert_wfs_to_geoparquet(
+        SERVICE,
+        TYPENAME,
+        str(out),
+        version="1.1.0",
+        bbox=(10.6, 59.85, 10.9, 60.0),
+        bbox_mode="server",
+        skip_hilbert=True,
+    )
+
+    expected = f"59.85,10.6,60.0,10.9,urn:ogc:def:crs:EPSG::{code}"
+    hits = [r for r in http.requests if _is_hits(r)]
+    pages = [r for r in http.requests if _is_getfeature(r)]
+    assert hits
+    assert pages
+    assert {r.params["bbox"] for r in hits + pages} == {expected}
+    assert geo_block_crs_id(out) == {"authority": "EPSG", "code": code}
+
+
+def test_every_tile_of_a_lat_lon_geographic_layer_is_sent_lat_lon(monkeypatch):
+    """Auto-tiling builds its tile probes and tile pages from the same rule."""
+    http = _geographic_layer(monkeypatch, "urn:ogc:def:crs:EPSG::4258")
+
+    _fetch_with_spatial_tiles(
+        service_url=SERVICE,
+        typename=TYPENAME,
+        version="1.1.0",
+        total_count=100_000,
+        startindex_limit=50_000,
+        layer_bbox=(5.0, 55.0, 15.0, 65.0),
+        crs="urn:ogc:def:crs:EPSG::4258",
+    )
+
+    sent = [r.params["bbox"] for r in http.requests if "bbox" in r.params]
+    assert len(sent) >= 4
+    for bbox in sent:
+        *numbers, label = bbox.split(",")
+        lat_min, lon_min, lat_max, lon_max = map(float, numbers)
+        assert label == "urn:ogc:def:crs:EPSG::4258"
+        assert 55.0 <= lat_min < lat_max <= 65.0
+        assert 5.0 <= lon_min < lon_max <= 15.0
+
+
+def test_an_unresolvable_layer_crs_fails_before_any_feature_is_requested(monkeypatch, tmp_path):
+    """The request CRS is known after negotiation, so a large layer is not
+    downloaded only to be refused at the end."""
+    http = _stub_projected_layer(monkeypatch, "urn:EPSG:def:crs:::999999")
+
+    with pytest.raises(WFSError, match="could not resolve"):
+        convert_wfs_to_geoparquet(
+            SERVICE, TYPENAME, str(tmp_path / "early.parquet"), version="1.1.0"
+        )
+
+    assert not [r for r in http.requests if _is_getfeature(r) or _is_hits(r)]

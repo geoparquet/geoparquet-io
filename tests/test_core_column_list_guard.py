@@ -90,6 +90,9 @@ def _run_carto(
         stack.enter_context(
             mock.patch.object(carto, "_get_row_count", return_value=fetched.num_rows)
         )
+        # The SRID probe (#1059) is not a column check; the probe claims here
+        # are about the column lists alone.
+        stack.enter_context(mock.patch.object(carto, "_probe_geometry_srids", return_value=[4326]))
         stack.enter_context(
             mock.patch.object(
                 carto, "repair_arrow_table_geometry", side_effect=lambda t, col, repair: (t, 0)

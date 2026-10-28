@@ -3,21 +3,29 @@
 from __future__ import annotations
 
 import os
+from itertools import pairwise
 
 import duckdb
 import pyarrow as pa
 
 from geoparquet_io.core.bbox_structure import get_bbox_advice
 from geoparquet_io.core.common import add_bbox, get_dataset_bounds, get_parquet_metadata
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    get_duckdb_connection,
+    quote_identifier,
+    sql_path,
+    uses_aws_profile,
+)
 from geoparquet_io.core.exceptions import RemoteAccessError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geo_metadata import DEFAULT_GEOPARQUET_VERSION
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
+    register_geometry_column,
 )
 from geoparquet_io.core.logging_config import debug, info, success, warn
+from geoparquet_io.core.optional_deps import load_module
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
     resolve_output_geoparquet_version,
@@ -28,7 +36,6 @@ from geoparquet_io.core.remote import (
     get_remote_error_hint,
     is_remote_url,
     needs_httpfs,
-    setup_aws_profile_if_needed,
     show_remote_read_message,
     validate_profile_for_urls,
 )
@@ -41,6 +48,7 @@ from geoparquet_io.core.streaming import (
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 
+@uses_aws_profile
 def _resolve_output_version(
     input_parquet: str,
     geoparquet_version: str | None,
@@ -78,12 +86,6 @@ def _resolve_output_version(
     if is_stdin(input_parquet):
         return None
 
-    # Authenticate before probing: the probe reads the input, and without the
-    # profile a remote read fails, which previously degraded to "1.1" and
-    # printed the very warning this function exists to suppress.
-    if profile:
-        setup_aws_profile_if_needed(profile, input_parquet, None)
-
     try:
         metadata, _ = get_parquet_metadata(input_parquet, verbose)
     except Exception as e:  # noqa: BLE001 - any read failure means "stay quiet"
@@ -100,6 +102,116 @@ def _resolve_output_version(
     )
 
 
+# Bytes of output a gather batch builds at once. The chunk-wise gather holds at
+# most about twice this beyond the output, against a whole column for a
+# concatenate-then-take, and each output chunk stays far below the 2 GiB a
+# 32-bit offset addresses.
+_GATHER_BATCH_BYTES = 16 * 1024 * 1024
+_GATHER_THREADS = 4
+
+
+def _view_twin(typ: pa.DataType) -> pa.DataType | None:
+    """The offset-based twin of a view layout pyarrow 25 cannot ``take``, else None."""
+    if pa.types.is_binary_view(typ):
+        return pa.large_binary()
+    if pa.types.is_string_view(typ):
+        return pa.large_string()
+    return None
+
+
+def _row_index_name(geom_col: str) -> str:
+    """An index column name DuckDB cannot confuse with ``geom_col`` (identifiers fold case)."""
+    idx_col = "__gpio_row_idx"
+    while idx_col.lower() == geom_col.lower():
+        idx_col += "_"
+    return idx_col
+
+
+def _row_bytes(column: pa.ChunkedArray):
+    """Approximate bytes each row of ``column`` adds to an output: exact for binary/string."""
+    np = load_module("numpy")
+    import pyarrow.compute as pc
+
+    sizes = []
+    for chunk in column.chunks:
+        if (
+            pa.types.is_binary(chunk.type)
+            or pa.types.is_string(chunk.type)
+            or (pa.types.is_large_binary(chunk.type) or pa.types.is_large_string(chunk.type))
+        ):
+            lengths = pc.binary_length(chunk).fill_null(0).to_numpy(zero_copy_only=False)
+            sizes.append(lengths.astype(np.int64) + 8)
+        else:
+            per_row = chunk.nbytes // max(len(chunk), 1) + 1
+            sizes.append(np.full(len(chunk), per_row, dtype=np.int64))
+    return np.concatenate(sizes) if sizes else np.zeros(0, dtype=np.int64)
+
+
+def _gather_batch(chunks, starts, batch):
+    """``batch`` (global row positions) gathered from ``chunks``, chunk by chunk."""
+    np = load_module("numpy")
+
+    owner = np.searchsorted(starts, batch, side="right") - 1
+    order = np.argsort(owner, kind="stable")
+    counts = np.bincount(owner, minlength=len(chunks))
+    pieces, pos = [], 0
+    for c, count in enumerate(counts):
+        if count:
+            local = batch[order[pos : pos + count]] - starts[c]
+            pieces.append(chunks[c].take(pa.array(local)))
+            pos += count
+    grouped = pa.concat_arrays(pieces) if len(pieces) > 1 else pieces[0]
+    if len(pieces) == 1:
+        return grouped
+    inverse = np.empty_like(order)
+    inverse[order] = np.arange(len(order))
+    return grouped.take(pa.array(inverse))
+
+
+def _gather_column(column: pa.ChunkedArray, indices) -> pa.ChunkedArray:
+    """``column.take(indices)`` without concatenating ``column``'s chunks first.
+
+    pyarrow's ``take`` on a multi-chunk column concatenates the chunks, which
+    for a binary or string column past 2 GiB overflows its 32-bit offsets
+    (ArrowInvalid) and otherwise holds a second copy of the column. Gathering
+    each output batch straight from the chunks it touches avoids both.
+    """
+    np = load_module("numpy")
+
+    twin = _view_twin(column.type)
+    if twin is not None:
+        gathered = _gather_column(column.cast(twin), indices)
+        return pa.chunked_array([c.cast(column.type) for c in gathered.chunks], type=column.type)
+    if column.num_chunks == 1:
+        return pa.chunked_array([column.chunk(0).take(pa.array(indices))], type=column.type)
+    if pa.types.is_dictionary(column.type) or column.num_chunks == 0:
+        return column.take(pa.array(indices))
+
+    chunks = column.chunks
+    starts = np.cumsum([0] + [len(c) for c in chunks])
+    # Cut the output wherever its running byte total crosses another batch.
+    cumulative = np.cumsum(_row_bytes(column)[indices])
+    marks = np.arange(_GATHER_BATCH_BYTES, cumulative[-1], _GATHER_BATCH_BYTES)
+    ends = np.unique(np.searchsorted(cumulative, marks) + 1)
+    bounds = [0, *ends[ends < len(indices)].tolist(), len(indices)]
+    out = [_gather_batch(chunks, starts, indices[lo:hi]) for lo, hi in pairwise(bounds)]
+    return pa.chunked_array(out, type=column.type)
+
+
+def _take_rows(table: pa.Table, indices) -> pa.Table:
+    """``table`` reordered to ``indices`` (numpy int64, one per row).
+
+    Columns are gathered on a few threads (pyarrow releases the GIL), which
+    keeps the reorder as fast as ``Table.take``; each holds at most a couple
+    of batches beyond the output, so the transient stays bounded.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=_GATHER_THREADS) as pool:
+        columns = list(pool.map(lambda col: _gather_column(col, indices), table.columns))
+    return pa.Table.from_arrays(columns, schema=table.schema)
+
+
 def hilbert_order_table(
     table: pa.Table,
     geometry_column: str | None = None,
@@ -109,8 +221,19 @@ def hilbert_order_table(
 
     This is the table-centric version for the Python API.
 
-    Empty or NULL geometries are placed at the end of the result since they
-    have no spatial extent and cannot be assigned a Hilbert curve index.
+    Empty or NULL geometries (and WKB that does not parse) are placed at the
+    end of the result, in their input order, since they have no spatial extent
+    and cannot be assigned a Hilbert curve index. Rows with equal Hilbert keys
+    keep their input order too, so the result is deterministic.
+
+    DuckDB sees only the geometry column and a row index, and hands back the
+    sorted *indices*; the result is then gathered from the caller's own Arrow
+    chunks (``_take_rows``). Round-tripping the whole table through DuckDB
+    instead — sort the full rows, ``read_all()`` the sorted copy — held three
+    copies of the data at once and peaked at ~11x the input file's size
+    (#1268). The gather also keeps what a round-trip destroyed: column order,
+    the geometry column's exact bytes and encoding, and every attribute's
+    Arrow type. The geometry bytes are not re-encoded, so EWKB stays EWKB.
 
     Args:
         table: Input PyArrow Table
@@ -119,104 +242,54 @@ def hilbert_order_table(
     Returns:
         New table with rows reordered by Hilbert curve
     """
-    # Find geometry column
     geom_col = geometry_column or find_geometry_column_from_table(table)
     if not geom_col:
         geom_col = "geometry"
-    quoted_geom = quote_identifier(geom_col)
+    idx_col = _row_index_name(geom_col)
+    quoted_idx = quote_identifier(idx_col)
 
-    # Register table and execute query
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        con.register("__input_table", table)
+        read = register_geometry_column(con, "__input_table", table, geom_col, row_index=idx_col)
+        # One projection of the parsed geometry, shared by both queries below.
+        source_ref = f"(SELECT {quoted_idx}, {read.shape_expr} AS __g FROM __input_table)"
 
-        # Check if geometry column is BLOB (needs conversion)
-        columns_info = con.execute("DESCRIBE __input_table").fetchall()
-        geom_is_blob = any(col[0] == geom_col and "BLOB" in col[1].upper() for col in columns_info)
-
-        if geom_is_blob and geom_col in table.column_names:
-            # Quote column names to handle special characters (colons, spaces, etc.)
-            other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
-            col_defs = other_cols + [f"ST_GeomFromWKB({quoted_geom}) AS {quoted_geom}"]
-            view_query = (
-                f"CREATE VIEW __input_view AS SELECT {', '.join(col_defs)} FROM __input_table"
-            )
-            con.execute(view_query)
-            source_ref = "__input_view"
-        else:
-            source_ref = "__input_table"
-
-        # Count empty/null geometries to handle them separately
-        # ST_IsEmpty returns TRUE for empty geometries, NULL for NULL geometries
-        empty_count_result = con.execute(f"""
-            SELECT COUNT(*) FROM {source_ref}
-            WHERE {quoted_geom} IS NULL OR ST_IsEmpty({quoted_geom})
+        # One scan for the empty/NULL count and the bounds of everything else
+        # (ST_IsEmpty is NULL for a NULL geometry, so FILTER drops those too).
+        empty_count, xmin, ymin, xmax, ymax = con.execute(f"""
+            SELECT
+                COUNT(*) FILTER (WHERE __g IS NULL OR ST_IsEmpty(__g)),
+                MIN(ST_XMin(__g)) FILTER (WHERE NOT ST_IsEmpty(__g)),
+                MIN(ST_YMin(__g)) FILTER (WHERE NOT ST_IsEmpty(__g)),
+                MAX(ST_XMax(__g)) FILTER (WHERE NOT ST_IsEmpty(__g)),
+                MAX(ST_YMax(__g)) FILTER (WHERE NOT ST_IsEmpty(__g))
+            FROM {source_ref}
         """).fetchone()
-        empty_count = empty_count_result[0] if empty_count_result else 0
 
         if empty_count > 0:
             warn(
                 f"Found {empty_count} empty/null geometries. "
                 "These will be placed at the end of the sorted output."
             )
-
-        # Calculate dataset bounds from non-empty geometries only
-        bounds_result = con.execute(f"""
-            SELECT
-                MIN(ST_XMin({quoted_geom})) as xmin,
-                MIN(ST_YMin({quoted_geom})) as ymin,
-                MAX(ST_XMax({quoted_geom})) as xmax,
-                MAX(ST_YMax({quoted_geom})) as ymax
-            FROM {source_ref}
-            WHERE {quoted_geom} IS NOT NULL AND NOT ST_IsEmpty({quoted_geom})
-        """).fetchone()
-
-        # If all geometries are empty/null, return table unchanged
-        if not bounds_result or any(v is None for v in bounds_result):
+        if any(v is None for v in (xmin, ymin, xmax, ymax)):
             warn("All geometries are empty or null. Returning table without Hilbert ordering.")
             return table
 
-        xmin, ymin, xmax, ymax = bounds_result
-
-        # Get non-geometry columns
-        other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
-        select_cols = ", ".join(other_cols) if other_cols else ""
-
-        # Build column selection with WKB conversion
-        if select_cols:
-            wkb_select = f"{select_cols}, ST_AsWKB({quoted_geom}) AS {quoted_geom}"
-        else:
-            wkb_select = f"ST_AsWKB({quoted_geom}) AS {quoted_geom}"
-
-        # Build Hilbert ordering query that handles empty geometries:
-        # 1. Non-empty geometries are ordered by Hilbert curve
-        # 2. Empty/null geometries are appended at the end
-        query = f"""
-            WITH non_empty AS (
-                SELECT {wkb_select}
-                FROM {source_ref}
-                WHERE {quoted_geom} IS NOT NULL AND NOT ST_IsEmpty({quoted_geom})
-                ORDER BY ST_Hilbert({quoted_geom},
-                    ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax})))
-            ),
-            empty_or_null AS (
-                SELECT {wkb_select}
-                FROM {source_ref}
-                WHERE {quoted_geom} IS NULL OR ST_IsEmpty({quoted_geom})
-            )
-            SELECT * FROM non_empty
-            UNION ALL
-            SELECT * FROM empty_or_null
-        """
-        result = con.execute(query).arrow().read_all()
-
-        # Preserve metadata
-        if table.schema.metadata:
-            result = result.replace_schema_metadata(table.schema.metadata)
-
-        return result
+        # Sorted row indices: non-empty geometries in Hilbert order, then the
+        # empty/NULL rows (a NULL key, sorted last); the index breaks every tie.
+        # DuckDB sorts (key, index) pairs — 16 bytes a row — never the rows.
+        ordered = con.execute(f"""
+            SELECT {quoted_idx} FROM {source_ref}
+            ORDER BY CASE WHEN __g IS NULL OR ST_IsEmpty(__g) THEN NULL
+                ELSE ST_Hilbert(__g, ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax})))
+                END NULLS LAST,
+                {quoted_idx}
+        """).fetchnumpy()[idx_col]
     finally:
         con.close()
+
+    # The gather keeps the schema, so the caller's metadata travels as-is.
+    return _take_rows(table, ordered.astype("int64", copy=False))
 
 
 def _prepare_working_file(input_parquet, add_bbox_flag, verbose):
@@ -485,6 +558,7 @@ def _hilbert_order_streaming(
             success(f"Successfully reordered data using Hilbert curve to: {output_path}")
 
 
+@uses_aws_profile
 def _hilbert_order_file_based(
     input_parquet: str,
     output_parquet: str | None,
@@ -512,7 +586,6 @@ def _hilbert_order_file_based(
     )
 
     validate_profile_for_urls(profile, input_parquet, output_parquet)
-    setup_aws_profile_if_needed(profile, input_parquet, output_parquet)
     show_remote_read_message(working_parquet, verbose)
 
     working_url = resolve_file_url(working_parquet, verbose)

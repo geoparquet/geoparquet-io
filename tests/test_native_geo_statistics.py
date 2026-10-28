@@ -5,8 +5,8 @@ GEOMETRY column on Windows: pyarrow writing them, or DuckDB's
 ``parquet_metadata()`` reading them. These tests answered it — the reader, and
 only on DuckDB <= 1.5.1, which reported [0, 0, 0, 0] on Windows for a
 pyarrow-written file whose statistics pyarrow read back correctly from those
-same bytes. gpio's floor is now ``duckdb>=1.5.5`` (#737, taken for an unrelated
-segfault), and on that floor Windows reads them correctly.
+same bytes. gpio's floor is now ``duckdb>=1.5.6`` (#737 and #1102, taken for
+unrelated segfaults), and on that floor Windows reads them correctly.
 
 The watch is what caught it. These assertions carried a *strict* xfail on
 win32, so when the floor moved they turned CI red with XPASS rather than

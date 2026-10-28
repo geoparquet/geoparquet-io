@@ -301,13 +301,19 @@ class TestExtractPartition:
 
 
 class TestCheckPartition:
-    """Tests for gpio check commands on partitioned data."""
+    """Tests for gpio check commands on partitioned data.
+
+    The country partition declares a 1.1 ``covering`` over a bbox struct in
+    Overture's ``xmin, xmax, ymin, ymax`` order, which the spec rejects, so
+    ``check all`` and ``check bbox`` fail it and exit 1 (#1241). These tests are
+    about which files a partition input resolves to, not that verdict.
+    """
 
     def test_check_all_partition_default(self, country_partition_dir):
         """Test check all on partition (default: first file)."""
         runner = CliRunner()
         result = runner.invoke(check, ["all", country_partition_dir])
-        assert result.exit_code == 0
+        assert result.exit_code == 1, result.output
         # Should show version info and indicate partition
         assert "1.1" in result.output or "Version" in result.output
         assert "first file" in result.output.lower()
@@ -316,15 +322,16 @@ class TestCheckPartition:
         """Test check all on all files in partition."""
         runner = CliRunner()
         result = runner.invoke(check, ["all", country_partition_dir, "--all-files"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1, result.output
         # Should check all 4 files
         assert "all 4 files" in result.output.lower()
+        assert "4 failed" in result.output
 
     def test_check_all_partition_sample(self, country_partition_dir):
         """Test check all on sample of partition files."""
         runner = CliRunner()
         result = runner.invoke(check, ["all", country_partition_dir, "--sample-files", "2"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1, result.output
         assert "sample" in result.output.lower()
 
     def test_check_compression_partition(self, country_partition_dir):
@@ -338,9 +345,9 @@ class TestCheckPartition:
         """Test check bbox on partition."""
         runner = CliRunner()
         result = runner.invoke(check, ["bbox", country_partition_dir])
-        assert result.exit_code == 0
-        # Files have proper bbox metadata
-        assert "bbox" in result.output.lower()
+        # The declared covering is over a struct the spec rejects: a failure
+        assert result.exit_code == 1, result.output
+        assert "Covering declared over" in result.output
 
 
 class TestPartitionDataIntegrity:

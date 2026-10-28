@@ -415,7 +415,7 @@ def assert_valid_geoparquet_output(path: str, expect: Expect) -> list[str]:
 
     result = validate_geoparquet(path, validate_data=True, sample_size=0)
     # No platform is excused: DuckDB <= 1.5.1 misread native-geo statistics on
-    # Windows (#721), but gpio now floors DuckDB at 1.5.5, which reads them
+    # Windows (#721), but gpio now floors DuckDB at 1.5.6, which reads them
     # correctly, so the oracle is enforced everywhere.
     return [c.name for c in result.checks if c.status == CheckStatus.FAILED]
 

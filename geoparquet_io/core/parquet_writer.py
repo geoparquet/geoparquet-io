@@ -21,8 +21,11 @@ write path is entitled to answer for itself:
    for one -- :func:`resolve_output_geoparquet_version`.
 3. **Which CRS the output declares** when the caller did not name one --
    :func:`resolve_input_crs`.
-4. **Whether a ``geo`` key appears in the output's file-level metadata at all**
-   -- :func:`apply_output_kv_metadata`.
+4. **Which file-level keys the output carries** -- whether a ``geo`` key
+   appears at all, and that the input's ``pandas``, ``ARROW:schema`` and
+   ``geo:overviews`` never do -- :func:`output_schema_metadata` and
+   :func:`apply_output_kv_metadata`, and for a DuckDB ``COPY`` that carries its
+   own ``geo`` block, :func:`geoparquet_copy_options`.
 
 The third exists because it is the *same question as the second*, asked of the
 same witness. Both are "what did the input declare", and a rewrite that answers
@@ -58,11 +61,19 @@ the column it read carried, which is how ``gpio sort quadkey`` stamped
 from __future__ import annotations
 
 import math
+from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+from geoparquet_io.core.crs_utils import (
+    PARQUET_UNKNOWN_CRS,
+    extract_crs_from_parquet,
+    source_crs_is_unknown,
+)
+from geoparquet_io.core.duckdb_utils import build_kv_metadata_clause
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.geo_metadata import OVERVIEWS_KEY, sanitized_carried_geo
+from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
 from geoparquet_io.core.logging_config import debug, info
 from geoparquet_io.core.streaming import extract_version_from_metadata
 
@@ -353,8 +364,8 @@ def resolve_output_geoparquet_version(
     key) that means writing native 2.0, which is what ``convert`` and
     ``reproject`` already did via ``resolve_geoparquet_version_from_file``.
     Whether the output may declare a bbox ``covering`` is a separate decision,
-    gated on the struct's shape by ``geo_metadata.bbox_column_to_declare``
-    (ADR-0006), never on the version chosen here.
+    gated on the struct's shape by ``geo_metadata.bbox_column_to_declare``,
+    never on the version chosen here.
 
     Every other entry point resolved auto mode from the carried KV metadata
     alone, and a native-geo-only input has no ``geo`` key for that to read: it
@@ -399,12 +410,12 @@ def resolve_output_geoparquet_version(
 
 
 def resolve_input_crs(
-    input_crs: dict | None,
+    input_crs: dict | str | None,
     *,
     input_file: str | None = None,
     geometry_column: str | None = None,
     verbose: bool = False,
-) -> dict | None:
+) -> dict | str | None:
     """Decide which CRS the output describes its geometry with. The third decision.
 
     An output with no geometry column describes no geometry, so the question has
@@ -438,9 +449,11 @@ def resolve_input_crs(
     anywhere.
 
     ``extract_crs_from_parquet`` returns ``None`` for the default CRS and for an
-    explicit ``crs: null``, both of which mean "do not state a CRS here" -- so a
-    miss leaves ``input_crs`` ``None`` and ``apply_output_crs`` keeps its
-    existing behaviour of preserving whatever the carried block said. A file
+    unknown one. The two are told apart here: an input whose CRS is unknown
+    (``crs: null``, an empty value, or a ``srid:0`` type with no block) answers
+    :data:`crs_utils.PARQUET_UNKNOWN_CRS`, so the output says "unknown" in the
+    ``geo`` block and in its type rather than nothing, which means OGC:CRS84
+    (#1276). Any other miss leaves ``input_crs`` ``None``. A file
     that cannot be inspected (remote without credentials, a path that is not
     Parquet) is a miss too, not an error: the write worked before this function
     existed and must keep working.
@@ -454,10 +467,84 @@ def resolve_input_crs(
 
     try:
         # RAW path: extract_crs_from_parquet escapes its own argument (#718).
-        return extract_crs_from_parquet(input_file, verbose=verbose)
+        # The geometry column says which native column's CRS a block-less
+        # (native-geo-only) input means: in schema order the first CRS can be
+        # a secondary's.
+        crs = extract_crs_from_parquet(input_file, verbose=verbose, geometry_column=geometry_column)
+        if crs is None and source_crs_is_unknown(input_file, geometry_column):
+            # An unknown CRS is a fact about the output too (#1276).
+            return PARQUET_UNKNOWN_CRS
+        return crs
     except Exception as exc:  # pragma: no cover - defensive, see docstring
         debug(f"CRS auto-detect failed for {input_file}: {exc}; leaving the CRS unstated")
         return None
+
+
+# Schema-metadata keys that describe the *input's* schema rather than the
+# output's, so they must never ride along into a write.
+#
+# `geo` would declare the input's GeoParquet version over output the writer has
+# just given a different shape; `ARROW:schema` and `pandas` are serialized
+# descriptors that pyarrow writes through verbatim rather than regenerating,
+# leaving the output naming the input's columns and CRS. A stale `pandas` block
+# also relabels rows: after a sort it hands back the input's index labels in the
+# input's order, and a stale `datetimetz` entry shifts a naive timestamp by the
+# zone's offset (#710, #1268).
+#
+# One definition, used by every place that needs it -- the facade below, the
+# parquet-geo-only path in arrow_geo_metadata (which sees `bytes` keys, straight
+# off a pyarrow schema) and write_parquet_with_metadata's preserved-keys loop
+# (which sees them decoded). They were separate literals; a key added to one and
+# not the other is a silent metadata leak, so the bytes form is derived rather
+# than written out again. It lives here because the facade applies it to every
+# Arrow-side write.
+#
+# `geo:overviews` describes the file's own row-group layout (OVERVIEWS_SPEC
+# 3.1 calls it authoritative), so a rewrite that regroups or filters rows must
+# not carry it: an honest plain file with a `level` column beats a footer that
+# lies about where each level ends. The writer of a levelled file mints a fresh
+# one; nothing else may forward it.
+_CARRIED_SCHEMA_METADATA_KEYS = frozenset({"geo", "ARROW:schema", "pandas", OVERVIEWS_KEY})
+_CARRIED_SCHEMA_METADATA_KEYS_BYTES = frozenset(
+    key.encode("utf-8") for key in _CARRIED_SCHEMA_METADATA_KEYS
+)
+
+
+def _as_bytes(value: str | bytes) -> bytes:
+    return value.encode("utf-8") if isinstance(value, str) else value
+
+
+def output_schema_metadata(
+    metadata: Mapping[str | bytes, str | bytes] | Mapping[bytes, bytes] | None,
+    geoparquet_version: str | None,
+    extra_kv_metadata: Mapping[str, str] | Mapping[str | bytes, str | bytes] | None = None,
+) -> dict[bytes, bytes]:
+    """The file-level KV metadata an output gets from its table's metadata.
+
+    * The input's ``pandas``, ``ARROW:schema`` and ``geo:overviews`` are
+      dropped: they describe the input's rows, not the output's (#710, #1268).
+      pyarrow regenerates ``ARROW:schema`` from what is left.
+    * ``geo`` is kept, because by the time a write gets here the table carries
+      the block that write built. ``parquet-geo-only`` drops it too, as it
+      means "carry no GeoParquet metadata".
+    * Every other key (fiboa, vecorel, STAC, provenance) survives (#690), and
+      ``extra_kv_metadata`` is merged in last, so the caller's value wins.
+
+    Keys and values come back as ``bytes``, ready for
+    ``replace_schema_metadata`` or ``with_metadata``.
+    """
+    dropped = _CARRIED_SCHEMA_METADATA_KEYS_BYTES
+    if geoparquet_version != "parquet-geo-only":
+        dropped = dropped - {b"geo"}
+
+    result = {
+        _as_bytes(key): _as_bytes(value)
+        for key, value in (metadata or {}).items()
+        if _as_bytes(key) not in dropped
+    }
+    for key, value in (extra_kv_metadata or {}).items():
+        result[_as_bytes(key)] = _as_bytes(value)
+    return result
 
 
 def apply_output_kv_metadata(
@@ -465,15 +552,10 @@ def apply_output_kv_metadata(
     geoparquet_version: str | None,
     extra_kv_metadata: dict[str, str] | None = None,
 ) -> pa.Table:
-    """Decide the output's file-level KV metadata. The fourth decision.
+    """Give ``table`` its output's file-level KV metadata. The fourth decision.
 
-    Two rules, and the version decides both:
-
-    * ``parquet-geo-only`` means "carry no GeoParquet metadata", so the ``geo``
-      key is dropped. Every other key is not GeoParquet metadata and survives.
-    * ``extra_kv_metadata`` -- the input's preserved sidecar payloads (fiboa,
-      vecorel, STAC), plus anything the caller minted -- is merged in, caller
-      last.
+    The rules are :func:`output_schema_metadata`'s; this is the table form. It
+    is zero-copy: only the schema metadata is replaced.
 
     The three Arrow strategies each carried their own copy of the merge half and
     none of them had the drop half: ``write_from_table`` guards its metadata
@@ -482,23 +564,130 @@ def apply_output_kv_metadata(
     ``geo`` key naming a ``primary_column`` the output does not have, and
     declaring a GeoParquet version for a file explicitly asked to declare none
     (#773). The same hole let a parquet-geo-only write *with* geometry keep the
-    input's carried block on the streaming path.
+    input's carried block on the streaming path. Copying the rest of the
+    metadata verbatim also carried the input's ``pandas`` block into every
+    in-memory and streaming output (#1268).
 
-    Applied once, at the top of each strategy's ``write_from_table``, before any
-    early return can skip it.
+    Applied at the top of each strategy's ``write_from_table``, before any
+    early return can skip it, and again, with the same extras, by
+    ``_write_table_with_settings`` just before ``pq.write_table``, so the
+    Arrow-table funnel and every helper that writes through it get the same
+    answer.
     """
-    metadata = dict(table.schema.metadata or {})
-
-    if geoparquet_version == "parquet-geo-only":
-        metadata.pop(b"geo", None)
-        metadata.pop("geo", None)
-
-    for key, value in (extra_kv_metadata or {}).items():
-        bkey = key.encode("utf-8") if isinstance(key, str) else key
-        bval = value.encode("utf-8") if isinstance(value, str) else value
-        metadata[bkey] = bval
-
+    metadata = output_schema_metadata(table.schema.metadata, geoparquet_version, extra_kv_metadata)
     return table.replace_schema_metadata(metadata)
+
+
+def geoparquet_copy_options(duckdb_version: str, kv_pairs: Mapping[str, str] | None) -> list[str]:
+    """The ``GEOPARQUET_VERSION`` and ``KV_METADATA`` options of one DuckDB ``COPY``.
+
+    The fourth decision, for a write that hands DuckDB a ``geo`` block of its
+    own. DuckDB's writer with ``GEOPARQUET_VERSION`` ``'V1'``, ``'V2'`` or
+    ``'BOTH'`` does not replace a ``geo`` key supplied in ``KV_METADATA``: it
+    writes the supplied entry and then appends the one it generated, so the
+    footer carries two ``geo`` keys that disagree (one with the ``covering``,
+    one with DuckDB's ``crs``) and each reader picks its own (#1225). Only
+    ``'NONE'`` writes the supplied entry alone.
+
+    So whenever ``kv_pairs`` holds ``geo``, a ``'V2'`` request becomes
+    ``'NONE'``. That is lossless on a native ``GEOMETRY`` column: ``'NONE'``
+    governs the ``geo`` key only, and the column keeps its Parquet ``GEOMETRY``
+    logical type, the CRS in it and its geospatial statistics.
+
+    A ``'V1'`` or ``'BOTH'`` request with a ``geo`` key is refused rather than
+    rewritten. ``'V1'`` turns a ``GEOMETRY`` column into WKB, and ``'NONE'``
+    would write it native instead, which a 1.x file must not carry (#712).
+    ``'BOTH'`` keeps the column native, but what it promises is DuckDB's own
+    dual-readable block, which a supplied block would silently stand in for.
+    No caller does this today; a caller that wants it has to cast to ``BLOB``
+    itself and ask for ``'NONE'``.
+
+    Args:
+        duckdb_version: The ``GEOPARQUET_VERSION`` the write would otherwise use.
+        kv_pairs: RAW file-level key/value pairs for ``KV_METADATA``, or None.
+
+    Returns:
+        ``["GEOPARQUET_VERSION '...'"]``, plus the ``KV_METADATA`` clause when
+        there is anything to write.
+    """
+    pairs = dict(kv_pairs or {})
+    if "geo" in pairs and duckdb_version != "NONE":
+        if duckdb_version != "V2":
+            raise ValueError(
+                f"a supplied geo block cannot be written beside GEOPARQUET_VERSION "
+                f"'{duckdb_version}': DuckDB would append its own geo key, and 'NONE' "
+                f"would write the geometry column native"
+            )
+        duckdb_version = "NONE"
+    options = [f"GEOPARQUET_VERSION '{duckdb_version}'"]
+    kv_clause = build_kv_metadata_clause(pairs)
+    if kv_clause:
+        options.append(kv_clause)
+    return options
+
+
+def _leaf_paths(name: str, arrow_type) -> Iterator[str]:
+    """The Parquet leaf paths an Arrow column is written as, in schema order.
+
+    pyarrow names a dictionary-encoding request by leaf path, so ``bbox`` alone
+    would not reach ``bbox.xmin``. Lists and maps use the compliant nested
+    names pyarrow writes by default.
+    """
+    import pyarrow as pa
+
+    while isinstance(arrow_type, pa.BaseExtensionType):
+        arrow_type = arrow_type.storage_type
+    if pa.types.is_dictionary(arrow_type):
+        arrow_type = arrow_type.value_type
+    if pa.types.is_struct(arrow_type):
+        for i in range(arrow_type.num_fields):
+            child = arrow_type.field(i)
+            yield from _leaf_paths(f"{name}.{child.name}", child.type)
+    elif pa.types.is_map(arrow_type):
+        yield from _leaf_paths(f"{name}.key_value.key", arrow_type.key_type)
+        yield from _leaf_paths(f"{name}.key_value.value", arrow_type.item_type)
+    elif (
+        pa.types.is_list(arrow_type)
+        or pa.types.is_large_list(arrow_type)
+        or pa.types.is_fixed_size_list(arrow_type)
+    ):
+        yield from _leaf_paths(f"{name}.list.element", arrow_type.value_type)
+    else:
+        yield name
+
+
+def dictionary_columns(schema: pa.Schema, geometry_columns: Collection[str] = ()) -> list[str]:
+    """The leaf columns a pyarrow write may dictionary-encode: all but the geometry.
+
+    A WKB value is unique per row, so a dictionary over it is a second copy of
+    the column plus an index, and the overviews spec (4.5) forbids one (#1122).
+    The geometry columns are the ones named here, the ones the schema's ``geo``
+    block describes, and every GeoArrow extension field. Pass the result as
+    ``use_dictionary`` so every Arrow writer makes the same choice.
+    """
+    geometry = set(geometry_columns)
+    geometry.update((sanitized_carried_geo(schema.metadata).get("columns") or {}).keys())
+    geometry.update(field.name for field in schema if is_geoarrow_extension_field(field))
+    return [
+        path
+        for field in schema
+        if field.name not in geometry
+        for path in _leaf_paths(field.name, field.type)
+    ]
+
+
+def without_geometry_dictionary(
+    writer_kwargs: dict, schema: pa.Schema, geometry_columns: Collection[str] = ()
+) -> dict:
+    """``writer_kwargs`` with ``use_dictionary`` limited to the non-geometry columns.
+
+    The one place a pyarrow ``ParquetWriter`` or ``write_table`` call gets its
+    ``use_dictionary``. pyarrow's default encodes every column, so a write that
+    builds its own kwargs re-encodes the geometry (#1122).
+    ``tests/test_geometry_not_dictionary_encoded.py`` fails on a new pyarrow
+    write that does not ask here.
+    """
+    return {**writer_kwargs, "use_dictionary": dictionary_columns(schema, geometry_columns)}
 
 
 @dataclass
@@ -518,8 +707,18 @@ class ParquetWriteSettings:
     DEFAULT_COMPRESSION_LEVEL = 15
     DEFAULT_PARQUET_VERSION = "2.6"
 
-    def get_pyarrow_kwargs(self, calculated_row_group_size: int | None = None) -> dict:
-        """Get kwargs dict for PyArrow write_table()."""
+    def get_pyarrow_kwargs(
+        self,
+        calculated_row_group_size: int | None = None,
+        schema: pa.Schema | None = None,
+        geometry_columns: Collection[str] = (),
+    ) -> dict:
+        """Get kwargs dict for PyArrow write_table().
+
+        With ``schema``, dictionary encoding is limited to the non-geometry
+        columns (:func:`dictionary_columns`). Without it, pyarrow's default
+        applies to every column.
+        """
         pa_compression = self.compression if self.compression != "UNCOMPRESSED" else None
         pa_compression_level = (
             self.compression_level if self.compression in ["GZIP", "ZSTD", "BROTLI"] else None
@@ -535,7 +734,9 @@ class ParquetWriteSettings:
             "row_group_size": row_group_size,
             "compression": pa_compression,
             "write_statistics": True,
-            "use_dictionary": True,
+            "use_dictionary": (
+                True if schema is None else dictionary_columns(schema, geometry_columns)
+            ),
             "version": self.DEFAULT_PARQUET_VERSION,
         }
 

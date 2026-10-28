@@ -184,8 +184,16 @@ The GeoParquet spec distinguishes two states for a geometry column's `crs`:
 - **omitted** → defaults to OGC:CRS84 (lon/lat WGS84)
 - **`null`** → CRS is *unknown*
 
-A file declaring `crs: null` cannot be read by DuckDB and won't reproject. If the
-coordinates are really lon/lat WGS84, use `--assume-crs84` to treat them as
+A file whose CRS is unknown (`crs: null`, an empty `crs` value, or a `srid:0`
+Parquet type) has no source CRS to reproject from, so reproject refuses it
+unless you say what the coordinates are. If you know the real CRS, name it with
+`--src-crs`:
+
+```bash
+gpio convert reproject unknown_crs.parquet out.parquet --src-crs EPSG:5070
+```
+
+If the coordinates are really lon/lat WGS84, use `--assume-crs84` to treat them as
 OGC:CRS84 and rewrite the file so the `crs` key is omitted (no coordinates are
 changed):
 

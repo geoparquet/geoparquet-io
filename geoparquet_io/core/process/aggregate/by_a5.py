@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pyarrow as pa
 
+from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.constants import DEFAULT_A5_COLUMN_NAME
 from geoparquet_io.core.process.aggregate.grid_common import (
     GridScheme,
@@ -33,6 +34,10 @@ A5_SCHEME = GridScheme(
     latlng_template="a5_cell_to_lonlat({cell})",
     # a5_cell_to_lonlat returns [lon, lat].
     centroid_wkb_template="ST_AsWKB(ST_Point({ll}[1], {ll}[2]))",
+    # A5 is equal-area by construction: every cell at a resolution covers the
+    # same number of square metres, so the denominator of `pct_cell` is one
+    # constant and does not need the cell id (#1181).
+    cell_area_template="a5_cell_area({res})",
 )
 
 
@@ -57,8 +62,11 @@ def aggregate_by_a5(
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> None:
     """Aggregate a GeoParquet file into A5 cells. Writes the output file."""
+    compression_level = resolve_process_compression_level(compression, compression_level)
     aggregate_grid_file(
         A5_SCHEME,
         input_parquet,
@@ -81,6 +89,8 @@ def aggregate_by_a5(
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
+        memory_limit=memory_limit,
     )
 
 
@@ -97,6 +107,8 @@ def aggregate_a5_table(
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> pa.Table:
     """Aggregate an in-memory Arrow table by a5 cell. Returns a new Arrow table."""
     return aggregate_grid_table(
@@ -113,4 +125,6 @@ def aggregate_a5_table(
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
+        memory_limit=memory_limit,
     )

@@ -7,10 +7,11 @@ import gc
 
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet
 from geoparquet_io.core.duckdb_utils import (
-    get_duckdb_connection,
     quote_identifier,
+    s3_config_scope,
     sql_path,
     validate_where_clause,
     where_sql_fragment,
@@ -19,6 +20,7 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
+from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.partition.admin_hierarchical import (
     _build_admin_table_reference,
     _setup_admin_dataset,
@@ -27,20 +29,23 @@ from geoparquet_io.core.process.aggregate.common import (
     VALID_OUT_GEOMETRY,
     MetricSpec,
     aggregate_source_relation,
-    build_breakdown_column_names,
-    build_breakdown_select,
+    build_breakdown_pivot,
     build_metric_select,
-    resolve_breakdown_values,
+    parse_breakdown_metric,
+    reject_pct_cell_metrics,
     resolve_metric_column_types,
     validate_agg_columns,
+    validate_breakdown_metric,
     validate_metric_nodata,
 )
 from geoparquet_io.core.process.aggregate.grid_common import (
+    _RESERVED_INTERNAL,
     _resolve_bbox_column_for_file,
     _validate_bucket_point_args,
     _validate_keying_columns_for_file,
     bucket_point_expr,
-    build_exclude_clause,
+    needed_source_columns,
+    source_select_list,
 )
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
@@ -73,7 +78,7 @@ def _build_joined_sql(
     admin_geom_col: str,
     admin_bbox_col: str | None = None,
     where: str | None = None,
-    exclude_sql: str = "",
+    select_list: str = "*, ",
 ) -> str:
     """Build the spatial-join SQL tagging each input feature with its admin region.
 
@@ -91,12 +96,12 @@ def _build_joined_sql(
     ``where`` is applied to the inner input scan, so the spatial join, metrics,
     and breakdowns all see only the filtered rows (#568). The caller validates
     the clause. Hive partition columns are visible to it (#612); see
-    :func:`aggregate_source_relation`. ``exclude_sql`` is a prebuilt
-    `` EXCLUDE (...)`` clause (see ``build_exclude_clause``) dropping columns
-    (typically the geometry) from the passthrough SELECT so their Parquet pages
-    are never read; building it with ``build_exclude_clause`` keeps it
-    existence-checked, so a geometry-less bbox-only input never trips a binder
-    error on a nonexistent column.
+    :func:`aggregate_source_relation`. ``select_list`` is the prebuilt
+    passthrough part of the inner SELECT (see ``source_select_list``), ending in
+    ``", "``: it names only the columns the aggregation reads, so the rest are
+    neither scanned nor carried through the join, and it is built against the
+    relation so a geometry-less bbox-only input never trips a binder error on a
+    column it does not have.
     """
     if admin_bbox_col:
         bbox_filter = (
@@ -113,7 +118,7 @@ def _build_joined_sql(
                b.{quote_identifier(name_col)} AS __admin_name,
                ST_AsWKB(b.{quote_identifier(admin_geom_col)}) AS __admin_geom
         FROM (
-            SELECT *{exclude_sql}, {input_pt_expr} AS __cen
+            SELECT {select_list}{input_pt_expr} AS __cen
             FROM {aggregate_source_relation(input_url)}
             {where_sql_fragment(where)}
         ) s
@@ -183,6 +188,8 @@ def aggregate_by_admin(
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> None:
     """Aggregate input features by administrative region.
 
@@ -213,7 +220,13 @@ def aggregate_by_admin(
             point column.
         bbox_column: Bbox covering column for ``bucket_point='bbox'``
             (auto-detected when omitted).
+        breakdown_metric: What each breakdown column holds: None/``count``
+            (default), or ``sum:col``/``min:col``/``max:col`` for a weighted
+            pivot named ``<func>_<col>_<value>``.
+        memory_limit: DuckDB memory limit for the join and aggregation (e.g.
+            ``"8GB"``). Default: half the process's memory ceiling.
     """
+    compression_level = resolve_process_compression_level(compression, compression_level)
     configure_verbose(verbose)
     if out_geometry not in VALID_OUT_GEOMETRY:
         raise InvalidParameterError(
@@ -222,7 +235,12 @@ def aggregate_by_admin(
         )
     if where:
         validate_where_clause(where)
-    metrics, nodata_values = validate_metric_nodata(metric, metric_nodata)
+    bd_metric = parse_breakdown_metric(breakdown_metric)
+    validate_breakdown_metric(breakdown, bd_metric)
+    metrics, nodata_values = validate_metric_nodata(metric, metric_nodata, bd_metric)
+    # An admin region is not a grid cell and has no cell area, so `pct_cell`
+    # cannot mean anything here -- say so before the dataset setup (#1181).
+    reject_pct_cell_metrics(metrics)
     _validate_bucket_point_args(bucket_point, bbox_column)
     if bucket_point == "bbox":
         bbox_column = _resolve_bbox_column_for_file(input_parquet, bbox_column, verbose)
@@ -243,20 +261,31 @@ def aggregate_by_admin(
     input_url = resolve_file_url(input_parquet, verbose)
     geom_col = find_primary_geometry_column(input_parquet, verbose) or "geometry"
 
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=True)
+    # Opened in the dataset's scope, so its public read is not signed with an
+    # outer AWS profile and configure_s3's endpoint is not beaten by a secret.
+    with s3_config_scope(admin_dataset.get_s3_config()):
+        con = open_bounded_connection(
+            load_spatial=True, load_httpfs=True, memory_limit=memory_limit, verbose=verbose
+        )
     try:
         con.execute("SET geometry_always_xy = true")
         admin_dataset.configure_s3(con)
 
         read_rel = aggregate_source_relation(input_url)
-        if metrics or breakdown:
+        if metrics or breakdown or bd_metric:
             # Clear error (not a DuckDB binder error) for missing metric/breakdown
             # columns -- especially `--metric count`, a no-op request since count
             # is always emitted. Checked before _get_admin_ref so a typo fails now
             # rather than after downloading the admin boundary cache, and before
             # the type resolution below so a missing column reports as missing.
-            cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {read_rel}").fetchall()}
-            validate_agg_columns(cols, metrics, breakdown)
+            # The internal aliases are subtracted for the same reason the grid
+            # path subtracts them: the narrowed projection drops a requested name
+            # that collides with one, so validating against it would pass a column
+            # the query then cannot bind.
+            cols = {
+                r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {read_rel}").fetchall()
+            } - set(_RESERVED_INTERNAL)
+            validate_agg_columns(cols, metrics, breakdown, bd_metric)
 
         admin_ref = _get_admin_ref(admin_dataset, con, level)
 
@@ -264,13 +293,15 @@ def aggregate_by_admin(
         # column's actual precision (REAL vs DOUBLE, #613) and non-numeric metric
         # columns fail up-front instead of mid-query.
         column_types = (
-            resolve_metric_column_types(con, f"SELECT * FROM {read_rel}", metrics)
+            resolve_metric_column_types(
+                con, f"SELECT * FROM {read_rel}", metrics + ([bd_metric] if bd_metric else [])
+            )
             if nodata_values
             else None
         )
         # Admin boundaries are OGC:CRS84; reproject a non-CRS84 input so ST_Intersects
         # does not fail on a CRS mismatch and the join point lands correctly (#525).
-        source_crs = extract_crs_from_parquet(input_parquet, verbose)
+        source_crs = extract_crs_from_parquet(input_parquet, verbose, geometry_column=geom_col)
         input_pt_expr, exclude_cols = bucket_point_expr(
             con, read_rel, geom_col, source_crs, bucket_point, bbox_column
         )
@@ -283,21 +314,35 @@ def aggregate_by_admin(
             admin_geom_col,
             admin_bbox_col,
             where=where,
-            exclude_sql=build_exclude_clause(con, read_rel, exclude_cols),
+            select_list=source_select_list(
+                con,
+                read_rel,
+                needed_source_columns(metrics, breakdown, bd_metric),
+                (*exclude_cols, *_RESERVED_INTERNAL),
+            ),
         )
 
         # When a breakdown is requested, materialize the spatial join once so that
         # resolve_breakdown_values and the aggregation both read from the same temp
-        # table rather than re-running the expensive ST_Intersects join twice.
+        # table rather than re-running the expensive ST_Intersects join twice. The
+        # join point has done its work by then -- the table is one row per input
+        # feature, so a POINT per row is pure weight.
         breakdown_select = ""
         if breakdown:
-            con.execute(f"CREATE TEMP TABLE __agg_joined AS {joined_sql}")
-            joined_ref = "SELECT * FROM __agg_joined"
-            top_values, has_other = resolve_breakdown_values(
-                con, joined_ref, breakdown, breakdown_limit
+            con.execute(
+                f"CREATE TEMP TABLE __agg_joined AS SELECT * EXCLUDE (__cen) FROM ({joined_sql})"
             )
-            colmap = build_breakdown_column_names(top_values, reserved={"count_other"})
-            breakdown_select = build_breakdown_select(breakdown, colmap, has_other)
+            joined_ref = "SELECT * FROM __agg_joined"
+            breakdown_select = build_breakdown_pivot(
+                con,
+                joined_ref,
+                breakdown,
+                breakdown_limit,
+                metrics=metrics,
+                spec=bd_metric,
+                nodata_values=nodata_values,
+                column_types=column_types,
+            )
             agg_sql = _build_agg_sql(
                 joined_ref, metrics, breakdown_select, nodata_values, column_types
             )

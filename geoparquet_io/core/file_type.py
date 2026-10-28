@@ -7,7 +7,11 @@ by path and mtime because nearly every command asks it at least once.
 
 from typing import Any
 
-from geoparquet_io.core.duckdb_metadata import detect_geometry_columns, get_geo_metadata
+from geoparquet_io.core.duckdb_metadata import (
+    detect_geometry_columns,
+    detect_native_geometry_columns,
+    get_geo_metadata,
+)
 from geoparquet_io.core.file_utils import _get_file_cache_key
 from geoparquet_io.core.geo_metadata import carried_version
 from geoparquet_io.core.logging_config import debug
@@ -101,9 +105,10 @@ def detect_geoparquet_file_type(parquet_file, verbose=False, con=None):
             # version *or None*, and every consumer already handles None.
             result["geo_version"] = carried_version(geo_meta["version"], source=str(parquet_file))
 
-    # Check for native Parquet geo types using schema
-    geo_columns = detect_geometry_columns(parquet_file, con=con)
-    if geo_columns:
+    # Check for native Parquet geo types using schema. A GeoArrow struct column
+    # counts here (its coordinate stats prune like native ones, #461), but only
+    # a true Parquet GEOMETRY/GEOGRAPHY column makes a file parquet_geo_only (#624).
+    if detect_geometry_columns(parquet_file, con=con):
         result["has_native_geo_types"] = True
 
     # Determine file type
@@ -115,7 +120,7 @@ def detect_geoparquet_file_type(parquet_file, verbose=False, con=None):
         else:
             result["file_type"] = "geoparquet_v1"
             result["bbox_recommended"] = True  # V1.x needs bbox for spatial filtering
-    elif result["has_native_geo_types"]:
+    elif result["has_native_geo_types"] and detect_native_geometry_columns(parquet_file, con=con):
         result["file_type"] = "parquet_geo_only"
         result["bbox_recommended"] = False  # Native geo types provide row group stats
     # else: remains "unknown"

@@ -26,6 +26,7 @@ import pyarrow.ipc as ipc
 
 from geoparquet_io.core.crs_utils import _crs_from_geoarrow_field, geoarrow_crs_to_projjson
 from geoparquet_io.core.geo_metadata import (
+    GEOGRAPHY_EDGE_ALGORITHMS,
     backfill_derived_stats,
     carried_column_name,
     carried_geometry_column,
@@ -275,52 +276,6 @@ def find_geometry_column_from_table(table: pa.Table) -> str | None:
     return None
 
 
-def get_crs_from_arrow_table(table: pa.Table, geometry_column: str) -> str | None:
-    """
-    Get CRS from Arrow table's GeoParquet metadata.
-
-    Args:
-        table: PyArrow Table to inspect
-        geometry_column: Name of the geometry column
-
-    Returns:
-        CRS string (e.g., "EPSG:4326") or None if not found
-    """
-    import json
-
-    metadata = dict(table.schema.metadata) if table.schema.metadata else {}
-
-    # Check for GeoParquet geo metadata
-    geo_bytes = metadata.get(b"geo")
-    if not geo_bytes:
-        return None
-
-    try:
-        from geoparquet_io.core.crs_utils import crs_is_explicitly_null, warn_null_crs_once
-
-        geo_meta = json.loads(geo_bytes.decode("utf-8"))
-        columns = geo_meta.get("columns", {})
-        col_meta = columns.get(geometry_column, {})
-
-        if crs_is_explicitly_null(col_meta):
-            warn_null_crs_once(
-                f"table:{hashlib.sha1(geo_bytes, usedforsecurity=False).hexdigest()}"
-            )
-
-        crs = col_meta.get("crs")
-        if crs:
-            # Extract EPSG code from CRS object
-            if isinstance(crs, dict):
-                auth = crs.get("id", {})
-                if auth.get("authority") == "EPSG":
-                    return f"EPSG:{auth.get('code')}"
-            return str(crs) if not isinstance(crs, dict) else None
-
-        return None
-    except Exception:
-        return None
-
-
 def read_stdin_to_temp_file(verbose: bool = False) -> str:
     """
     Read Arrow IPC stream from stdin and write to a temporary parquet file.
@@ -475,6 +430,7 @@ def apply_geoarrow_extension_type(
     table: pa.Table,
     geometry_column: str,
     crs: dict | str | None = None,
+    edges: str | None = None,
 ) -> pa.Table:
     """
     Convert geometry column to geoarrow extension type.
@@ -486,6 +442,7 @@ def apply_geoarrow_extension_type(
         table: PyArrow Table with geometry column
         geometry_column: Name of the geometry column
         crs: CRS as PROJJSON dict, string identifier, or None
+        edges: Recognized edge algorithm, or planar, to carry in the field type
 
     Returns:
         Table with geometry column converted to geoarrow extension type
@@ -519,9 +476,16 @@ def apply_geoarrow_extension_type(
         # Convert to geoarrow WKB extension type
         wkb_arr = ga.as_wkb(geom_col)
 
-        # Apply CRS if provided
+        # Keep both parts of the geometry model in the IPC field. The next
+        # process may have no geo block to recover a lost declaration from.
+        new_type = wkb_arr.type
         if crs:
             new_type = wkb_arr.type.with_crs(crs)
+        if edges == "planar" or edges in GEOGRAPHY_EDGE_ALGORITHMS:
+            new_type = new_type.with_edge_type(ga.EdgeType[edges.upper()])
+        # PyArrow extension equality ignores the serialized CRS and edges.
+        # Rewrap whenever either was supplied, even when the types compare equal.
+        if crs or edges == "planar" or edges in GEOGRAPHY_EDGE_ALGORITHMS:
             # Use from_storage to preserve CRS (cast() resets it)
             new_chunks = []
             for chunk in wkb_arr.chunks:

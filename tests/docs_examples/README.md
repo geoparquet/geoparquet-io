@@ -21,6 +21,9 @@ Each block runs in its own throwaway directory, seeded from
 `data.csv`, an empty `output_dir/`, and a few aliases. See `seeder.py` for the
 full list. That is why most examples run verbatim, with no doc edits.
 
+The seeder also builds `world_geography.parquet`, a small native GEOGRAPHY
+file with spherical edges, for the add guide's planar math warning examples.
+
 ## When your example cannot run
 
 Say so in the doc with an HTML comment on the line **above** the fence. It is

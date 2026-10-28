@@ -67,7 +67,7 @@ class TestCoreExceptions:
     def test_geography_hint_offers_a5_and_never_a_forbidden_downgrade(self):
         """The 404 branch must be actionable without violating the pin (#778).
 
-        The floor is duckdb>=1.5.5, the release 'geography' is published for
+        The floor is duckdb>=1.5.6, a release 'geography' is published for
         on mainstream platforms, so a 404 now points at a platform the
         registry has no builds for (Windows ARM, musl, source builds) or an
         intercepting proxy — not at the version, and not primarily at this

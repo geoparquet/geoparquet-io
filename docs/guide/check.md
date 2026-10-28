@@ -38,6 +38,97 @@ Runs all validation checks:
 - GeoParquet v2.0 upgrade recommendation (for v1.1 files)
 - Spec validation
 
+## Exit Codes
+
+Every `check` subcommand — `all`, `bbox`, `compression`, `optimization`,
+`row-group`, `spatial`, `spec` and `stac` — follows one contract, so any of them
+can gate a CI build:
+
+| Outcome | Exit code | With `--strict` |
+|---------|-----------|-----------------|
+| Every check passed | `0` | `0` |
+| Warnings only (advice) | `0` | `1` |
+| A check failed | `1` | `1` |
+| A check could not run | `1` | `1` |
+| The input matched no files | `1` | `1` |
+
+A **failure** is a defect: a spec violation, a file that is not GeoParquet at
+all (no `geo` metadata and no native Parquet geo types), or metadata a reader
+would mis-read or cannot open — a `covering` the spec rejects, or one with no
+`bbox` member. A **warning** is advice: a non-ZSTD codec, a row-group size
+outside the recommended band, data that is not spatially sorted, a missing bbox
+column on a 1.x file, low spatial-filter pushdown readiness in `check spatial`,
+an optimization score below 5/5, or "GeoParquet 2.0 is available". `check all`
+exits 1 if any of its checks failed, including spec validation. Each issue is
+printed at its own check's level, so `check all` on a file that fails the spec
+and uses SNAPPY prints the spec failure as `✗ ERROR` and the codec as
+`⚠ WARNING`.
+
+Over a directory or glob, the run exits 1 if any of the files it checked
+failed. Without `--all-files` (or `--sample-files N`) a check reads only the
+first file, so its verdict covers that file alone, and the run says so on
+stderr: pass `--all-files` to gate on every file. `--fix` never samples — it
+checks and repairs every matched file.
+
+A check that cannot run counts as a failure. It prints a line naming the check
+and the reason, the remaining checks still run, and the run then exits 1 with or
+without `--strict`. A check that could not read the data is never reported as a
+pass, even after `--fix` (#624).
+
+Pass `--strict` to make warnings exit 1 as well; it prints a line on stderr
+saying that is why.
+
+On stdout, `✓` marks a pass, `⚠` a warning and `✗` a failure, in every
+subcommand; `ℹ️` marks information that does not count either way.
+
+=== "CLI"
+
+    ```bash
+    # Fails the build only on a defect
+    gpio check all myfile.parquet
+
+    # Fails the build on any finding, advice included
+    gpio check compression myfile.parquet --strict || echo "not ZSTD"
+    ```
+
+=== "Python"
+
+    <!-- doctest: prelude="import geoparquet_io as gpio; table = gpio.read('myfile.parquet')" -->
+    ```python
+    # table.check() runs the structure checks only; `gpio check all` adds
+    # spatial order and spec validation, so a CI gate combines all three.
+    results = [table.check(), table.check_spatial(), table.validate()]
+    verdicts = {r.verdict() for r in results}  # "pass", "warning" or "failure"
+
+    failed = "failure" in verdicts  # what `gpio check all` exits 1 on
+    strict_failed = verdicts != {"pass"}  # the --strict equivalent
+    for result in results:
+        print(*result.failures(), *result.warnings(), sep="\n")
+    ```
+
+    `failures()` and `warnings()` bucket each issue by the same severity
+    `verdict()` reads.
+
+`--fix` keeps the contract: a file is judged by what the fix wrote, so a
+failure that `--fix` repairs exits 0, while a fix that fails, or that `--fix`
+declines because it cannot repair the problem, exits 1 (and says
+`✗ No automatic fix available`). With `--fix-output`, a file that needed no
+repair is copied there, so a pipeline always gets the file it named; a failing
+file that `--fix` cannot repair is not.
+
+An input that resolves to no parquet files — a glob that matches nothing, or an
+empty directory — exits 1 with `No parquet files found` on stderr, with or
+without `--fix`, so a mistyped path cannot pass for a successful run. That holds
+for every subcommand that reads parquet files, `check spec` included; `check
+stac` takes one JSON file, and a missing one is an error (exit 1) too.
+
+!!! note "Changed after 1.6.0"
+    Six of the eight subcommands used to print a failure and exit 0, a glob that
+    matched nothing exited 0, and `check spec` exited `2` for warnings only.
+    Failures now exit 1, warnings exit 0 (1 with `--strict`), and `check spec`
+    no longer uses exit code `2` ([#1241](https://github.com/geoparquet/geoparquet-io/issues/1241),
+    [#1091](https://github.com/geoparquet/geoparquet-io/issues/1091)).
+
 ## Individual Checks
 
 ### Spatial Ordering
@@ -72,10 +163,14 @@ Checks if data is spatially ordered. Spatially ordered data improves:
 
 **How it works:**
 
-- **Bbox-stats method**: Passes when the expected fraction of row groups a spatial query can skip, computed from the bounding boxes in the file footer, reaches 70% of what a tiling of the extent into the same number of row groups would allow — the [Portolan spec's pruning-efficiency rule](https://github.com/portolan-sdi/portolan-spec/blob/main/specs/portolan/formats.md). The bbox column is the one `geo.covering.bbox` names; a conventionally named struct column is only the fallback. Below eight row groups the verdict is withheld: the output reports the numbers and `not judged below 8 row groups` instead of a pass or a fail, `--fix` declines, and the payload carries `judged: false` (with `passed: true`, since no failure was found). Smaller row groups (`--row-group-size`, 2,048 minimum) make such a file judgeable. `--verbose` adds the achievable skip rate, the consecutive-overlap fraction and the area sum (row-group box areas over the extent area), which are also in the JSON payload. The area sum helps read a high row-group count, where oversized boxes barely move the efficiency; like the efficiency it measures order against the extent, so it cannot separate a shuffled file whose extent is mostly empty from a well-sorted one.
+- **Bbox-stats method**: Checks if consecutive row groups have overlapping bounding boxes. Non-overlapping row groups indicate good spatial ordering. Passes if < 30% of row group pairs overlap.
+- **Sampling method**: Compares average distance between consecutive features vs random feature pairs. Lower ratio indicates better spatial clustering. Passes if ratio < 0.5.
 
-    A file rewritten by `--fix` gets the default row-group size (49,152 rows), so a file under about 393,000 rows comes out with fewer than eight row groups and its own verdict withheld; the output says so.
-- **Sampling method** (no bbox column or native statistics): Compares average distance between consecutive features vs random feature pairs. Lower ratio indicates better spatial clustering. Passes if ratio < 0.5. This does not measure row-group pruning, and the verdict line says `(sampling method)`; add a bbox column with `gpio add bbox` so the footer-based check can run.
+The sampling method reads WKB, native Parquet GEOMETRY and GeoArrow coordinate
+struct columns. NULL, zero-length and unparsable values are skipped, and the
+spec validation reports them. When the geometry column is missing or has a type
+that holds no geometry, the check fails with the reason and `gpio check spatial`
+exits with status 1 (#624).
 
 ### Compression
 
@@ -118,12 +213,13 @@ Verifies:
 - Bbox column structure
 - GeoParquet metadata version
 - Bbox covering metadata
+- That each row's bbox really covers that row's geometry
 
 A bbox column is optional in GeoParquet 2.0, but it must be declared, and the
 declaration must be true:
 
 - A bbox column that no `covering` entry points at costs file size and cannot be
-  used by any reader, so `check bbox` fails the file and suggests
+  used by any reader, so `check bbox` warns about it and suggests
   `gpio add bbox-metadata` (or `--fix` to drop the column). `--fix` only ever
   removes an *undeclared* column — a covering the file legitimately declares is
   never deleted.
@@ -131,10 +227,175 @@ declaration must be true:
   undeclared rather than accepted. Such a covering makes readers prune away rows
   that genuinely match, so it is worse than none at all.
 
-`check spec` runs its four `covering` checks — paths well-formed, column
-present, struct shape, field types — at GeoParquet 1.1 **and** 2.0. They were
-previously gated to 1.1 only, so an identical broken covering failed at 1.1 and
-passed at 2.0.
+`check spec` runs its `covering` checks — the `bbox` member present, paths
+well-formed, column present, struct shape, field types — at GeoParquet 1.1
+**and** 2.0. The last four were previously gated to 1.1 only, so an identical
+broken covering failed at 1.1 and passed at 2.0.
+
+#### Does the bbox cover the geometry?
+
+The checks above all read the footer. They say the column is there and that the
+`covering` points at it — not that its numbers are right. A bbox column is a
+*copy* of information the geometry already holds, so any operation that rewrites
+geometry without rewriting the copy leaves a file that passes every metadata
+check while describing geometry it no longer has. Simplifying one partition of a
+published catalogue with Douglas-Peucker at 0.0002° moved a bbox extreme on
+135,712 of its 435,138 rows; `gpio check spec` still reported 29 passed, 0
+failed.
+
+So `check bbox` compares the numbers too, and the two ways to be wrong are not
+the same finding:
+
+- **A bbox smaller than its geometry fails the check.** The whole point of a
+  covering is that a reader can prune row groups and pages without decoding
+  geometry, so an undersized box makes that pruning drop rows that genuinely
+  intersect the query window. Nothing raises; the reader just gets less data
+  than the file holds and cannot tell.
+- **A bbox larger than its geometry is a warning.** The reader over-fetches and
+  re-filters on the real geometry, so the answer stays right. It costs time, not
+  correctness.
+- **A NULL bbox beside a non-NULL geometry fails**, for the same reason an
+  undersized one does: every comparison against NULL is NULL, so a
+  covering-based filter drops the row. A bbox struct that is present but has a
+  NULL in any of its four fields is a NULL bbox, and a NaN in one fails the same
+  way — no filter can match it.
+- **A geometry value that is not valid WKB fails** — zero-length or unparsable
+  bytes. No reader can decode it, and its bbox cannot be checked. It is counted
+  on its own; the rows around it are still compared (including the other rows
+  of a dictionary-encoded page, which DuckDB would otherwise read as NULL).
+
+A row with no geometry — NULL or empty — has no envelope to compare against and
+is counted and skipped. If it still carries a bbox, that is a warning: there is
+nothing for the bbox to describe.
+
+Each finding is reported at its own level, so a file with both an undersized
+and an oversized bbox prints one failure and one warning. A failure exits 1 like
+any other check failure; a file with only warnings exits 0 unless `--strict` is
+set. See [exit codes](#exit-codes) for the shared contract.
+
+**Antimeridian.** On a geographic CRS (including the default, OGC:CRS84), a bbox
+with `xmin > xmax` crosses the antimeridian (RFC 7946, section 5.2): longitudes in
+`[xmin, 180]` or `[-180, xmax]` are inside it, judged per vertex. This is how
+`check spec` reads the file-level `bbox`, so the two agree; the output says how
+many rows were read that way. On a projected CRS, `xmin > xmax` is simply wrong
+and fails as undersized.
+
+**Spherical edges.** The comparison uses the planar envelope of a geometry's
+vertices. For a column whose `edges` are `spherical`, a geodesic edge can bulge
+past that envelope, so the output names the edges and the check is a check on
+the vertices, not on the curve.
+
+The report names the worst offending rows by their position in the file, which
+is the part you can act on:
+
+```
+Bbox vs geometry:
+   5,000 of 435,138 rows checked (a random sample; --all-rows checks every row)
+✗ 1,547 rows where the bbox does not cover its geometry
+   Readers prune on the covering, so these rows are missing from spatial query results with no error anywhere
+   Worst: row 229584 (short by 0.0113), row 81070 (short by 0.00981), ...
+   Regenerate the column: gpio add bbox <input> <output> --force
+```
+
+`--fix` cannot repair this. It adds a missing column or metadata, or drops an
+unusable column; numbers that are wrong have to be recomputed from the
+geometry, which is a rewrite. When `--fix` does apply a metadata repair, it
+compares the values again on what it wrote, so a wrong bbox still fails the run:
+
+```bash
+gpio add bbox --force input.parquet output.parquet
+```
+
+**Cost and sampling.** Comparing means decoding geometry, which the other checks
+never do, so the default is a random sample of 5,000 rows drawn across the whole
+file, large enough that a corruption affecting even 1% of rows is seen with
+overwhelming probability. It is a random sample rather than the first N rows on
+purpose: the realistic corruption is an operation that rewrote part of a file,
+and a head-of-file sample would miss a rewritten tail.
+
+The sample fixes the *decode* cost, not the I/O. Drawing rows from across the
+file means reading the geometry and bbox columns of every row group, so a
+sampled check on a remote file still transfers both columns in full — budget for
+that on a large object-store file. The sample is seeded, so the same file gets
+the same verdict every run, but a passing sample is evidence, not a guarantee: a
+corruption confined to a handful of rows can fall between the sampled ones.
+`--all-rows` compares every row; `--sample-rows N` sets the sample size, and
+`--sample-rows 0` skips the comparison (and says so) and checks structure and
+metadata only.
+
+=== "CLI"
+
+    ```bash
+    # Default: 5,000 rows sampled across the file
+    gpio check bbox myfile.parquet
+
+    # Exhaustive
+    gpio check bbox myfile.parquet --all-rows
+
+    # Wider sample, or none at all
+    gpio check bbox myfile.parquet --sample-rows 50000
+    gpio check bbox myfile.parquet --sample-rows 0
+    ```
+
+=== "Python"
+
+    <!-- doctest: prelude="import geoparquet_io as gpio; table = gpio.read('myfile.parquet')" -->
+    ```python
+    result = table.check_bbox(all_rows=True)
+    if result.verdict() == "failure":
+        for failure in result.failures():
+            print(failure)
+    for warning in result.warnings():  # an oversized bbox, say
+        print(warning)
+
+    # Wider sample, and the per-row report behind the verdict
+    report = table.check_bbox(sample_rows=50000).to_dict()['bbox_values']
+    print(report['undersized_rows'], report['undersized_examples'])
+    ```
+
+**Tolerance.** Exact equality is the wrong test — a bbox that has been through a
+reprojection or a float32 column is not bit-identical to the envelope recomputed
+from the geometry. The slack is four ULP of the bbox column's *own* storage
+type, scaled to the magnitude of the coordinate, with a 1e-9 absolute floor for
+coordinates near zero. A float64 covering is therefore held to about 9e-16
+relative, and a float32 one to about 5e-7: the GeoParquet spec allows a float32
+covering and asks writers to round outward, and writers that round to nearest
+instead put a bound up to half an ULP inside the geometry. That slack is an
+artefact of the column's storage, not a wrong bbox. The comparison is not
+symmetric — it is an undersized box beyond the tolerance that fails.
+
+`check all` does **not** run this comparison. Every other question it asks is
+answered from the footer, so it stays a metadata-only pass; reading geometry
+belongs to the command you ran for it.
+
+#### A covering with no `bbox` member
+
+The spec defines one covering encoding: "The keys of the 'covering' object MUST
+be a supported encoding. Currently the only supported encoding is 'bbox'". gpio
+records its own spatial-index entries (`h3`, `s2`, `a5`, `quadkey`, `kdtree`)
+*beside* a `bbox` member, which stays valid — but a covering carrying only those
+entries, with no `bbox` member at all, is a file no reader can use:
+`geopandas.read_parquet` indexes `covering["bbox"]` unguarded and raises
+`KeyError: 'bbox'`.
+
+`gpio add h3/s2/a5/quadkey/kdtree` and `gpio partition <index> --keep-*-column`
+wrote that shape over a bbox-less input up to gpio 1.6. They no longer do, but
+the files are published, so both halves of `check` now say so:
+
+- `check spec` **fails** such a file at 1.1+ (`covering_has_bbox_<column>`). It
+  is a failure, not a warning, because the file does not open. `check bbox` and
+  `check all` fail it too, at any version.
+- `check all --fix` drops the covering, before any other repair, and says it
+  did. The repair patches the footer only — compression codec and level,
+  encodings, bloom filters, row-group boundaries and row order are all kept —
+  and a covering that *does* carry a `bbox` member is never touched, index
+  entries and all. At GeoParquet 1.x the same run then adds a bbox column and a
+  legal covering, as it always has.
+
+So `gpio check spec published.parquet` reports
+`covering_has_bbox_geometry: FAILED` and exits 1, and
+`gpio check all published.parquet --fix` repairs the file in place, keeping a
+`.bak`.
 
 #### Bbox struct field order
 
@@ -256,10 +517,14 @@ The `gpio check spatial` command also reports spatial filter pushdown readiness 
 Shows:
 
 - **Row group count** and bbox coverage
-- **Estimated skip rate** - the expected percentage of row groups a query window can skip
+- **Estimated skip rate** - percentage of row groups that can be skipped for representative spatial queries
 - **Avg bbox area ratio** - how tight the row group bounding boxes are
 
-Pushdown readiness is absolute (at least 50% of row groups skippable) where the ordering verdict above is relative to the row-group count: a two-row-group file can be perfectly ordered and still poor for pushdown, and the fix there is smaller row groups, not re-sorting.
+It counts toward the verdict where it is advice: low pushdown efficiency on a
+file with several row groups, or a 1.x file with no bbox column, is a `⚠`
+warning (exit 1 with `--strict`). A file with native geo types needs no bbox
+column for pushdown, and a single row group has nothing to skip; both are shown
+as `ℹ️` information.
 
 !!! note "Requires bbox data"
     Pushdown readiness requires GeoParquet 2.0 native geo stats or a bbox column. For v1.1 files, add a bbox column with `gpio add bbox`.
@@ -314,6 +579,11 @@ Validates file structure and metadata against the GeoParquet specification:
 - Supports GeoParquet 1.0, 1.1, 2.0, and Parquet native geo types
 - Auto-detects version unless `--geoparquet-version` is specified
 - Optional data validation against metadata claims
+- `--json` prints strict JSON that `jq` and JavaScript parse as is. Dates and
+  times become ISO 8601 strings, decimals become exact strings, binary becomes
+  hex, and a NaN or infinite value becomes `null`. `gpio inspect stats`, `head`,
+  `tail` and `meta` use the same encoder for their `--json` output
+  ([#1226](https://github.com/geoparquet/geoparquet-io/issues/1226)).
 
 **Metadata checks include:**
 
@@ -331,9 +601,42 @@ Validates file structure and metadata against the GeoParquet specification:
   `v2_crs_consistency`, because the Parquet type's own default is OGC:CRS84.
   The spec's pairing for an unknown CRS is `"crs": null` in the geo metadata
   *and* the string `srid:0` in the Parquet logical type; written that way, the
-  file passes. If the coordinates really are lon/lat WGS84, drop the null
-  instead: `gpio convert reproject in.parquet out.parquet --assume-crs84`
+  file passes. Every gpio write keeps an unknown CRS unknown. GeoParquet 1.0
+  and 1.1 outputs keep `"crs": null`, 2.0 outputs keep it and type the column
+  `srid:0`, and parquet-geo-only outputs type the column `srid:0`. An empty
+  `crs` value such as `{}` is read as unknown too, with a warning, and written
+  the same way. So is a `srid:0` type under a geo entry with no `crs` key,
+  which is how DuckDB's own 2.0 writer spells an unknown CRS. Secondary
+  geometry columns follow the same rules. An unknown CRS has no valid
+  coordinate range, so `coordinates_valid_for_crs` is skipped for it instead
+  of holding projected coordinates to the lon/lat range. If you know the real
+  CRS, `gpio convert reproject in.parquet out.parquet --src-crs EPSG:5070`
+  reprojects from it. If the coordinates really are lon/lat WGS84, drop the
+  null instead. `gpio convert reproject in.parquet out.parquet --assume-crs84`
   writes the default (see [convert](../cli/convert.md)).
+
+  === "CLI"
+
+      ```bash
+      # You know the real CRS, so reproject from it
+      gpio convert reproject input.parquet out.parquet --src-crs EPSG:5070
+
+      # The coordinates really are lon/lat WGS84
+      gpio convert reproject input.parquet out_crs84.parquet --assume-crs84
+      ```
+
+  === "Python"
+
+      <!-- doctest: prelude="import geoparquet_io as gpio" -->
+      ```python
+      table = gpio.read("input.parquet")
+
+      # You know the real CRS, so reproject from it
+      table.reproject(target_crs="EPSG:4326", source_crs="EPSG:5070").write("out.parquet")
+
+      # The coordinates really are lon/lat WGS84
+      table.reproject(target_crs="EPSG:4326", assume_crs84=True).write("out_crs84.parquet")
+      ```
 - **Every CRS form the Parquet geo type may use** — the `GEOMETRY`/`GEOGRAPHY`
   logical type can name its CRS as inline PROJJSON, `srid:<id>`,
   `projjson:<key>` or the compact `<authority>:<code>` (e.g. `EPSG:32633`), and
@@ -362,6 +665,10 @@ Validates file structure and metadata against the GeoParquet specification:
   specific static frame (e.g. GDA2020) it warns; on a dynamic frame (e.g. ITRF)
   it passes. With an explicit `"crs": null` the datum cannot be verified, so an
   epoch produces a warning.
+- **One `geo` key** — a footer that carries the `geo` key more than once fails
+  `geo_key_unique`. Readers pick different entries, so the file means different
+  things to different tools. DuckDB writes this shape when a `geo` entry is
+  supplied beside `GEOPARQUET_VERSION` `V1` or `V2` (#1229).
 - **Malformed metadata** — a `geo` key containing invalid JSON or a non-object
   value fails cleanly in auto mode instead of crashing. The same holds for a
   value *inside* a valid `geo` object whose type is wrong: a `covering` that is
@@ -369,6 +676,14 @@ Validates file structure and metadata against the GeoParquet specification:
   paths, a `bbox` that is not an array of finite numbers. Each gets a FAILED
   check quoting the value it found (bounded, so a huge value cannot flood the
   report), and the rest of the report is still printed (#1062).
+- **Empty and unparsable WKB.** `encoding_matches_data_<column>` reads the
+  bytes the file stores and counts the values that are not WKB. A zero-length
+  value is reported as `N of M geometries in column "geometry" are empty
+  (zero-length) WKB`, and bytes that do not parse as `K of M geometries do not
+  match "WKB" encoding`, each with the row of the first one. Both fail, and a
+  NULL geometry is allowed. The other data checks judge the values that do
+  parse, so one bad value is reported once, not as a DuckDB error under every
+  later check (#1064, #1082).
 - **Dimension-aware geometry types** — `geometry_types` entries carry Z/M
   suffixes (`"Point Z"`, `"LineString ZM"`), and validation matches declared
   suffixes against the actual coordinate dimensions in both directions
@@ -396,20 +711,28 @@ Validates file structure and metadata against the GeoParquet specification:
   them. Both use the whole file's statistics — the union over every row group,
   not the first one's — so a correctly written multi-row-group file passes
   (#721).
+- **GEOGRAPHY bounding boxes** — a `GEOGRAPHY` column's row-group boxes must
+  be finite and stay in the canonical ranges, X in [-180, 180] and Y in
+  [-90, 90] (`geography_stats_bbox_*` **fails** otherwise; `xmin > xmax`
+  passes as the antimeridian wrap, RFC 7946 §5.2). With data validation on,
+  `geography_stats_cover_edges_*` **warns** when a row group's box does not
+  contain its own sampled geometries' geodesic edges — the great-circle (or
+  ellipsoidal) bulge included — because a reader pruning row groups by such a
+  box can skip rows that really match. Each row group is judged on its own,
+  so a bad box cannot hide behind a file-wide union, and the edges are
+  densified independently with `pyproj.Geod` rather than by gpio's writer.
+  gpio's own 2.0 GEOGRAPHY outputs pass both.
 
-**Exit codes:**
+**Exit codes:** `0` when no check failed, `1` when one did; warnings exit `0`,
+or `1` with `--strict` (see [Exit Codes](#exit-codes)). `check spec` used to
+exit `2` for warnings only; it no longer does.
 
-- `0` - All checks passed
-- `1` - One or more checks failed
-- `2` - Warnings only (all required checks passed)
-
-!!! note "Coordinate/CRS mismatch heuristic is now a warning"
+!!! note "Coordinate/CRS mismatch heuristic is a warning"
     The heuristic that flags geographic-looking coordinates (values within
     ±180/±90) under a projected CRS reports a **WARNING** instead of a failure,
-    so `gpio check spec` exits with code `2` instead of `1` for affected files.
-    Update CI pipelines that gate only on exit code `1`. The deterministic
-    CRS-consistency check for GeoParquet 2.0 native geo statistics still fails
-    on a real mismatch.
+    so `gpio check spec` exits `0` for affected files (`1` with `--strict`).
+    The deterministic CRS-consistency check for GeoParquet 2.0 native geo
+    statistics still fails on a real mismatch.
 
 ### STAC Validation
 
@@ -450,6 +773,10 @@ Validates STAC Item or Collection JSON:
 
     # Custom sampling for spatial check
     gpio check spatial myfile.parquet --random-sample-size 200 --limit-rows 1000000
+
+    # Custom sampling for the bbox-vs-geometry comparison
+    gpio check bbox myfile.parquet --sample-rows 50000
+    gpio check bbox myfile.parquet --all-rows
     ```
 
 === "Python"
@@ -458,6 +785,10 @@ Validates STAC Item or Collection JSON:
     ```python
     # Custom sampling for spatial check
     result = table.check_spatial(sample_size=200, limit_rows=1000000)
+
+    # Custom sampling for the bbox-vs-geometry comparison
+    result = table.check_bbox(sample_rows=50000)
+    result = table.check_bbox(all_rows=True)
     ```
 
 ## Checking Partitioned Data

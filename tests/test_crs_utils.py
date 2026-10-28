@@ -114,9 +114,9 @@ class TestIsDefaultCrs:
         """None CRS is considered default."""
         assert is_default_crs(None) is True
 
-    def test_empty_string_is_default(self):
-        """Empty string is considered default."""
-        assert is_default_crs("") is True
+    def test_empty_string_is_not_default(self):
+        """An empty string names no CRS, so it is unknown, not the default (#1267)."""
+        assert is_default_crs("") is False
 
     def test_epsg_4326_is_default(self):
         """EPSG:4326 is default."""

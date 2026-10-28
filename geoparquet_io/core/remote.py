@@ -119,34 +119,6 @@ def needs_httpfs(path):
     return any(path.startswith(scheme) for scheme in httpfs_schemes)
 
 
-def setup_aws_profile_if_needed(profile, *paths):
-    """
-    Set AWS_PROFILE environment variable if profile specified and S3 URLs detected.
-
-    This allows both DuckDB (via credential_chain) and obstore to use the specified
-    AWS profile for authentication. The profile is resolved using standard AWS SDK
-    mechanisms (reads from ~/.aws/credentials, ~/.aws/config, etc.).
-
-    Note: This is a convenience wrapper. Setting AWS_PROFILE env var directly
-    has the same effect.
-
-    Args:
-        profile: AWS profile name or None
-        *paths: Variable number of file paths to check for S3 URLs
-
-    Example:
-        setup_aws_profile_if_needed(profile, input_file, output_file)
-        # Equivalent to: os.environ['AWS_PROFILE'] = profile
-    """
-    if not profile:
-        return
-
-    # Check if any path is S3
-    has_s3 = any(p and is_s3_url(p) for p in paths)
-    if has_s3:
-        os.environ["AWS_PROFILE"] = profile
-
-
 def resolve_s3_config(
     s3_endpoint: str | None = None,
     s3_region: str | None = None,
@@ -159,6 +131,10 @@ def resolve_s3_config(
     1. Explicit params
     2. AWS env vars (AWS_ENDPOINT_URL, AWS_REGION/AWS_DEFAULT_REGION, AWS_PROFILE)
     3. Defaults (no endpoint, no region, SSL on, no profile)
+
+    ``profile_from_env`` is True when the profile is only the exported
+    ``AWS_PROFILE``. The AWS SDK lets env keys beat an exported ``AWS_PROFILE``
+    but not ``--profile``, so the DuckDB secret needs to know which one it got.
     """
     endpoint = s3_endpoint or os.environ.get("AWS_ENDPOINT_URL") or None
     region = s3_region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
@@ -181,6 +157,7 @@ def resolve_s3_config(
         "s3_region": region,
         "s3_use_ssl": use_ssl,
         "profile": profile,
+        "profile_from_env": bool(profile) and not aws_profile,
     }
 
 

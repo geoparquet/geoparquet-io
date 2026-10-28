@@ -192,7 +192,14 @@ Filter features by a rectangular bounding box. The bbox is specified as `xmin,ym
       fixed a row — `ST_MakeValid` can change a geometry's type, so a repaired
       self-intersecting `Polygon` comes back a `MultiPolygon` and the input's
       `geometry_types` would under-declare the output. A repair pass that found
-      nothing invalid changes no row and keeps the carried stats.
+      nothing invalid changes no row and keeps the carried stats. A column that
+      declares **non-planar edges** (`edges: spherical` in the `geo` metadata or
+      a native `GEOGRAPHY` logical type) is never planar-repaired at all: planar
+      validity is the wrong test there, and `ST_MakeValid` would collapse shapes
+      that are valid on the sphere (a pole-enclosing ring, say) into line
+      fragments. The repair and its invalid count are skipped with a warning —
+      even when repair is requested explicitly — and the carried stats and
+      `orientation` stay.
     - **`--exclude-cols`** — metadata that references a dropped column is
       pruned: excluding the `bbox` column drops the `covering` entry, and
       excluding the geometry column writes plain Parquet with no `geo` metadata
@@ -201,9 +208,82 @@ Filter features by a rectangular bounding box. The bbox is specified as `xmin,ym
     An unfiltered, unrepaired, single-file column-only extract preserves the
     input's `bbox`/`geometry_types` unchanged.
 
+    Arrow IPC pipes also keep each geometry column's CRS and edge interpolation,
+    including native `GEOGRAPHY` inputs with no `geo` key. A receiving extract
+    sees the spherical declaration before its repair decision, so passing data
+    through another command does not enable planar repair. See
+    [native geometry through a pipe](piping.md#native-geometry-through-a-pipe)
+    for CLI and Python examples.
+
     Recomputing costs one extra aggregate pass over the (already filtered)
     query — on the order of 30% of a plain copy for a few million rows. Use
     `--verbose` to see when it runs.
+
+## Merging Many Files Into One
+
+A glob or directory input merges every matching file into a single output. That
+merged file is usually the one later reads window into over and over, so it is
+worth writing it with per-row-group spatial statistics — otherwise every later
+`--bbox` read has to scan all of it.
+
+`--geoparquet-version 2.0` does that in the *same* pass as the merge, using
+Parquet's native geo types and their per-row-group `geo_bbox` statistics:
+
+=== "CLI"
+
+    ```bash
+    # Two per-region inputs, standing in for a staging directory
+    mkdir -p staged
+    gpio extract data.parquet staged/west.parquet --bbox -180,-90,0,90
+    gpio extract data.parquet staged/east.parquet --bbox 0,-90,180,90
+
+    # Merge them and write GeoParquet 2.0 with native geo statistics — one pass.
+    # A quoted glob works too ("staged/*.parquet"), but a directory needs no
+    # quoting and so behaves the same in every shell.
+    gpio extract staged merged.parquet --geoparquet-version 2.0
+
+    # Every row group now declares its own bounds
+    gpio inspect meta merged.parquet --geo-stats
+    ```
+
+=== "Python"
+
+    ```python
+    import os
+    import geoparquet_io as gpio
+
+    os.makedirs('staged', exist_ok=True)
+    gpio.read('data.parquet').write('staged/west.parquet')
+
+    # read() takes a directory (not a glob) and merges it
+    gpio.read('staged').write('merged.parquet', geoparquet_version='2.0')
+    ```
+
+!!! note "Use the CLI for a large merge"
+    The Table API materializes the whole merge in memory. The CLI streams it
+    through DuckDB under `--write-memory`, which is what a merge measured in
+    tens of gigabytes needs. The CLI also accepts a glob; `gpio.read()` takes a
+    single file or a directory.
+
+Without it, a merge of GeoParquet 1.x inputs writes 1.1, and if the inputs carry
+no `bbox` covering column the merged file has no spatial statistics at all.
+`extract` says so when that happens:
+
+```text
+Merging 219 files to GeoParquet 1.1 with no bbox covering column: the merged
+file carries no per-row-group spatial statistics, so a later --bbox read has to
+scan every row group. Consider --geoparquet-version 2.0 to enable native
+geo_bbox row group statistics.
+```
+
+The alternative — merging first and converting the whole file to 2.0 afterwards
+— reads and rewrites every byte a second time. On a 108 GB merge that second
+pass cost about 30 minutes and a full extra write.
+
+!!! note "The default version is unchanged"
+    A merge of 1.x inputs still writes 1.1 unless you ask for 2.0. GeoParquet
+    2.0 needs a reader that understands Parquet's native geo types, so `extract`
+    points at the flag rather than switching for you.
 
 ### Geometry Filter
 
@@ -728,6 +808,107 @@ Consider adjusting `--bbox-threshold` when:
 - You've benchmarked and found a different crossover point for your data
 - Your BigQuery pricing tier or network conditions differ from typical
 
+### Views and Materialized Views
+
+The BigQuery Storage Read API serves physical tables only. When the id names a
+view, a materialized view or an external table, gpio sees BigQuery refuse the
+read and runs a BigQuery **query job** instead -- there is no flag to set, and
+the CLI and Python examples above work unchanged with a view's id.
+
+What changes on a view:
+
+- **It is billed by bytes scanned.** The columns you select, `--where`, a
+  server-side `--bbox` and `--limit` all go into the query job, so BigQuery
+  reads only the columns asked for and can prune partitions. An unfiltered read
+  of a very large view can fail with "Response too large to return": filter it.
+- **`--where` runs inside BigQuery, as GoogleSQL.** On a table DuckDB evaluates
+  it. Only the subset both dialects read identically is accepted on a view:
+  bare column names, plain single-quoted strings with no quote or backslash
+  inside, and no comments. A double-quoted name is refused, because GoogleSQL
+  reads `"name"` as a string literal. For anything more, use
+  [`--sql`](#running-your-own-sql).
+- **`--bbox-mode local` reads the whole view** and filters it in DuckDB; leave
+  the default (`auto` filters a view server-side).
+- `--dry-run` cannot tell a view from a table, so it shows the table form.
+
+### Running Your Own SQL
+
+`--where` can only add a predicate to `SELECT * FROM <table>`. When the
+question needs more than that -- a window function, a join, a `GROUP BY`, a
+`QUALIFY` -- give the whole statement with `--sql` instead. It runs as a
+BigQuery query job and its result is what gets written.
+
+=== "CLI"
+
+    <!-- doctest: skip="queries a table that exists only in the reader's own warehouse" -->
+    ```bash
+    # Latest version of each item: no --where can express this
+    gpio extract bigquery --project myproject output.parquet \
+      --sql "SELECT * EXCEPT(rn) FROM (
+               SELECT *, ROW_NUMBER() OVER (
+                 PARTITION BY item_id ORDER BY version DESC) AS rn
+               FROM \`myproject.geodata.items\`
+               WHERE acquired_at >= TIMESTAMP('2025-09-01')
+                 AND acquired_at <  TIMESTAMP('2025-09-02')
+             ) WHERE rn = 1" \
+      --geography-column geometry --geometry-format geojson
+    ```
+
+=== "Python"
+
+    <!-- doctest: skip="queries a table that exists only in the reader's own warehouse" -->
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.Table.from_bigquery(
+        sql="""
+            SELECT * EXCEPT(rn) FROM (
+              SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY item_id ORDER BY version DESC) AS rn
+              FROM `myproject.geodata.items`
+              WHERE acquired_at >= TIMESTAMP('2025-09-01')
+                AND acquired_at <  TIMESTAMP('2025-09-02')
+            ) WHERE rn = 1
+        """,
+        project='myproject',
+        geography_column='geometry',
+        geometry_format='geojson',
+    )
+    table.write('output.parquet')
+    ```
+
+Four things to know.
+
+**It replaces the table source.** There is no `TABLE_ID`; the statement names
+its own relations. `--project` becomes required, because the query job has to
+be billed to a project and there is no table id to take one from.
+
+**It is mutually exclusive with every query-shaping option** --
+`--include-cols`, `--exclude-cols`, `--where`, `--bbox`, `--bbox-mode`,
+`--bbox-threshold` and `--limit`. The statement already says which columns,
+which rows and how many; a second, outer answer to the same question could
+only disagree with it. Combining them is an error rather than a silent
+precedence rule.
+
+**It must be one read-only query.** The statement has to open with `SELECT`
+or `WITH` and hold no second statement after a `;`. BigQuery runs whatever it
+is handed, and it would run a `DELETE`, `CREATE` or `MERGE` while gpio is still
+reading the schema, so those are refused before anything is sent.
+
+**Filter inside the statement.** A query job materializes its entire result
+before anything is read back, so an unfiltered `SELECT *` over a large
+relation does not return slowly -- it fails outright with "Response too large
+to return". This is also why `--limit` has nowhere useful to go: capping rows
+the job has already built saves nothing.
+
+The options that shape the *output file* all still apply:
+`--geography-column`, `--geometry-format`, `--edges`, `--compression`,
+`--row-group-size`, `--geoparquet-version`, `--overwrite` and the rest.
+
+!!! tip "See the statement before you pay for it"
+    `--dry-run` prints the query gpio would issue without connecting to
+    BigQuery, and `--show-sql` prints it on a real run.
+
 ### Authentication
 
 The command uses Google Cloud credentials in this order:
@@ -1201,6 +1382,45 @@ Each HTTP request defaults to a 60-second timeout. FeatureServer layers with ver
 
 Combine `--timeout` with `--batch-size` (smaller pages) or `--max-allowable-offset` (fewer vertices per feature) when a layer is both slow and heavy.
 
+### Adaptive page size
+
+A layer's advertised `maxRecordCount` is a row limit, not a promise that a page of that many rows can be serialized. Heavy polygon layers regularly fail at the advertised size and succeed at a smaller one, and a page of 55 detailed features can fail where 2,000 points would not. `gpio extract arcgis` therefore treats the page size as a lever: when the server refuses a page, the same offset is retried at the next rung of `1000 → 500 → 100 → 50 → 10 → 1`, and the rung that works is kept for the rest of the download. `--batch-size` sets the starting rung, so a threshold you already know skips the walk.
+
+The ladder is entered when a page comes back as any of:
+
+| The server answered | Which is how |
+|---|---|
+| HTTP 200 with a body that is not JSON | a proxy or WAF page, or a truncated payload |
+| A JSON error envelope with `code` 500 and one of ArcGIS's generic query-failure messages (`Error performing query operation`, `Unable to complete operation`, `Unable to perform query operation`) and no more specific `details` — whether it arrives with HTTP 200 or mirrored into an HTTP 500 | ArcGIS Server reports a page it could not serialize on the EsriJSON (`--output-crs`) path |
+| HTTP 500, 502 or 504 without a JSON body, persisting through the transport's three same-size attempts | the same failure as an HTML error page on the default GeoJSON path, or a proxy giving up on a heavy page |
+
+A JSON envelope is the server's considered answer, so it descends at once; a bare 5xx may be a blip, so the transport's usual attempts (each logged as `HTTP 500 (attempt n/3)`) run first. Each descent is then logged as one warning naming the offset, the size that failed, what the server said, the offset the download resumes from and that the smaller size sticks. Authentication errors (498/499), bad parameters (400), HTTP 501/503 (unsupported, unavailable) and a JSON error 500 whose message or `details` say what actually went wrong are not a page-size problem and fail as before, the last with a reminder that `--batch-size` exists. If even `batch_size=1` is refused, the error states that fact with the server's last message, then points at `--max-allowable-offset` and `--timeout` for a heavy layer or a retry later for a failing service.
+
+When you already know the page size a layer tolerates, set it up front with `--batch-size` (CLI) or `batch_size` (Python) and skip the walk. The default is the server's `maxRecordCount`, capped at 2000; the value must be a positive integer.
+
+=== "CLI"
+
+    <!-- doctest: skip="needs cloud credentials" -->
+    ```bash
+    # 50 features per request, 3 minutes per request
+    gpio extract arcgis "https://services.arcgis.com/.../FeatureServer/0" out.parquet \
+      --batch-size 50 --timeout 180
+    ```
+
+=== "Python"
+
+    <!-- doctest: skip="needs cloud credentials" -->
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.extract_arcgis(
+        service_url="https://services.arcgis.com/.../FeatureServer/0",
+        batch_size=50,
+        timeout=180,
+    )
+    table.write("out.parquet")
+    ```
+
 ### Finding Service URLs
 
 ArcGIS Feature Service URLs follow this pattern:
@@ -1253,7 +1473,30 @@ Web Feature Service (WFS) is an OGC standard for serving vector geospatial data 
 
 ### Bbox Filtering
 
-Spatial filtering can be applied server-side (pushed to WFS) or locally (after download):
+Spatial filtering can be applied server-side (pushed to WFS) or locally (after download).
+
+The bbox is read in the CRS gpio requests from the layer. That is `--output-crs`
+when the layer offers it, else EPSG:4326 when the layer offers it, else the
+layer's default CRS. Most layers offer EPSG:4326, so a lon/lat bbox works. For
+a layer that only offers a projected CRS, pass the bbox in that CRS, x,y
+(easting first, or westing first for Krovak). gpio does not reproject it, and
+sends it labelled with that CRS so the server applies the filter. Only when
+the request CRS is geographic WGS84 is the bbox labelled
+`urn:ogc:def:crs:OGC:1.3:CRS84`, which GeoServer, MapServer, QGIS Server and
+deegree all read as lon,lat. For a projected request CRS, gpio reads the bbox
+in that CRS without reprojecting it.
+
+When the bbox looks like lon/lat on a projected layer, or a bbox matches no
+features, gpio warns. The warning names the layer CRS, shows the layer extent
+in lon/lat and in that CRS, and prints your box reprojected into it, ready to
+copy. gpio does not apply the hint. For a layer that only offers EPSG:4026, it
+reads like this.
+
+```text
+--bbox 28.82,47.01,28.825,47.013 looks like lon/lat. --bbox is read in the layer CRS EPSG:4026 (MOLDREF99 / Moldova TM), x,y (easting first).
+Layer extent is 26.63,45.44,30.13,48.47 in lon/lat and 61521,33542,335349,371881 in EPSG:4026.
+If your box is lon/lat, try --bbox 231933,208131,232316,208468 (reprojected to EPSG:4026, not applied).
+```
 
 === "CLI"
     <!-- doctest: skip="illustrative endpoint" -->
@@ -1392,17 +1635,39 @@ a service advertises nothing at all, gpio asks for GeoJSON as it always has.
 
 ### Axis Order
 
-WFS 1.1.0+ with URN-format CRS (e.g., `urn:ogc:def:crs:EPSG::4326`) uses lat,lon axis order per OGC spec. gpio auto-detects this, but you can override:
+Pass `--bbox` as x,y (lon,lat for a geographic layer). gpio then picks the
+order and the label from the layer CRS, so that every server reads the bbox the
+same way.
+
+- A WGS84 lon/lat layer (EPSG:4326, CRS84) gets x,y labelled CRS84.
+- A layer CRS whose official axis order starts with latitude or northing, such
+  as EPSG:4258, EPSG:4269 or EPSG:3006, gets lat,lon (or y,x) labelled
+  `urn:ogc:def:crs:EPSG::<code>`. Servers disagree on the short `EPSG:<code>`
+  label for these CRSs, while they all read the URN in that order.
+- Any other projected layer (EPSG:3857, EPSG:25832, and polar CRSs such as
+  EPSG:3031 or EPSG:3413 that list easting first) gets x,y with its
+  `EPSG:<code>` label.
+- WFS 1.0.0 is always read x,y, so the bbox goes x,y with no label.
+
+Some servers, such as ArcGIS WFS, read every EPSG:4326 bbox as lat,lon whatever
+the label says, so the filter selects a swapped area. For those,
+`--axis-order latlon` sends the bbox as lat,lon with the
+`urn:ogc:def:crs:EPSG::4326` label. It has no effect on an x,y CRS, and on WFS
+1.0.0 it is ignored with a warning.
+
+`--axis-order xy` always sends the bbox x,y with the short `EPSG:<code>` label
+(CRS84 for a lon/lat layer). Use it for a server that reads the short label x,y
+but mishandles the URN for a lat,lon CRS such as EPSG:4258.
 
 <!-- doctest: skip="illustrative endpoint" -->
 ```bash
-# Force lon,lat (XY) axis order
+# Default, x,y order
+gpio extract wfs https://geo.example.com/wfs cities output.parquet \
+    --bbox 4.82,50.44,4.92,50.48
+
+# Send a lon/lat bbox to the server as lat,lon
 gpio extract wfs https://geo.example.com/wfs cities output.parquet \
     --bbox 4.82,50.44,4.92,50.48 \
-    --axis-order xy
-
-# Force lat,lon axis order
-gpio extract wfs https://geo.example.com/wfs cities output.parquet \
     --axis-order latlon
 ```
 
@@ -1547,6 +1812,11 @@ gpio extract carto https://phl.carto.com opa_properties_public output.parquet
 ### Geometry Column
 
 Carto tables typically have geometry in a column named `the_geom` (WGS84). This is automatically renamed to `geometry` in the output for consistency with other geoparquet-io extractors.
+
+Carto returns `the_geom` in the SRID the table stores it in, without reprojecting. So `gpio` reads that SRID with one small `ST_SRID` query and tags the output with it. SRID 4326 is written as `OGC:CRS84`, and any other SRID as its EPSG definition. If the SRID cannot be read, resolves to no EPSG definition, or differs between the rows you extract, the extraction **fails** and writes nothing, because a file tagged as WGS84 would label projected coordinates as longitude and latitude.
+
+!!! note "Changed after 1.6.0"
+    Every Carto extraction used to be tagged `OGC:CRS84`, whatever SRID the table used. A table stored in a projected SRID is now tagged with that SRID, and one whose SRID cannot be resolved is refused.
 
 ### Non-Geometry (Tabular) Tables
 
@@ -1958,6 +2228,19 @@ matched case-insensitively and resolved to that list's own spelling, so
 `--exclude-cols OWNER` drops a column named `Owner` rather than silently
 dropping nothing.
 
+An `--exclude-cols` that names *every* column is refused rather than ignored. On
+`arcgis` the whole option used to be dropped on the floor in that case, so
+`--exclude-cols geometry` on a geometry-only layer wrote full GeoParquet
+including the column you asked to drop ([#1176](https://github.com/geoparquet/geoparquet-io/issues/1176)).
+The layer's advertised fields are enough to see it, so the refusal comes before
+any feature is downloaded.
+
+Every other extract path refuses the same selection, and names the columns that
+are available. `gpio extract geoparquet` (file or stream) and `ops.extract()`
+used to hand the empty selection to DuckDB and come back with
+`Parser Error: SELECT clause without selection list`; `carto`'s tabular path
+wrote a file with no columns at all and said nothing.
+
 `--exclude-cols` names columns of the table you get back, not of the source. On
 `carto` it is therefore checked against that table once it is fetched, so the
 name to use is `geometry` — the post-fetch name of the geometry column — and not
@@ -1973,6 +2256,12 @@ is checked *before* the fetch instead, since it becomes the SELECT list: under
 `--geometry`/`--no-geometry` it issues one bounded `SELECT * … LIMIT 0` of its
 own to do so, and if that cannot be reached, extraction proceeds unchecked
 rather than failing.
+
+On `arcgis`, by contrast, excluding `geometry` is allowed and behaves like
+`gpio extract geoparquet`: the output is an attribute table — plain Parquet
+with no `geo` metadata — and the geometry-dependent steps (Hilbert ordering,
+the `bbox` column) are skipped. That holds for a filter that matches no
+features too, which writes the layer's remaining columns with zero rows.
 
 A **blank entry** in the list — `--include-cols id,,name`, or `--include-cols '   '` —
 is a usage error and is rejected before anything is opened or contacted. That

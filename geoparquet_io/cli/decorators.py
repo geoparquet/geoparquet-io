@@ -9,7 +9,9 @@ import functools
 import math
 
 import click
+from click.core import ParameterSource
 
+from geoparquet_io.core.compression import COMPRESSION_RANGES, PROCESS_ZSTD_LEVEL
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
     SPATIAL_BAND_TOP_ROWS,
@@ -133,11 +135,8 @@ def parse_row_group_options(
 
 
 # ``--approx``'s default. ``gpio add kdtree`` and ``gpio partition kdtree`` both
-# declare the option with this value, and exclusivity against ``--exact`` is
-# detected by comparing the received value against it (see the note in
-# ``resolve_kdtree_options``), so the declarations import it from here rather
-# than repeating the literal: a second copy that drifted would make a bare
-# ``--exact`` start reporting a conflict with an ``--approx`` nobody typed.
+# declare the option with this value, so the declarations import it from here
+# rather than repeating the literal.
 DEFAULT_KDTREE_APPROX = 100000
 
 # Rows per partition targeted when the user asks for neither ``--partitions``
@@ -151,6 +150,7 @@ def resolve_kdtree_options(
     auto: int | None,
     approx: int,
     exact: bool,
+    approx_source: ParameterSource | None,
 ) -> tuple[int | None, int | None, tuple[str, int] | None]:
     """Resolve the four KD-tree sizing options into what the core layer takes.
 
@@ -166,6 +166,11 @@ def resolve_kdtree_options(
         auto: ``--auto``, a target row count per partition.
         approx: ``--approx``, the sample size for approximate medians.
         exact: ``--exact``, computing medians over the full dataset instead.
+        approx_source: where ``approx`` came from, as reported by
+            ``ctx.get_parameter_source("approx")``. Any source but
+            ``ParameterSource.DEFAULT`` counts as a supplied ``--approx`` --
+            ``None`` (unknown) included, so an unwired caller fails closed
+            rather than reviving the #951 quirk.
 
     Returns:
         ``(iterations, sample_size, auto_target)`` -- the recursion depth
@@ -174,17 +179,9 @@ def resolve_kdtree_options(
         when the partition count was explicit).
 
     Raises:
-        click.UsageError: ``--partitions`` with ``--auto``, ``--exact`` with a
-            non-default ``--approx``, or a ``--partitions`` value that is not a
-            power of two of at least 2.
-
-    Note:
-        The ``--approx``/``--exact`` check compares ``approx`` against its
-        declared default rather than asking Click whether the user typed it, so
-        ``--exact --approx 100000`` is accepted silently. That is preserved
-        verbatim from both call sites: correcting it with a
-        ``ctx.get_parameter_source`` check would change behaviour, and belongs in
-        its own change (#951).
+        click.UsageError: ``--partitions`` with ``--auto``, ``--exact`` with an
+            ``--approx`` the user supplied, or a ``--partitions`` value that is
+            not a power of two of at least 2.
     """
     if sum([partitions is not None, auto is not None]) > 1:
         raise click.UsageError("--partitions and --auto are mutually exclusive")
@@ -195,7 +192,7 @@ def resolve_kdtree_options(
     if partitions is not None and (partitions < 2 or (partitions & (partitions - 1)) != 0):
         raise click.UsageError(f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}")
 
-    if exact and approx != DEFAULT_KDTREE_APPROX:
+    if exact and approx_source is not ParameterSource.DEFAULT:
         raise click.UsageError("--approx and --exact are mutually exclusive")
 
     sample_size = None if exact else approx
@@ -207,14 +204,23 @@ def resolve_kdtree_options(
     return None, sample_size, ("rows", target_rows)
 
 
-def compression_options(func):
-    """
-    Add compression-related options to a command.
+def _compression_level_help(zstd_default: int) -> str:
+    """The ``--compression-level`` help, which has to name the right ZSTD default.
 
-    Adds:
-    - --compression: Type of compression (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
-    - --compression-level: Compression level for formats that support it
+    Two strings, because there are two defaults: ``gpio process`` resolves an
+    unset ZSTD level to ``PROCESS_ZSTD_LEVEL`` and everything else to the
+    global 15 (#1299). Both numbers are imported, not typed, so help text
+    cannot drift from what the writers actually do -- the mistake #967 made
+    with the row-group number.
     """
+    return (
+        f"Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 "
+        f"(default: {zstd_default}), BROTLI: 1-11 (default: 6). "
+        "Ignored for LZ4/SNAPPY."
+    )
+
+
+def _add_compression_options(func, level_help: str):
     func = click.option(
         "--compression",
         default="ZSTD",
@@ -226,9 +232,35 @@ def compression_options(func):
     func = click.option(
         "--compression-level",
         type=click.IntRange(1, 22),
-        help="Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 (default: 15), BROTLI: 1-11 (default: 6). Ignored for LZ4/SNAPPY.",
+        help=level_help,
     )(func)
     return func
+
+
+def compression_options(func):
+    """
+    Add compression-related options to a command.
+
+    Adds:
+    - --compression: Type of compression (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
+    - --compression-level: Compression level for formats that support it
+
+    For a ``gpio process`` command use :func:`process_compression_options`
+    instead, so the help names that group's lower ZSTD default.
+    """
+    return _add_compression_options(func, _compression_level_help(COMPRESSION_RANGES["ZSTD"][2]))
+
+
+def process_compression_options(func):
+    """``compression_options`` for the ``gpio process`` group.
+
+    Identical options; the help names ZSTD 9 instead of 15, because these
+    commands compute a whole table and then write it, and the write is a large
+    share of their wall clock. The resolution itself lives in the cores
+    (``core/compression.resolve_process_compression_level``), so the Python API
+    gets it too -- this decorator only keeps ``--help`` honest.
+    """
+    return _add_compression_options(func, _compression_level_help(PROCESS_ZSTD_LEVEL))
 
 
 # Help text for --row-group-size. One string, because there is now one rule.
@@ -377,6 +409,19 @@ def overwrite_option(func):
     Allows overwriting existing files without prompting.
     """
     return click.option("--overwrite", is_flag=True, help="Overwrite existing files")(func)
+
+
+def strict_option(func):
+    """
+    Add --strict option to a ``check`` command.
+
+    A failure always exits 1; ``--strict`` makes a warning exit 1 as well.
+    """
+    return click.option(
+        "--strict",
+        is_flag=True,
+        help="Exit 1 on warnings as well as failures (a failure always exits 1)",
+    )(func)
 
 
 def _validate_column_name(ctx, param, value):
@@ -532,7 +577,7 @@ def _validate_write_memory(ctx, param, value):
     if value is None:
         return None
 
-    from geoparquet_io.core.write_strategies.duckdb_kv import validate_memory_limit
+    from geoparquet_io.core.memory_limits import validate_memory_limit
 
     try:
         validate_memory_limit(value)
@@ -545,7 +590,8 @@ def _validate_write_memory(ctx, param, value):
 # verbatim.
 _WRITE_MEMORY_HELP = (
     "Memory limit for streaming writes (e.g., '512MB', '2GB'). "
-    "Default: 50% of available RAM (container-aware)."
+    "Default: 50% of the memory ceiling -- physical RAM, or the container or "
+    "Slurm job cap when lower."
 )
 
 
@@ -593,7 +639,7 @@ def aws_profile_option(func):
     """Add hidden --aws-profile option (now a global option)."""
     return click.option(
         "--aws-profile",
-        help="AWS profile name for S3 operations (sets AWS_PROFILE env var)",
+        help="AWS profile name for S3 operations",
         hidden=True,
     )(func)
 
@@ -727,6 +773,25 @@ def where_option(func):
     )(func)
 
 
+def spatial_filter_options(func):
+    """Add the ``--bbox``/``--geometry``/``--use-first-geometry`` spatial filter
+    options (same wording as `gpio extract`; pair with :func:`where_option`)."""
+    func = click.option(
+        "--use-first-geometry",
+        is_flag=True,
+        help="Use first geometry if FeatureCollection contains multiple",
+    )(func)
+    func = click.option(
+        "--geometry",
+        help="Geometry filter: GeoJSON, WKT, @filepath, or - for stdin",
+    )(func)
+    func = click.option(
+        "--bbox",
+        help="Bounding box filter: xmin,ymin,xmax,ymax",
+    )(func)
+    return func
+
+
 def metric_nodata_option(func):
     """Add the ``--metric-nodata`` NoData sentinel option for aggregate commands."""
     return click.option(
@@ -754,13 +819,27 @@ def bucket_point_options(func):
     return func
 
 
+def breakdown_metric_option(func):
+    """Add ``--breakdown-metric``: what each breakdown pivot column holds (#1100).
+
+    Shared by the grid commands and `aggregate admin`, so the wording stays in
+    one place.
+    """
+    return click.option(
+        "--breakdown-metric",
+        default=None,
+        help='What each breakdown column holds: "count" (default), or "sum:col" / '
+        '"min:col" / "max:col" for a weighted pivot named <func>_<col>_<value>.',
+    )(func)
+
+
 def grid_aggregate_options(func):
     """Add the options shared by `gpio process aggregate <grid>` commands.
 
     Adds (the per-scheme ``--resolution`` is declared on each command, since its
     valid range differs between grids):
     - --auto, --target-per-cell, --max-cells
-    - --metric, --metric-nodata, --breakdown, --breakdown-limit
+    - --metric, --metric-nodata, --breakdown, --breakdown-limit, --breakdown-metric
     - --out-geometry, --where, --bucket-point, --bbox-column
     """
     func = bucket_point_options(func)
@@ -771,11 +850,12 @@ def grid_aggregate_options(func):
         default="polygon",
         help="Output geometry per cell (default: polygon).",
     )(func)
+    func = breakdown_metric_option(func)
     func = click.option(
         "--breakdown-limit",
         type=int,
         default=20,
-        help="Max breakdown values before remainder rolls into count_other (default: 20).",
+        help="Max breakdown values before remainder rolls into the other bucket (default: 20).",
     )(func)
     func = click.option(
         "--breakdown",
@@ -786,7 +866,9 @@ def grid_aggregate_options(func):
     func = click.option(
         "--metric",
         default=None,
-        help='Numeric rollups, e.g. "sum:area_ha,avg:yield". Bare column = sum.',
+        help='Numeric rollups, e.g. "sum:area_ha,avg:yield". Bare column = sum. '
+        '"pct_cell:<column>" writes pct_<column>: the percent of the cell covered '
+        "by a per-feature area in m2 (emits sum_<column> with it).",
     )(func)
     func = click.option(
         "--max-cells",
@@ -801,7 +883,23 @@ def grid_aggregate_options(func):
         help="Target features per cell when using --auto (default: 10000).",
     )(func)
     func = click.option("--auto", is_flag=True, help="Auto-select resolution from data size.")(func)
+    func = aggregate_memory_option(func)
     return func
+
+
+#: ``--write-memory`` for the aggregate/overview commands. The value bounds the
+#: scan, the spatial join and the GROUP BY -- where these commands spend their
+#: memory -- rather than a streaming write, so the wording says so (#1179).
+_AGGREGATE_MEMORY_HELP = (
+    "Memory limit for the aggregation (e.g., '512MB', '2GB'). "
+    "Default: 50% of the memory ceiling -- physical RAM, or the container or "
+    "Slurm job cap when lower."
+)
+
+
+def aggregate_memory_option(func):
+    """Add --write-memory to a command whose DuckDB work is a query, not a write."""
+    return write_memory_option(func, help=_AGGREGATE_MEMORY_HELP)
 
 
 def partition_options(func):

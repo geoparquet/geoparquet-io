@@ -34,7 +34,7 @@ The `convert` command transforms between GeoParquet and other vector formats wit
     so the number you ask for is the number that lands.
 
     A request of **2,048 rows or fewer** is the exception: gpio passes it
-    through untouched, because pyarrow honours it exactly while DuckDB's
+    through untouched, because pyarrow honors it exactly while DuckDB's
     `COPY` rounds it up to 2,048 regardless — so what lands depends on which
     writer runs, and gpio cannot snap it without overriding the one writer that
     could have obeyed. `convert` writes through DuckDB, so
@@ -66,9 +66,30 @@ Auto-detected by file extension:
 - **GeoPackage** (.gpkg)
 - **FlatGeobuf** (.fgb)
 - **File Geodatabase** (.gdb)
-- **CSV/TSV** (.csv, .tsv, .txt) - See [CSV/TSV Support](#csvtsv-support) below
+- **CSV/TSV** (.csv, .tsv, .txt) - See [CSV/TSV Support](#tabular-sources-csv-tsv-and-parquet-without-geometry) below
 
 Any format supported by DuckDB's spatial extension (50+ formats) can be read.
+
+A `.json` file has to be GeoJSON. A bare array of records, or records wrapped
+in an object such as `{"data": [...]}`, is not a vector dataset GDAL can open,
+so `gpio convert` stops with `Failed to read input file` and `gpio.convert()`
+raises a `GeoParquetError`. DuckDB 1.5.5 crashed on such files instead, which
+is why gpio requires DuckDB 1.5.6 or later
+([#1102](https://github.com/geoparquet/geoparquet-io/issues/1102)).
+
+GeoJSON dates and times keep their UTC offset. A property such as
+`2026-01-01T00:00:00+01:00` becomes the instant `2025-12-31 23:00:00` UTC in a
+TIMESTAMP WITH TIME ZONE column, and DATE, TIME and offset-free TIMESTAMP
+columns keep their types. The GDAL that DuckDB spatial 1.5 bundles dropped the
+offset when a whole column shared one, so gpio reads GeoJSON date columns as
+text and lets DuckDB parse them
+([#1152](https://github.com/geoparquet/geoparquet-io/issues/1152)).
+
+The table `gpio.convert()` returns describes its geometry column and CRS the
+same way a table from `gpio.read()` does, so every `add_*` method works on it
+directly. A projected input such as EPSG:6933 now gets the same H3, S2, A5,
+quadkey and KD-tree cells whether it is converted or read back from GeoParquet
+([#1222](https://github.com/geoparquet/geoparquet-io/issues/1222)).
 
 ### Output Formats (from GeoParquet)
 
@@ -183,6 +204,49 @@ gpio convert data.parquet output.csv --no-wkt
 # Exclude bbox column
 gpio convert data.parquet output.csv --no-bbox
 ```
+
+### Filtering During Conversion
+
+`convert geopackage`, `convert flatgeobuf` and `convert csv` can filter rows on
+the way through, with the same `--bbox`, `--geometry` and `--where` options as
+`gpio extract` -- one step instead of extract-then-convert. A `--bbox` prunes on
+the input's bbox covering column when it has one.
+
+=== "CLI"
+
+    <!-- doctest: menu -->
+    ```bash
+    # Only the features in a bounding box
+    gpio convert geopackage data.parquet box.gpkg --bbox -0.5,10.0,0.5,11.0
+
+    # Features intersecting a geometry (GeoJSON, WKT, or @file)
+    gpio convert flatgeobuf data.parquet clipped.fgb \
+        --geometry "POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))"
+
+    # Attribute filter, DuckDB WHERE syntax
+    gpio convert csv data.parquet named.csv --where "name IS NOT NULL"
+
+    # Combined
+    gpio convert geopackage data.parquet combined.gpkg \
+        --bbox -0.5,10.0,0.5,11.0 --where "name IS NOT NULL"
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.read('data.parquet')
+
+    # Only the features in a bounding box
+    table.write('box.gpkg', bbox=(-0.5, 10.0, 0.5, 11.0))
+
+    # Features intersecting a geometry (GeoJSON or WKT text, or @file)
+    table.write('clipped.fgb', geometry='POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))')
+
+    # Attribute filter, DuckDB WHERE syntax
+    table.write('named.csv', where="name IS NOT NULL")
+    ```
 
 **GeoJSON:**
 
@@ -323,17 +387,30 @@ GeoParquet files can have multiple geometry columns (e.g., `geometry` for point 
     can stand behind the claim:
 
     - it computed the bbox column itself, from the geometry, during this convert
-    - the input's own metadata already declared a covering for the column being
-      preserved
+    - the **primary** geometry column's own metadata already declared a covering
+      for the column being preserved
     - the output carries a conventional `bbox` struct column (the shape every
       GeoParquet 1.0 writer emitted, before `covering` existed) — this is what
       makes a 1.0 → 1.1 upgrade declare it
 
-    A preserved column with any other name — `bounds`, `parcel_extent`,
-    `tile_bounds` — is left undeclared, because its name is not evidence that
-    its values bound the geometry, and a wrong covering makes readers skip rows
-    that genuinely match. Declare such a column deliberately with
-    [`gpio add bbox-metadata`](add.md); `gpio check bbox` will point this out.
+    The same two pieces of evidence decide which column convert treats as *the*
+    input's bbox in the first place. A struct column with any other name —
+    `bounds`, `parcel_extent`, `tile_bounds`, or the `boundary_bbox` that
+    belongs to a secondary geometry column — is carried through as ordinary
+    data: it is not declared, it is not dropped for a native-geometry output,
+    and a 1.x output gets convert's own computed `bbox` beside it. Its name is
+    not evidence that its values bound the primary geometry, and a wrong
+    covering makes readers skip rows that genuinely match. Declare such a column
+    deliberately with
+    [`gpio add bbox-metadata --bbox-name <column>`](add.md), which is you
+    supplying the evidence gpio cannot read off a schema. Note that
+    `gpio check bbox` does *not* point this out: it reports on the primary's bbox
+    column, so an undeclared `bounds` reads there as no bbox column at all.
+
+    If the input already has a column named `bbox` that is not a bbox struct
+    (a string tile id, say), it is kept as it is, and the computed bbox is
+    written under the next free name (`bbox_1`, `bbox_2`, …) with the covering
+    declared over that column; a warning names both.
 
 !!! note "When the input's CRS is not valid PROJJSON"
     GeoParquet requires a column's `crs` to be a PROJJSON object, which means it
@@ -363,7 +440,7 @@ GeoParquet files can have multiple geometry columns (e.g., `geometry` for point 
 
 ### Custom Geometry Column Names
 
-GeoParquet files can use non-standard geometry column names (e.g., `the_geom`, `my_geometry`). These names are preserved during conversion:
+GeoParquet files can use non-standard geometry column names (e.g., `the_geom`, `my_geometry`). The CLI preserves them during conversion:
 
 === "CLI"
 
@@ -373,19 +450,31 @@ GeoParquet files can use non-standard geometry column names (e.g., `the_geom`, `
     gpio convert input.parquet output.parquet
     ```
 
+`gpio.convert()`'s `geometry_column` is a **request for the output name**, not a
+way to point at a source column — the source's geometry column is always
+detected. The returned `Table` carries the name actually used, so read it off
+`table.geometry_column` rather than assuming the request was granted
+([#1176](https://github.com/geoparquet/geoparquet-io/issues/1176)):
+
+| Source | `geometry_column='geom'` gives |
+|--------|-------------------------------|
+| CSV, or Parquet with WKT / lat-lon columns | `geom` — the geometry is *built* here, so it can take the name. A column the source carries through that already has that name keeps it, and the built one moves aside to `geom_1` with a warning. |
+| GeoPackage, Shapefile, GeoJSON, FlatGeobuf, FileGDB, GeoParquet | `geometry` — the read aliases `ST_AsWKB(...) AS geometry`, so the request cannot be honored and the actual name is reported instead. This is also why `gpio.convert()` on a `the_geom` GeoParquet hands back `geometry`, where the CLI above keeps the name. |
+
 === "Python"
 
-    <!-- doctest: skip="names 'the_geom', a geometry column the sample data does not use" -->
+    <!-- doctest: skip="names 'geom', a geometry column the sample data does not use" -->
     ```python
     import geoparquet_io as gpio
 
-    # Input has primary_column: "the_geom"
-    # Output preserves "the_geom" (not renamed to "geometry")
-    gpio.convert('input.parquet').write('output.parquet')
+    # Honoured: the geometry is built from lat/lon, so it can take the name
+    table = gpio.convert('pts.csv', lat_column='lat', lon_column='lon',
+                         geometry_column='geom')
+    table.geometry_column   # 'geom'
 
-    # Custom geometry column names are automatically detected
-    # For files without GeoParquet metadata, specify the column:
-    gpio.convert('input.parquet', geometry_column='the_geom').write('output.parquet')
+    # Not honored: a GeoPackage's geometry is read, and reports back 'geometry'
+    table = gpio.convert('data.gpkg', geometry_column='geom')
+    table.geometry_column   # 'geometry'
     ```
 
 ### Edges Metadata Preservation
@@ -422,10 +511,49 @@ declaration unchanged. `gpio check spec` warns about files that carry
     gpio.read('geography.parquet').sort_hilbert().write('output.parquet')
     ```
 
+The same holds for a native Parquet GEOGRAPHY column with no `geo` key, and
+for the commands that write through an Arrow table (`process simplify`, the
+Python API's `.write()`). A 2.0 output keeps the column a GEOGRAPHY, and its
+`geo` block says the same edges, so `gpio check spec` has nothing to warn about.
+
+When a table's `geo` block states `edges` and its GeoArrow type says
+something else, the `geo` block wins. Only a GeoParquet edge algorithm counts,
+so an `edges` value gpio does not know is read as no declaration at all.
+
 When a GeoParquet 2.0 input declares an ellipsoidal edges algorithm
 (`vincenty`, `karney`, `andoyer`, `thomas`) and the output is 1.x, the
 algorithm is mapped to `"spherical"` — the only non-planar value 1.x supports
 — with a warning. 2.0 outputs keep the algorithm verbatim.
+
+### Geodesic Bounding Boxes for GEOGRAPHY
+
+A 2.0 output whose column carries non-planar edges comes out as a native
+Parquet `GEOGRAPHY`, and its bounding boxes — each row group's geospatial
+statistics and the `geo` block's per-column `bbox` — are computed over the
+**geodesic edges**, not just the vertices. A long east–west great-circle edge
+at high latitude bulges poleward (`LINESTRING (-30 60, 30 60)` peaks near
+63.4°N, not 60°), so a vertex-only box would let a reader prune row groups
+that really match. gpio writes the bulged box instead:
+
+- `spherical` edges get the exact great-circle bound; the ellipsoidal
+  algorithms (`vincenty`, `thomas`, `andoyer`, `karney`) get the bound of the
+  geodesic on the column CRS's ellipsoid (WGS84 when it names none), from the
+  geodesic's own azimuths. Edges longer than 170° of arc on the ellipsoid,
+  and antipodal edges on the sphere, bound to the whole globe.
+- A polygon whose interior holds a pole reaches it. Without an `orientation`
+  in the `geo` block, a ring's interior is the smaller of the two regions it
+  bounds — the reading the GeoParquet spec says readers typically make; with
+  `orientation: "counterclockwise"` it is the left of the ring.
+- Geometry that crosses the antimeridian gets `xmin > xmax`, the wrap form
+  both Parquet's statistics and RFC 7946 §5.2 define.
+- A row group that cannot be bounded — unreadable WKB, or a NaN, infinite or
+  out-of-range coordinate — loses its box (and the file-level `bbox` goes
+  too), with a warning. A missing box is always legal; it only gives up
+  pruning.
+
+1.x outputs have no `GEOGRAPHY` type, but a `spherical` column's `geo` block
+`bbox` is the geodesic bound there too. A bbox covering column is per-row
+data and stays the vertex box of each row.
 
 ### Z and M Dimensions
 
@@ -433,6 +561,34 @@ Geometries with Z (elevation) and/or M (measure) values are preserved, and the
 written `geometry_types` metadata carries the spec's dimension suffixes
 (`"Point Z"`, `"LineString ZM"`). `gpio check spec` validates these suffixes
 against the actual coordinate dimensions in both directions.
+
+`--force-2d` drops Z and M instead (`ST_Force2D`), for sources that are 3D
+throughout when the consumer is not: some tile renderers draw nothing for 3D
+geometry. It applies to every input format, including a WKT column in CSV and
+every geometry column of a GeoParquet input, and the bounds, bbox column and
+Hilbert ordering are all computed from the flattened geometry. The written CRS
+follows: a compound "horizontal + height" CRS (EST97 + EVRF2007 height, say) is
+reduced to its horizontal component, and a 3D geographic CRS such as EPSG:4979
+to its 2D counterpart, so the file does not describe a dimension it no longer
+has. Without `--force-2d` a compound CRS is kept as declared.
+
+=== "CLI"
+
+    <!-- doctest: skip="needs a 3D source" -->
+    ```bash
+    gpio convert etak_3d.shp etak.parquet --force-2d
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+    ```
+
+    <!-- doctest: skip="needs a 3D source" -->
+    ```python
+    gpio.convert("etak_3d.shp", force_2d=True).write("etak.parquet")
+    ```
 
 ## Remote Files
 
@@ -499,6 +655,57 @@ Only invalid geometry is touched: valid geometry is byte-identical, NULL is
 preserved, and bounding boxes stay correct (`ST_MakeValid` never expands an
 envelope).
 
+#### Spherical (non-planar) edges are never planar-repaired
+
+Planar validity is the wrong test for a column that declares non-planar edges —
+`edges: spherical` (or an ellipsoidal algorithm such as `vincenty` or `karney`)
+in the input's `geo` metadata, a GeoArrow non-planar edge type, or a native
+Parquet `GEOGRAPHY` logical type (the normal shape of
+BigQuery GEOGRAPHY exports and S2-based pipelines). A pole-enclosing ring like
+`POLYGON ((0 80, 90 80, 180 80, -90 80, 0 80))` is valid on the sphere but
+collinear (zero area) on the plane, and `ST_MakeValid` would collapse it into
+line fragments.
+
+For such columns gpio **skips** the planar repair and its invalid count
+entirely and warns — even when repair is requested explicitly, because planar
+repair is actively destructive on spherical data. The geometry passes through
+unchanged. An `edges` value that is not a GeoParquet edge algorithm is not a
+declaration gpio can honor, so that column keeps the planar repair. Repair on
+the sphere (via the S2 `geography` extension) is a planned follow-up.
+
+This pass-through applies to GeoParquet output. GeoJSON and PMTiles export
+instead refuse a non-planar geometry declaration before writing anything.
+Their Cartesian segments cannot carry geodesic edges, and their planar
+precision reduction can destroy valid spherical shapes even with repair off.
+`--no-repair-geometry` and `repair_geometry=False` do not bypass the refusal.
+See [non-planar GeoJSON inputs](geojson.md#non-planar-edges) for the CLI and
+Python API limitations.
+
+=== "CLI"
+
+    <!-- doctest: skip="needs an input declaring spherical edges" -->
+    ```bash
+    # Input declares edges: spherical — geometry passes through unchanged
+    gpio convert geoparquet spherical.parquet output.parquet
+    # Skipping planar geometry repair for column 'geometry': it declares 'spherical' edges, ...
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+    ```
+
+    <!-- doctest: skip="needs an input declaring spherical edges" -->
+    ```python
+    # Same skip through the Python API — the warning is logged, and the
+    # returned table's geo metadata keeps edges: spherical
+    gpio.convert("spherical.parquet").write("output.parquet")
+    ```
+
+    The geometry bytes pass through unchanged, and `Table.write` restates the
+    edges in the written file's metadata, as the CLI command above does.
+
 ### Curved Geometries
 
 GeoParquet cannot represent curved geometry types (CircularString,
@@ -558,6 +765,67 @@ geometry DuckDB cannot read; a file already at the output path is overwritten
 by the second attempt or, if that fails too, left as it was.
 `--no-linearize-curves` keeps the error instead.
 
+### Source Text Encoding
+
+Every string gpio writes is valid UTF-8, or the conversion stops. A shapefile
+attribute table (DBF) is often in a Windows code page instead, such as Shift_JIS
+(CP932) for Japanese data, GBK (CP936) for Chinese, CP1251 for Cyrillic or
+CP1252 for Western European text.
+
+For a shapefile, gpio finds the encoding the way GDAL does. It takes
+`--encoding` first, then the `.cpg` sidecar, then the language driver id in the
+DBF header. The GDAL that DuckDB bundles can only recode ISO-8859-1 by itself,
+so for any other code page gpio reads the raw bytes and decodes them with
+Python's codec of that name. Values and field names both come out as the
+original text. A character cut in half at a DBF field's width becomes U+FFFD,
+with a warning.
+
+When nothing names the encoding and a string is not UTF-8, the conversion
+fails. The error names the column and asks for `--encoding`. Nothing is
+written, so a file no reader can open is never reported as a success.
+
+=== "CLI"
+
+    <!-- doctest: skip="needs a shapefile whose DBF is not UTF-8" -->
+    ```bash
+    # Japanese shapefile with no .cpg sidecar
+    gpio convert tokyo.shp tokyo.parquet --encoding CP932
+
+    # Western European shapefile with no .cpg sidecar
+    gpio convert ehak.shp ehak.parquet --encoding ISO-8859-1
+
+    # Latin-1 CSV with a WKT column
+    gpio convert points.csv points.parquet --encoding ISO-8859-1
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+    ```
+
+    <!-- doctest: skip="needs a shapefile whose DBF is not UTF-8" -->
+    ```python
+    gpio.convert("tokyo.shp", encoding="CP932").write("tokyo.parquet")
+    gpio.convert("ehak.shp", encoding="ISO-8859-1").write("ehak.parquet")
+    gpio.convert("points.csv", encoding="ISO-8859-1").write("points.parquet")
+    ```
+
+A shapefile with a `.cpg` or a language driver id needs no option. Names follow
+Python's codec registry, so `CP932`, `Shift_JIS`, `GBK`, `CP936`, `CP1251`,
+`CP1252` and `latin1` all work. `Shift_JIS` and `GB2312` are read as their
+Windows supersets CP932 and GBK, which is what files labeled that way hold.
+gpio does not fetch the `.cpg` of a remote shapefile, so pass `--encoding` for
+one that is not UTF-8. For other GDAL formats the name is passed to GDAL as its
+`ENCODING` open option.
+
+The CSV reader decodes UTF-8, UTF-16 and Latin-1 on its own, and the common
+names are translated for it (`ISO-8859-1` and `latin1` both reach it as
+Latin-1). Every other encoding, CP1252 included, comes from DuckDB's
+`encodings` extension, which gpio loads on demand. Offline, without a cached
+copy, the error names the extension. Parquet carries UTF-8 already, so the
+option is refused there.
+
 ### Skip Hilbert Ordering
 
 For faster conversion when spatial ordering isn't critical:
@@ -568,6 +836,23 @@ gpio convert large.gpkg output.parquet --skip-hilbert
 ```
 
 Trade-off: Faster conversion but less optimal for spatial queries.
+
+### Memory on Very Large Inputs
+
+Hilbert ordering sorts the whole input, so a conversion larger than memory
+spills the sort to disk under `TMPDIR`. gpio caps DuckDB's write at half the
+memory ceiling it detects — physical RAM, or the container or batch-job (Slurm)
+cgroup limit when that is lower — leaving room for the memory DuckDB allocates
+outside its limit. Set the cap yourself with `--write-memory`:
+
+<!-- doctest: setup="gpio convert geopackage input.parquet large.gpkg" -->
+```bash
+gpio convert large.gpkg output.parquet --geoparquet-version 2.0 --write-memory 8GB
+```
+
+If DuckDB reports `Out of Memory Error` rather than spilling, raise the limit
+or point `TMPDIR` at a volume with room for the spill. See
+[Write Strategies](write-strategies.md#memory-configuration).
 
 ### Custom Compression
 
@@ -779,34 +1064,92 @@ gpio inspect output.parquet
 gpio check all output.parquet
 ```
 
-## CSV/TSV Support
+## Tabular Sources: CSV, TSV and Parquet Without Geometry
 
-Auto-detects geometry columns. WKT columns (wkt, geometry, geom) checked first, then lat/lon pairs (lat/lon, latitude/longitude).
+A source whose coordinates sit in ordinary columns — a CSV, or a **Parquet file
+that carries no geometry column at all** — gets its geometry built from those
+columns. Scientific archives are full of the second kind: a table of
+observations with `LAT` and `LON` columns and no `geo` metadata, which used to
+fail with "No geometry column detected".
 
-```bash
-# Auto-detect WKT or lat/lon
-gpio convert points.csv points.parquet
+=== "CLI"
+
+    ```bash
+    # Auto-detect WKT or lat/lon, CSV or Parquet alike
+    gpio convert points.csv points.parquet
+    ```
+
+    <!-- doctest: skip="needs a CSV with a 'geom_wkt' column, and a Parquet file with no geometry" -->
+    ```bash
+    # Name the columns when auto-detection cannot
+    gpio convert data.csv out.parquet --wkt-column geom_wkt
+    gpio convert data.csv out.parquet --lat-column lat --lon-column lng
+
+    # Same flags, Parquet input
+    gpio convert observations.parquet out.parquet --lat-column LAT --lon-column LON
+
+    # Custom delimiter (CSV/TSV only)
+    gpio convert data.txt out.parquet --delimiter "|"
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    gpio.convert("points.csv").sort_hilbert().write("points.parquet")
+    ```
+
+    <!-- doctest: skip="needs a CSV with a 'geom_wkt' column, and a Parquet file with no geometry" -->
+    ```python
+    gpio.convert("data.csv", wkt_column="geom_wkt").write("out.parquet")
+    gpio.convert("data.csv", lat_column="lat", lon_column="lng").write("out.parquet")
+    gpio.convert(
+        "observations.parquet", lat_column="LAT", lon_column="LON"
+    ).write("out.parquet")
+    ```
+
+The lat/lon columns are replaced by a single `geometry` column; every other
+column is carried through. A row missing a coordinate keeps its attributes and
+gets NULL geometry.
+
+### What Auto-Detection Looks For
+
+WKT first, then a lat/lon pair:
+
+| Step | Matches |
+|------|---------|
+| WKT column | `wkt`, `geometry`, `geom`, `the_geom`, `shape` — the value is parsed before it is believed |
+| Exact lat/lon names | `lat`/`lon`, `latitude`/`longitude`, `lng`, `long`, and `y`/`x` |
+| Matching numeric pair | Two numeric columns alike but for the axis word: `decimalLatitude`/`decimalLongitude`, `lat_dd`/`lon_dd`, `LATITUDE_WGS84`/`LONGITUDE_WGS84`, `location.lat`/`location.lon` |
+
+Words are matched whole, so a column like `GCLONG01` is not mistaken for a
+longitude. When several matching pairs exist — `pickup_latitude`/
+`pickup_longitude` beside `dropoff_latitude`/`dropoff_longitude` — the first is
+used and the others are named in a warning; pass `--lat-column`/`--lon-column`
+to choose. A Parquet file that already has a geometry column is never
+reinterpreted: those flags are refused for it, and auto-detection does not run.
+
+A mistyped name is answered with the nearest column names rather than a bare
+failure:
+
 ```
-
-<!-- doctest: skip="needs a CSV with a 'geom_wkt' column" -->
-```bash
-# Explicit columns
-gpio convert data.csv out.parquet --wkt-column geom_wkt
-
-gpio convert data.csv out.parquet --lat-column lat --lon-column lng
-
-# Custom delimiter
-gpio convert data.txt out.parquet --delimiter "|"
+Error: column 'LONG' not found in input. Did you mean 'LON'?
+Available columns: OBS_TIMESTAMP, MSG_TYPE, ... (+161 more)
 ```
 
 ### CRS and Validation
 
-Default: WGS84 (EPSG:4326). Override with `--crs` for WKT data:
+Default: WGS84 (EPSG:4326). Override with `--crs` for WKT data — in a CSV or
+in a Parquet file whose geometry gpio is building from its columns:
 
 <!-- doctest: skip="needs projected.csv, which the harness does not seed" -->
 ```bash
 gpio convert projected.csv out.parquet --crs EPSG:3857
 ```
+
+`--crs` is still refused for a source that states its own CRS (a GeoPackage,
+a shapefile, a Parquet file with a `geo` block).
 
 Validates lat/lon ranges (-90 to 90, -180 to 180). Warns on large coordinates suggesting projected CRS.
 
@@ -825,7 +1168,8 @@ geometry. Those rows are kept either way, with NULL geometry, so their
 attributes survive the conversion; they sort after the ordered rows, as they do
 for every other input format.
 
-Skips invalid rows, disables Hilbert ordering. Mixed geometry types supported.
+Skips rows whose geometry does not parse; the output is still Hilbert-ordered
+(add `--skip-hilbert` to keep the input order). Mixed geometry types supported.
 
 ### Delimiters
 
@@ -835,6 +1179,37 @@ Auto-detects comma and tab. Override with `--delimiter` for semicolon, pipe, or 
 ```bash
 gpio convert data.csv out.parquet --delimiter ";"
 ```
+
+## Columns Whose Names Differ Only by Case
+
+Some sources carry two columns whose names differ only by case -- most often a
+GeoServer WFS response, where the driver materialises the feature-level `id`
+member beside the publisher's own `Id`. DuckDB identifiers are
+case-insensitive, so such a file cannot be read as it stands.
+
+`convert` keeps both columns: the first spelling it meets keeps its name, and
+each later collision is suffixed (`Id` becomes `Id_1`). Parquet field names are
+case-sensitive, so nothing is dropped, and every rename is logged. Sources
+without a collision are unaffected.
+
+=== "CLI"
+
+    <!-- doctest: skip="needs a source carrying both 'id' and 'Id'" -->
+    ```bash
+    gpio convert geoparquet counties.geojson counties.parquet
+    # Renamed column "Id" to "Id_1": it collides with an earlier column
+    # under DuckDB's case-insensitive identifiers
+    ```
+
+=== "Python"
+
+    <!-- doctest: skip="needs a source carrying both 'id' and 'Id'" -->
+    ```python
+    import geoparquet_io as gpio
+
+    # columns land as 'id' and 'Id_1'
+    gpio.convert('counties.geojson').write('counties.parquet')
+    ```
 
 ## Performance
 

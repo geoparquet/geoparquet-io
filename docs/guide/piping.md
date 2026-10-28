@@ -143,6 +143,32 @@ When you use `-` for output, gpio writes data in [Arrow IPC streaming format](ht
 
 The receiving command reads the Arrow IPC stream, processes the data, and outputs either another Arrow stream (for further piping) or a Parquet file.
 
+### Native Geometry Through a Pipe
+
+Pass-through operations such as extraction keep each geometry column's CRS and
+edge interpolation in the Arrow fields, including native `GEOGRAPHY` files with
+no `geo` metadata key. Secondary geometry columns keep their own descriptions.
+The next extraction sees spherical edges before deciding whether planar repair
+is safe, so a pole-enclosing polygon is not rewritten as line fragments.
+
+An explicit supported edge choice in the `geo` block takes precedence over the
+Arrow field type. Operations that construct new planar geometry keep their
+existing planar behavior.
+
+=== "CLI"
+
+    ```bash
+    gpio extract geoparquet input.parquet - | gpio extract geoparquet - output.parquet
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    gpio.read("input.parquet").extract().write("output.parquet")
+    ```
+
 ## Auto-Detection
 
 gpio automatically detects when stdout is piped to another process. You don't need to specify `-` for output:

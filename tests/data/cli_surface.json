@@ -834,6 +834,22 @@
      "kind": "command",
      "params": [
       {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "bbox_name",
+       "nargs": 1,
+       "opts": [
+        "--bbox-name"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
        "default": "<unset>",
        "hidden": false,
        "is_flag": false,
@@ -2171,6 +2187,110 @@
        "type": "text"
       }
      ]
+    },
+    "stac-metadata": {
+     "class": "SingleFileCommand",
+     "hidden": false,
+     "kind": "command",
+     "params": [
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "collection",
+       "nargs": 1,
+       "opts": [
+        "--collection"
+       ],
+       "param_type": "Option",
+       "required": true,
+       "secondary_opts": [],
+       "type": "path[exists=True,file_okay=True,dir_okay=False,writable=False,readable=True,resolve_path=False]"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "input_parquet",
+       "nargs": 1,
+       "opts": [
+        "input_parquet"
+       ],
+       "param_type": "Argument",
+       "required": true,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "output_parquet",
+       "nargs": 1,
+       "opts": [
+        "output_parquet"
+       ],
+       "param_type": "Argument",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "overwrite",
+       "nargs": 1,
+       "opts": [
+        "--overwrite"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "'1.1.0'",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "stac_geoparquet_version",
+       "nargs": 1,
+       "opts": [
+        "--stac-geoparquet-version"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "choice[1.0.0|1.1.0,case_sensitive=True]"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "verbose",
+       "nargs": 1,
+       "opts": [
+        "--verbose",
+        "-v"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      }
+     ]
     }
    },
    "default_subcommand": null,
@@ -2821,6 +2941,22 @@
        "is_flag": true,
        "metavar": null,
        "multiple": false,
+       "name": "strict",
+       "nargs": 1,
+       "opts": [
+        "--strict"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
        "name": "verbose",
        "nargs": 1,
        "opts": [
@@ -2838,6 +2974,22 @@
      "hidden": false,
      "kind": "command",
      "params": [
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "all_rows",
+       "nargs": 1,
+       "opts": [
+        "--all-rows"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
       {
        "default": "False",
        "hidden": false,
@@ -2949,6 +3101,38 @@
        "required": true,
        "secondary_opts": [],
        "type": "text"
+      },
+      {
+       "default": "5000",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "sample_rows",
+       "nargs": 1,
+       "opts": [
+        "--sample-rows"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "integer range[min=0,max=None,min_open=False,max_open=False,clamp=False]"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "strict",
+       "nargs": 1,
+       "opts": [
+        "--strict"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
       },
       {
        "default": "False",
@@ -3091,6 +3275,22 @@
        "is_flag": true,
        "metavar": null,
        "multiple": false,
+       "name": "strict",
+       "nargs": 1,
+       "opts": [
+        "--strict"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
        "name": "verbose",
        "nargs": 1,
        "opts": [
@@ -3155,6 +3355,22 @@
        "required": true,
        "secondary_opts": [],
        "type": "text"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "strict",
+       "nargs": 1,
+       "opts": [
+        "--strict"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
       },
       {
        "default": "False",
@@ -3306,6 +3522,22 @@
        "required": false,
        "secondary_opts": [],
        "type": "choice[web,case_sensitive=False]"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "strict",
+       "nargs": 1,
+       "opts": [
+        "--strict"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
       },
       {
        "default": "False",
@@ -3480,6 +3712,22 @@
        "is_flag": true,
        "metavar": null,
        "multiple": false,
+       "name": "strict",
+       "nargs": 1,
+       "opts": [
+        "--strict"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
        "name": "verbose",
        "nargs": 1,
        "opts": [
@@ -3583,6 +3831,22 @@
        "is_flag": true,
        "metavar": null,
        "multiple": false,
+       "name": "strict",
+       "nargs": 1,
+       "opts": [
+        "--strict"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
        "name": "verbose",
        "nargs": 1,
        "opts": [
@@ -3616,6 +3880,22 @@
        "required": true,
        "secondary_opts": [],
        "type": "text"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "strict",
+       "nargs": 1,
+       "opts": [
+        "--strict"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
       },
       {
        "default": "False",
@@ -3661,6 +3941,38 @@
        "nargs": 1,
        "opts": [
         "--aws-profile"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "bbox",
+       "nargs": 1,
+       "opts": [
+        "--bbox"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "geometry",
+       "nargs": 1,
+       "opts": [
+        "--geometry"
        ],
        "param_type": "Option",
        "required": false,
@@ -3769,6 +4081,22 @@
        "is_flag": true,
        "metavar": null,
        "multiple": false,
+       "name": "use_first_geometry",
+       "nargs": 1,
+       "opts": [
+        "--use-first-geometry"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
        "name": "verbose",
        "nargs": 1,
        "opts": [
@@ -3779,6 +4107,22 @@
        "required": false,
        "secondary_opts": [],
        "type": "boolean"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "where",
+       "nargs": 1,
+       "opts": [
+        "--where"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
       }
      ]
     },
@@ -3797,6 +4141,38 @@
        "nargs": 1,
        "opts": [
         "--aws-profile"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "bbox",
+       "nargs": 1,
+       "opts": [
+        "--bbox"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "geometry",
+       "nargs": 1,
+       "opts": [
+        "--geometry"
        ],
        "param_type": "Option",
        "required": false,
@@ -3873,6 +4249,22 @@
        "is_flag": true,
        "metavar": null,
        "multiple": false,
+       "name": "use_first_geometry",
+       "nargs": 1,
+       "opts": [
+        "--use-first-geometry"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
        "name": "verbose",
        "nargs": 1,
        "opts": [
@@ -3883,6 +4275,22 @@
        "required": false,
        "secondary_opts": [],
        "type": "boolean"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "where",
+       "nargs": 1,
+       "opts": [
+        "--where"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
       }
      ]
     },
@@ -4163,6 +4571,38 @@
        "is_flag": false,
        "metavar": null,
        "multiple": false,
+       "name": "bbox",
+       "nargs": 1,
+       "opts": [
+        "--bbox"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "geometry",
+       "nargs": 1,
+       "opts": [
+        "--geometry"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
        "name": "input_file",
        "nargs": 1,
        "opts": [
@@ -4243,6 +4683,22 @@
        "is_flag": true,
        "metavar": null,
        "multiple": false,
+       "name": "use_first_geometry",
+       "nargs": 1,
+       "opts": [
+        "--use-first-geometry"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
        "name": "verbose",
        "nargs": 1,
        "opts": [
@@ -4253,6 +4709,22 @@
        "required": false,
        "secondary_opts": [],
        "type": "boolean"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "where",
+       "nargs": 1,
+       "opts": [
+        "--where"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
       }
      ]
     },
@@ -4388,6 +4860,38 @@
        "required": false,
        "secondary_opts": [],
        "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "encoding",
+       "nargs": 1,
+       "opts": [
+        "--encoding"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "force_2d",
+       "nargs": 1,
+       "opts": [
+        "--force-2d"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
       },
       {
        "default": "None",
@@ -5924,7 +6428,23 @@
        "default": "<unset>",
        "hidden": false,
        "is_flag": false,
-       "metavar": "TABLE_ID",
+       "metavar": null,
+       "multiple": false,
+       "name": "sql",
+       "nargs": 1,
+       "opts": [
+        "--sql"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": "[TABLE_ID]",
        "multiple": false,
        "name": "table_id",
        "nargs": 1,
@@ -5932,7 +6452,7 @@
         "table_id"
        ],
        "param_type": "Argument",
-       "required": true,
+       "required": false,
        "secondary_opts": [],
        "type": "text"
       },
@@ -10577,6 +11097,22 @@
        "type": "text"
       },
       {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "chunks",
+       "nargs": 1,
+       "opts": [
+        "--chunks"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
        "default": "True",
        "hidden": false,
        "is_flag": true,
@@ -10845,6 +11381,23 @@
        "type": "text"
       },
       {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "temporary_directory",
+       "nargs": 1,
+       "opts": [
+        "--temporary-directory",
+        "-t"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "path[exists=True,file_okay=False,dir_okay=True,writable=True,readable=True,resolve_path=True]"
+      },
+      {
        "default": "False",
        "hidden": false,
        "is_flag": true,
@@ -11094,6 +11647,23 @@
        "type": "path[exists=False,file_okay=True,dir_okay=True,writable=False,readable=True,resolve_path=False]"
       },
       {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "temporary_directory",
+       "nargs": 1,
+       "opts": [
+        "--temporary-directory",
+        "-t"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "path[exists=True,file_okay=False,dir_okay=True,writable=True,readable=True,resolve_path=True]"
+      },
+      {
        "default": "False",
        "hidden": false,
        "is_flag": true,
@@ -11193,6 +11763,22 @@
          "required": false,
          "secondary_opts": [],
          "type": "integer"
+        },
+        {
+         "default": "None",
+         "hidden": false,
+         "is_flag": false,
+         "metavar": null,
+         "multiple": false,
+         "name": "breakdown_metric",
+         "nargs": 1,
+         "opts": [
+          "--breakdown-metric"
+         ],
+         "param_type": "Option",
+         "required": false,
+         "secondary_opts": [],
+         "type": "text"
         },
         {
          "default": "'geometry'",
@@ -11434,6 +12020,22 @@
          "required": false,
          "secondary_opts": [],
          "type": "text"
+        },
+        {
+         "default": "None",
+         "hidden": false,
+         "is_flag": false,
+         "metavar": null,
+         "multiple": false,
+         "name": "write_memory",
+         "nargs": 1,
+         "opts": [
+          "--write-memory"
+         ],
+         "param_type": "Option",
+         "required": false,
+         "secondary_opts": [],
+         "type": "text"
         }
        ]
       },
@@ -11489,6 +12091,22 @@
          "required": false,
          "secondary_opts": [],
          "type": "integer"
+        },
+        {
+         "default": "None",
+         "hidden": false,
+         "is_flag": false,
+         "metavar": null,
+         "multiple": false,
+         "name": "breakdown_metric",
+         "nargs": 1,
+         "opts": [
+          "--breakdown-metric"
+         ],
+         "param_type": "Option",
+         "required": false,
+         "secondary_opts": [],
+         "type": "text"
         },
         {
          "default": "'geometry'",
@@ -11698,6 +12316,22 @@
          "required": false,
          "secondary_opts": [],
          "type": "text"
+        },
+        {
+         "default": "None",
+         "hidden": false,
+         "is_flag": false,
+         "metavar": null,
+         "multiple": false,
+         "name": "write_memory",
+         "nargs": 1,
+         "opts": [
+          "--write-memory"
+         ],
+         "param_type": "Option",
+         "required": false,
+         "secondary_opts": [],
+         "type": "text"
         }
        ]
       },
@@ -11769,6 +12403,22 @@
          "required": false,
          "secondary_opts": [],
          "type": "integer"
+        },
+        {
+         "default": "None",
+         "hidden": false,
+         "is_flag": false,
+         "metavar": null,
+         "multiple": false,
+         "name": "breakdown_metric",
+         "nargs": 1,
+         "opts": [
+          "--breakdown-metric"
+         ],
+         "param_type": "Option",
+         "required": false,
+         "secondary_opts": [],
+         "type": "text"
         },
         {
          "default": "'geometry'",
@@ -12010,6 +12660,22 @@
          "required": false,
          "secondary_opts": [],
          "type": "text"
+        },
+        {
+         "default": "None",
+         "hidden": false,
+         "is_flag": false,
+         "metavar": null,
+         "multiple": false,
+         "name": "write_memory",
+         "nargs": 1,
+         "opts": [
+          "--write-memory"
+         ],
+         "param_type": "Option",
+         "required": false,
+         "secondary_opts": [],
+         "type": "text"
         }
        ]
       }
@@ -12019,6 +12685,270 @@
      "hidden": false,
      "kind": "group",
      "params": []
+    },
+    "contour": {
+     "class": "Command",
+     "hidden": false,
+     "kind": "command",
+     "params": [
+      {
+       "default": "1",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "band",
+       "nargs": 1,
+       "opts": [
+        "--band"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "integer"
+      },
+      {
+       "default": "0.0",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "base",
+       "nargs": 1,
+       "opts": [
+        "--base"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "float"
+      },
+      {
+       "default": "'ZSTD'",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "compression",
+       "nargs": 1,
+       "opts": [
+        "--compression"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "compression_level",
+       "nargs": 1,
+       "opts": [
+        "--compression-level"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "integer range[min=1,max=22,min_open=False,max_open=False,clamp=False]"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "geoparquet_version",
+       "nargs": 1,
+       "opts": [
+        "--geoparquet-version"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "choice[1.0|1.1|1.1-geoarrow|2.0|parquet-geo-only,case_sensitive=True]"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "input_raster",
+       "nargs": 1,
+       "opts": [
+        "input_raster"
+       ],
+       "param_type": "Argument",
+       "required": true,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "interval",
+       "nargs": 1,
+       "opts": [
+        "--interval"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "float"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "levels",
+       "nargs": 1,
+       "opts": [
+        "--levels"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "'max'",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "max_column",
+       "nargs": 1,
+       "opts": [
+        "--max-column"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "'min'",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "min_column",
+       "nargs": 1,
+       "opts": [
+        "--min-column"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "no_mask",
+       "nargs": 1,
+       "opts": [
+        "--no-mask"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "nodata",
+       "nargs": 1,
+       "opts": [
+        "--nodata"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "float"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "output_parquet",
+       "nargs": 1,
+       "opts": [
+        "output_parquet"
+       ],
+       "param_type": "Argument",
+       "required": true,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "row_group_size",
+       "nargs": 1,
+       "opts": [
+        "--row-group-size"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "integer"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "row_group_size_mb",
+       "nargs": 1,
+       "opts": [
+        "--row-group-size-mb"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "verbose",
+       "nargs": 1,
+       "opts": [
+        "--verbose",
+        "-v"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      }
+     ]
     },
     "overview": {
      "class": "Command",
@@ -12058,6 +12988,22 @@
        "type": "text"
       },
       {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "cell_detail",
+       "nargs": 1,
+       "opts": [
+        "--cell-detail"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "float"
+      },
+      {
        "default": "'ZSTD'",
        "hidden": false,
        "is_flag": false,
@@ -12088,6 +13034,22 @@
        "required": false,
        "secondary_opts": [],
        "type": "integer range[min=1,max=22,min_open=False,max_open=False,clamp=False]"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "explicit_gsd",
+       "nargs": 1,
+       "opts": [
+        "--gsd"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
       },
       {
        "default": "False",
@@ -12192,6 +13154,22 @@
        "is_flag": false,
        "metavar": null,
        "multiple": false,
+       "name": "overview_out",
+       "nargs": 1,
+       "opts": [
+        "--overview-out"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "path[exists=False,file_okay=True,dir_okay=True,writable=False,readable=True,resolve_path=False]"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
        "name": "scheme",
        "nargs": 1,
        "opts": [
@@ -12217,6 +13195,542 @@
        "required": false,
        "secondary_opts": [],
        "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "verbose",
+       "nargs": 1,
+       "opts": [
+        "--verbose",
+        "-v"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "write_memory",
+       "nargs": 1,
+       "opts": [
+        "--write-memory"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      }
+     ]
+    },
+    "polygonize": {
+     "class": "Command",
+     "hidden": false,
+     "kind": "command",
+     "params": [
+      {
+       "default": "1",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "band",
+       "nargs": 1,
+       "opts": [
+        "--band"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "integer"
+      },
+      {
+       "default": "'ZSTD'",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "compression",
+       "nargs": 1,
+       "opts": [
+        "--compression"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "compression_level",
+       "nargs": 1,
+       "opts": [
+        "--compression-level"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "integer range[min=1,max=22,min_open=False,max_open=False,clamp=False]"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "geoparquet_version",
+       "nargs": 1,
+       "opts": [
+        "--geoparquet-version"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "choice[1.0|1.1|1.1-geoarrow|2.0|parquet-geo-only,case_sensitive=True]"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "input_raster",
+       "nargs": 1,
+       "opts": [
+        "input_raster"
+       ],
+       "param_type": "Argument",
+       "required": true,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "no_mask",
+       "nargs": 1,
+       "opts": [
+        "--no-mask"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "nodata",
+       "nargs": 1,
+       "opts": [
+        "--nodata"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "float"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "output_parquet",
+       "nargs": 1,
+       "opts": [
+        "output_parquet"
+       ],
+       "param_type": "Argument",
+       "required": true,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "True",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "repair_geometry",
+       "nargs": 1,
+       "opts": [
+        "--repair-geometry"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [
+        "--no-repair-geometry"
+       ],
+       "type": "boolean"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "row_group_size",
+       "nargs": 1,
+       "opts": [
+        "--row-group-size"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "integer"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "row_group_size_mb",
+       "nargs": 1,
+       "opts": [
+        "--row-group-size-mb"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "'value'",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "value_column",
+       "nargs": 1,
+       "opts": [
+        "--value-column"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "values",
+       "nargs": 1,
+       "opts": [
+        "--values"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "verbose",
+       "nargs": 1,
+       "opts": [
+        "--verbose",
+        "-v"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      }
+     ]
+    },
+    "simplify": {
+     "class": "Command",
+     "hidden": false,
+     "kind": "command",
+     "params": [
+      {
+       "default": "'ZSTD'",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "compression",
+       "nargs": 1,
+       "opts": [
+        "--compression"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "compression_level",
+       "nargs": 1,
+       "opts": [
+        "--compression-level"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "integer range[min=1,max=22,min_open=False,max_open=False,clamp=False]"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "coverage",
+       "nargs": 1,
+       "opts": [
+        "--coverage"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [
+        "--no-coverage"
+       ],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "drop_empty",
+       "nargs": 1,
+       "opts": [
+        "--drop-empty"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "geometry_column",
+       "nargs": 1,
+       "opts": [
+        "--geometry-column"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "geoparquet_version",
+       "nargs": 1,
+       "opts": [
+        "--geoparquet-version"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "choice[1.0|1.1|1.1-geoarrow|2.0|parquet-geo-only,case_sensitive=True]"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "input_parquet",
+       "nargs": 1,
+       "opts": [
+        "input_parquet"
+       ],
+       "param_type": "Argument",
+       "required": true,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "output_parquet",
+       "nargs": 1,
+       "opts": [
+        "output_parquet"
+       ],
+       "param_type": "Argument",
+       "required": true,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "preserve_topology",
+       "nargs": 1,
+       "opts": [
+        "--preserve-topology"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [
+        "--no-preserve-topology"
+       ],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "refresh_metrics",
+       "nargs": 1,
+       "opts": [
+        "--refresh-metrics"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "row_group_size",
+       "nargs": 1,
+       "opts": [
+        "--row-group-size"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "integer"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "row_group_size_mb",
+       "nargs": 1,
+       "opts": [
+        "--row-group-size-mb"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "simplify_boundary",
+       "nargs": 1,
+       "opts": [
+        "--simplify-boundary"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [
+        "--no-simplify-boundary"
+       ],
+       "type": "boolean"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "simplify_crs",
+       "nargs": 1,
+       "opts": [
+        "--simplify-crs"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "threads",
+       "nargs": 1,
+       "opts": [
+        "--threads"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "integer"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "tolerance",
+       "nargs": 1,
+       "opts": [
+        "--tolerance"
+       ],
+       "param_type": "Option",
+       "required": true,
+       "secondary_opts": [],
+       "type": "float"
       },
       {
        "default": "False",

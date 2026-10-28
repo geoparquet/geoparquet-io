@@ -26,16 +26,6 @@ from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
 TEST_DATA_DIR = Path(__file__).parent / "data"
 
 
-def _dead_pid() -> int:
-    """A pid that has certainly exited and been reaped."""
-    import subprocess
-    import sys
-
-    proc = subprocess.Popen([sys.executable, "-c", ""])
-    proc.wait()
-    return proc.pid
-
-
 def _spatial_connection(duckdb):
     """An in-memory DuckDB with spatial loaded, configured as gpio configures it."""
     con = duckdb.connect()
@@ -1172,7 +1162,7 @@ class TestClearCache:
                 assert (cache_dir / "readme.txt").exists()
                 assert (cache_dir / ".gitkeep").exists()
 
-    def test_clear_cache_removes_orphaned_spill_directories(self):
+    def test_clear_cache_removes_orphaned_spill_directories(self, dead_pid):
         """The worst orphan lands here, in ``$HOME``, where no tmp-reaper runs.
 
         ``gpio add admin-divisions`` spills onto the admin cache volume, so an
@@ -1182,7 +1172,7 @@ class TestClearCache:
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_dir = Path(tmpdir)
-            orphan = cache_dir / f"gpio-spill-{_dead_pid()}-abcdef123456"
+            orphan = cache_dir / f"gpio-spill-{dead_pid}-abcdef123456"
             orphan.mkdir()
             (orphan / "duckdb_temp_storage_S192K-0.tmp").write_bytes(b"x" * 2048)
 

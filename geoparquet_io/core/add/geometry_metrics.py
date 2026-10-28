@@ -5,17 +5,27 @@ Add geometry metrics (area and perimeter) to GeoParquet files.
 
 Calculates geodesic area (m²) and perimeter (m) using DuckDB's spheroid
 functions, following the Vecorel geometry-metrics extension specification.
+
+The spheroid functions read lon/lat degrees. Input in any other CRS is
+transformed to OGC:CRS84 first: handed projected metres they return NaN, which
+the command used to write without a word (#1193).
 """
 
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from geoparquet_io.core.common import (
     add_computed_column,
     get_parquet_metadata,
 )
 from geoparquet_io.core.constants import VECOREL_METRICS_SCHEMA, build_collection_metadata
+from geoparquet_io.core.crs_utils import (
+    crs_transform_sql_expr,
+    extract_crs_from_parquet,
+    transform_geom_sql,
+)
 from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geometry_detection import (
@@ -31,6 +41,14 @@ from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 AREA_COLUMN = "metrics:area"
 PERIMETER_COLUMN = "metrics:perimeter"
+
+
+def _metric_exprs(geom_sql: str) -> tuple[str, str]:
+    """``(area, perimeter)`` SQL over a lon/lat geometry expression."""
+    return (
+        f"CAST(ST_Area_Spheroid({geom_sql}) AS FLOAT)",
+        f"CAST(ST_Perimeter_Spheroid({geom_sql}) AS FLOAT)",
+    )
 
 
 def _build_vecorel_metadata(
@@ -60,7 +78,9 @@ def add_geometry_metrics(
     Add geometry metrics (area and perimeter) to a GeoParquet file.
 
     Calculates geodesic area (m²) and perimeter (m) for each geometry
-    using spheroid-based calculations (assumes WGS84/EPSG:4326 input).
+    using spheroid-based calculations. The primary geometry's CRS is read from
+    the input and a non-default one is transformed to OGC:CRS84 first; an
+    explicit ``crs: null`` (unknown) warns and is measured as lon/lat.
 
     Uses add_computed_column for each metric — two passes over the data.
 
@@ -134,7 +154,7 @@ def _add_metrics_streaming(
     if should_stream_output(output_path):
         verbose = False
 
-    def make_query(source: str, con) -> str:
+    def make_query(source: str, con, source_crs: str | None = None) -> str:
         sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
         col_names = [col[0] for col in sample]
 
@@ -146,10 +166,12 @@ def _add_metrics_streaming(
         if not geom_col:
             geom_col = "geometry"
 
+        # `source_crs` is the input's CRS as an AUTH:CODE string, read by
+        # execute_transform from the file or the stream's geo metadata.
+        area, perimeter = _metric_exprs(transform_geom_sql(quote_identifier(geom_col), source_crs))
         return (
-            f"SELECT *, "
-            f"CAST(ST_Area_Spheroid({quote_identifier(geom_col)}) AS FLOAT) AS {quote_identifier(AREA_COLUMN)}, "
-            f"CAST(ST_Perimeter_Spheroid({quote_identifier(geom_col)}) AS FLOAT) AS {quote_identifier(PERIMETER_COLUMN)} "
+            f"SELECT *, {area} AS {quote_identifier(AREA_COLUMN)}, "
+            f"{perimeter} AS {quote_identifier(PERIMETER_COLUMN)} "
             f"FROM {source}"
         )
 
@@ -196,8 +218,11 @@ def _add_metrics_file_based(
 
     geom_col = find_primary_geometry_column(input_parquet, verbose)
 
-    area_expr = f"CAST(ST_Area_Spheroid({quote_identifier(geom_col)}) AS FLOAT)"
-    perimeter_expr = f"CAST(ST_Perimeter_Spheroid({quote_identifier(geom_col)}) AS FLOAT)"
+    # RAW path: extract_crs_from_parquet escapes its own argument (#718).
+    source_crs = extract_crs_from_parquet(input_parquet, verbose, geometry_column=geom_col)
+    area_expr, perimeter_expr = _metric_exprs(
+        crs_transform_sql_expr(quote_identifier(geom_col), source_crs)
+    )
 
     if dry_run:
         from geoparquet_io.core.logging_config import info
@@ -250,18 +275,32 @@ def _add_metrics_file_based(
         if os.path.exists(temp_file):
             os.unlink(temp_file)
 
-    # Add Vecorel metadata and ensure required columns
+    # Add Vecorel metadata and ensure required columns. These rewrite the file
+    # in place, so they must keep writing at the caller's resolved settings —
+    # left to their own defaults they undid the level of everything above
+    # (DuckDB's 3 for the id column, pyarrow's 1 for the schema fix).
     if vecorel:
         from geoparquet_io.core.constants import ensure_vecorel_columns
 
-        _add_vecorel_metadata_to_file(output_parquet, verbose, memory_limit)
-        ensure_vecorel_columns(output_parquet, verbose)
+        _add_vecorel_metadata_to_file(
+            output_parquet, verbose, memory_limit, compression, compression_level
+        )
+        ensure_vecorel_columns(
+            output_parquet,
+            verbose,
+            compression=compression,
+            compression_level=compression_level,
+        )
 
     success(f"Added {AREA_COLUMN} and {PERIMETER_COLUMN} to: {output_parquet}")
 
 
 def _add_vecorel_metadata_to_file(
-    parquet_file: str, verbose: bool, memory_limit: str | None
+    parquet_file: str,
+    verbose: bool,
+    memory_limit: str | None,
+    compression: str = "ZSTD",
+    compression_level: int | None = None,
 ) -> None:
     """Add Vecorel schema metadata to an existing file via rewrite."""
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
@@ -290,6 +329,15 @@ def _add_vecorel_metadata_to_file(
     os.close(fd)
     os.unlink(temp_out)
 
+    # The caller's codec always goes through -- dropping it when the level is
+    # unset re-encoded a GZIP output as ZSTD on this one rewrite. An unset
+    # level stays None, the same "no COMPRESSION_LEVEL in the COPY" the
+    # command's other writes already mean by it (#1335 tracks what unset
+    # resolves to across the COPY paths).
+    level_kwargs: dict[str, Any] = {
+        "compression": compression,
+        "compression_level": compression_level,
+    }
     try:
         try:
             write_parquet_with_metadata(
@@ -299,6 +347,7 @@ def _add_vecorel_metadata_to_file(
                 original_metadata=metadata,
                 extra_kv_metadata=extra_kv,
                 verbose=verbose,
+                **level_kwargs,
                 # A whole-file rewrite to attach one sidecar key must not also
                 # change the geometry encoding. Without this witness auto mode
                 # read the carried `geo` key, which does not say whether the

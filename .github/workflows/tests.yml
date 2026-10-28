@@ -28,7 +28,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -70,7 +70,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -92,9 +92,68 @@ jobs:
           # shellcheck disable=SC2086
           uv run pip-audit $IGNORE_ARGS
 
+  embeddable-import:
+    # The embeddable core surface (#1307, docs/guide/embedding.md) must import
+    # in a host application that ships neither DuckDB nor click — a QGIS plugin
+    # vendoring these modules as source files. A fresh venv with only pyarrow
+    # proves it. import-linter cannot enforce this: it counts function-body
+    # imports as edges, so "top-level only" is not expressible as a contract.
+    # tests/test_embeddable_imports.py keeps this module list in sync.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Build a bare venv (pyarrow only — no duckdb, no click)
+        run: |
+          uv venv bare-venv --python 3.11
+          uv pip install -p bare-venv/bin/python 'pyarrow>=23.0.1'
+
+      - name: Import the embeddable surface without duckdb or click
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          bare-venv/bin/python - <<'EOF'
+          import sys
+
+          import geoparquet_io
+
+          assert "click" not in sys.modules, "`import geoparquet_io` pulled in click"
+          assert "duckdb" not in sys.modules, "`import geoparquet_io` pulled in duckdb"
+
+          import geoparquet_io.core.bbox_structure
+          import geoparquet_io.core.duckdb_metadata
+          import geoparquet_io.core.extract
+          import geoparquet_io.core.format_writers
+          import geoparquet_io.core.geo_metadata
+          import geoparquet_io.core.preview
+          import geoparquet_io.core.remote
+
+          assert "click" not in sys.modules, "the embeddable surface pulled in click"
+          assert "duckdb" not in sys.modules, "the embeddable surface pulled in duckdb"
+          print("embeddable surface imports cleanly without duckdb or click")
+          EOF
+
   test:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    permissions:
+      contents: read
+      # Codecov uploads authenticate via OIDC (use_oidc on the upload step);
+      # without a token every upload is silently dropped and the badge goes
+      # stale. Not available to fork PRs, where the upload step fails softly
+      # (fail_ci_if_error: false).
+      id-token: write
     env:
       # THE single place that decides which matrix leg reports coverage.
       # Four things key off it (fetch-depth, COV_ARGS, the Codecov upload, the
@@ -135,7 +194,7 @@ jobs:
           submodules: true
 
       - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -151,7 +210,7 @@ jobs:
           # DuckDB extension downloads (extensions.duckdb.org) occasionally fail
           # with a transient network error, which broke otherwise-green builds.
           # Retry with backoff before giving up.
-          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
+          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
           for attempt in 1 2 3 4 5; do
             if uv run python -c "$install"; then
               echo "DuckDB extensions installed (attempt $attempt)."
@@ -214,11 +273,12 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: env.COVERAGE_JOB == 'true'
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ./coverage.xml
           flags: unittests
           name: codecov-umbrella
+          use_oidc: true
           fail_ci_if_error: false
 
       - name: Diff coverage gate (changed lines >= 90% covered)
@@ -246,7 +306,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -288,7 +348,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -311,7 +371,7 @@ jobs:
         run: |
           # Same transient-failure retry as the fast matrix: extensions.duckdb.org
           # occasionally drops a request and breaks an otherwise-green build.
-          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
+          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
           for attempt in 1 2 3 4 5; do
             if uv run python -c "$install"; then
               echo "DuckDB extensions installed (attempt $attempt)."
@@ -354,6 +414,10 @@ jobs:
        contains(github.event.pull_request.labels.*.name, 'run-slow-tests'))
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    permissions:
+      contents: read
+      # OIDC for the Codecov upload, same as the test job above.
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -367,7 +431,7 @@ jobs:
           submodules: true
 
       - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -394,7 +458,7 @@ jobs:
           # DuckDB extension downloads (extensions.duckdb.org) occasionally fail
           # with a transient network error, which broke otherwise-green builds.
           # Retry with backoff before giving up.
-          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
+          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
           for attempt in 1 2 3 4 5; do
             if uv run python -c "$install"; then
               echo "DuckDB extensions installed (attempt $attempt)."
@@ -458,11 +522,12 @@ jobs:
 
       - name: Upload slow test coverage to Codecov
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ./coverage.xml
           flags: slowtests
           name: codecov-slow
+          use_oidc: true
           fail_ci_if_error: false
 
   network-tests:
@@ -487,7 +552,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -506,7 +571,7 @@ jobs:
           # DuckDB extension downloads (extensions.duckdb.org) occasionally fail
           # with a transient network error, which broke otherwise-green builds.
           # Retry with backoff before giving up.
-          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
+          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
           for attempt in 1 2 3 4 5; do
             if uv run python -c "$install"; then
               echo "DuckDB extensions installed (attempt $attempt)."

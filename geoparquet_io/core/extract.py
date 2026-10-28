@@ -22,7 +22,7 @@ from geoparquet_io.core.column_selection import (
     reject_blank_column_entries,
     split_column_list,
 )
-from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.common import get_parquet_metadata, should_skip_bbox
 from geoparquet_io.core.crs_utils import get_crs_display_name
 from geoparquet_io.core.duckdb_metadata import (
     get_geo_metadata,
@@ -35,6 +35,7 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     get_duckdb_connection_for_s3,
     quote_identifier,
+    register_arrow,
     sql_path,
     validate_where_clause,
 )
@@ -44,6 +45,7 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
 )
 from geoparquet_io.core.file_utils import (
+    get_all_parquet_files,
     get_first_parquet_file,
     handle_output_overwrite,
     is_partition_path,
@@ -59,8 +61,12 @@ from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
-from geoparquet_io.core.geometry_repair import repair_query_geometry
+from geoparquet_io.core.geometry_repair import (
+    nonplanar_edges_of_arrow_table,
+    repair_query_geometry,
+)
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
+from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.partition.reader import build_read_parquet_expr, require_parquet_files
 from geoparquet_io.core.remote import (
     _sanitize_url_for_logging,
@@ -74,7 +80,10 @@ from geoparquet_io.core.streaming import (
     is_stdin,
     should_stream_output,
 )
-from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+from geoparquet_io.core.write_funnels import (
+    declared_nonplanar_edges,
+    write_parquet_with_metadata,
+)
 
 
 def get_parquet_row_count(parquet_file: str) -> int:
@@ -485,6 +494,14 @@ def build_column_selection(
 
     Returns:
         list: Columns to select (preserving original order)
+
+    Raises:
+        InvalidParameterError: If the selection leaves no columns at all. The
+            empty list used to reach the three SQL builders below it and come
+            back as a raw ``ParserException: SELECT clause without selection
+            list`` -- on the file-based path, the streaming path and
+            ``extract_table`` alike. This is the guard ``extract arcgis``
+            already makes, in the one place all three share (#1176).
     """
     exclude_set = set(exclude_cols) if exclude_cols else set()
 
@@ -502,7 +519,13 @@ def build_column_selection(
         selected = set(all_columns)
 
     # Preserve original column order
-    return [c for c in all_columns if c in selected]
+    result = [c for c in all_columns if c in selected]
+    if all_columns and not result:
+        raise InvalidParameterError(
+            "exclude_cols" if exclude_cols else "columns",
+            f"this selection leaves no columns to extract (available: {', '.join(all_columns)})",
+        )
+    return result
 
 
 def validate_columns(
@@ -792,7 +815,7 @@ def extract_table(
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        con.register("__input_table", table)
+        registered = register_arrow(con, "__input_table", table)
         source_ref, needs_wkb = (
             _setup_geometry_view(con, table, geom_col) if geom_col else ("__input_table", False)
         )
@@ -810,7 +833,11 @@ def extract_table(
         geometry_repaired = False
         if keeps_geometry:
             query, geometry_repaired = _repair_geometry_in_query(
-                con, query, geom_col, repair_geometry
+                con,
+                query,
+                geom_col,
+                repair_geometry,
+                nonplanar_edges=nonplanar_edges_of_arrow_table(table, geom_col),
             )
 
         result = con.execute(query).arrow().read_all()
@@ -825,24 +852,31 @@ def extract_table(
                 metadata = backfill_derived_stats(strip_derived_stats(metadata), result)
                 metadata = strip_orientation(metadata, geom_col)
             result = result.replace_schema_metadata(metadata)
-        return result
+        # The geometry passes through unless the planar repair rewrote it; a
+        # repaired column is planar GEOMETRY now and must not be relabelled (#1253).
+        passed_through = [c for c in registered.fields if not (geometry_repaired and c == geom_col)]
+        return registered.restore_edges(result, passed_through)
     finally:
         con.close()
 
 
 def _repair_geometry_in_query(
-    con, query: str, geometry_column: str, repair: bool
+    con, query: str, geometry_column: str, repair: bool, nonplanar_edges: str | None = None
 ) -> tuple[str, bool]:
     """Run the geometry repair pass, reporting whether it rewrote the query.
 
     :func:`repair_query_geometry` returns ``query`` unchanged when repair is off,
-    when the column is not repairable in place, and when it counted zero invalid
-    rows; it returns a rewritten query only when at least one row will actually
-    be repaired. That distinction is what decides whether the input's derived
-    stats survive into the output: a pass that changed nothing keeps them, so a
-    file with no invalid geometry is never rescanned for nothing.
+    when the column is not repairable in place, when the column declares
+    non-planar edges (planar validity is the wrong test there — #1287), and when
+    it counted zero invalid rows; it returns a rewritten query only when at
+    least one row will actually be repaired. That distinction is what decides
+    whether the input's derived stats and orientation survive into the output: a
+    pass that changed nothing keeps them, so a file with no invalid geometry is
+    never rescanned for nothing.
     """
-    repaired_query = repair_query_geometry(con, query, geometry_column, repair=repair)
+    repaired_query = repair_query_geometry(
+        con, query, geometry_column, repair=repair, nonplanar_edges=nonplanar_edges
+    )
     return repaired_query, repaired_query != query
 
 
@@ -936,7 +970,9 @@ def _extract_streaming(
     if should_stream_output(output_path):
         verbose = False
 
-    with open_input(input_path, verbose=verbose) as (source, metadata, is_stream, con):
+    with open_input(
+        input_path, verbose=verbose, stream_output=should_stream_output(output_path)
+    ) as (source, metadata, is_stream, con):
         # Get column names from query result (works with both table names and read_parquet)
         sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
         all_columns = [col[0] for col in sample]
@@ -972,7 +1008,15 @@ def _extract_streaming(
         query = _build_query_for_source(source, selected_columns, spatial_filter, where, limit)
 
         # Repair invalid geometry (issue #506) before streaming the write.
-        query, geometry_repaired = _repair_geometry_in_query(con, query, geom_col, repair_geometry)
+        query, geometry_repaired = _repair_geometry_in_query(
+            con,
+            query,
+            geom_col,
+            repair_geometry,
+            # open_input carries the resolved field model in metadata before
+            # DuckDB registration. It is also the only witness on later hops.
+            nonplanar_edges=declared_nonplanar_edges(None, metadata).get(geom_col),
+        )
 
         if verbose:
             debug(f"Streaming extraction query: {query}")
@@ -1078,6 +1122,64 @@ TO {sql_path(output_parquet)}
     info(f"\n-- Note: Using {compression_desc} compression")
 
 
+def _advise_spatial_stats_on_merge(
+    input_parquet: str,
+    selected_columns: list[str],
+    bbox_col: str | None,
+    geoparquet_version: str | None,
+    geometry_col: str | None = None,
+) -> None:
+    """Tell a merge that will not prune that ``--geoparquet-version 2.0`` would.
+
+    A merged file is the one later reads window into again and again, so it is
+    the write that benefits most from per-row-group spatial statistics -- and
+    the one where their absence costs most. 219 per-country inputs concatenated
+    without them made every downstream ``--bbox`` shard job read 12,764 of
+    12,764 row groups, twelve times over a 90 GB file (#1151). Writing the merge
+    as 2.0 in the first place is one pass; the alternative the reporting
+    pipeline was paying for is a second whole-file ``gpio convert`` afterwards.
+
+    ``sort hilbert`` already names the flag when sorting to 1.1 buys no
+    pushdown, and #1151 asks the merge path to advertise the same way. It is an
+    advisory, not a default: promoting a 1.x merge to 2.0 unasked would hand the
+    caller a file older readers cannot open.
+
+    Scoped to the case that is actually unprunable. A single-file extract is not
+    a merge. The versions :func:`should_skip_bbox` says need no bbox covering are
+    exactly the versions that carry their own per-row-group spatial statistics,
+    so they are already prunable. And a *surviving* bbox covering column carries
+    ordinary Parquet min/max per row group, which prunes too -- #1151 accepts
+    either -- so it only speaks up when neither is there.
+    """
+    if is_remote_url(input_parquet) or not is_partition_path(input_parquet):
+        return
+    # Nothing spatial to collect statistics over: merging plain Parquet writes
+    # no geo key at all, and 2.0 is a verified no-op for it. Advising the flag
+    # there sends the reader after a setting that cannot help (review of #1151).
+    # A geometry column dropped by --exclude-cols is the same case (#1163).
+    if not geometry_col or geometry_col not in selected_columns:
+        return
+    if bbox_col and bbox_col in selected_columns:
+        return
+
+    effective_version = (
+        resolve_output_geoparquet_version(geoparquet_version, input_file=input_parquet) or "1.1"
+    )
+    if should_skip_bbox(effective_version):
+        return
+
+    inputs = get_all_parquet_files(input_parquet)
+    if len(inputs) < 2:
+        return
+
+    warn(
+        f"Merging {len(inputs):,} files to GeoParquet {effective_version} with no bbox covering "
+        "column: the merged file carries no per-row-group spatial statistics, so a later --bbox "
+        "read has to scan every row group. Consider --geoparquet-version 2.0 to enable native "
+        "geo_bbox row group statistics."
+    )
+
+
 def _execute_extraction(
     input_parquet: str,
     output_parquet: str,
@@ -1147,7 +1249,11 @@ def _execute_extraction(
         geometry_repaired = False
         if geometry_col:
             query, geometry_repaired = _repair_geometry_in_query(
-                con, query, geometry_col, repair_geometry
+                con,
+                query,
+                geometry_col,
+                repair_geometry,
+                nonplanar_edges=declared_nonplanar_edges(input_parquet, metadata).get(geometry_col),
             )
 
         stale_columns = _stale_stat_columns(
@@ -1399,6 +1505,9 @@ def _extract_impl(
             compression_level,
         )
     else:
+        _advise_spatial_stats_on_merge(
+            input_parquet, selected_columns, bbox_col, geoparquet_version, geometry_col
+        )
         _execute_extraction(
             input_parquet,
             output_parquet,

@@ -38,7 +38,8 @@ class _RecordingConnection:
 def test_bbox_query_excludes_empty_geometries():
     query = _build_bbox_query("input.parquet", "geometry", "BLOB", (0, 0, 1, 1), "")
 
-    assert 'NOT ST_IsEmpty(ST_GeomFromWKB("geometry"))' in query
+    assert "NOT ST_IsEmpty((CASE WHEN" in query
+    assert 'THEN ST_GeomFromWKB(list_extract(["geometry"], 1)) END)' in query
 
 
 def test_native_geo_stats_query_excludes_empty_geometries(tmp_path):

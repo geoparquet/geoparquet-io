@@ -433,6 +433,61 @@ class TestCheckMetadataAndBbox:
         check_metadata_and_bbox(places_test_file, verbose=True, return_results=False)
 
 
+class TestCheckAllReadsTheGeoBlockOnce:
+    """``check all`` asks the file for its ``geo`` block once, not per check.
+
+    Two of its five checks want the same block and each used to read it again.
+    On a remote file every read is a request, and under ``--fix`` the reads are
+    repeated per file in a glob.
+    """
+
+    def test_the_block_is_read_once(self, places_test_file, monkeypatch):
+        from geoparquet_io.core import check_parquet_structure as cps
+
+        real = cps.get_geo_metadata
+        reads = []
+
+        def counting(parquet_file, *args, **kwargs):
+            reads.append(str(parquet_file))
+            return real(parquet_file, *args, **kwargs)
+
+        monkeypatch.setattr(cps, "get_geo_metadata", counting)
+
+        cps.check_all(places_test_file, return_results=True, quiet=True)
+
+        assert reads == [str(places_test_file)]
+
+    def test_a_check_called_on_its_own_still_reads_for_itself(self, places_test_file):
+        """``geo_meta`` is an optimisation, not a new requirement on callers."""
+        from geoparquet_io.core.check_parquet_structure import (
+            check_covering_encoding,
+            check_metadata_and_bbox,
+        )
+
+        covering = check_covering_encoding(places_test_file, return_results=True, quiet=True)
+        bbox = check_metadata_and_bbox(places_test_file, return_results=True, quiet=True)
+
+        assert covering["passed"] is True
+        assert bbox["has_geo_metadata"] is True
+
+    def test_a_caller_supplied_block_is_the_one_judged(self, places_test_file):
+        """Non-vacuity: the parameter is used, not accepted and ignored."""
+        from geoparquet_io.core.check_parquet_structure import check_covering_encoding
+
+        broken = {
+            "version": "1.1.0",
+            "primary_column": "geometry",
+            "columns": {"geometry": {"encoding": "WKB", "covering": {"h3": {"column": "h3"}}}},
+        }
+
+        result = check_covering_encoding(
+            places_test_file, return_results=True, quiet=True, geo_meta=broken
+        )
+
+        assert result["passed"] is False
+        assert result["bboxless_covering_columns"] == ["geometry"]
+
+
 class TestV2UpgradeSuggestion:
     """Tests for v2.0 upgrade suggestion in check output for v1.1 files."""
 

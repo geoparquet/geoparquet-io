@@ -55,3 +55,22 @@ class TestGetOvertureDivisionsUrl:
             mock.return_value = "2099-01-01.0"
             url = get_overture_divisions_url()
             assert "2099-01-01.0" in url
+
+
+class TestFetchLatestRelease:
+    """The latest release comes from Overture's STAC catalog.
+
+    Overture froze ``releases.json`` at 2026-07-22.0 and deleted that release
+    from S3, so reading it resolves a path that no longer exists.
+    """
+
+    def test_reads_latest_from_stac_catalog(self):
+        import io
+        import json
+
+        body = json.dumps({"type": "Catalog", "latest": "2026-08-19.0"}).encode()
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value.__enter__.return_value = io.BytesIO(body)
+            assert overture_mod._fetch_latest_release() == "2026-08-19.0"
+        requested = mock_open.call_args.args[0]
+        assert requested == "https://stac.overturemaps.org/catalog.json"

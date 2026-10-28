@@ -988,9 +988,11 @@ class TestSchemaIsReadOnce:
         module_source = Path(inspect.getsourcefile(extract_bigquery)).read_text(encoding="utf-8")
         helper_source = inspect.getsource(extract_bigquery._schema_rows)
 
-        # Two: the bigquery_scan branch and the local-table branch.
-        assert helper_source.count("DESCRIBE SELECT") == 2
-        assert module_source.count("DESCRIBE SELECT") == 2
+        # One, now that the three sources a schema can come from -- a scan, a
+        # local table, a pre-built --sql relation -- differ only in the
+        # relation they name, and the DESCRIBE around it is written once.
+        assert helper_source.count("DESCRIBE SELECT") == 1
+        assert module_source.count("DESCRIBE SELECT") == 1
 
     def test_given_rows_are_used_without_touching_the_connection(self):
         from geoparquet_io.core.extract_bigquery import _detect_geometry_column_from_schema
@@ -1041,7 +1043,7 @@ class TestSchemaIsReadOnce:
 
         rows = [("id", "BIGINT"), ("name", "VARCHAR"), ("geom", "GEOMETRY")]
 
-        def _spy(con, table_id, table_source="bigquery", *, _reads):
+        def _spy(con, table_id=None, table_source="bigquery", relation=None, *, _reads):
             _reads.append(table_id)
             return rows
 
@@ -1560,3 +1562,1307 @@ class TestBigQueryIntegration:
         table = Table.from_bigquery(bq_table_id, limit=5)
         assert isinstance(table, Table)
         assert table.num_rows == 5
+
+
+def _inner_googlesql(sql: str) -> str:
+    """Decode the GoogleSQL string literal out of a ``bigquery_query`` call.
+
+    Scans for the second argument's quoted literal, honouring DuckDB's
+    doubled-quote escape, because the call may be followed by an outer
+    WHERE or LIMIT whose own parens and quotes would defeat a naive split.
+    DuckDB does the final decoding, so the assertion is about the SQL
+    BigQuery actually receives rather than how the f-string looked.
+    """
+    rest = sql.split("bigquery_query(", 1)[1].split(",", 1)[1]
+    start = rest.index("'")
+    i = start + 1
+    while i < len(rest):
+        if rest[i] == "'":
+            if i + 1 < len(rest) and rest[i + 1] == "'":
+                i += 2
+                continue
+            break
+        i += 1
+    literal = rest[start : i + 1]
+    con = duckdb.connect()
+    try:
+        return con.execute(f"SELECT {literal}").fetchone()[0]
+    finally:
+        con.close()
+
+
+class TestViewsRouteThroughBigQueryQuery:
+    """A view or materialized view cannot be read with ``bigquery_scan``.
+
+    The Storage Read API rejects it with "non-table entities cannot be read
+    with the storage API". The same DuckDB extension ships ``bigquery_query``,
+    which runs a real query job and reads a view fine, so the fix is to route
+    the relation through that instead of refusing the source.
+    """
+
+    def test_view_query_uses_bigquery_query_not_scan(self):
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        sql = _build_bigquery_query(
+            con=None,
+            validated_table_id="my-project.ds.the_view",
+            select_cols="*",
+            bbox=None,
+            bbox_mode="auto",
+            bbox_threshold=1000,
+            geom_col=None,
+            where=None,
+            limit=None,
+            is_view=True,
+        )
+        assert "bigquery_scan(" not in sql
+        assert "bigquery_query(" in sql
+
+    def test_view_query_bills_the_project_from_the_table_id(self):
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        sql = _build_bigquery_query(
+            con=None,
+            validated_table_id="my-project.ds.the_view",
+            select_cols="*",
+            bbox=None,
+            bbox_mode="auto",
+            bbox_threshold=1000,
+            geom_col=None,
+            where=None,
+            limit=None,
+            is_view=True,
+        )
+        assert "bigquery_query('my-project'," in sql
+
+    def test_view_query_selects_from_the_backtick_quoted_view(self):
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        sql = _build_bigquery_query(
+            con=None,
+            validated_table_id="my-project.ds.the_view",
+            select_cols="*",
+            bbox=None,
+            bbox_mode="auto",
+            bbox_threshold=1000,
+            geom_col=None,
+            where=None,
+            limit=None,
+            is_view=True,
+        )
+        assert _inner_googlesql(sql) == "SELECT * FROM `my-project.ds.the_view`"
+
+    def test_server_side_bbox_becomes_a_googlesql_where_not_a_filter_arg(self):
+        """``bigquery_query`` has no ``filter=``; the predicate goes in the SQL."""
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        sql = _build_bigquery_query(
+            con=None,
+            validated_table_id="my-project.ds.the_view",
+            select_cols="*",
+            bbox="0,0,10,10",
+            bbox_mode="server",
+            bbox_threshold=1000,
+            geom_col="geog",
+            where=None,
+            limit=None,
+            is_view=True,
+        )
+        assert "filter=" not in sql
+        inner = _inner_googlesql(sql)
+        assert inner.startswith("SELECT * FROM `my-project.ds.the_view` WHERE ")
+        assert "ST_INTERSECTS(`geog`," in inner
+
+    def test_hostile_column_cannot_break_out_of_the_googlesql_literal(self):
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        sql = _build_bigquery_query(
+            con=None,
+            validated_table_id="my-project.ds.the_view",
+            select_cols="*",
+            bbox="0,0,10,10",
+            bbox_mode="server",
+            bbox_threshold=1000,
+            geom_col="x') OR TRUE --",
+            where=None,
+            limit=None,
+            is_view=True,
+        )
+        assert len(duckdb.extract_statements(sql)) == 1
+
+    def test_limit_and_where_still_apply_outside_the_view_relation(self):
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        sql = _build_bigquery_query(
+            con=None,
+            validated_table_id="my-project.ds.the_view",
+            select_cols="*",
+            bbox=None,
+            bbox_mode="auto",
+            bbox_threshold=1000,
+            geom_col=None,
+            where="cloud < 10",
+            limit=7,
+            is_view=True,
+        )
+        live = _strip_line_comments(sql)
+        assert "LIMIT 7" in live
+        assert "cloud < 10" in live
+
+    def test_table_path_is_unchanged_by_the_view_parameter_default(self):
+        """A physical table must still use bigquery_scan, byte for byte."""
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        kwargs = {
+            "con": None,
+            "validated_table_id": "my-project.ds.tbl",
+            "select_cols": "*",
+            "bbox": None,
+            "bbox_mode": "auto",
+            "bbox_threshold": 1000,
+            "geom_col": None,
+            "where": None,
+            "limit": None,
+        }
+        assert _build_bigquery_query(**kwargs) == (
+            "SELECT * FROM bigquery_scan('my-project.ds.tbl')"
+        )
+
+
+class TestViewBboxStrategy:
+    """A view has no ``__TABLES__`` row count, and local filtering would be ruinous."""
+
+    def test_auto_mode_on_a_view_filters_server_side(self):
+        from geoparquet_io.core.extract_bigquery import _determine_bbox_strategy
+
+        con = MagicMock()
+        assert _determine_bbox_strategy(con, "p.d.v", "auto", 500_000, is_view=True) is True
+
+    def test_explicit_local_still_wins_on_a_view(self):
+        from geoparquet_io.core.extract_bigquery import _determine_bbox_strategy
+
+        con = MagicMock()
+        assert _determine_bbox_strategy(con, "p.d.v", "local", 500_000, is_view=True) is False
+
+
+class TestViewFallsBackOnTheReadError:
+    """Detection happens on the read, because the DESCRIBE does not fail.
+
+    BigQuery answers ``DESCRIBE SELECT * FROM bigquery_scan('a.view')`` from
+    table metadata without opening a Storage Read API session, so the schema
+    comes back fine for a view and only the data read is refused. Anything
+    that decided table-vs-view from the DESCRIBE would therefore never fire.
+    Verified against a real materialized view and a real logical view: both
+    describe and neither reads.
+    """
+
+    SCHEMA = [("id", "VARCHAR"), ("geom", "GEOMETRY")]
+    NON_TABLE_ERROR = (
+        "Binder Error: Error while creating read session: Permanent error, with a "
+        "last message of request failed: non-table entities cannot be read with "
+        "the storage API"
+    )
+
+    def _run(self, tmp_path, read_fails: bool):
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        table = pa.table({"id": pa.array(["a"]), "geom": pa.array([None], pa.binary())})
+        issued: list[str] = []
+
+        def execute(sql, *args, **kwargs):
+            issued.append(str(sql))
+            if read_fails and "bigquery_scan(" in str(sql) and "DESCRIBE" not in str(sql):
+                raise duckdb.BinderException(self.NON_TABLE_ERROR)
+            result = MagicMock()
+            result.arrow.return_value.read_all.return_value = table
+            return result
+
+        con = MagicMock()
+        con.execute.side_effect = execute
+        with (
+            patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
+            patch(
+                "geoparquet_io.core.extract_bigquery._schema_rows",
+                return_value=self.SCHEMA,
+            ),
+        ):
+            mock_conn.return_value.__enter__.return_value = con
+            extract_bigquery(
+                table_id="my-project.ds.relation",
+                output_parquet=str(tmp_path / "out.parquet"),
+            )
+        return issued
+
+    def test_a_refused_read_is_retried_as_a_query(self, tmp_path):
+        issued = self._run(tmp_path, read_fails=True)
+        assert any("bigquery_query(" in q for q in issued), issued
+
+    def test_the_retry_produces_the_output_file(self, tmp_path):
+        self._run(tmp_path, read_fails=True)
+        assert (tmp_path / "out.parquet").exists()
+
+    def test_a_table_never_pays_for_a_second_attempt(self, tmp_path):
+        issued = self._run(tmp_path, read_fails=False)
+        assert any("bigquery_scan(" in q for q in issued)
+        assert not any("bigquery_query(" in q for q in issued), issued
+
+    def test_an_unrelated_read_error_is_not_retried(self, tmp_path):
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        con = MagicMock()
+        con.execute.side_effect = duckdb.BinderException("Permission denied on relation")
+        with (
+            patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
+            patch(
+                "geoparquet_io.core.extract_bigquery._schema_rows",
+                return_value=self.SCHEMA,
+            ),
+        ):
+            mock_conn.return_value.__enter__.return_value = con
+            with pytest.raises(duckdb.Error, match="Permission denied"):
+                extract_bigquery(
+                    table_id="my-project.ds.relation",
+                    output_parquet=str(tmp_path / "out.parquet"),
+                )
+
+
+class TestViewPushesFiltersIntoTheQueryJob:
+    """On the view path --where and --limit must reach BigQuery, not DuckDB.
+
+    ``bigquery_scan`` streams, so an outer DuckDB filter merely wastes
+    bandwidth. A query job has to produce its whole result first, so the same
+    outer filter asks BigQuery to materialise the entire relation: against a
+    7.7-billion-row materialized view that returns "Response too large to
+    return" rather than any rows. ``--where`` is documented as BigQuery SQL
+    anyway, so BigQuery is where it belongs.
+    """
+
+    def _view_sql(self, **over):
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        kwargs = {
+            "con": None,
+            "validated_table_id": "my-project.ds.v",
+            "select_cols": "*",
+            "bbox": None,
+            "bbox_mode": "auto",
+            "bbox_threshold": 1000,
+            "geom_col": None,
+            "where": None,
+            "limit": None,
+            "is_view": True,
+        }
+        kwargs.update(over)
+        return _build_bigquery_query(**kwargs)
+
+    def test_where_lands_inside_the_googlesql(self):
+        inner = _inner_googlesql(self._view_sql(where="acquired_at >= '2025-09-01'"))
+        assert "WHERE" in inner
+        assert "acquired_at >= '2025-09-01'" in inner
+
+    def test_where_is_not_also_applied_outside(self):
+        """Applying it twice is harmless for SQL but means it was not pushed."""
+        sql = self._view_sql(where="cloud < 10")
+        outer = sql.split(")", 1)[-1] if ")" in sql else sql
+        assert "cloud < 10" not in outer.split("bigquery_query", 1)[0]
+
+    def test_limit_lands_inside_the_googlesql(self):
+        inner = _inner_googlesql(self._view_sql(limit=5))
+        assert inner.rstrip().endswith("LIMIT 5")
+
+    def test_bbox_and_where_combine_in_one_googlesql_where(self):
+        inner = _inner_googlesql(
+            self._view_sql(bbox="0,0,10,10", bbox_mode="server", geom_col="geog", where="a = 1")
+        )
+        assert "ST_INTERSECTS(`geog`," in inner
+        assert "a = 1" in inner
+        assert inner.count(" WHERE ") == 1
+
+    def test_a_hostile_where_never_reaches_the_googlesql(self):
+        """Counting DuckDB statements cannot see a GoogleSQL break-out, so the
+        comment that would make one is refused before the job is built."""
+        from geoparquet_io.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError):
+            self._view_sql(where="1=1) OR TRUE --")
+
+    def test_the_table_path_still_filters_in_duckdb(self):
+        """Unchanged behaviour for a physical table: no silent push-down."""
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        sql = _build_bigquery_query(
+            con=None,
+            validated_table_id="my-project.ds.t",
+            select_cols="*",
+            bbox=None,
+            bbox_mode="auto",
+            bbox_threshold=1000,
+            geom_col=None,
+            where="cloud < 10",
+            limit=5,
+        )
+        live = _strip_line_comments(sql)
+        assert "bigquery_scan('my-project.ds.t')" in live
+        assert "cloud < 10" in live
+        assert live.rstrip().endswith("LIMIT 5")
+
+
+# Integration test that requires BigQuery access to a view
+@pytest.mark.network
+class TestBigQueryViewIntegration:
+    """Set BQ_TEST_VIEW to a view or materialized view to run this.
+
+    export BQ_TEST_VIEW=project.dataset.view
+
+    Verified during development against a BigQuery materialized view of
+    7.7 billion rows and against a logical view. Both describe through
+    ``bigquery_scan`` and neither reads through it, which is the behaviour the
+    fallback exists for.
+    """
+
+    @pytest.fixture
+    def bq_view_id(self):
+        view_id = os.environ.get("BQ_TEST_VIEW")
+        if not view_id:
+            pytest.skip("BQ_TEST_VIEW environment variable not set")
+        return view_id
+
+    @pytest.fixture
+    def output_file(self):
+        tmp_path = Path(tempfile.gettempdir()) / f"test_bq_view_{uuid.uuid4()}.parquet"
+        yield str(tmp_path)
+        safe_unlink(tmp_path)
+
+    def test_a_view_extracts_to_parquet(self, bq_view_id, output_file):
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        extract_bigquery(table_id=bq_view_id, output_parquet=output_file, limit=10)
+
+        assert Path(output_file).exists()
+        assert pq.ParquetFile(output_file).metadata.num_rows == 10
+
+
+class TestViewWithALocalBboxFilter:
+    """--bbox-mode local on a view: the filter runs in DuckDB, so LIMIT
+    cannot be pushed down with it.
+
+    The inner query would otherwise cut candidates before the spatial filter
+    saw them, returning fewer rows than asked for. This combination is the
+    only path where the view relation carries an outer WHERE.
+    """
+
+    def _sql(self, limit):
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        return _build_bigquery_query(
+            con=None,
+            validated_table_id="my-project.ds.v",
+            select_cols="*",
+            bbox="0,0,10,10",
+            bbox_mode="local",
+            bbox_threshold=1000,
+            geom_col="geom",
+            where=None,
+            limit=limit,
+            is_view=True,
+        )
+
+    def test_the_local_filter_lands_outside_the_query_job(self):
+        sql = self._sql(None)
+        outer = sql.split("bigquery_query(", 1)[1]
+        assert "ST_Intersects" in outer.rsplit(")", 1)[-1] or "WHERE" in sql
+        assert "ST_Intersects" in sql
+
+    def test_the_spatial_predicate_is_not_pushed_into_the_googlesql(self):
+        inner = _inner_googlesql(self._sql(None))
+        assert "ST_Intersects" not in inner
+        assert "ST_INTERSECTS" not in inner
+
+    def test_limit_stays_outside_when_a_local_filter_follows_it(self):
+        sql = self._sql(7)
+        inner = _inner_googlesql(sql)
+        assert "LIMIT" not in inner, inner
+        assert _strip_line_comments(sql).rstrip().endswith("LIMIT 7")
+
+    def test_it_is_still_one_statement(self):
+        assert len(duckdb.extract_statements(self._sql(7))) == 1
+
+
+class TestBboxStrategyFallsThroughForATable:
+    """The is_view shortcut must not swallow the table path."""
+
+    def test_auto_mode_on_a_table_still_weighs_the_row_count(self):
+        from geoparquet_io.core.extract_bigquery import _determine_bbox_strategy
+
+        con = MagicMock()
+        with patch(
+            "geoparquet_io.core.extract_bigquery._get_table_row_count",
+            return_value=1_000_000,
+        ):
+            assert _determine_bbox_strategy(con, "p.d.t", "auto", 500_000) is True
+        with patch(
+            "geoparquet_io.core.extract_bigquery._get_table_row_count",
+            return_value=10,
+        ):
+            assert _determine_bbox_strategy(con, "p.d.t", "auto", 500_000) is False
+
+
+class TestShowSqlDuringTheViewRetry:
+    """--show-sql must print the query that actually ran, not only the one
+    that was refused."""
+
+    SCHEMA = [("id", "VARCHAR"), ("geom", "GEOMETRY")]
+    NON_TABLE_ERROR = "Binder Error: non-table entities cannot be read with the storage API"
+
+    def test_both_the_scan_and_the_retry_are_printed(self, tmp_path, monkeypatch):
+        import geoparquet_io.core.extract_bigquery as bq
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        printed: list[str] = []
+        monkeypatch.setattr(bq, "progress", printed.append)
+
+        table = pa.table({"id": pa.array(["a"]), "geom": pa.array([None], pa.binary())})
+
+        def execute(sql, *a, **k):
+            if "bigquery_scan(" in str(sql) and "DESCRIBE" not in str(sql):
+                raise duckdb.BinderException(self.NON_TABLE_ERROR)
+            result = MagicMock()
+            result.arrow.return_value.read_all.return_value = table
+            return result
+
+        con = MagicMock()
+        con.execute.side_effect = execute
+        with (
+            patch.object(bq, "BigQueryConnection") as mock_conn,
+            patch.object(bq, "_schema_rows", return_value=self.SCHEMA),
+        ):
+            mock_conn.return_value.__enter__.return_value = con
+            extract_bigquery(
+                table_id="my-project.ds.relation",
+                output_parquet=str(tmp_path / "o.parquet"),
+                show_sql=True,
+            )
+
+        sqls = [m for m in printed if m.startswith("SQL: ")]
+        assert any("bigquery_scan(" in s for s in sqls), sqls
+        assert any("bigquery_query(" in s for s in sqls), sqls
+
+
+class TestViewQueryProjectsOnlyTheRequestedColumns:
+    """A query job is billed by the columns it reads, so ``SELECT *`` over a
+    view bills every column even when --include-cols asked for two. BigQuery
+    prunes columns through a view only when the statement names them."""
+
+    def _sql(self, **over):
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        kwargs = {
+            "con": None,
+            "validated_table_id": "my-project.ds.v",
+            "select_cols": '"id", ST_AsWKB("geom") AS "geom"',
+            "bbox": None,
+            "bbox_mode": "auto",
+            "bbox_threshold": 1000,
+            "geom_col": "geom",
+            "where": None,
+            "limit": None,
+            "is_view": True,
+            "source_columns": ["id", "geom"],
+        }
+        kwargs.update(over)
+        return _build_bigquery_query(**kwargs)
+
+    def test_the_inner_statement_names_the_columns(self):
+        assert _inner_googlesql(self._sql()) == "SELECT `id`, `geom` FROM `my-project.ds.v`"
+
+    def test_all_columns_keeps_select_star(self):
+        assert _inner_googlesql(self._sql(source_columns=None)) == (
+            "SELECT * FROM `my-project.ds.v`"
+        )
+
+    def test_a_local_bbox_filter_keeps_its_geometry_column(self):
+        """The outer DuckDB filter reads the geometry even when it is excluded."""
+        inner = _inner_googlesql(
+            self._sql(
+                select_cols='"id"',
+                source_columns=["id"],
+                bbox="0,0,1,1",
+                bbox_mode="local",
+            )
+        )
+        assert inner == "SELECT `id`, `geom` FROM `my-project.ds.v`"
+
+    def test_a_hostile_column_name_is_quoted_for_googlesql(self):
+        sql = self._sql(select_cols='"a`b\'c"', source_columns=["a`b'c"], geom_col=None)
+        assert len(duckdb.extract_statements(sql)) == 1
+        assert _inner_googlesql(sql) == "SELECT `a\\`b'c` FROM `my-project.ds.v`"
+
+    def test_the_table_path_ignores_source_columns(self):
+        sql = self._sql(is_view=False, select_cols='"id"', source_columns=["id"], geom_col=None)
+        assert sql == "SELECT \"id\" FROM bigquery_scan('my-project.ds.v')"
+
+
+class TestViewWhereMustReadTheSameInGoogleSQL:
+    """On a view --where runs inside BigQuery. Two DuckDB spellings parse
+    there too but mean something else, silently: ``"col"`` is a STRING
+    literal in GoogleSQL (so ``"name" = 'x'`` compares two constants and
+    returns no rows), and a backslash in a string literal is an escape
+    sequence. Refuse those rather than return a wrong answer."""
+
+    def _sql(self, where, is_view=True):
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        return _build_bigquery_query(
+            con=None,
+            validated_table_id="my-project.ds.v",
+            select_cols="*",
+            bbox=None,
+            bbox_mode="auto",
+            bbox_threshold=1000,
+            geom_col=None,
+            where=where,
+            limit=None,
+            is_view=is_view,
+        )
+
+    @pytest.mark.parametrize("where", ["\"name\" = 'x'", '"my col" IS NOT NULL'])
+    def test_a_double_quoted_identifier_is_refused(self, where):
+        from geoparquet_io.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError, match="double-quoted name"):
+            self._sql(where)
+
+    @pytest.mark.parametrize(
+        "where",
+        [
+            "name = 'it''s'",
+            "name = " + "'" * 3 + "x" + "'" * 3,
+            "a = 1 -- trailing",
+            "a = 1 /* x */ AND b = 2",
+            "/* lead */ a = 1",
+            "a = 1 /* /* nested */ ) OR TRUE */",
+        ],
+        ids=[
+            "doubled-quote",
+            "triple-quote",
+            "line-comment",
+            "block-comment",
+            "leading-comment",
+            "nested-comment",
+        ],
+    )
+    def test_a_lexically_ambiguous_clause_is_refused(self, where):
+        """DuckDB and GoogleSQL disagree where these strings and comments end,
+        so what DuckDB validated as data could be code to BigQuery."""
+        from geoparquet_io.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError, match="runs inside BigQuery"):
+            self._sql(where)
+
+    def test_a_backslash_in_a_string_literal_is_refused(self):
+        from geoparquet_io.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError, match="backslash"):
+            self._sql("path = 'C:\\new'")
+
+    @pytest.mark.parametrize(
+        "where",
+        [
+            "name = 'x'",
+            "pop >= 10 AND kind IN ('a', 'b')",
+            "note = 'say \"hi\"'",
+            "d >= '2025-09-01' AND (x IS NOT NULL OR y <> 3.5)",
+        ],
+    )
+    def test_portable_predicates_still_push_down(self, where):
+        assert where in _inner_googlesql(self._sql(where))
+
+    def test_the_table_path_still_accepts_a_double_quoted_identifier(self):
+        assert "\"name\" = 'x'" in self._sql("\"name\" = 'x'", is_view=False)
+
+
+class TestViewFallbackTellsTheUserAboutBilling:
+    SCHEMA = [("id", "VARCHAR"), ("geom", "GEOMETRY")]
+
+    def test_the_fallback_is_announced(self, tmp_path, monkeypatch):
+        import geoparquet_io.core.extract_bigquery as bq
+
+        printed: list[str] = []
+        monkeypatch.setattr(bq, "progress", printed.append)
+        table = pa.table({"id": pa.array(["a"]), "geom": pa.array([None], pa.binary())})
+
+        def execute(sql, *a, **k):
+            if "bigquery_scan(" in str(sql) and "DESCRIBE" not in str(sql):
+                raise duckdb.BinderException(
+                    "non-table entities cannot be read with the storage API"
+                )
+            result = MagicMock()
+            result.arrow.return_value.read_all.return_value = table
+            return result
+
+        con = MagicMock()
+        con.execute.side_effect = execute
+        with (
+            patch.object(bq, "BigQueryConnection") as mock_conn,
+            patch.object(bq, "_schema_rows", return_value=self.SCHEMA),
+        ):
+            mock_conn.return_value.__enter__.return_value = con
+            bq.extract_bigquery(
+                table_id="my-project.ds.relation",
+                output_parquet=str(tmp_path / "o.parquet"),
+                include_cols="id",
+            )
+
+        assert any("query job" in m and "billed" in m for m in printed), printed
+        issued = [str(c.args[0]) for c in con.execute.call_args_list]
+        job = next(q for q in issued if "bigquery_query(" in q)
+        assert _inner_googlesql(job).startswith("SELECT `id`, `geom` FROM")
+
+
+# --- gpio extract bigquery --sql -------------------------------------------
+#
+# --sql replaces the table source: the user's GoogleSQL becomes the relation,
+# run through the same bigquery_query() machinery a view goes through. The
+# point of the flag is everything --where cannot express -- a window function,
+# a join, a GROUP BY -- so there is no attempt to parse or rewrite it.
+
+_WINDOW_SQL = (
+    "SELECT * EXCEPT(rn) FROM ("
+    "SELECT *, ROW_NUMBER() OVER (PARTITION BY item_id ORDER BY version DESC) AS rn "
+    "FROM `p.d.v` WHERE item_type = 'PSScene') WHERE rn = 1"
+)
+
+
+def _relation_googlesql(sql: str) -> str:
+    """The GoogleSQL DuckDB will hand BigQuery, decoded by DuckDB itself."""
+    return _inner_googlesql(sql)
+
+
+class TestBigQueryQueryRelation:
+    """``_bigquery_query_relation`` is the one place GoogleSQL is wrapped.
+
+    The view path (PR #1) and the --sql path both end up calling it, so the
+    escaping contract -- escape exactly once, at the point of interpolation --
+    is stated and tested in exactly one place.
+    """
+
+    def test_it_builds_a_bigquery_query_relation(self):
+        from geoparquet_io.core.extract_bigquery import _bigquery_query_relation
+
+        assert _bigquery_query_relation("my-project", "SELECT 1") == (
+            "bigquery_query('my-project', 'SELECT 1')"
+        )
+
+    def test_the_googlesql_survives_the_round_trip_verbatim(self):
+        """Escaped once: what BigQuery receives is what the user typed."""
+        from geoparquet_io.core.extract_bigquery import _bigquery_query_relation
+
+        relation = _bigquery_query_relation("my-project", _WINDOW_SQL)
+        assert _relation_googlesql(f"SELECT * FROM {relation}") == _WINDOW_SQL
+
+    def test_an_apostrophe_in_the_user_sql_is_escaped_exactly_once(self):
+        from geoparquet_io.core.extract_bigquery import _bigquery_query_relation
+
+        user_sql = "SELECT * FROM `p.d.t` WHERE name = 'O''Brien'"
+        relation = _bigquery_query_relation("my-project", user_sql)
+        assert _relation_googlesql(f"SELECT * FROM {relation}") == user_sql
+
+    def test_the_view_relation_still_delegates_to_it_unchanged(self):
+        """PR #1's output is byte-for-byte what it was before the generalization."""
+        from geoparquet_io.core.extract_bigquery import _bigquery_view_relation
+
+        assert _bigquery_view_relation("my-project.ds.v", ["a = 1"], 5) == (
+            "bigquery_query('my-project', 'SELECT * FROM `my-project.ds.v` WHERE a = 1 LIMIT 5')"
+        )
+
+
+class TestHostileSqlCannotBreakTheDuckDbWrapper:
+    """The goal is statement containment, not SQL safety.
+
+    --sql exists so a user can run arbitrary BigQuery SQL; refusing arbitrary
+    BigQuery SQL would refuse the feature. What must hold is that the value
+    cannot escape the DuckDB string literal it travels in and become a second
+    *DuckDB* statement -- which is where it could reach COPY TO, ATTACH, or
+    the local filesystem. Mirrors
+    ``test_hostile_column_cannot_break_out_of_the_googlesql_literal``.
+    """
+
+    HOSTILE = [
+        "SELECT 1'); COPY (SELECT 1) TO 'file.csv'; --",
+        "SELECT 1' , 'x') ; ATTACH 'evil.db' ; SELECT * FROM bigquery_query('p",
+        "SELECT 1; DROP TABLE t",
+        "SELECT '\\'' ; SELECT 2",
+        "'''; SELECT 1; --",
+    ]
+
+    @pytest.mark.parametrize("hostile", HOSTILE)
+    def test_a_hostile_sql_stays_one_duckdb_statement(self, hostile):
+        from geoparquet_io.core.extract_bigquery import _bigquery_query_relation
+
+        sql = f"SELECT * FROM {_bigquery_query_relation('my-project', hostile)}"
+        assert len(duckdb.extract_statements(sql)) == 1
+
+    @pytest.mark.parametrize("hostile", HOSTILE)
+    def test_the_hostile_text_arrives_at_bigquery_intact(self, hostile):
+        """Contained, not mangled: BigQuery gets exactly what was typed."""
+        from geoparquet_io.core.extract_bigquery import _bigquery_query_relation
+
+        sql = f"SELECT * FROM {_bigquery_query_relation('my-project', hostile)}"
+        assert _relation_googlesql(sql) == hostile
+
+
+class TestSqlReplacesTheTableSource:
+    """The core takes ``sql=`` instead of a table id, and never scans."""
+
+    def _run(self, tmp_path, geom_type="GEOMETRY", **kwargs):
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        table = pa.table({"id": pa.array(["a"]), "geom": pa.array([None], pa.binary())})
+        issued: list[str] = []
+
+        def execute(sql, *args, **kw):
+            issued.append(str(sql))
+            result = MagicMock()
+            result.arrow.return_value.read_all.return_value = table
+            return result
+
+        con = MagicMock()
+        con.execute.side_effect = execute
+        with (
+            patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
+            patch(
+                "geoparquet_io.core.extract_bigquery._schema_rows",
+                return_value=[("id", "VARCHAR"), ("geom", geom_type)],
+            ),
+        ):
+            mock_conn.return_value.__enter__.return_value = con
+            extract_bigquery(
+                sql=_WINDOW_SQL,
+                project="my-project",
+                output_parquet=str(tmp_path / "out.parquet"),
+                **kwargs,
+            )
+        return issued
+
+    def test_the_read_goes_through_bigquery_query(self, tmp_path):
+        issued = self._run(tmp_path)
+        assert any("bigquery_query(" in q for q in issued), issued
+
+    def test_nothing_is_ever_scanned(self, tmp_path):
+        """No bigquery_scan: there is no table id to scan, and no fallback."""
+        issued = self._run(tmp_path)
+        assert not any("bigquery_scan(" in q for q in issued), issued
+
+    def test_the_user_sql_reaches_bigquery_verbatim(self, tmp_path):
+        issued = self._run(tmp_path)
+        read = next(q for q in issued if "bigquery_query(" in q)
+        assert _relation_googlesql(read) == _WINDOW_SQL
+
+    def test_it_writes_the_output_file(self, tmp_path):
+        self._run(tmp_path)
+        assert (tmp_path / "out.parquet").exists()
+
+    def test_the_schema_is_described_from_the_user_sql(self, tmp_path):
+        """``_schema_rows`` must describe the query, not a table."""
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        seen = {}
+
+        def fake_schema_rows(con, table_id=None, table_source="bigquery", relation=None):
+            seen["table_id"] = table_id
+            seen["relation"] = relation
+            return [("id", "VARCHAR")]
+
+        con = MagicMock()
+        con.execute.return_value.arrow.return_value.read_all.return_value = pa.table(
+            {"id": pa.array(["a"])}
+        )
+        with (
+            patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
+            patch("geoparquet_io.core.extract_bigquery._schema_rows", fake_schema_rows),
+        ):
+            mock_conn.return_value.__enter__.return_value = con
+            extract_bigquery(
+                sql="SELECT 1 AS id",
+                project="my-project",
+                output_parquet=str(tmp_path / "out.parquet"),
+            )
+        assert seen["table_id"] is None
+        assert "bigquery_query('my-project'" in (seen["relation"] or "")
+
+    def test_a_native_geography_column_is_still_converted(self, tmp_path):
+        issued = self._run(tmp_path, geography_column="geom")
+        read = next(q for q in issued if "bigquery_query(" in q)
+        assert 'ST_AsWKB("geom")' in read
+
+    def test_a_varchar_geometry_column_is_still_parsed(self, tmp_path):
+        """--geography-column/--geometry-format work exactly as on a table."""
+        issued = self._run(
+            tmp_path, geom_type="VARCHAR", geography_column="geom", geometry_format="geojson"
+        )
+        read = next(q for q in issued if "bigquery_query(" in q)
+        assert "ST_AsWKB(ST_GeomFromGeoJSON(" in read
+
+    def test_the_table_path_is_untouched(self, tmp_path):
+        """Regression: no --sql means the Storage Read API path, unchanged."""
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        issued: list[str] = []
+        table = pa.table({"id": pa.array(["a"])})
+
+        def execute(sql, *args, **kw):
+            issued.append(str(sql))
+            result = MagicMock()
+            result.arrow.return_value.read_all.return_value = table
+            return result
+
+        con = MagicMock()
+        con.execute.side_effect = execute
+        with (
+            patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
+            patch(
+                "geoparquet_io.core.extract_bigquery._schema_rows",
+                return_value=[("id", "VARCHAR")],
+            ),
+        ):
+            mock_conn.return_value.__enter__.return_value = con
+            extract_bigquery(
+                table_id="my-project.ds.t", output_parquet=str(tmp_path / "out.parquet")
+            )
+        assert any("bigquery_scan('my-project.ds.t')" in q for q in issued), issued
+        assert not any("bigquery_query(" in q for q in issued), issued
+
+
+class TestSqlSourceValidation:
+    """--sql needs a billing project, and refuses a table id."""
+
+    def test_sql_without_a_project_is_refused(self):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        with pytest.raises(InvalidParameterError, match="requires"):
+            extract_bigquery(sql="SELECT 1", dry_run=True)
+
+    def test_neither_a_table_id_nor_sql_is_refused(self):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        with pytest.raises(InvalidParameterError, match="TABLE_ID"):
+            extract_bigquery(dry_run=True)
+
+    def test_a_table_id_and_sql_together_are_refused(self):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        with pytest.raises(InvalidParameterError, match="replaces the table source"):
+            extract_bigquery(table_id="p.d.t", sql="SELECT 1", project="p", dry_run=True)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"include_cols": "a,b"},
+            {"exclude_cols": "a"},
+            {"where": "a = 1"},
+            {"bbox": "0,0,1,1"},
+            {"bbox_mode": "server"},
+            {"bbox_threshold": 10},
+            {"limit": 5},
+        ],
+    )
+    def test_a_query_shaping_argument_alongside_sql_is_refused(self, kwargs):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        with pytest.raises(InvalidParameterError, match="express columns, filters and limits"):
+            extract_bigquery(sql="SELECT 1", project="my-project", dry_run=True, **kwargs)
+
+    def test_an_output_shaping_argument_alongside_sql_is_fine(self):
+        """--geography-column and friends shape the file, not the query."""
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        assert (
+            extract_bigquery(
+                sql="SELECT 1",
+                project="my-project",
+                geography_column="geom",
+                geometry_format="geojson",
+                edges="planar",
+                dry_run=True,
+            )
+            is None
+        )
+
+
+class TestSqlDryRun:
+    """--dry-run prints the statement without connecting to anything."""
+
+    def test_it_prints_the_bigquery_query_relation(self, caplog):
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        with caplog.at_level("INFO"):
+            extract_bigquery(sql=_WINDOW_SQL, project="my-project", dry_run=True)
+        assert "bigquery_query('my-project'" in caplog.text
+
+    def test_it_prints_the_user_sql_verbatim(self, caplog):
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        with caplog.at_level("INFO"):
+            extract_bigquery(sql=_WINDOW_SQL, project="my-project", dry_run=True)
+        printed = next(line for line in caplog.text.splitlines() if "bigquery_query(" in line)
+        assert _relation_googlesql(printed.split("SQL: ", 1)[1]) == _WINDOW_SQL
+
+    @patch("geoparquet_io.core.extract_bigquery._setup_bigquery_connection")
+    def test_it_never_connects(self, mock_setup):
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        mock_setup.side_effect = AssertionError("dry run connected to BigQuery")
+        extract_bigquery(sql="SELECT 1", project="my-project", dry_run=True)
+        mock_setup.assert_not_called()
+
+
+class TestSqlCommandLine:
+    """The CLI wiring: argument arity, and the mutual-exclusion rule."""
+
+    def _invoke(self, args):
+        return CliRunner().invoke(extract, ["bigquery", *args])
+
+    def _invoke_captured(self, args):
+        """Invoke with the core patched out; returns (result, call kwargs)."""
+        with patch("geoparquet_io.core.extract_bigquery.extract_bigquery") as mock:
+            mock.return_value = None
+            result = self._invoke(args)
+        return result, (mock.call_args.kwargs if mock.call_args else None)
+
+    def test_a_lone_positional_after_sql_is_the_output_not_the_table_id(self, tmp_path):
+        """The arity trap: Click binds positionals left to right.
+
+        ``gpio extract bigquery --sql "..." out.parquet`` must write
+        out.parquet, not try to read a BigQuery table called "out.parquet".
+        """
+        out = str(tmp_path / "out.parquet")
+        result, kwargs = self._invoke_captured(
+            ["--sql", "SELECT 1", "--project", "my-project", out]
+        )
+        assert result.exit_code == 0, result.output
+        assert kwargs["output_parquet"] == out
+        assert kwargs["table_id"] is None
+        assert kwargs["sql"] == "SELECT 1"
+
+    def test_a_table_id_and_an_output_still_bind_in_order(self, tmp_path):
+        """Regression: the table path's two positionals are unchanged."""
+        out = str(tmp_path / "out.parquet")
+        result, kwargs = self._invoke_captured(["my-project.ds.t", out])
+        assert result.exit_code == 0, result.output
+        assert kwargs["table_id"] == "my-project.ds.t"
+        assert kwargs["output_parquet"] == out
+        assert kwargs["sql"] is None
+
+    def test_two_positionals_with_sql_are_refused(self, tmp_path):
+        out = str(tmp_path / "out.parquet")
+        result = self._invoke(["--sql", "SELECT 1", "--project", "my-project", "p.d.t", out])
+        assert result.exit_code != 0
+        assert "replaces the table source" in result.output
+
+    def test_no_table_id_and_no_sql_is_refused(self):
+        """Both positionals are optional now, so "nothing at all" needs a message.
+
+        A single positional and no --sql is still a TABLE_ID, not an output.
+        """
+        result = self._invoke([])
+        assert result.exit_code != 0
+        assert "TABLE_ID" in result.output
+
+    def test_sql_without_project_is_refused(self, tmp_path):
+        result = self._invoke(["--sql", "SELECT 1", str(tmp_path / "out.parquet")])
+        assert result.exit_code != 0
+        assert "--project" in result.output
+
+    # Every query-shaping flag, including the two with non-None defaults:
+    # --bbox-mode and --bbox-threshold have to be detected with
+    # ctx.get_parameter_source, because "auto" and 500000 are what an
+    # untouched command line also carries.
+    @pytest.mark.parametrize(
+        "flag",
+        [
+            ["--include-cols", "a,b"],
+            ["--exclude-cols", "a"],
+            ["--where", "a = 1"],
+            ["--bbox", "0,0,1,1"],
+            ["--bbox-mode", "server"],
+            ["--bbox-mode", "auto"],
+            ["--bbox-threshold", "10"],
+            ["--bbox-threshold", "500000"],
+            ["--limit", "5"],
+        ],
+    )
+    def test_a_query_shaping_flag_with_sql_is_refused(self, flag, tmp_path):
+        result = self._invoke(
+            [
+                "--sql",
+                "SELECT 1",
+                "--project",
+                "my-project",
+                str(tmp_path / "out.parquet"),
+                *flag,
+            ]
+        )
+        assert result.exit_code != 0, result.output
+        assert "express columns, filters and limits in the SQL itself" in result.output
+
+    @pytest.mark.parametrize(
+        "flag",
+        [
+            ["--geography-column", "geom"],
+            ["--geometry-format", "geojson"],
+            ["--edges", "planar"],
+            ["--compression", "snappy"],
+            ["--row-group-size", "1000"],
+            ["--geoparquet-version", "1.1"],
+            ["--no-repair-geometry"],
+            ["--overwrite"],
+            ["--write-memory", "1GB"],
+            ["--show-sql"],
+            ["-v"],
+        ],
+    )
+    def test_an_output_shaping_flag_with_sql_is_accepted(self, flag, tmp_path):
+        result, _ = self._invoke_captured(
+            [
+                "--sql",
+                "SELECT 1",
+                "--project",
+                "my-project",
+                str(tmp_path / "out.parquet"),
+                *flag,
+            ]
+        )
+        assert result.exit_code == 0, result.output
+
+    def test_the_help_documents_the_flag(self):
+        result = self._invoke(["--help"])
+        assert "--sql" in result.output
+
+    def test_dry_run_prints_the_statement(self, tmp_path):
+        result = self._invoke(
+            [
+                "--sql",
+                "SELECT 1 AS id",
+                "--project",
+                "my-project",
+                str(tmp_path / "out.parquet"),
+                "--dry-run",
+            ]
+        )
+        assert result.exit_code == 0, result.output
+        assert "bigquery_query('my-project'" in result.output
+
+
+class TestSqlPythonApi:
+    """Every CLI option needs a Python API path (CLAUDE.md)."""
+
+    def test_read_bigquery_takes_sql(self):
+        import inspect
+
+        from geoparquet_io.api import ops
+
+        params = inspect.signature(ops.read_bigquery).parameters
+        assert "sql" in params
+        assert params["table_id"].default is None
+
+    def test_from_bigquery_takes_sql(self):
+        import inspect
+
+        from geoparquet_io.api.table import Table
+
+        params = inspect.signature(Table.from_bigquery).parameters
+        assert "sql" in params
+        assert params["table_id"].default is None
+
+    def test_read_bigquery_passes_the_sql_through(self):
+        from geoparquet_io.api import ops
+
+        with patch("geoparquet_io.core.extract_bigquery.extract_bigquery") as mock:
+            mock.return_value = pa.table({"id": [1]})
+            ops.read_bigquery(sql="SELECT 1 AS id", project="my-project")
+        assert mock.call_args.kwargs["sql"] == "SELECT 1 AS id"
+        assert mock.call_args.kwargs["table_id"] is None
+
+    def test_from_bigquery_passes_the_sql_through(self):
+        from geoparquet_io.api.table import Table
+
+        with patch("geoparquet_io.core.extract_bigquery.extract_bigquery") as mock:
+            mock.return_value = pa.table({"id": [1]})
+            table = Table.from_bigquery(sql="SELECT 1 AS id", project="my-project")
+        assert mock.call_args.kwargs["sql"] == "SELECT 1 AS id"
+        assert table.num_rows == 1
+
+
+# Integration test that requires BigQuery access
+@pytest.mark.network
+class TestBigQuerySqlIntegration:
+    """Set BQ_TEST_SQL_PROJECT to a project you can bill a query job to.
+
+    export BQ_TEST_SQL_PROJECT=my-project
+
+    The statement is a window function over a public dataset, which is the
+    case --where cannot express and so the reason this flag exists.
+    """
+
+    @pytest.fixture
+    def bq_project(self):
+        project = os.environ.get("BQ_TEST_SQL_PROJECT")
+        if not project:
+            pytest.skip("BQ_TEST_SQL_PROJECT environment variable not set")
+        return project
+
+    @pytest.fixture
+    def output_file(self):
+        tmp_path = Path(tempfile.gettempdir()) / f"test_bq_sql_{uuid.uuid4()}.parquet"
+        yield str(tmp_path)
+        safe_unlink(tmp_path)
+
+    def test_a_window_function_extracts_to_geoparquet(self, bq_project, output_file):
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        extract_bigquery(
+            sql=(
+                "SELECT * EXCEPT(rn) FROM ("
+                "SELECT zip_code, zip_code_geom, "
+                "ROW_NUMBER() OVER (ORDER BY zip_code) AS rn "
+                "FROM `bigquery-public-data.geo_us_boundaries.zip_codes`"
+                ") WHERE rn <= 5"
+            ),
+            project=bq_project,
+            output_parquet=output_file,
+            geography_column="zip_code_geom",
+        )
+
+        assert Path(output_file).exists()
+        meta = pq.ParquetFile(output_file).metadata
+        assert meta.num_rows == 5
+        assert b"geo" in meta.metadata
+
+
+class TestSqlFalsyQueryShapingValues:
+    """A query-shaping argument given as a falsy value is still given."""
+
+    @pytest.mark.parametrize("kwargs", [{"limit": 0}, {"include_cols": ""}, {"where": ""}])
+    def test_a_falsy_value_alongside_sql_is_refused(self, kwargs):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        with pytest.raises(InvalidParameterError, match="express columns, filters and limits"):
+            extract_bigquery(sql="SELECT 1", project="my-project", dry_run=True, **kwargs)
+
+
+class TestSqlMustBeOneReadOnlyQuery:
+    """``extract`` reads. A DML/DDL statement, or a script that smuggles one
+    in after a ``;``, would run in BigQuery -- during the DESCRIBE that
+    reads the schema, before gpio sees a row -- so it is refused up front."""
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "DELETE FROM `p.d.t` WHERE TRUE",
+            "drop table `p.d.t`",
+            "INSERT INTO `p.d.t` SELECT * FROM `p.d.u`",
+            "CREATE OR REPLACE TABLE `p.d.t` AS SELECT 1 AS x",
+            "MERGE `p.d.t` USING `p.d.u` ON TRUE WHEN MATCHED THEN DELETE",
+            "SELECT 1; DELETE FROM `p.d.t` WHERE TRUE",
+            "SELECT 1 /* ; */ ; DROP TABLE `p.d.t`",
+            "-- leading comment\nTRUNCATE TABLE `p.d.t`",
+        ],
+        ids=[
+            "delete",
+            "drop",
+            "insert",
+            "create",
+            "merge",
+            "script",
+            "script-after-comment",
+            "commented-truncate",
+        ],
+    )
+    def test_a_statement_that_is_not_one_query_is_refused(self, sql):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        with pytest.raises(InvalidParameterError, match="single SELECT"):
+            extract_bigquery(sql=sql, project="my-project", dry_run=True)
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT 1",
+            "  select * from `p.d.t`;  ",
+            "WITH a AS (SELECT 1 AS x) SELECT * FROM a",
+            "(SELECT 1) UNION ALL (SELECT 2)",
+            "/* why */ -- note\n# hash comment\nSELECT ';' AS semi, \"; DROP\" AS s2",
+            "SELECT '''a ; b''' AS t, r'\\'; x' AS r, `odd;name` FROM `p.d.t`",
+            "SELECT * FROM `p.d.t` WHERE note = 'it\\'s; fine'",
+        ],
+        ids=["plain", "trailing-semicolon", "with", "paren", "comments", "literals", "escape"],
+    )
+    def test_a_single_query_passes(self, sql):
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        assert extract_bigquery(sql=sql, project="my-project", dry_run=True) is None
+
+
+class TestEmptySqlIsNotAbsentSql:
+    """``--sql ""`` was read as "no --sql", so with a TABLE_ID it silently read
+    the table instead, and with one positional it parsed the output path as a
+    table id. An empty statement is a statement, and not a query."""
+
+    def test_cli_empty_sql_with_a_table_id_is_refused(self, tmp_path):
+        with patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as conn:
+            result = CliRunner().invoke(
+                extract,
+                [
+                    "bigquery",
+                    "--sql",
+                    "",
+                    "--project",
+                    "my-project",
+                    "my-project.d.t",
+                    str(tmp_path / "out.parquet"),
+                ],
+            )
+        assert result.exit_code != 0
+        assert not conn.called
+        assert not (tmp_path / "out.parquet").exists()
+
+    def test_cli_empty_sql_with_one_positional_names_the_sql(self, tmp_path):
+        with patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as conn:
+            result = CliRunner().invoke(
+                extract,
+                ["bigquery", "--sql", "", "--project", "my-project", str(tmp_path / "o.parquet")],
+            )
+        assert result.exit_code != 0
+        assert not conn.called
+        assert "single SELECT" in result.output
+
+    def test_api_empty_sql_is_refused(self):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        with pytest.raises(InvalidParameterError, match="single SELECT"):
+            extract_bigquery(sql="", project="my-project", dry_run=True)
+
+
+class TestSqlErrorsSpeakTheApisNames:
+    """A Python caller passed ``columns=``, not ``--include-cols``."""
+
+    def test_the_exclusivity_error_names_the_api_argument(self):
+        from geoparquet_io.api import ops
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        with pytest.raises(InvalidParameterError, match=r"Given with sql: columns, limit\."):
+            ops.read_bigquery(sql="SELECT 1", project="my-project", columns=["x"], limit=5)
+
+    def test_a_bad_bbox_mode_does_not_report_table_none(self):
+        from geoparquet_io.api import ops
+
+        with pytest.raises(ValueError) as exc:
+            ops.read_bigquery(sql="SELECT 1", project="my-project", bbox_mode="bogus")
+        assert "'None'" not in str(exc.value)

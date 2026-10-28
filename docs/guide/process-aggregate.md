@@ -35,6 +35,7 @@ Each output cell or region can carry three kinds of statistics. Pick the ones th
 | `sum` | Total across features in the cell | **additive** — area, population, revenue | `sum:area_ha` → total hectares of fields in the cell |
 | `avg` | Mean across features | a **typical value/intensity**, independent of how many features | `avg:yield` → average yield per field |
 | `min` / `max` | Smallest / largest value | an **extreme or range** — oldest, newest, cheapest, peak | `max:price`, `min:built_year` |
+| `pct_cell` | Percent of the **cell's own area** covered | a **share of the landscape** — cropland cover, built-up fraction | `pct_cell:metrics:area` → `pct_metrics:area`, percent of the cell under fields |
 
 Rules of thumb:
 
@@ -78,6 +79,76 @@ Rules of thumb:
     result.write('cells.parquet')
     ```
 
+### Percent of the cell covered (`pct_cell`)
+
+"How much of each cell is covered?" is the map most polygon layers are
+aggregated for, and it is the one metric you cannot build from `sum` alone,
+because it needs the cell's area. `pct_cell:<column>` supplies that
+denominator: `<column>` holds each feature's **area in square metres**, and the
+output column `pct_<column>` is `100 × Σ column ÷ cell area`.
+
+Compute the per-feature area first with
+[`gpio add geometry-metrics`](add.md) (it writes `metrics:area` in m²), then:
+
+=== "CLI"
+
+    <!-- doctest: skip="needs a metrics:area column from gpio add geometry-metrics" -->
+    ```bash
+    gpio process aggregate a5 fields.parquet coverage.parquet \
+        --resolution 7 --metric "pct_cell:metrics:area"
+    ```
+
+=== "Python"
+
+    <!-- doctest: skip="needs a metrics:area column from gpio add geometry-metrics" -->
+    ```python
+    import geoparquet_io as gpio
+
+    result = gpio.read('fields.parquet').aggregate_a5(
+        resolution=7,
+        metric="pct_cell:metrics:area",
+    )
+    result.write('coverage.parquet')
+    ```
+
+Where the denominator comes from:
+
+- **A5 is an equal-area grid**, so every cell at a resolution covers the same
+  number of square metres and the denominator is one constant per resolution —
+  33,207 km² at r5, 2,075.5 km² at r7, 518.9 km² at r8. gpio takes it from the
+  grid itself (`a5_cell_area`), so there is nothing to configure and nothing to
+  measure.
+- **H3 is not equal-area** — a cell near a pole is about a quarter smaller than
+  one at the equator — so each cell is divided by *its own* measured area
+  (`h3_cell_area`). Two cells with the same total area therefore report
+  different percentages, which is the correct answer. Note that `h3_cell_area`
+  measures on H3's sphere while `gpio add geometry-metrics` measures features on
+  the WGS84 ellipsoid, so h3 percentages carry a latitude-dependent error of up
+  to about one percentage point ([#1192](https://github.com/geoparquet/geoparquet-io/issues/1192));
+  a5 is unaffected, because its cell area and the feature areas share an earth
+  model.
+- **Admin regions have no cell area**, so `pct_cell` is refused for
+  `gpio process aggregate admin`. Use `sum:<column>` and divide by the region's
+  own area downstream.
+
+Two things to know about the numbers:
+
+- **`sum_<column>` comes with it.** Requesting `pct_cell:x` also writes
+  `sum_x`, whether or not you asked for it. That total is what
+  [`gpio process overview`](process-overview.md) recomputes a coarser cell's
+  percentage from; without it a percentage cannot be rolled up at all, because
+  averaging fine cells' percentages is not the coarse cell's percentage.
+- **A value can exceed 100, and by a lot if the resolution is wrong.** Every
+  feature is assigned wholly to the cell its keying point falls in, so a field
+  straddling a cell boundary contributes its *full* area to one cell and none
+  to the other, and two overlapping features each contribute their full area.
+  Pick a resolution whose cells are comfortably larger than the features and
+  the overshoot stays small — read a value just over 100 as "fully covered".
+  Pick one whose cells are *smaller* than the features and the number stops
+  meaning anything: a 1,100 km² polygon keyed into a 3.8 km² h3 r7 cell reports
+  about 57,000. A result far above 100 is the signal that the resolution is too
+  fine for the data, not that the cell is very full.
+
 ### Which breakdown to use
 
 `--breakdown` pivots one categorical (or time-bucket) column into a `count_<value>` column per value — the building block for **filterable** or **animated** maps:
@@ -86,6 +157,8 @@ Rules of thumb:
 - A year column (`harvest_year`) → `count_2021`, `count_2022`, … driving a time slider.
 
 Values beyond `--breakdown-limit` (default 20, ordered by frequency) collapse into `count_other`, so a high-cardinality column won't explode the schema.
+
+Each pivot holds a count by default. `--breakdown-metric` makes it hold a magnitude instead: `--breakdown month --breakdown-metric "sum:peak"` writes `sum_peak_202605`, `sum_peak_202606`, … each the total `peak` for that month, **in place of** the `count_<value>` columns. `sum`, `min` and `max` are available; `avg` is not, because a per-category mean cannot be rolled up to a coarser overview level without the category's own count, which the output does not carry (`--metric avg:<column>` still gives a per-cell mean). A category with no rows in a cell, or only NULL values, reads NULL, as `--metric sum:` does for the same cell.
 
 ---
 
@@ -157,6 +230,8 @@ Aggregate numeric columns with `--metric` (`func:column`, comma-separated; bare 
 
 Use `--breakdown` to pivot a categorical column into per-category count columns (`count_<value>`). Values beyond the limit are rolled into `count_other`.
 
+`--breakdown-metric` changes what each pivot holds: `"sum:peak"` gives `sum_peak_<value>` columns (remainder `sum_peak_other`) carrying a weighted total instead of a row count. The names start with `sum_`/`min_`/`max_`, so [`gpio process overview`](process-overview.md) rolls them up exactly rather than dropping them.
+
 === "CLI"
 
     <!-- doctest: skip="breaks down by 'crop_type', a column the sample data does not have" -->
@@ -168,6 +243,10 @@ Use `--breakdown` to pivot a categorical column into per-category count columns 
     # Limit to top 10 categories
     gpio process aggregate a5 fields.parquet cells.parquet \
         --resolution 8 --breakdown crop_type --breakdown-limit 10
+
+    # Weighted pivot: total area per crop type, not a count of fields
+    gpio process aggregate a5 fields.parquet cells.parquet \
+        --resolution 8 --breakdown crop_type --breakdown-metric "sum:area_ha"
     ```
 
 === "Python"
@@ -183,6 +262,14 @@ Use `--breakdown` to pivot a categorical column into per-category count columns 
         breakdown_limit=10,
     )
     result.write('cells.parquet')
+
+    # Weighted pivot: total area per crop type, not a count of fields
+    weighted = gpio.read('fields.parquet').aggregate_a5(
+        resolution=8,
+        breakdown="crop_type",
+        breakdown_metric="sum:area_ha",
+    )
+    weighted.write('cells_weighted.parquet')
     ```
 
 ### Row Filtering
@@ -240,10 +327,12 @@ entirely**, cutting the scan to a small fraction:
 | `bbox` | Center of the bbox covering column | **no** |
 | `<column>` | An existing point column | **no** |
 
-The bbox column is auto-detected from the file's GeoParquet `covering.bbox`
-metadata when present, falling back to naming conventions (`bbox`, `*_bbox`,
-`bounds`, `extent` structs with `xmin`/`ymin`/`xmax`/`ymax`); pass
-`--bbox-column NAME` for uncovered, nonconventional names. Bbox center differs from the true
+The bbox column is auto-detected from the **primary** geometry column's own
+`covering.bbox` metadata when present, falling back to a struct column named
+exactly `bbox` with `xmin`/`ymin`/`xmax`/`ymax` fields. Nothing else is guessed
+from a name: a `boundary_bbox` bounds the secondary `boundary` column, not the
+geometry being keyed. Pass `--bbox-column NAME` for an undeclared column under
+any other name. Bbox center differs from the true
 centroid only for L-shaped/very elongated features — negligible at aggregation
 resolutions, where keying by centroid is already an approximation.
 
@@ -400,7 +489,8 @@ Combining all three kinds of statistics. The output cell carries `count`, `sum_a
 ## H3 Grid Aggregation
 
 H3 aggregation works exactly like A5 — the same `--metric`, `--breakdown`,
-`--breakdown-limit`, `--out-geometry`, `--resolution`, and `--auto` options apply.
+`--breakdown-limit`, `--breakdown-metric`, `--out-geometry`, `--resolution`, and
+`--auto` options apply.
 The differences are that H3 uses Uber's hexagonal grid, its resolution range is
 **0–15** (A5 is 0–30), and the bucket id column is `h3_cell` (a string, e.g.
 `861fa80e7ffffff`).
@@ -538,12 +628,21 @@ Regardless of the chosen bucket scheme, every output file contains:
 | `a5_cell` or `admin_code` | UBIGINT / VARCHAR | Bucket identifier |
 | `admin_name` | VARCHAR | Human-readable name (admin only; currently equals `admin_code`) |
 | `count` | BIGINT | Number of input features in the bucket |
-| `sum_<col>`, `avg_<col>`, etc. | DOUBLE | Numeric rollups from `--metric` |
+| `sum_<col>`, `avg_<col>`, etc. | the column's type (a `sum` of integers is HUGEINT, written as DECIMAL(38,0)) | Numeric rollups from `--metric` |
+| `pct_<col>` | DOUBLE | Percent of the cell's area covered, from `--metric pct_cell:<col>`; `sum_<col>` is written with it. Can exceed 100 — see [Percent of the cell covered](#percent-of-the-cell-covered-pct_cell) |
 | `count_<value>` | BIGINT | Per-category counts from `--breakdown` |
 | `count_other` | BIGINT | Count for categories beyond `--breakdown-limit` |
+| `sum_<col>_<value>`, `min_`/`max_` likewise | as for `--metric` | Per-category rollups when `--breakdown-metric` is set, replacing the `count_<value>` columns; NULL for a category with no rows or no values in the cell |
+| `sum_<col>_other` | as above | Rollup for categories beyond `--breakdown-limit` |
 | `geometry` | WKB | Bucket polygon or centroid (absent when `--out-geometry none`) |
 
 ### Cells at the antimeridian and the poles
+
+Aggregation outputs use OGC:CRS84 longitude and latitude, even when the source
+uses a projected CRS. This applies to both CLI output and Python `Table`
+results, including tables created with `gpio.convert()`. Overview methods
+likewise regenerate geographic parent geometry. Counts-only output has no
+geometry or CRS.
 
 A grid cell is a region of the sphere, and a few of them cannot be drawn as a
 single flat polygon. Those are written the way [RFC 7946
@@ -576,11 +675,49 @@ Both commands support the standard output options:
 ```text
 --where "confidence >= 50"  # DuckDB WHERE clause filtering input rows
 --metric-nodata "-999"    # NoData sentinel(s) mapped to NULL in --metric columns
+--write-memory 8GB        # Memory limit for the aggregation
 --compression SNAPPY      # Output compression (default: ZSTD)
+--compression-level 15    # Output compression level (default: 9 for process)
 --geoparquet-version 1.1  # GeoParquet spec version
 --show-sql                # Print the generated DuckDB SQL
 --verbose                 # Detailed progress output
 ```
+
+### Memory
+
+An aggregation reads only what it aggregates: the keying point, the `--metric`
+columns and the `--breakdown` column. Nothing else in the input is scanned, so a
+wide file with one metric costs about what a narrow one does — and
+`--bucket-point bbox` leaves the geometry unread on top of that.
+
+DuckDB runs inside a memory limit of half the process's memory ceiling: physical
+RAM, or the container or Slurm job cap when that is lower. The cap is what
+matters on a shared node — without it DuckDB sizes itself for the whole machine
+and the job's cgroup kills it first. `--write-memory` overrides the default:
+
+=== "CLI"
+
+    <!-- doctest: skip="aggregates 'area', a column the sample data does not have" -->
+    ```bash
+    gpio process aggregate a5 fields.parquet cells.parquet \
+        --resolution 7 --metric "sum:area" --write-memory 8GB
+    ```
+
+=== "Python"
+
+    <!-- doctest: skip="aggregates 'area', a column the sample data does not have" -->
+    ```python
+    import geoparquet_io as gpio
+
+    result = gpio.read('fields.parquet').aggregate_a5(
+        resolution=7,
+        metric="sum:area",
+        memory_limit="8GB",
+    )
+    result.write('cells.parquet')
+    ```
+
+`gpio process overview` takes the same flag.
 
 ## See Also
 

@@ -2,20 +2,33 @@
 
 from __future__ import annotations
 
+import json
+
 import pyarrow as pa
 
-from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.bbox_structure import (
+    bbox_shaped_struct_columns,
+    check_bbox_structure,
+    resolve_bbox_name,
+)
 from geoparquet_io.core.common import add_computed_column
-from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadata, get_schema_info
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
-from geoparquet_io.core.geo_metadata import covering_supported
+from geoparquet_io.core.geo_metadata import (
+    _bbox_claimed_by_another_column,
+    bbox_struct_child_names_match,
+    build_bbox_covering,
+    covering_supported,
+)
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
+    register_geometry_column,
 )
-from geoparquet_io.core.logging_config import progress, success, warn
+from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
+from geoparquet_io.core.logging_config import debug, progress, success, warn
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
@@ -25,11 +38,16 @@ from geoparquet_io.core.streaming import (
 )
 
 
-def _bbox_metadata_advice(parquet_file: str) -> str:
+def _bbox_metadata_advice(parquet_file: str, declare_by_name: str | None = None) -> str:
     """Advice for a file that has a bbox column but no covering metadata.
 
     'covering' is 1.1-only, so a 1.0 file cannot be fixed by 'add bbox-metadata'
     (which refuses) — it needs a version upgrade first.
+
+    ``declare_by_name`` is set when the column is one ``add bbox-metadata`` will
+    not find on its own — an explicitly requested ``bounds`` or
+    ``geometry_bbox`` — so the advice names the ``--bbox-name`` flag instead of
+    sending the user to a command that would report no bbox column at all.
     """
 
     geo_meta = get_geo_metadata(parquet_file) or {}
@@ -37,12 +55,58 @@ def _bbox_metadata_advice(parquet_file: str) -> str:
     if covering_supported(version):
         if check_bbox_structure(parquet_file).get("covering_problem"):
             return "The existing column cannot carry a 'covering'; use --force to rewrite it."
-        return "Run 'gpio add bbox-metadata' to add metadata, or use --force to replace."
+        flag = f" --bbox-name {declare_by_name}" if declare_by_name else ""
+        return f"Run 'gpio add bbox-metadata{flag}' to add metadata, or use --force to replace."
     return (
         f"'covering' requires GeoParquet 1.1+ (this file is {version}). Use --force to "
         "rewrite the bbox column at 1.1 with covering, or convert first: "
         "gpio convert geoparquet IN.parquet OUT.parquet --geoparquet-version 1.1"
     )
+
+
+def _explicitly_named_bbox_struct(input_parquet: str, bbox_column_name: str) -> bool:
+    """Whether ``--bbox-name`` names an existing bbox struct this run may reuse.
+
+    Detection answers for the PRIMARY geometry column, so a legal but undeclared
+    ``bounds`` is not "the file's bbox column" (#738/#1171) -- correct, and it
+    left an *explicit* ``--bbox-name bounds`` with nowhere to go: the file path
+    fell through to ``add_computed_column``, which refused the duplicate name,
+    while the streaming path (which tests the requested name by shape) passed the
+    same input through. Naming the column is the user supplying the provenance
+    detection cannot infer, exactly as it is for ``add bbox-metadata``.
+
+    What naming it still cannot do is claim a struct some NON-primary geometry
+    column already declares as *its* covering: those values bound that column's
+    geometry. Such a column, and one that is not a bbox struct at all, keep the
+    plain name-collision refusal.
+    """
+    if bbox_column_name not in bbox_shaped_struct_columns(get_schema_info(input_parquet)):
+        return False
+    return not _bbox_claimed_by_another_column(get_geo_metadata(input_parquet), bbox_column_name)
+
+
+def _note_bbox_structs_computed_beside(
+    input_parquet: str, bbox_column_name: str, verbose: bool
+) -> None:
+    """Name the bbox-shaped structs this run is about to compute a column next to.
+
+    Purely informational, and deliberately NOT part of detection: declaring a
+    column gpio did not compute asserts a relationship only its name suggests,
+    which is exactly what #738/#1171 removed. The duplication is the documented
+    intent; the silence was not. Before the narrowing a ``bounds`` struct
+    name-matched, so this ran into ``_handle_existing_bbox``'s "File will have 2
+    bbox columns" warning; afterwards ``check_bbox_structure`` reports no bbox
+    column at all and that branch is never reached.
+    """
+    for name in bbox_shaped_struct_columns(get_schema_info(input_parquet)):
+        if name == bbox_column_name:
+            continue
+        warn(
+            f"Note: '{name}' looks like a bbox struct but nothing declares it as this "
+            f"file's covering; computing '{bbox_column_name}' beside it."
+        )
+        if verbose:
+            debug(f"'{name}' is carried through as ordinary data, undeclared")
 
 
 def _has_bbox_struct_column(con, source: str, bbox_column_name: str) -> bool:
@@ -51,15 +115,17 @@ def _has_bbox_struct_column(con, source: str, bbox_column_name: str) -> bool:
     Mirrors what :func:`check_bbox_structure` decides for files, but from a live
     DuckDB relation, so the streaming path can take the same "already has a bbox"
     decision as the file-based one.
+
+    Reads the relation's Arrow schema (zero rows) rather than DuckDB's rendered
+    type string: that string was upper-cased and substring-tested, so a ``bbox``
+    struct spelled ``XMIN/YMIN/XMAX/YMAX`` -- the user's own data, which no
+    ``covering`` may point at -- passed as gpio's own and the stream wrote
+    nothing at all (#1176).
     """
-    for name, col_type, *_ in con.execute(f"DESCRIBE SELECT * FROM {source}").fetchall():
-        if name != bbox_column_name:
-            continue
-        upper = col_type.upper()
-        return upper.startswith("STRUCT") and all(
-            field in upper for field in ("XMIN", "YMIN", "XMAX", "YMAX")
-        )
-    return False
+    schema = con.execute(f"SELECT * FROM {source} LIMIT 0").arrow().read_all().schema
+    if bbox_column_name not in schema.names:
+        return False
+    return _is_bbox_struct_field(schema.field(bbox_column_name))
 
 
 def add_bbox_table(
@@ -85,73 +151,99 @@ def add_bbox_table(
     if not geom_col:
         geom_col = "geometry"
 
-    # Check if bbox column already exists
-    if bbox_column_name in table.column_names:
-        # Drop existing column (replace behavior)
-        idx = table.column_names.index(bbox_column_name)
-        table = table.remove_column(idx)
+    table, bbox_column_name = _prepare_table_bbox_column(table, bbox_column_name)
 
-    # Register table and execute query
+    # Register only the geometry column: registration is zero-copy, and DuckDB
+    # computes nothing but the bbox struct — 32 bytes a row. Round-tripping the
+    # whole table (every attribute plus an ST_AsWKB re-encode of the geometry)
+    # materialized a second full copy of the data for four doubles of new
+    # information (#1268), and re-ordered the columns while doing it.
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        con.register("__input_table", table)
-
-        # Check if geometry column is BLOB (needs conversion)
-        columns_info = con.execute("DESCRIBE __input_table").fetchall()
-        geom_is_blob = any(col[0] == geom_col and "BLOB" in col[1].upper() for col in columns_info)
-
-        quoted_geom_col = quote_identifier(geom_col)
+        warn_planar_math("add_bbox", table, geom_col)
+        read = register_geometry_column(con, "__input_table", table, geom_col)
         quoted_bbox_col = quote_identifier(bbox_column_name)
+        bbox_query = f"""
+            SELECT STRUCT_PACK(
+                xmin := ST_XMin(__g),
+                ymin := ST_YMin(__g),
+                xmax := ST_XMax(__g),
+                ymax := ST_YMax(__g)
+            ) AS {quoted_bbox_col}
+            FROM (SELECT {read.shape_expr} AS __g FROM __input_table)
+        """
+        bbox_column = con.execute(bbox_query).arrow().read_all().column(0)
 
-        if geom_is_blob and geom_col in table.column_names:
-            # Create view with geometry conversion
-            # Quote column names to handle special characters (colons, spaces,
-            # embedded quotes, etc.)
-            other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
-            col_defs = other_cols + [f"ST_GeomFromWKB({quoted_geom_col}) AS {quoted_geom_col}"]
-            view_query = (
-                f"CREATE VIEW __input_view AS SELECT {', '.join(col_defs)} FROM __input_table"
-            )
-            con.execute(view_query)
-            source_ref = "__input_view"
-        else:
-            source_ref = "__input_table"
+        # Append the computed column; everything else keeps its exact bytes,
+        # Arrow types and column order.
+        result = table.append_column(bbox_column_name, bbox_column)
 
-        # Build query to add bbox column
-        bbox_expr = f"""STRUCT_PACK(
-            xmin := ST_XMin({quoted_geom_col}),
-            ymin := ST_YMin({quoted_geom_col}),
-            xmax := ST_XMax({quoted_geom_col}),
-            ymax := ST_YMax({quoted_geom_col})
-        )"""
-
-        # Get non-geometry columns
-        other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
-        select_cols = ", ".join(other_cols) if other_cols else ""
-
-        # Build SELECT with geometry converted back to WKB
-        if select_cols:
-            query = f"""
-                SELECT {select_cols},
-                       ST_AsWKB({quoted_geom_col}) AS {quoted_geom_col},
-                       {bbox_expr} AS {quoted_bbox_col}
-                FROM {source_ref}
-            """
-        else:
-            query = f"""
-                SELECT ST_AsWKB({quoted_geom_col}) AS {quoted_geom_col},
-                       {bbox_expr} AS {quoted_bbox_col}
-                FROM {source_ref}
-            """
-        result = con.execute(query).arrow().read_all()
-
-        # Preserve metadata
-        if table.schema.metadata:
-            result = result.replace_schema_metadata(table.schema.metadata)
+        # Preserve metadata, recording the column just computed as the
+        # geometry's covering bbox (see _declare_computed_bbox).
+        metadata = _declare_computed_bbox(table.schema.metadata, geom_col, bbox_column_name)
+        if metadata:
+            result = result.replace_schema_metadata(metadata)
 
         return result
     finally:
         con.close()
+
+
+def _is_bbox_struct_field(field) -> bool:
+    """Whether an Arrow field is a bbox covering struct rather than a column of that name.
+
+    Child names are matched as spelled, which is what the file-based detector
+    (``bbox_structure``) does: a ``bbox`` struct whose children are
+    ``XMIN/YMIN/XMAX/YMAX`` is the user's own data -- the folded-case test read
+    it as gpio's own and *destroyed* it (#1176).
+    """
+    if not pa.types.is_struct(field.type):
+        return False
+    return bbox_struct_child_names_match({child.name for child in field.type})
+
+
+def _prepare_table_bbox_column(table: pa.Table, bbox_column_name: str) -> tuple[pa.Table, str]:
+    """``(table, name)``: drop the bbox struct being replaced, or move aside.
+
+    A column of the requested name that really is a bbox struct is the column
+    this call recomputes, so it goes -- the documented replace behaviour. One
+    that is *not* a bbox struct is the user's own data (a label, a tile id), and
+    replacing it silently is what #1176 reports: the computed column takes a free
+    name instead, the same answer ``gpio convert`` and ``gpio add bbox`` give.
+    Resolution is case-insensitive because the computed column is aliased in SQL,
+    where ``BBOX`` and ``bbox`` are one name.
+    """
+    if bbox_column_name in table.column_names and _is_bbox_struct_field(
+        table.schema.field(bbox_column_name)
+    ):
+        return table.remove_column(table.column_names.index(bbox_column_name)), bbox_column_name
+    return table, resolve_bbox_name(table.column_names, None, requested=bbox_column_name)
+
+
+def _declare_computed_bbox(metadata, geometry_column: str, bbox_column_name: str):
+    """``metadata`` whose geo block declares ``bbox_column_name`` as ``geometry_column``'s bbox.
+
+    The column was computed from that geometry right here, which is the
+    provenance a ``covering`` needs (#738). Recording it on the table's own
+    block is what lets a writer declare a column not named exactly ``bbox``;
+    none will on name alone (#953). A 1.0 output drops it again at write time.
+    No geo block (or no entry for the column) means nothing to record.
+    """
+    if not metadata or b"geo" not in metadata:
+        return metadata
+    try:
+        geo = json.loads(metadata[b"geo"])
+    except ValueError:
+        return metadata
+    columns = geo.get("columns") if isinstance(geo, dict) else None
+    col_meta = columns.get(geometry_column) if isinstance(columns, dict) else None
+    if not isinstance(col_meta, dict):
+        return metadata
+    covering = col_meta.get("covering")
+    covering = dict(covering) if isinstance(covering, dict) else {}
+    covering["bbox"] = build_bbox_covering(bbox_column_name)
+    columns = {**columns, geometry_column: {**col_meta, "covering": covering}}
+    return {**metadata, b"geo": json.dumps({**geo, "columns": columns}).encode("utf-8")}
 
 
 def _bbox_covering_metadata(bbox_column_name: str) -> dict:
@@ -317,6 +409,8 @@ def add_bbox_column(
     )
     compression = compression or "ZSTD"
 
+    warn_planar_math_for_file("add_bbox", input_parquet)
+
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
@@ -381,8 +475,8 @@ def _add_bbox_streaming(
     # rather than through execute_transform, which fixes both before the query is
     # built. (add_bbox's query builder takes no source CRS, so nothing is lost.)
     with open_input(input_path, verbose=verbose) as (source, metadata, _is_stream, con):
-        query, passed_through = _make_streaming_bbox_query(
-            source, con, bbox_column_name, force=force
+        query, passed_through, bbox_column_name = _make_streaming_bbox_query(
+            source, con, bbox_column_name, force=force, geoparquet_version=geoparquet_version
         )
 
         write_output(
@@ -420,24 +514,28 @@ def _add_bbox_streaming(
 
 
 def _make_streaming_bbox_query(
-    source: str, con, bbox_column_name: str, force: bool
-) -> tuple[str, bool]:
+    source: str, con, bbox_column_name: str, force: bool, geoparquet_version: str | None = None
+) -> tuple[str, bool, str]:
     """Build the add-bbox query for a streaming source.
 
-    Returns ``(query, passed_through)``. ``passed_through`` means the source
-    already carries a usable bbox struct, so the query is a plain copy and the
-    caller must not claim anything about a column gpio did not compute.
+    Returns ``(query, passed_through, bbox_column_name)``. ``passed_through``
+    means the source already carries a usable bbox struct, so the query is a
+    plain copy and the caller must not claim anything about a column gpio did not
+    compute. The name comes back because a source column of the requested name
+    that is *not* a bbox struct moves the computed one aside (#1176), and the
+    caller declares the covering over the name actually written.
     """
     # Same guard as the file-based path (#728): a source that already carries a
     # bbox struct is passed through untouched rather than silently gaining a
     # second column named 'bbox_1'.
-    if not force and _has_bbox_struct_column(con, source, bbox_column_name):
+    has_bbox_struct = _has_bbox_struct_column(con, source, bbox_column_name)
+    if not force and has_bbox_struct:
         progress(
             f"Input already has bbox column '{bbox_column_name}'; "
             "passed it through unchanged - the existing bbox column was not recomputed."
         )
         progress("Use --force to recompute and replace the existing bbox column.")
-        return f"SELECT * FROM {source}", True
+        return f"SELECT * FROM {source}", True, bbox_column_name
 
     # Get column names from query result (works with both table names and read_parquet)
     sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
@@ -452,9 +550,16 @@ def _make_streaming_bbox_query(
     if not geom_col:
         geom_col = "geometry"
 
+    # --force over a real bbox struct replaces it in place; anything else of that
+    # name is the user's own column and the computed one moves aside instead.
+    if not has_bbox_struct:
+        bbox_column_name = resolve_bbox_name(
+            col_names, geoparquet_version, requested=bbox_column_name
+        )
     return (
-        _make_add_bbox_query(source, geom_col, bbox_column_name, replace_existing=force),
+        _make_add_bbox_query(source, geom_col, bbox_column_name, replace_existing=has_bbox_struct),
         False,
+        bbox_column_name,
     )
 
 
@@ -509,6 +614,20 @@ def _add_bbox_file_based(
     )
     if done:
         return
+
+    # Not replacing a bbox column the input already has, so the computed one has
+    # to find a free name: a column of that name which `check_bbox_structure`
+    # rejected (a string tile id, a label) is the user's own data. Without this
+    # `add_computed_column` refused the whole run, while `gpio convert` on the
+    # same file wrote `bbox_1` (#1176).
+    if replace_column is None:
+        bbox_column_name = resolve_bbox_name(
+            get_column_names(input_parquet), geoparquet_version, requested=bbox_column_name
+        )
+
+    # A column is being computed. Say which bbox-shaped structs it will sit
+    # beside, undeclared, so the duplication is visible rather than silent.
+    _note_bbox_structs_computed_beside(input_parquet, bbox_column_name, verbose)
 
     # Get geometry column for the SQL expression
     geom_col = find_primary_geometry_column(input_parquet, verbose)
@@ -567,8 +686,17 @@ def _handle_existing_bbox(
     dry-run, that copy has been described). Otherwise the caller computes the
     column, excluding ``replace_column`` from the copy of the input schema.
     """
+    # An explicit --bbox-name over a legal, unclaimed bbox struct detection does
+    # not report is the same situation as an existing bbox column, so it takes
+    # the same branches below rather than falling through to the duplicate-name
+    # refusal. `declare_by_name` makes the advice name the flag that can declare
+    # it: plain `add bbox-metadata` would report no bbox column for it.
+    declare_by_name = None
     if bbox_info["status"] not in ("optimal", "suboptimal"):
-        return False, None
+        if not _explicitly_named_bbox_struct(input_parquet, bbox_column_name):
+            return False, None
+        declare_by_name = bbox_column_name
+        bbox_info = {"status": "suboptimal", "bbox_column_name": bbox_column_name}
 
     existing_bbox_col = bbox_info.get("bbox_column_name")
 
@@ -595,7 +723,15 @@ def _handle_existing_bbox(
         )
         return False, existing_bbox_col
 
-    _report_bbox_copy(bbox_info, existing_bbox_col, input_parquet, output_parquet, verbose, dry_run)
+    _report_bbox_copy(
+        bbox_info,
+        existing_bbox_col,
+        input_parquet,
+        output_parquet,
+        verbose,
+        dry_run,
+        declare_by_name,
+    )
     return True, None
 
 
@@ -606,6 +742,7 @@ def _report_bbox_copy(
     output_parquet: str | None,
     verbose: bool,
     dry_run: bool,
+    declare_by_name: str | None = None,
 ) -> None:
     """Announce -- and, outside dry-run, perform -- the copy that answers this run."""
     if bbox_info["status"] == "optimal":
@@ -613,7 +750,7 @@ def _report_bbox_copy(
         advice = "Use --force to recompute and replace the existing bbox column."
     else:
         headline = f"File has bbox column '{existing_bbox_col}' but lacks covering metadata."
-        advice = _bbox_metadata_advice(input_parquet)
+        advice = _bbox_metadata_advice(input_parquet, declare_by_name)
 
     progress(headline)
     if dry_run:

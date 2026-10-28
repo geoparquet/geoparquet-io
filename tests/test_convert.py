@@ -10,6 +10,8 @@ Tests verify that convert applies all best practices:
 - Output passes validation
 """
 
+import json
+import logging
 import os
 import sys
 
@@ -20,6 +22,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core import convert as convert_module
 from geoparquet_io.core.check_parquet_structure import (
     check_all,
     check_bbox_structure,
@@ -27,7 +30,15 @@ from geoparquet_io.core.check_parquet_structure import (
     get_row_group_stats,
 )
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.convert import (
+    _case_collision_aliases,
+    _detect_spatial_geometry,
+    _spatial_source_aliases,
+    _st_read_layer_meta,
+    _suffixed_to_unique,
+    convert_to_geoparquet,
+)
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.geo_metadata import parse_geo_metadata
 from geoparquet_io.core.geometry_detection import (
     detect_parquet_geometry_column,
@@ -758,6 +769,83 @@ class TestConvertCSVCore:
             # Reset to default
             set_csv_max_line_size(None)
 
+    def test_csv_read_expr_pins_the_reader_buffer_to_the_line_size(self):
+        """#1113: DuckDB sizes its CSV buffer at 16x ``max_line_size``.
+
+        gpio raises ``max_line_size`` to 50MB so a coastline WKT still parses
+        (#301), which silently turned DuckDB's 32MiB read buffer into a single
+        800MiB allocation -- demanded for a three-row CSV as readily as for a
+        large one, and too big to spill. Pinning ``buffer_size`` to the line
+        size keeps the #301 headroom and drops the 16x multiplier.
+
+        The two must track each other, not the default constant:
+        ``docs/troubleshooting.md`` tells users to pass
+        ``--csv-max-line-size 100000000``, and a buffer left at 50MB under a
+        100MB line size is rejected outright by DuckDB with "Buffer Size of
+        52428800 must be a higher value than the maximum line size".
+        """
+        from geoparquet_io.core.convert import (
+            CSV_MAX_LINE_SIZE_DEFAULT,
+            _build_csv_read_expr,
+            set_csv_max_line_size,
+        )
+
+        # None exercises the default; 100MB is the override path that
+        # docs/troubleshooting.md documents.
+        for override in (None, 100 * 1024 * 1024):
+            line_size = CSV_MAX_LINE_SIZE_DEFAULT if override is None else override
+            set_csv_max_line_size(override)
+            try:
+                for delimiter in (None, ";"):
+                    expr = _build_csv_read_expr("/tmp/x.csv", delimiter)
+                    assert f"max_line_size={line_size}" in expr, expr
+                    assert f"buffer_size={line_size}" in expr, expr
+            finally:
+                set_csv_max_line_size(None)
+
+    def test_csv_read_buffer_does_not_follow_a_tiny_line_size_down(self):
+        """The buffer is also DuckDB's unit of parallel scan work.
+
+        Tracking ``max_line_size`` below ``CSV_READ_BUFFER_MIN`` starves the
+        scan for no memory worth having: a 200k-row read costs ~170ms at a 1KB
+        buffer against ~26ms at 4MiB. The floor never touches the default, so
+        #1113's 16x reduction is unaffected.
+        """
+        from geoparquet_io.core.convert import (
+            CSV_MAX_LINE_SIZE_DEFAULT,
+            CSV_READ_BUFFER_MIN,
+            _build_csv_read_expr,
+            set_csv_max_line_size,
+        )
+
+        assert CSV_READ_BUFFER_MIN < CSV_MAX_LINE_SIZE_DEFAULT
+
+        set_csv_max_line_size(1024)
+        try:
+            expr = _build_csv_read_expr("/tmp/x.csv", None)
+            assert "max_line_size=1024" in expr, expr
+            assert f"buffer_size={CSV_READ_BUFFER_MIN}" in expr, expr
+        finally:
+            set_csv_max_line_size(None)
+
+    def test_convert_csv_under_a_memory_limit_below_the_old_buffer(
+        self, tmp_path, temp_output_file
+    ):
+        """#1113: a tiny CSV under a sub-800MiB limit died of OOM.
+
+        ``--write-memory`` defaults to half of *available* RAM, so on a loaded
+        machine the limit lands under the reader's 800MiB buffer and every CSV
+        conversion fails, whatever its size. That is what broke journey 10 on
+        the macOS slow-tests leg, where three pytest workers left DuckDB a
+        703.8 MiB budget.
+        """
+        csv_path = tmp_path / "tiny.csv"
+        csv_path.write_text("id,wkt\n1,POINT (1 2)\n2,POINT (3 4)\n3,POINT (5 6)\n")
+
+        convert_to_geoparquet(str(csv_path), temp_output_file, memory_limit="512MB", verbose=False)
+
+        assert pq.read_table(temp_output_file).num_rows == 3
+
 
 class TestConvertCSVValidation:
     """Test CSV/TSV validation and error handling."""
@@ -1393,3 +1481,263 @@ class TestDetectParquetGeometryColumn:
 
         result = detect_parquet_geometry_column(path)
         assert result == "the_real_geom"
+
+
+class TestCaseInsensitiveColumnCollision:
+    """A source field differing from the GeoJSON ``id`` member only by case.
+
+    ``SELECT *`` over ``ST_Read`` on such a file cannot be bound: DuckDB
+    identifiers are case-insensitive, so the driver-materialised ``id`` field
+    and the source's own ``Id`` are one name. See the class docstring of the
+    fixture below for how the second ``id`` gets there.
+    """
+
+    @pytest.fixture
+    def colliding_geojson(self, tmp_path):
+        """GeoJSON with a string feature ``id`` member and an ``Id`` property.
+
+        The ``id`` member is a *string*, so the GDAL GeoJSON driver cannot use
+        it as the FID and materialises it as a field literally named ``id``
+        alongside the ``Id`` property. This is what a GeoServer WFS
+        ``outputFormat=application/json`` response looks like: the publisher's
+        ``DescribeFeatureType`` declares one ``Id`` and no ``id``.
+        """
+        path = tmp_path / "colliding.geojson"
+        path.write_text(
+            json.dumps(
+                {
+                    "type": "FeatureCollection",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "id": "layer.1",
+                            "properties": {"Id": 0, "name": "first"},
+                            "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
+                        },
+                        {
+                            "type": "Feature",
+                            "id": "layer.2",
+                            "properties": {"Id": 0, "name": "second"},
+                            "geometry": {"type": "Point", "coordinates": [1.0, 1.0]},
+                        },
+                    ],
+                }
+            )
+        )
+        return str(path)
+
+    def test_convert_geojson_with_case_colliding_id(self, colliding_geojson, temp_output_file):
+        """Both columns survive, the later one suffixed.
+
+        Parquet field names are case-sensitive, so nothing about the target
+        format requires either column to be lost -- they only have to stop
+        colliding under DuckDB's case-insensitive binder. The first spelling
+        seen keeps its name; the later one is suffixed.
+        """
+        convert_to_geoparquet(colliding_geojson, temp_output_file)
+
+        table = pq.read_table(temp_output_file)
+        assert table.num_rows == 2
+        names = table.schema.names
+        assert "id" in names, f"lost the driver-supplied id: {names}"
+        assert "Id_1" in names, f"lost the source's own Id: {names}"
+        # Both carry their own values: the suffix renames, it does not merge.
+        assert table.column("id").to_pylist() == ["layer.1", "layer.2"]
+        assert table.column("Id_1").to_pylist() == [0, 0]
+        assert table.column("name").to_pylist() == ["first", "second"]
+
+    def test_collision_rename_is_announced(self, colliding_geojson, temp_output_file, caplog):
+        """A renamed column is never silent -- the user has to be able to find it."""
+        with caplog.at_level(logging.WARNING):
+            convert_to_geoparquet(colliding_geojson, temp_output_file)
+
+        assert any("Id_1" in record.message for record in caplog.records), (
+            f"no warning named the rename: {[r.message for r in caplog.records]}"
+        )
+
+    def test_non_colliding_source_is_untouched(self, tmp_path, temp_output_file):
+        """The rescue path must not reach a file whose own names bind.
+
+        This is the regression that matters for everyone else: the collision
+        handling hangs off a failed bind, so an ordinary source has to come
+        out exactly as it did before.
+        """
+        path = tmp_path / "plain.geojson"
+        path.write_text(
+            json.dumps(
+                {
+                    "type": "FeatureCollection",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "properties": {"Id": 7, "name": "only"},
+                            "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
+                        }
+                    ],
+                }
+            )
+        )
+
+        convert_to_geoparquet(str(path), temp_output_file)
+
+        names = pq.read_table(temp_output_file).schema.names
+        assert "Id" in names
+        assert not [n for n in names if n.endswith("_1")], f"renamed something: {names}"
+
+    def test_python_api_survives_the_collision_too(self, colliding_geojson, tmp_path):
+        """The API reads through a different path, so parity is not free."""
+        import geoparquet_io as gpio
+
+        output = tmp_path / "api.parquet"
+        gpio.convert(colliding_geojson).write(str(output))
+
+        names = pq.read_table(str(output)).schema.names
+        assert "id" in names, f"lost the driver-supplied id: {names}"
+        assert "Id_1" in names, f"lost the source's own Id: {names}"
+
+
+@pytest.fixture
+def colliding_geojson_path(tmp_path):
+    """A GeoJSON whose string ``id`` member collides with its own ``Id`` field."""
+    path = tmp_path / "colliding.geojson"
+    path.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "id": "layer.1",
+                        "properties": {"Id": 0},
+                        "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
+                    }
+                ],
+            }
+        )
+    )
+    return str(path)
+
+
+class TestCollisionRescueGivesUp:
+    """Every way the rescue declines, so it never renames on a guess.
+
+    The rescue exists to read a file the binder refuses. When it cannot work
+    out the file's real column names it has to leave the original error
+    standing: a wrong alias list renames a column silently, which is worse
+    than the error the user already had.
+    """
+
+    @pytest.fixture
+    def plain_geojson(self, tmp_path):
+        path = tmp_path / "plain.geojson"
+        path.write_text(
+            json.dumps(
+                {
+                    "type": "FeatureCollection",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "properties": {"Id": 1},
+                            "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
+                        }
+                    ],
+                }
+            )
+        )
+        return str(path)
+
+    def _con(self):
+        return get_duckdb_connection(load_spatial=True)
+
+    def test_no_aliases_when_the_names_do_not_collide(self, plain_geojson):
+        """The ordinary file: the rescue must decline and change nothing."""
+        con = self._con()
+        try:
+            assert _case_collision_aliases(con, plain_geojson, None) is None
+        finally:
+            con.close()
+
+    def test_declines_an_unknown_layer(self, plain_geojson):
+        con = self._con()
+        try:
+            assert _st_read_layer_meta(con, plain_geojson, "no-such-layer") is None
+        finally:
+            con.close()
+
+    def test_declines_when_the_file_reports_no_layers(self):
+        class NoLayers:
+            def execute(self, _query):
+                return self
+
+            def fetchone(self):
+                return ("GeoJSON", [])
+
+        assert _st_read_layer_meta(NoLayers(), "irrelevant.geojson", None) is None
+
+    def test_declines_when_the_schema_cannot_be_read(self, plain_geojson, monkeypatch):
+        """No metadata means no names to alias with."""
+        monkeypatch.setattr(convert_module, "_st_read_layer_meta", lambda *a, **k: None)
+        con = self._con()
+        try:
+            assert _case_collision_aliases(con, plain_geojson, None) is None
+        finally:
+            con.close()
+
+    def test_declines_an_unrecognised_column_layout(self, plain_geojson, monkeypatch):
+        """More unnamed columns in front than the one FID we know how to name."""
+        monkeypatch.setattr(convert_module, "_st_read_column_count", lambda *a, **k: 99)
+        con = self._con()
+        try:
+            assert _case_collision_aliases(con, plain_geojson, None) is None
+        finally:
+            con.close()
+
+    def test_a_failed_rescue_is_swallowed(self, plain_geojson, monkeypatch):
+        """The rescue's own failure must not replace the error it was rescuing."""
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("meta unavailable")
+
+        monkeypatch.setattr(convert_module, "_case_collision_aliases", boom)
+        con = self._con()
+        try:
+            assert _spatial_source_aliases(con, plain_geojson, None) is None
+        finally:
+            con.close()
+
+    def test_an_unrelated_error_is_not_treated_as_a_collision(self, tmp_path):
+        """Only the duplicate-name binder error triggers the retry."""
+        con = self._con()
+        try:
+            with pytest.raises(Exception) as caught:
+                _detect_spatial_geometry(con, str(tmp_path / "missing.geojson"), False, None, None)
+            assert "duplicate column name" not in str(caught.value)
+        finally:
+            con.close()
+
+    def test_the_original_error_stands_when_no_aliases_can_be_built(
+        self, colliding_geojson_path, monkeypatch
+    ):
+        """A collision the rescue declines still raises the binder error."""
+        monkeypatch.setattr(convert_module, "_spatial_source_aliases", lambda *a, **k: None)
+        con = self._con()
+        try:
+            with pytest.raises(Exception, match="duplicate column name"):
+                _detect_spatial_geometry(con, colliding_geojson_path, False, None, None)
+        finally:
+            con.close()
+
+
+class TestSuffixedToUnique:
+    """The naming rule on its own, without the cost of a conversion."""
+
+    def test_first_spelling_wins_and_later_ones_are_suffixed(self):
+        assert _suffixed_to_unique(["id", "Id", "ID"]) == ["id", "Id_1", "ID_2"]
+
+    def test_untouched_when_nothing_collides(self):
+        names = ["OGC_FID", "Id", "name", "geom"]
+        assert _suffixed_to_unique(names) == names
+
+    def test_suffix_that_would_itself_collide_is_skipped(self):
+        """``Id_1`` already taken means the rename has to keep counting."""
+        assert _suffixed_to_unique(["id", "Id_1", "Id"]) == ["id", "Id_1", "Id_2"]

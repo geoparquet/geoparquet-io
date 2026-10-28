@@ -23,11 +23,12 @@ from geoparquet_io.core.crs_utils import (
     source_crs_string,
     transform_geom_sql,
 )
-from geoparquet_io.core.duckdb_utils import quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_rows, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, progress, success, warn
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.partition.common import raise_if_no_rows, sanitize_filename
 from geoparquet_io.core.partition.staging import (
@@ -359,8 +360,18 @@ def _perform_enrichment_join(
     input_geom_col,
     input_bbox_col,
     source_crs=None,
+    memory_limit=None,
+    verbose=False,
 ):
-    """Perform spatial join enrichment."""
+    """Perform spatial join enrichment.
+
+    The join materializes the whole input into a temp table, so it is the
+    largest piece of DuckDB work in the command -- bigger than the split that
+    follows it. It runs under the same memory policy as every gpio write
+    (``--write-memory`` when given, else the ceiling-based default): left
+    unbounded it sized itself for the host and was measured at 14.3 GiB on 12
+    threads while ``--write-memory 700MB`` was in force (#1174).
+    """
     enrichment_query = _build_enrichment_query(
         input_path,
         admin_table_ref,
@@ -374,7 +385,8 @@ def _perform_enrichment_join(
         enriched_table,
         source_crs=source_crs,
     )
-    con.execute(enrichment_query)
+    with scoped_write_memory_limit(con, memory_limit, verbose):
+        con.execute(enrichment_query)
 
 
 def _perform_per_level_enrichment_join(
@@ -391,6 +403,7 @@ def _perform_per_level_enrichment_join(
     vecorel,
     verbose,
     source_crs=None,
+    memory_limit=None,
 ):
     """Enrich by chaining one LEFT JOIN per level against its own land cache.
 
@@ -403,6 +416,8 @@ def _perform_per_level_enrichment_join(
     ≈ the input and bounds memory. Each level reads the previous level's temp
     table so a feature carries all admin columns forward; the final join
     produces ``enriched_table``.
+
+    Every level's join is bounded like the single-source one above (#1174).
 
     Returns the list of output admin column names.
     """
@@ -432,22 +447,22 @@ def _perform_per_level_enrichment_join(
         if verbose:
             debug(f"  → Level {i + 1}/{len(levels)}: joining {level} from {level_source}")
 
-        con.execute(
-            _build_enrichment_query(
-                current_source,
-                admin_table_ref,
-                admin_where_clause,
-                select_clause,
-                admin_geom_col,
-                admin_bbox_col,
-                [col],
-                input_geom_col,
-                input_bbox_col,
-                target,
-                input_is_table_ref=current_is_table_ref,
-                source_crs=source_crs,
-            )
+        level_query = _build_enrichment_query(
+            current_source,
+            admin_table_ref,
+            admin_where_clause,
+            select_clause,
+            admin_geom_col,
+            admin_bbox_col,
+            [col],
+            input_geom_col,
+            input_bbox_col,
+            target,
+            input_is_table_ref=current_is_table_ref,
+            source_crs=source_crs,
         )
+        with scoped_write_memory_limit(con, memory_limit, verbose):
+            con.execute(level_query)
         if not is_last:
             intermediate_tables.append(target)
         current_source = target
@@ -608,9 +623,10 @@ def _create_all_partitions(
     rewrites each (small) staging partition into its final nested file with the
     correct per-partition metadata.
 
-    ``input_parquet`` is the user's own file, and it is here for one reason: the
-    version this run writes has to be resolved from it, not from the staging
-    file each partition write actually reads. See ``PartitionWriteOptions``.
+    ``input_parquet`` is the user's own file, and it is here because the
+    version this run writes, and the CRS and edges each partition declares, have
+    to come from it, not from the staging file each partition write actually
+    reads. See ``PartitionWriteOptions``.
     Unlike the index-adding partition drivers, the admin join reads the user's
     file directly -- the enriched table is ``a.*`` plus the admin columns, with
     only the join predicate reprojected -- so this file is a truthful witness
@@ -624,6 +640,7 @@ def _create_all_partitions(
         geoparquet_version=resolve_output_geoparquet_version(
             geoparquet_version, input_file=input_parquet, verbose=verbose
         ),
+        input_file=input_parquet,
         compression=compression,
         compression_level=compression_level,
         row_group_size_mb=row_group_size_mb,
@@ -742,12 +759,14 @@ def partition_by_admin_hierarchical(
 
         # Setup dataset and get input file info
         dataset, boundary_columns = _setup_admin_dataset(dataset_name, verbose, levels)
+        # --write-memory also bounds the dataset's cache downloads (#1156).
+        dataset.memory_limit = memory_limit
         input_path, input_geom_col, input_bbox_col = _get_input_file_info(actual_input, verbose)
 
         # Admin boundaries are OGC:CRS84; reproject a non-CRS84 input before the
         # join so ST_Intersects neither errors on a CRS mismatch nor silently
         # matches nothing (#525).
-        source_crs = source_crs_string(actual_input, verbose)
+        source_crs = source_crs_string(actual_input, verbose, input_geom_col)
 
         # Get admin dataset info
         admin_geom_col = dataset.get_geometry_column()
@@ -786,6 +805,7 @@ def partition_by_admin_hierarchical(
                     vecorel,
                     verbose,
                     source_crs=source_crs,
+                    memory_limit=memory_limit,
                 )
             else:
                 admin_source = dataset.prepare_data_source(con)
@@ -817,6 +837,8 @@ def partition_by_admin_hierarchical(
                     input_geom_col,
                     input_bbox_col,
                     source_crs=source_crs,
+                    memory_limit=memory_limit,
+                    verbose=verbose,
                 )
 
             # Verify enrichment results
@@ -910,8 +932,7 @@ def _get_preview_partitions(con, table_name, partition_columns, level_names):
         ORDER BY record_count DESC
     """
 
-    result = con.execute(query)
-    return result.fetchall()
+    return fetch_rows(con, query)
 
 
 def _display_preview_header(level_names, all_partitions, total_records, limit):

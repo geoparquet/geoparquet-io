@@ -42,9 +42,13 @@ Credentials come from the standard AWS credential chain, so anything the AWS CLI
 5. **`credential_process`**: an external command that prints credentials
 6. **IAM role**: EC2 instance, ECS task or EKS pod identity metadata
 
-Naming a profile makes that profile win over environment keys. The region is read from the same chain: `--s3-region`, then `AWS_REGION`/`AWS_DEFAULT_REGION`, then the profile's `region`.
+For DuckDB reads, precedence follows the AWS CLI. Naming a profile with `--aws-profile` (or `profile=` in Python) makes that profile win over environment keys. An exported `AWS_PROFILE` does not, so when `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are also set, DuckDB reads sign with the environment keys. Uploads and copies go through obstore, where an exported `AWS_PROFILE` still wins over environment keys.
+
+The region comes from `--s3-region` (or `s3_region=` in Python) first, then `AWS_REGION` or `AWS_DEFAULT_REGION`. After that, a profile named with `--aws-profile` gives its own `region`. An exported `AWS_PROFILE` does not, and DuckDB reads use the `region` of the `default` profile instead. If the bucket is in another region, pass `--s3-region` (or `s3_region=`) or set `AWS_REGION`.
 
 Credentials from SSO, assume-role and `credential_process` are short-lived. gpio resolves them once at the start of a command, which is fine for a single upload or copy; a run that outlives the credential lifetime needs to be restarted.
+
+**Known limit for assume-role profiles on DuckDB reads.** For a profile with `role_arn` and `source_profile`, the DuckDB `aws` extension signs the STS `AssumeRole` call with the default credential chain (environment keys or the `default` profile), not with the keys of `source_profile`. Uploads and copies (obstore) use `source_profile` as expected. Until this is fixed upstream, put the source keys in the `default` profile or in environment variables, or use a `credential_process` or SSO profile.
 
 **Examples:**
 
@@ -63,7 +67,7 @@ Credentials from SSO, assume-role and `credential_process` are short-lived. gpio
     # Use a named AWS profile (convenient CLI flag)
     gpio --aws-profile production add bbox s3://bucket/input.parquet s3://bucket/output.parquet
 
-    # Or set AWS_PROFILE environment variable (equivalent to --aws-profile)
+    # Or set AWS_PROFILE environment variable (env keys, when set, win over it on reads)
     export AWS_PROFILE=production
     gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet
     ```
@@ -89,7 +93,7 @@ Credentials from SSO, assume-role and `credential_process` are short-lived. gpio
     gpio.read('s3://bucket/input.parquet').add_bbox().upload('s3://bucket/output.parquet')
     ```
 
-**Note:** The `--aws-profile` flag is available on all commands and sets `AWS_PROFILE` for you.
+**Note:** The `--aws-profile` flag is available on all commands. It applies to that one command only and does not change `AWS_PROFILE` in your environment.
 
 ### Azure Blob Storage
 

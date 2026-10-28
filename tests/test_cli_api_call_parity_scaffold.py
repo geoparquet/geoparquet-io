@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+import json
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
@@ -103,6 +104,7 @@ from geoparquet_io.core import check_optimization as core_check_optimization
 from geoparquet_io.core import check_parquet_structure as core_check_structure
 from geoparquet_io.core import check_spatial_order as core_check_spatial
 from geoparquet_io.core import extract as core_extract
+from geoparquet_io.core import format_writers as core_format_writers
 from geoparquet_io.core import hilbert_order as core_hilbert
 from geoparquet_io.core import pmtiles as core_pmtiles
 from geoparquet_io.core import pmtiles_pyramid as core_pmtiles_pyramid
@@ -119,6 +121,7 @@ from geoparquet_io.core.add import h3 as core_h3
 from geoparquet_io.core.add import kdtree as core_kdtree
 from geoparquet_io.core.add import quadkey as core_quadkey
 from geoparquet_io.core.add import s2 as core_s2
+from geoparquet_io.core.add import stac_metadata as core_stac_metadata
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
 from geoparquet_io.core.partition import by_h3 as core_part_h3
@@ -341,6 +344,19 @@ def _swallow(call: Callable[[], Any]) -> Any:
         return None
 
 
+def _collection_json(ctx: Ctx) -> str:
+    """A STAC Collection on disk, so both front ends name the same file.
+
+    `gpio add stac-metadata --collection` takes a path and `ops.add_stac_metadata`
+    takes a path or a dict; handing both the same path is what makes the captured
+    `collection` values comparable.
+    """
+    path = Path(ctx.scratch("parity-collection.json"))
+    if not path.exists():
+        path.write_text(json.dumps({"type": "Collection", "id": "parity"}))
+    return str(path)
+
+
 CASES: list[ParityCase] = [
     ParityCase(
         id="add bbox",
@@ -358,6 +374,26 @@ CASES: list[ParityCase] = [
             lambda c: c.gpio_table.add_bbox(),
         ),
         normalize={"column_name": ("bbox_column_name", "bbox_column_name")},
+    ),
+    ParityCase(
+        id="add stac-metadata",
+        cli=_cli(
+            "add_stac_metadata_impl",
+            core_stac_metadata.add_stac_metadata,
+            lambda c: ["add", "stac-metadata", c.input_file, "--collection", _collection_json(c)],
+            module=cli_add,
+        ),
+        ops=_ops(
+            "_add_stac_metadata_file",
+            core_stac_metadata.add_stac_metadata,
+            lambda c: ops.add_stac_metadata(c.input_file, _collection_json(c)),
+        ),
+        normalize={
+            "collection": ("collection", "collection"),
+            "version": ("version", "version"),
+            "output_file": ("output_file", "output_file"),
+            "overwrite": ("overwrite", "overwrite"),
+        },
     ),
     ParityCase(
         id="add h3",
@@ -620,6 +656,101 @@ CASES: list[ParityCase] = [
             "write boundary. Both mean 'auto'; the values cannot be equal here.",
         ),
     ),
+    # The three filtered converters (#1308). Every door resolves its writer from
+    # core.format_writers inside the call, and the geopackage/flatgeobuf wrappers
+    # forward to write_gdal_format through their module globals -- so that one
+    # function is the shared seam all three doors are patched on.
+    ParityCase(
+        id="convert geopackage",
+        cli=_cli(
+            "write_gdal_format",
+            core_format_writers.write_gdal_format,
+            lambda c: ["convert", "geopackage", c.input_file, c.scratch("parity-cli.gpkg")],
+            module=core_format_writers,
+        ),
+        ops=_ops_via_table(
+            core_format_writers,
+            "write_gdal_format",
+            core_format_writers.write_gdal_format,
+            lambda c: ops.convert_to_geopackage(c.table, c.scratch("parity-ops.gpkg")),
+        ),
+        table=_table(
+            core_format_writers,
+            "write_gdal_format",
+            core_format_writers.write_gdal_format,
+            lambda c: c.gpio_table.write(c.scratch("parity-table.gpkg")),
+        ),
+        normalize={
+            "format_name": ("format_name", "format_name"),
+            "overwrite": ("overwrite", "overwrite"),
+            "layer_name": ("layer_name", "layer_name"),
+            "bbox": ("bbox", "bbox"),
+            "geometry": ("geometry", "geometry"),
+            "where": ("where", "where"),
+            "use_first_geometry": ("use_first_geometry", "use_first_geometry"),
+        },
+    ),
+    ParityCase(
+        id="convert flatgeobuf",
+        cli=_cli(
+            "write_gdal_format",
+            core_format_writers.write_gdal_format,
+            lambda c: ["convert", "flatgeobuf", c.input_file, c.scratch("parity-cli.fgb")],
+            module=core_format_writers,
+        ),
+        ops=_ops_via_table(
+            core_format_writers,
+            "write_gdal_format",
+            core_format_writers.write_gdal_format,
+            lambda c: ops.convert_to_flatgeobuf(c.table, c.scratch("parity-ops.fgb")),
+        ),
+        table=_table(
+            core_format_writers,
+            "write_gdal_format",
+            core_format_writers.write_gdal_format,
+            lambda c: c.gpio_table.write(c.scratch("parity-table.fgb")),
+        ),
+        normalize={
+            "format_name": ("format_name", "format_name"),
+            "bbox": ("bbox", "bbox"),
+            "geometry": ("geometry", "geometry"),
+            "where": ("where", "where"),
+            "use_first_geometry": ("use_first_geometry", "use_first_geometry"),
+        },
+        notes=(
+            "overwrite is not compared: the CLI exposes --overwrite while "
+            "ops.convert_to_flatgeobuf has no such knob.",
+        ),
+    ),
+    ParityCase(
+        id="convert csv",
+        cli=_cli(
+            "write_csv",
+            core_format_writers.write_csv,
+            lambda c: ["convert", "csv", c.input_file, c.scratch("parity-cli.csv")],
+            module=core_format_writers,
+        ),
+        ops=_ops_via_table(
+            core_format_writers,
+            "write_csv",
+            core_format_writers.write_csv,
+            lambda c: ops.convert_to_csv(c.table, c.scratch("parity-ops.csv")),
+        ),
+        table=_table(
+            core_format_writers,
+            "write_csv",
+            core_format_writers.write_csv,
+            lambda c: c.gpio_table.write(c.scratch("parity-table.csv")),
+        ),
+        normalize={
+            "include_wkt": ("include_wkt", "include_wkt"),
+            "include_bbox": ("include_bbox", "include_bbox"),
+            "bbox": ("bbox", "bbox"),
+            "geometry": ("geometry", "geometry"),
+            "where": ("where", "where"),
+            "use_first_geometry": ("use_first_geometry", "use_first_geometry"),
+        },
+    ),
     ParityCase(
         id="partition h3",
         cli=_cli(
@@ -792,15 +923,15 @@ CASES: list[ParityCase] = [
     ParityCase(
         id="check bbox",
         cli=_cli(
-            "check_metadata_and_bbox",
-            core_check_structure.check_metadata_and_bbox,
+            "check_bbox",
+            core_check_structure.check_bbox,
             lambda c: ["check", "bbox", c.input_file],
             module=core_check_structure,
         ),
         table=_table(
             core_check_structure,
-            "check_metadata_and_bbox",
-            core_check_structure.check_metadata_and_bbox,
+            "check_bbox",
+            core_check_structure.check_bbox,
             lambda c: c.gpio_table.check_bbox(),
         ),
         normalize={"return_results": ("return_results", "return_results")},
@@ -1490,15 +1621,15 @@ NO_CALL_PARITY_CASE: dict[str, str] = {
             "partition admin",
             "convert reproject",
             "convert geojson",
-            "convert geopackage",
-            "convert flatgeobuf",
-            "convert csv",
             "convert shapefile",
             "partition string",
             "partition kdtree",
             "partition s2",
             "partition a5",
             "add bbox-metadata",
+            "process simplify",
+            "process polygonize",
+            "process contour",
         ],
         _DEFERRED,
     ),

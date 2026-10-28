@@ -178,8 +178,49 @@ table = gpio.Table.from_bigquery(
 
 See the [Extract Guide](../guide/extract.md#bbox-filtering-mode-server-vs-local) for detailed tradeoff analysis.
 
+**Running your own SQL:**
+
+`where` can only add a predicate to `SELECT * FROM <table>`. Pass `sql`
+instead when the question needs more than that -- a window function, a join,
+a `GROUP BY`. It replaces `table_id` as the source and runs as a BigQuery
+query job:
+
+```python
+table = gpio.Table.from_bigquery(
+    sql="""
+        SELECT * EXCEPT(rn) FROM (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY item_id ORDER BY version DESC) AS rn
+          FROM `myproject.geodata.items`
+          WHERE acquired_at >= TIMESTAMP('2025-09-01')
+        ) WHERE rn = 1
+    """,
+    project='myproject',
+    geography_column='geometry',
+)
+```
+
+`project` is required with `sql`, because the query job has to be billed
+somewhere and there is no `table_id` to take a project from. `sql` is
+mutually exclusive with every argument that shapes the query -- `columns`,
+`exclude_columns`, `where`, `bbox`, `bbox_mode`, `bbox_threshold`, `limit` --
+since the statement already says all of that. The arguments that shape the
+output (`geography_column`, `geometry_format`, `edges`, `repair_geometry`)
+still apply. The same `sql=` argument is on `ops.read_bigquery()`.
+
+!!! warning "Filter inside the statement"
+    A query job materializes its whole result before anything is read, so an
+    unfiltered `SELECT *` over a large relation fails with "Response too
+    large to return" rather than returning slowly.
+
+!!! note "BigQuery views"
+    A view, materialized view or external table is read through a BigQuery
+    query job instead of the Storage Read API, detected and retried
+    automatically. The job is billed by bytes scanned; the selected columns,
+    `where`, `bbox` and `limit` are pushed into it, and on a view `where` runs
+    as GoogleSQL (bare column names, plain single-quoted strings, no comments).
+
 !!! warning "BigQuery Limitations"
-    - **Cannot read views or external tables** (Storage Read API limitation)
     - BIGNUMERIC columns are not supported
 
 ### Reading from ArcGIS Feature Services
@@ -238,6 +279,7 @@ gpio.extract_arcgis(
 | `include_cols` | str | Comma-separated columns to include |
 | `exclude_cols` | str | Comma-separated columns to exclude |
 | `limit` | int | Maximum number of features |
+| `batch_size` | int | Features per request (default: server's `maxRecordCount`, capped at 2000); lower it for layers the server cannot serialize a full page of |
 | `max_workers` | int | Number of parallel fetch workers (default: 1) |
 | `output_crs` | str | Output CRS (e.g. `EPSG:25830`) or `native`; default reprojects to WGS84 |
 | `max_allowable_offset` | float | Server-side geometry generalization tolerance in output CRS units |
@@ -285,11 +327,11 @@ table = ops.from_wfs('https://geo.example.com/wfs', 'cities', limit=100)
 | `service_url` | str | WFS service URL |
 | `typename` | str | Layer name to extract |
 | `version` | str | WFS version: `auto` (default), `2.0.0`, `1.1.0`, `1.0.0`. Auto tries 2.0.0 first. |
-| `bbox` | tuple | Bounding box filter (xmin, ymin, xmax, ymax) |
+| `bbox` | tuple | Bounding box filter (xmin, ymin, xmax, ymax), x,y, in the CRS requested from the layer (`output_crs`, else EPSG:4326, else the layer's default CRS). Not reprojected. When it looks like lon/lat on a projected layer, or matches nothing, a warning prints the box reprojected into the layer CRS as a hint. |
 | `limit` | int | Maximum number of features |
 | `max_workers` | int | Number of parallel fetch workers (default: 1) |
 | `page_size` | int | Features per WFS request page (default: 100000) |
-| `axis_order` | str | Bbox axis order: `auto` (default), `xy`, `latlon`. Auto detects from CRS format. |
+| `axis_order` | str | Bbox axis order: `auto` (default), `xy`, `latlon`. Pass the bbox x,y. `auto` picks the form from the layer CRS (CRS84 for lon/lat, lat,lon with the EPSG URN for other lat,lon CRSs). `xy` always sends x,y with the short `EPSG:<code>` label (CRS84 for lon/lat). `latlon` also sends a lon/lat bbox lat,lon. Ignored on WFS 1.0.0. |
 | `auto_tile` | bool | Auto-subdivide bbox when server caps response (default: True) |
 | `strict_crs` | bool | Fail when the server returns a different CRS than requested (default: False, warns and uses the server's actual CRS instead). gpio trusts the CRS the server declares in its GeoJSON response and never guesses from coordinates. |
 
@@ -312,6 +354,14 @@ result = ops.aggregate_a5(
     breakdown="crop_type",
 )
 ```
+
+`metric` also takes `pct_cell:<column>`, where `<column>` holds each feature's
+area in m². It writes `pct_<column>` — the percent of the cell's own area that
+column adds up to — plus the `sum_<column>` an overview rollup recomputes it
+from. A5 cells are equal-area per resolution and H3 cells are measured
+individually; admin regions have no cell area, so `ops.aggregate_admin()`
+refuses it. See
+[Percent of the cell covered](../guide/process-aggregate.md#percent-of-the-cell-covered-pct_cell).
 
 #### ops.aggregate_h3()
 
@@ -494,6 +544,15 @@ full_meta = table.metadata(include_parquet_metadata=True)
 #### `to_geojson(output_path=None, precision=7, write_bbox=False, id_field=None)`
 
 Convert to GeoJSON.
+
+An exported geometry column declaring spherical or ellipsoidal edges raises
+`GeoParquetError` before output is created or overwritten. This includes
+point-only and empty inputs with that declaration. The same restriction applies
+to `Table.write('output.geojson')`, `ops.convert_to_geojson()`,
+`gpio convert geojson` and `gpio pmtiles`. Keeping non-planar data in GeoParquet
+preserves its meaning. A geodesic-aware tool must densify and cut it into a
+planar representation before GeoJSON export. Disabling geometry repair does not
+make that conversion safe.
 
 ```python
 # Write to file
@@ -718,6 +777,21 @@ WGS84, use `assume_crs84=True` to treat them as OGC:CRS84 and write the default
 table = gpio.read('unknown_crs.parquet').reproject(assume_crs84=True)
 ```
 
+If you know the real CRS of a file whose CRS is unknown, pass it as
+`source_crs` instead. A `srid:0` Parquet type reads as unknown the same way.
+
+```python
+table = gpio.read('unknown_crs.parquet').reproject(
+    target_crs='EPSG:4326', source_crs='EPSG:5070'
+)
+```
+
+Without that, `Table.write()` keeps an unknown CRS unknown. A 1.0 or 1.1
+output keeps `crs: null`, a 2.0 output keeps it and types the column `srid:0`,
+and a parquet-geo-only output types the column `srid:0`. An empty `crs` value
+such as `{}` reads as unknown, with a warning, and is written the same way.
+`table.crs` is `None` for both the default and an unknown CRS.
+
 #### `extract(columns=None, exclude_columns=None, bbox=None, where=None, limit=None)`
 
 Filter columns and rows.
@@ -758,6 +832,37 @@ table.write('output.parquet', compression='GZIP', compression_level=6)
 
 # With row group size
 table.write('output.parquet', row_group_size_mb=128)
+```
+
+A geometry column name the table does not carry — `Table(arrow_table,
+geometry_column='geom')` on a table whose column is `geometry` — raises
+`InvalidParameterError` naming the columns the table does have. Every output
+format and every write strategy refuses it the same way, instead of one crashing
+with a `KeyError`, one writing a `geo` block that names a column the file lacks,
+one quietly writing plain Parquet, and `.gpkg`/`.geojson`/`.fgb`/`.csv` ignoring
+the name altogether because their GDAL writers re-detect the geometry
+themselves ([#1176](https://github.com/geoparquet/geoparquet-io/issues/1176)).
+A table with *no* geometry column is not the same thing, and still writes plain
+Parquet deliberately.
+
+**What `write()` keeps**
+
+`write()` keeps the input's non-geo file metadata (fiboa, vecorel, STAC
+fragments, your own keys), for a table from `gpio.read()` and from
+`gpio.convert()` alike
+([#1268](https://github.com/geoparquet/geoparquet-io/issues/1268)). The stale
+`pandas` and `ARROW:schema` blocks are dropped on purpose, and `geo` is rebuilt
+from the table. Non-planar edges are kept too. A native GEOGRAPHY table writes
+as a GEOGRAPHY at 2.0 and as `edges: spherical` in a 1.x `geo` block
+([#1253](https://github.com/geoparquet/geoparquet-io/issues/1253)). A
+`1.1-geoarrow` output also names the edges in its GeoArrow type, so an Arrow
+reader sees the same answer. No WKB geometry column, primary or secondary,
+is dictionary-encoded, on any `write_strategy` and any `geoparquet_version`
+([#1122](https://github.com/geoparquet/geoparquet-io/issues/1122)).
+
+```python
+gpio.convert('fields.parquet').write('out.parquet')  # keeps the fiboa key
+gpio.read('geography.parquet').write('out.parquet', geoparquet_version='2.0')
 ```
 
 **Row group size**
@@ -812,6 +917,25 @@ table.write('output.parquet', write_strategy='streaming')
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `write_strategy` | str | Write strategy: `duckdb-kv` (default), `streaming`, `disk-rewrite`, or `in-memory` |
+
+Every strategy writes the same file-level keys. The `geo` block is built fresh
+for the output, and other keys such as fiboa, STAC or your own provenance key are
+kept. The input's `pandas`, `ARROW:schema` and `geo:overviews` keys are never
+copied, because they describe the input's rows and not the written ones. A stale
+`pandas` block made pandas give sorted rows the input's index labels, or shift a
+naive timestamp by a time zone the column no longer has. The CLI and the
+`duckdb-kv` and `disk-rewrite` strategies already worked this way. Before
+[#1268](https://github.com/geoparquet/geoparquet-io/issues/1268) the `in-memory`
+and `streaming` strategies and the Arrow-table writer copied the `pandas` key
+through. A named or non-range pandas index now reads back as a plain column, as
+it already did on the default strategy.
+
+The `pandas` key is always dropped, not only when the rows change. pyarrow uses
+it in `to_pandas()` to restore the index and nullable dtypes such as `Int64`, so
+even a plain `gpio.read(path).write(out)` loses them. An `Int64` column with
+nulls comes back as `float64`, and a named index comes back as a plain column.
+If you need a pandas round trip, write the file with geopandas `to_parquet`
+instead.
 
 DuckDB's memory limit is auto-detected and respects container cgroup limits. To
 set it explicitly, use the CLI `gpio extract --write-memory` flag; the Python
@@ -1022,7 +1146,12 @@ stats = table.partition_by_admin('output/', vecorel=True)
 
 ### Aggregation Methods {#aggregation}
 
-#### `aggregate_a5(resolution, metric=None, breakdown=None, breakdown_limit=20, out_geometry='polygon', where=None, metric_nodata=None, bucket_point='geometry', bbox_column=None)`
+Aggregate and overview methods generate new geometry in OGC:CRS84 longitude
+and latitude, including when the input comes from a projected `gpio.convert()`
+table. Their results use that output CRS when written. Counts-only results
+have no geometry or CRS.
+
+#### `aggregate_a5(resolution, metric=None, breakdown=None, breakdown_limit=20, out_geometry='polygon', where=None, metric_nodata=None, bucket_point='geometry', bbox_column=None, breakdown_metric=None, memory_limit=None)`
 
 Aggregate features into A5 grid cells with per-cell statistics for low-zoom visualization.
 
@@ -1065,16 +1194,18 @@ result.write('cells_stats.parquet')
 | `resolution` | int | required | A5 resolution level (0–30) |
 | `metric` | str | None | Numeric rollups: `"sum:col,avg:col"`. Bare column = sum. |
 | `breakdown` | str | None | Categorical column to pivot into `count_<value>` columns |
-| `breakdown_limit` | int | 20 | Max categories; remainder goes into `count_other` |
+| `breakdown_limit` | int | 20 | Max categories; remainder goes into the other bucket |
+| `breakdown_metric` | str | None | What each pivot holds: `None`/`'count'`, or `'sum:col'` / `'min:col'` / `'max:col'` (see `--breakdown-metric`) |
 | `out_geometry` | str | `"polygon"` | Geometry per cell: `"polygon"`, `"centroid"`, `"both"`, or `"none"` |
 | `where` | str | None | DuckDB WHERE clause filtering input rows before aggregation |
 | `metric_nodata` | str | None | NoData sentinel value(s) mapped to NULL in metric columns, e.g. `"-999"` or `"-999,-9999"` (`"nan"` matches NaN) |
 | `bucket_point` | str | `"geometry"` | Keying point source: `"geometry"` (centroid), `"bbox"` (bbox covering column center, skips reading geometry), or a point column name |
 | `bbox_column` | str | None | Bbox covering column for `bucket_point="bbox"` (auto-detected when omitted) |
+| `memory_limit` | str | None | DuckDB memory limit for the aggregation, e.g. `"8GB"`. Default: half the process's memory ceiling (RAM, or the container/Slurm cap when lower) |
 
 Every output row carries `a5_cell` (UBIGINT) as the bucket identifier.
 
-#### `aggregate_h3(resolution, metric=None, breakdown=None, breakdown_limit=20, out_geometry='polygon', where=None, metric_nodata=None, bucket_point='geometry', bbox_column=None)`
+#### `aggregate_h3(resolution, metric=None, breakdown=None, breakdown_limit=20, out_geometry='polygon', where=None, metric_nodata=None, bucket_point='geometry', bbox_column=None, breakdown_metric=None, memory_limit=None)`
 
 Aggregate features into H3 hexagonal grid cells. Same options as `aggregate_a5`,
 but the resolution range is **0–15** and the bucket id column is `h3_cell` (a
@@ -1093,7 +1224,7 @@ result.write('cells.parquet')
 
 Every output row carries `h3_cell` (string) as the bucket identifier.
 
-#### `aggregate_admin(level='country', metric=None, breakdown=None, breakdown_limit=20, out_geometry='polygon', where=None, metric_nodata=None, bucket_point='geometry', bbox_column=None)`
+#### `aggregate_admin(level='country', metric=None, breakdown=None, breakdown_limit=20, out_geometry='polygon', where=None, metric_nodata=None, bucket_point='geometry', bbox_column=None, breakdown_metric=None, memory_limit=None)`
 
 Aggregate features into administrative regions (Overture Maps) with per-region statistics.
 
@@ -1120,16 +1251,18 @@ result.write('by_region.parquet')
 | `level` | str | `"country"` | Admin level: `"country"` or `"region"` |
 | `metric` | str | None | Numeric rollups: `"sum:col,avg:col"`. Bare column = sum. |
 | `breakdown` | str | None | Categorical column to pivot into `count_<value>` columns |
-| `breakdown_limit` | int | 20 | Max categories; remainder goes into `count_other` |
+| `breakdown_limit` | int | 20 | Max categories; remainder goes into the other bucket |
+| `breakdown_metric` | str | None | What each pivot holds: `None`/`'count'`, or `'sum:col'` / `'min:col'` / `'max:col'` (see `--breakdown-metric`) |
 | `out_geometry` | str | `"polygon"` | Geometry per region: `"polygon"`, `"centroid"`, `"both"`, or `"none"` |
 | `where` | str | None | DuckDB WHERE clause filtering input rows before aggregation |
+| `memory_limit` | str | None | DuckDB memory limit for the aggregation, e.g. `"8GB"`. Default: half the process's memory ceiling (RAM, or the container/Slurm cap when lower) |
 
 Every output row carries `admin_code` and `admin_name` bucket identifiers. Features outside all regions go into an `unassigned` bucket.
 
 !!! note "Known limitation"
     `admin_name` currently equals the ISO code (same as `admin_code`).
 
-#### `overview(level, cell_column=None)`
+#### `overview(level, cell_column=None, scheme=None, memory_limit=None)`
 
 Roll an aggregate table up to a coarser overview level by true cell hierarchy
 (`a5_cell_to_parent` / `h3_cell_to_parent`; admin region codes collapse to
@@ -1154,11 +1287,41 @@ by_country.write('by_region_country.parquet')
 | `level` | int or str | required | Coarser grid resolution, or `"country"` for admin |
 | `cell_column` | str | None | Cell id column when auto-detection fails |
 | `scheme` | str | None | Bucketing scheme (`a5`/`h3`/`admin`) when inference is ambiguous, e.g. H3 ids stored as integers |
+| `memory_limit` | str | None | DuckDB memory limit for the rollup, e.g. `"8GB"`. Default: half the process's memory ceiling (RAM, or the container/Slurm cap when lower) |
 
 `count`, `sum_*`, `min_*`, `max_*`, and breakdown `count_*` columns roll up
 exactly; `avg_*` is count-weighted (exact when the metric had no NULLs). For
 file-based batch building of several levels (with auto level selection), use
 `ops.create_overviews`.
+
+### Simplification and Raster Methods {#simplify-raster}
+
+#### `simplify(tolerance, coverage=False, preserve_topology=True, simplify_boundary=True, threads=None)`
+
+Simplify geometries with [coarsen](https://github.com/isaaccorley/coarsen)
+(requires the `simplify` extra). `coverage=True` keeps shared edges shared
+across a polygonal coverage. See [Simplifying Geometries](../guide/process-simplify.md).
+
+<!-- doctest: skip="requires the optional simplify extra (coarsen)" -->
+```python
+import geoparquet_io as gpio
+
+gpio.read('parcels.parquet').simplify(10).write('simplified.parquet')
+```
+
+#### `Table.polygonize(input_raster, ...)` / `Table.contour(input_raster, ...)`
+
+Classmethod constructors that build a Table from a raster via
+[contourrs](https://github.com/isaaccorley/contourrs) (requires the `raster`
+extra, Python 3.12+). See [Raster to Vector](../guide/process-raster.md).
+
+<!-- doctest: skip="requires the optional raster extra (contourrs, Python 3.12+)" -->
+```python
+import geoparquet_io as gpio
+
+gpio.Table.polygonize('landcover.tif').write('landcover.parquet')
+gpio.Table.contour('dem.tif', interval=100).write('contours.parquet')
+```
 
 ### Sub-Partitioning Utilities
 
@@ -1276,18 +1439,69 @@ a table read from plain Parquet is refused here exactly as `gpio add bbox-metada
 refuses the file. Convert it first: `gpio convert geoparquet in.parquet out.parquet`.
 `ops.add_bbox_metadata(table)` is the function form and applies the same rules.
 
+#### `add_stac_metadata(collection, *, version='1.1.0')`
+
+Attach a STAC Collection under the `stac-geoparquet` metadata key. A
+stac-geoparquet file holds STAC Items as rows; this carries the Collection
+those Items belong to in the file's own metadata, so a reader that has the file
+has the Collection too.
+
+<!-- doctest: skip="needs a collection.json and a table of STAC items" -->
+```python
+# From a Collection on disk
+table.add_stac_metadata('collection.json').write('items.parquet')
+
+# Or from a dict you already hold
+table.add_stac_metadata(collection_dict, version='1.0.0').write('items.parquet')
+```
+
+The value written is
+`{"version": ..., "collections": {"<collection id>": {...}}}`. `collections` is
+a **map keyed by collection id** — the singular `collection` key of the 1.0.0
+release is deprecated in 1.1.0, so it is written only under version 1.0.0
+(beside the map, and a 1.0.0 value can hold just one Collection). Every other
+metadata
+key, `geo` included, is kept.
+
+A `stac-geoparquet` key already present is merged with, not replaced by, the
+Collection this call adds: a new collection id joins the map alongside the
+ones already there, a repeated id replaces its own entry, and the declared
+`version` becomes whichever this call asked for.
+
+Raises `GeoParquetError` when `version` is anything but `'1.0.0'` or `'1.1.0'`
+(the only two the specification defines), when the Collection cannot be read,
+or when it has no `id` — the id is what an Item's `collection` field points at,
+so there is no key to file the Collection under without one.
+
+`ops.add_stac_metadata_table(table, collection)` is the function form.
+`ops.add_stac_metadata(path, collection)` is the **file** form: it patches an
+already-written file's footer without re-encoding it, exactly as
+`gpio add stac-metadata` does.
+
+<!-- doctest: skip="needs a collection.json and an items.parquet" -->
+```python
+from geoparquet_io.api import ops
+
+ops.add_stac_metadata('items.parquet', 'collection.json')
+```
+
 #### `check()` / `check_spatial()` / `check_compression()` / `check_bbox()` / `check_row_groups()`
 
-Run best-practice checks on the table.
+Run best-practice checks on the table. `check()` runs the structure checks
+(row groups, bbox and covering, compression, bloom filters); `gpio check all`
+also runs spatial order and spec validation, so for its exit code combine
+`check()`, `check_spatial()` and `validate()`.
 
 ```python
-# Run all checks
+# Run the structure checks
 result = table.check()
-if result.passed():
-    print("All checks passed!")
-else:
+if result.verdict() == "failure":
     for failure in result.failures():
         print(f"Failed: {failure}")
+
+# What `gpio check all` exits 1 on (`!= "pass"` for `--strict`)
+gate = [table.check(), table.check_spatial(), table.validate()]
+check_all_fails = any(r.verdict() == "failure" for r in gate)
 
 # Individual checks
 spatial_result = table.check_spatial()
@@ -1299,22 +1513,21 @@ row_group_result = table.check_row_groups()
 details = result.to_dict()
 ```
 
-`check_spatial()` judges a file with row-group bounding boxes by the [Portolan
-spec's pruning-efficiency rule](https://github.com/portolan-sdi/portolan-spec/blob/main/specs/portolan/formats.md); `sample_size` (default `100`) and
-`limit_rows` (default `500000`) apply only to the sampling fallback used when a
-file has none. Below eight row groups the verdict is withheld: `passed()` stays
-`True` (no failure was found), `judged()` is `False`, the numbers
-(`estimated_skip_rate`, `ideal_skip_rate`, `skip_rate_efficiency`,
-`bbox_area_sum`, `num_row_groups`) are still in `to_dict()`, and `warnings()`
-says why. `judged()` is available on every `CheckResult`; only the spatial
-check withholds.
+`check_bbox()` also compares each row's bbox against its geometry's real
+envelope. A bbox smaller than its geometry fails the check — readers prune on
+the covering, so those rows go missing from spatial query results with no error
+anywhere — as do a NULL or NaN bbox and a geometry that is not valid WKB; one
+larger than its geometry is a warning (`verdict()` is `"warning"`). The
+comparison decodes a seeded sample of 5,000 rows drawn across the file by
+default, though it reads the geometry and bbox columns in full:
 
 ```python
-result = gpio.read('two_row_groups.parquet').check_spatial()
-result.passed()                           # True: nothing failed
-result.judged()                           # False: nothing was judged either
-result.warnings()[0]                      # 'Spatial ordering not judged below 8 row groups (2 in this file); ...'
-result.to_dict()["skip_rate_efficiency"]  # the number, all the same
+bbox_result = table.check_bbox(all_rows=True)       # compare every row
+bbox_result = table.check_bbox(sample_rows=50000)   # wider sample
+bbox_result = table.check_bbox(sample_rows=0)       # structure and metadata only
+
+report = table.check_bbox().to_dict()['bbox_values']
+print(report['undersized_rows'], report['undersized_examples'])
 ```
 
 **Which bytes a check describes.** A table from `gpio.read(path)` is checked
@@ -1346,8 +1559,7 @@ print(f"Score: {details['score']}/5 - {details['level']}")
 
 #### `check_spatial_pushdown()`
 
-Check spatial filter pushdown readiness: the expected fraction of row groups a
-query window can skip, at least 50% to pass.
+Check spatial filter pushdown readiness by analyzing row group bounding box overlap.
 
 ```python
 result = table.check_spatial_pushdown()
@@ -1447,6 +1659,33 @@ table = gpio.convert('data.csv', lat_column='latitude', lon_column='longitude')
 
 # Convert from S3 with authentication
 table = gpio.convert('s3://bucket/data.gpkg', profile='my-aws')
+
+# Name the text encoding of a source that cannot say (a DBF without .cpg, a Latin-1 CSV)
+table = gpio.convert('ehak.shp', encoding='ISO-8859-1')
+table = gpio.convert('tokyo.shp', encoding='CP932')  # Shift_JIS attribute table
+
+# Drop Z/M so a 3D source becomes 2D geometry
+table = gpio.convert('etak_3d.shp', force_2d=True)
+```
+
+`geometry_column` is a *request*, and the returned `Table` carries the name
+actually used — read it off `table.geometry_column` rather than assuming. A
+tabular source (`wkt_column`, or `lat_column`/`lon_column`) honours the request,
+because it aliases the geometry it builds; if a column the source carries through
+already has that name, the built one moves aside to `<name>_1` with a warning. A
+spatial source (GeoPackage, Shapefile, GeoJSON, FlatGeobuf, FileGDB) cannot
+honour it — both of its reads alias `ST_AsWKB(...) AS geometry` — so the table
+comes back with `geometry` ([#1176](https://github.com/geoparquet/geoparquet-io/issues/1176)).
+
+```python
+# Honoured: the geometry is built here, so it can take the name
+table = gpio.convert('pts.csv', lat_column='lat', lon_column='lon',
+                     geometry_column='geom')
+table.geometry_column   # 'geom'
+
+# A GeoPackage's geometry is read, not built: the name is reported back
+table = gpio.convert('data.gpkg', geometry_column='geom')
+table.geometry_column   # 'geometry'
 ```
 
 Unlike the CLI `convert` command, the Python API does NOT apply Hilbert sorting by default. Chain `.sort_hilbert()` explicitly if you want spatial ordering:
@@ -1516,6 +1755,18 @@ table.write('output.csv',
            include_bbox=False)  # Exclude bbox column
 ```
 
+**Row filters (GeoPackage, FlatGeobuf, CSV):**
+
+GeoPackage, FlatGeobuf and CSV writes can filter rows on the way through, with
+the same semantics as `gpio extract`. A `bbox` prunes on the table's bbox
+covering column when it has one.
+
+```python
+table.write('subset.gpkg', bbox=(-0.5, 10.0, 0.5, 11.0))     # bounding box
+table.write('subset.fgb', geometry='POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))')
+table.write('subset.csv', where="name IS NOT NULL")           # DuckDB WHERE
+```
+
 **GeoJSON:**
 
 ```python
@@ -1542,6 +1793,10 @@ table = pq.read_table('data.parquet')
 ops.convert_to_geopackage(table, 'output.gpkg', layer_name='features')
 ops.convert_to_flatgeobuf(table, 'output.fgb')
 ops.convert_to_csv(table, 'output.csv', include_wkt=True)
+
+# Filter rows on the way through (GeoPackage, FlatGeobuf, CSV)
+ops.convert_to_geopackage(table, 'subset.gpkg', bbox=(-0.5, 10.0, 0.5, 11.0))
+ops.convert_to_csv(table, 'subset.csv', where="name IS NOT NULL")
 ops.convert_to_shapefile(table, 'output.shp', encoding='UTF-8')
 ops.convert_to_geojson(table, 'output.geojson', precision=7)
 ```
@@ -1676,6 +1931,8 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 |----------|-------------|
 | `ops.add_bbox(table, column_name='bbox', geometry_column=None)` | Add bounding box column |
 | `ops.add_bbox_metadata(table, bbox_column='bbox', geometry_column=None)` | Add `covering` metadata for an existing bbox column |
+| `ops.add_stac_metadata_table(table, collection, version='1.1.0')` | Set the `stac-geoparquet` key on a table's schema metadata |
+| `ops.add_stac_metadata(parquet_file, collection, version='1.1.0', output_file=None, overwrite=False)` | Write the `stac-geoparquet` key into a written file's footer |
 | `ops.add_quadkey(table, column_name='quadkey', resolution=13, use_centroid=False, geometry_column=None)` | Add quadkey column |
 | `ops.add_h3(table, column_name='h3_cell', resolution=9, geometry_column=None)` | Add H3 cell column |
 | `ops.add_a5(table, column_name='a5_cell', resolution=15, geometry_column=None)` | Add A5 cell column |
@@ -1690,16 +1947,18 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 | `ops.reproject(table, target_crs='EPSG:4326', source_crs=None, geometry_column=None, assume_crs84=False)` | Reproject geometry (`assume_crs84` treats an unknown/null CRS as OGC:CRS84) |
 | `ops.extract(table, columns=None, exclude_columns=None, bbox=None, where=None, limit=None, geometry_column=None)` | Filter columns/rows |
 | `ops.read_bigquery(table_id, project=None, credentials_file=None, where=None, bbox=None, bbox_mode='auto', bbox_threshold=500000, limit=None, columns=None, exclude_columns=None)` | Read BigQuery table (`None`/`[]` selects every column; a blank entry in the list raises) |
-| `ops.from_arcgis(service_url, token=None, where='1=1', bbox=None, include_cols=None, exclude_cols=None, limit=None)` | Fetch ArcGIS Feature Service |
+| `ops.from_arcgis(service_url, token=None, where='1=1', bbox=None, include_cols=None, exclude_cols=None, limit=None, max_workers=1, output_crs=None, max_allowable_offset=None, repair_geometry=True, timeout=60.0, batch_size=None)` | Fetch ArcGIS Feature Service (`batch_size` lowers the page size for layers the server cannot serialize a full page of) |
 | `ops.convert_to_geojson(table, output, precision=7, write_bbox=False, id_field=None)` | Convert to GeoJSON |
-| `ops.convert_to_geopackage(table, output, layer_name='features', overwrite=False)` | Convert to GeoPackage |
-| `ops.convert_to_flatgeobuf(table, output)` | Convert to FlatGeobuf |
-| `ops.convert_to_csv(table, output, include_wkt=True, include_bbox=True)` | Convert to CSV |
+| `ops.convert_to_geopackage(table, output, layer_name='features', overwrite=False, bbox=None, geometry=None, where=None, use_first_geometry=False)` | Convert to GeoPackage, optionally filtering rows |
+| `ops.convert_to_flatgeobuf(table, output, bbox=None, geometry=None, where=None, use_first_geometry=False)` | Convert to FlatGeobuf, optionally filtering rows |
+| `ops.convert_to_csv(table, output, include_wkt=True, include_bbox=True, bbox=None, geometry=None, where=None, use_first_geometry=False)` | Convert to CSV, optionally filtering rows |
 | `ops.convert_to_shapefile(table, output, encoding='UTF-8', overwrite=False)` | Convert to Shapefile |
 | `ops.from_wfs(service_url, typename, version='auto', bbox=None, limit=None, max_workers=1, page_size=100000, auto_tile=True, ...)` | Fetch from WFS service |
 | `ops.from_wfs_layers(service_url, typenames, output_dir, parallel_layers=1, max_workers=1, page_size=100000, ...)` | Fetch multiple WFS layers to directory |
-| `ops.create_overviews(input_parquet, levels=None, max_tile_kb=500, bytes_per_cell=None, cell_column=None, scheme=None, output_dir=None, force=False, ...)` | Build coarser overview levels from an aggregate file |
-| `ops.create_pmtiles_pyramid(input_path, output_path, levels=None, max_tile_kb=500, layer_mode='grouped', include_features=False, features_source=None, max_zoom=None, ...)` | Build a zoom-banded multi-level PMTiles archive from an aggregate file (requires tippecanoe + tile-join) |
+| `ops.create_overviews(input_parquet, levels=None, max_tile_kb=500, bytes_per_cell=None, cell_column=None, scheme=None, output_dir=None, force=False, ...)` | Build coarser overview levels from an aggregate file; an unset ZSTD level resolves to the process default 9 |
+| `ops.create_overview_file(input_parquet, overview_out, levels=None, cell_detail=None, explicit_gsd=None, output_dir=None, force=False, ...)` | Assemble the overview ladder into one levelled GeoParquet (tylertoo overviews format) |
+| `ops.create_pmtiles(input_path, output_path, layer=None, min_zoom=None, max_zoom=None, bbox=None, where=None, include_cols=None, chunks=None, temporary_directory=None, ...)` | Stream a GeoParquet file into a PMTiles archive (requires tippecanoe; `chunks` also tile-join) |
+| `ops.create_pmtiles_pyramid(input_path, output_path, levels=None, max_tile_kb=500, layer_mode='grouped', include_features=False, features_source=None, max_zoom=None, temporary_directory=None, ...)` | Build a zoom-banded multi-level PMTiles archive from an aggregate file (requires tippecanoe + tile-join) |
 | `ops.partition_by_h3(table, output_dir, resolution=None, auto=False, target_rows=100000, max_partitions=10000, compression='ZSTD', hive=False, keep_h3_column=None, overwrite=False, geometry_column=None)` | Partition into a directory by H3 cell |
 | `ops.partition_by_a5(table, output_dir, resolution=None, auto=False, target_rows=100000, max_partitions=10000, compression='ZSTD', hive=False, keep_a5_column=None, overwrite=False, geometry_column=None)` | Partition into a directory by A5 cell |
 | `ops.partition_by_s2(table, output_dir, level=None, auto=False, target_rows=100000, max_partitions=10000, compression='ZSTD', hive=False, keep_s2_column=None, overwrite=False, geometry_column=None)` | Partition into a directory by S2 cell |
@@ -1711,7 +1970,11 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 | `ops.sub_partition_by_a5(directory, min_size, resolution=None, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into A5 sub-partitions |
 | `ops.sub_partition_by_quadkey(directory, min_size, resolution=None, partition_resolution=None, use_centroid=False, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into quadkey sub-partitions (pass both resolutions, or `auto=True`) |
 | `ops.sub_partition_by_s2(directory, min_size, level=None, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into S2 sub-partitions |
+| `ops.simplify(table, tolerance, coverage=False, preserve_topology=True, simplify_boundary=True, threads=None, geometry_column=None, drop_empty=False, simplify_crs=None)` | Simplify geometries with coarsen (requires the `simplify` extra; `coverage=True` preserves shared edges) |
+| `ops.polygonize(input_raster, band=1, values=None, value_column='value', nodata=None, use_mask=True, verbose=False, repair_geometry=True)` | Polygonize a categorical raster band (requires the `raster` extra, Python 3.12+). `repair_geometry=False` skips repairing the tracer's self-touching rings, which is much faster and still reports the count |
+| `ops.contour(input_raster, levels=None, interval=None, base=0.0, band=1, nodata=None, min_column='min', max_column='max')` | Extract filled contour bands from a raster band (requires the `raster` extra, Python 3.12+) |
 | `ops.get_row_group_geo_stats(parquet_file)` | Per-row-group geo bbox statistics |
+| `ops.preview_bbox_filter(parquet_file, bbox, geometry_column=None)` | Preview the row groups a bbox read would touch, with estimated rows/bytes, before reading |
 | `ops.compression_stats(path)` | Per-column compression ratios |
 | `ops.explain_analyze(file_path, query=None)` | DuckDB EXPLAIN ANALYZE query plan |
 
@@ -1868,8 +2131,10 @@ from geoparquet_io import CheckResult
 
 # Methods
 result.passed()          # Returns True if all checks passed
-result.failures()        # List of failure messages
-result.warnings()        # List of warning messages
+result.verdict()         # "pass", "warning" or "failure" - what `gpio check` exits on
+                         # (exit 1 on "failure"; `verdict() != "pass"` is --strict)
+result.failures()        # Issues whose severity is "failure"
+result.warnings()        # Issues whose severity is "warning" (advice)
 result.recommendations() # List of recommendations
 result.to_dict()         # Full results as dictionary
 
@@ -1897,6 +2162,36 @@ for rg in stats:
 # Works with both:
 # - Native Parquet geo stats (GeoParquet 2.0, parquet-geo-only)
 # - Bbox column statistics (files with a bbox column)
+```
+
+### Bbox Query Preview
+
+Preview which row groups a bbox-filtered read would touch — and how many rows
+and compressed bytes they hold — before reading any data. Useful for a real
+progress bar or a size warning ahead of a large (remote) read:
+
+```python
+from geoparquet_io.api import ops
+
+preview = ops.preview_bbox_filter(
+    'https://example.com/places.parquet',
+    bbox=(-122.5, 37.7, -122.3, 37.9),
+)
+
+if preview.has_estimate:
+    print(f"{len(preview.row_groups)} of {preview.total_row_groups} row groups, "
+          f"~{preview.est_rows} rows, ~{preview.est_bytes} bytes")
+else:
+    # The file has no usable per-row-group spatial statistics: the preview
+    # says so instead of guessing. The total_* fields are still real.
+    print(f"No estimate: {preview.reason} "
+          f"(file holds {preview.total_rows} rows, {preview.total_bytes} bytes)")
+
+# The estimate is an upper bound derived from the same statistics DuckDB
+# prunes with, in the same order as get_row_group_geo_stats:
+# - Native Parquet geo stats (stats_source == "native")
+# - Bbox covering column chunk statistics (stats_source == "bbox_struct")
+# A row group without statistics cannot be pruned, so it is counted.
 ```
 
 ## See Also

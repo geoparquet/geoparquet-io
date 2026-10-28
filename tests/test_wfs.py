@@ -5,12 +5,14 @@ Tests use mocked HTTP responses to avoid network dependencies.
 Network tests are marked separately for optional integration testing.
 """
 
+import contextlib
 import logging
 import os
 import re
 import time
 from unittest.mock import MagicMock, patch
 
+import pyarrow as pa
 import pytest
 
 # Module-level imports for WFS functions (avoids per-test imports)
@@ -24,7 +26,9 @@ from geoparquet_io.core.wfs import (
     _build_bbox_param,
     _build_local_bbox_filter,
     _build_wfs_url,
+    _describe_schema,
     _detect_best_output_format,
+    _detect_geometry_column,
     _detect_sortable_attribute,
     _determine_bbox_strategy,
     _negotiate_crs,
@@ -818,10 +822,15 @@ class TestBboxFilters:
                 (-122.5, 37.5, -122.0, 38.0),
                 "EPSG:4326",
                 "1.1.0",
-                "-122.5,37.5,-122.0,38.0,EPSG:4326",
+                "-122.5,37.5,-122.0,38.0,urn:ogc:def:crs:OGC:1.3:CRS84",
             ),
             # Integer coordinates
-            ((-180, -90, 180, 90), "EPSG:4326", "1.1.0", "-180,-90,180,90,EPSG:4326"),
+            (
+                (-180, -90, 180, 90),
+                "EPSG:4326",
+                "1.1.0",
+                "-180,-90,180,90,urn:ogc:def:crs:OGC:1.3:CRS84",
+            ),
         ],
     )
     def test_server_side_bbox_parameter(self, bbox, crs, version, expected_param):
@@ -855,17 +864,40 @@ class TestBboxFilters:
         assert sql.count("-122.5 37.5") == 2
 
     def test_bbox_with_crs_suffix(self):
-        """WFS 1.1.0 bbox always uses EPSG:4326 regardless of output CRS.
+        """A 4326 request sends lon,lat labelled CRS84 (#397, #640).
 
-        Many WFS servers (especially GeoServer) only accept bbox in WGS84,
-        so we always send bbox with EPSG:4326 suffix regardless of output CRS.
+        GeoServer reads a URN 4326 bbox as lat,lon (#397), and MapServer reads
+        the short EPSG:4326 form as lat,lon in WFS 1.1.0 (seen live on
+        demo.mapserver.org, PDOK, wfs.nrw.de, USGS mrdata, geo.weather.gc.ca).
+        CRS84 is lon,lat on all of them.
         """
         bbox = (-122.5, 37.5, -122.0, 38.0)
-        crs = "urn:ogc:def:crs:EPSG::4326"  # Output CRS (ignored for bbox)
-        result = _build_bbox_param(bbox, crs, "1.1.0")
-        # Bbox should always end with EPSG:4326, not the output CRS
-        assert result.endswith("EPSG:4326")
-        assert result == "-122.5,37.5,-122.0,38.0,EPSG:4326"
+        result = _build_bbox_param(bbox, "urn:ogc:def:crs:EPSG::4326", "1.1.0")
+        assert result == "-122.5,37.5,-122.0,38.0,urn:ogc:def:crs:OGC:1.3:CRS84"
+
+    @pytest.mark.parametrize(
+        "crs,suffix",
+        [
+            ("http://www.opengis.net/def/crs/EPSG/0/25830", "EPSG:25830"),
+            ("EPSG:3857", "EPSG:3857"),
+            # A lon/lat request is labelled CRS84, which every server reads as x,y.
+            ("urn:ogc:def:crs:OGC:1.3:CRS84", "urn:ogc:def:crs:OGC:1.3:CRS84"),
+            ("EPSG:4326", "urn:ogc:def:crs:OGC:1.3:CRS84"),
+        ],
+    )
+    def test_bbox_is_labelled_with_the_request_crs(self, crs, suffix):
+        """#640: the bbox names the CRS its coordinates are in, never a hardcoded 4326."""
+        bbox = (185357.315, 133208.941, 213794.05, 174347.488)
+        result = _build_bbox_param(bbox, crs, "2.0.0")
+        assert result == f"185357.315,133208.941,213794.05,174347.488,{suffix}"
+
+    def test_a_northing_first_projected_crs_goes_in_authority_order_with_the_urn(self):
+        """The Moldova cadastre layer from #640 is projected with YX authority
+        axes. The short label is read x,y by GeoServer and y,x by MapServer, so
+        the bbox goes y,x with the URN, which both read the same way."""
+        bbox = (185357.315, 133208.941, 213794.05, 174347.488)
+        result = _build_bbox_param(bbox, "urn:ogc:def:crs:EPSG::4026", "2.0.0")
+        assert result == "133208.941,185357.315,174347.488,213794.05,urn:ogc:def:crs:EPSG::4026"
 
     def test_invalid_geometry_column_rejected(self):
         """Invalid geometry column names with SQL injection characters are rejected."""
@@ -960,6 +992,120 @@ class TestSortByParameter:
         mock_wfs.get_schema.side_effect = Exception("Schema unavailable")
         result = _detect_sortable_attribute(mock_wfs, "test:layer")
         assert result is None
+
+
+# =============================================================================
+# Unit Tests - DescribeFeatureType names the layer per WFS version (Issue #1144)
+# =============================================================================
+
+
+def _lgl_like_get_schema(url, typename, version="1.0.0", timeout=30, headers=None, **kw):
+    """OWSLib's get_schema against a 2.0.0 server that only reads ``typeNames``.
+
+    OWSLib appends ``typeName=<typename>`` (the WFS 1.x spelling) to whatever
+    URL it is given. owsproxy.lgl-bw.de ignores that parameter, describes every
+    feature type, and OWSLib returns the first one's schema; only a URL that
+    already carries ``typeNames`` gets the requested layer (2026-09-22).
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    schemas = {
+        "nora:v_al_land": {
+            "geometry": "MultiPolygon",
+            "geometry_column": "geom",
+            "properties": {"land_id": "string", "land_name": "string"},
+            "required": [],
+        },
+        "nora:v_al_flur": {
+            "geometry": "MultiPolygon",
+            "geometry_column": "the_geom",
+            "properties": {"gemarkung_id": "string", "flurnummer": "string"},
+            "required": [],
+        },
+    }
+    requested = parse_qs(urlparse(url).query).get("typeNames", ["nora:v_al_land"])[0]
+    return schemas[requested]
+
+
+class TestDescribeSchemaNamesTheLayerPerVersion:
+    """A WFS 2.0.0 DescribeFeatureType must say ``typeNames``, not ``typeName``.
+
+    Otherwise a server that only knows the 2.0.0 parameter answers with all of
+    its feature types and every layer looks like the first: gpio then sends
+    ``sortBy=land_id`` for a layer whose columns are gemarkung_id/flurnummer and
+    the server rejects every page with HTTP 400 ``Illegal property name``
+    (LGL Baden-Württemberg ALKIS service, portolan-pipeline run 35704483737).
+    """
+
+    def _wfs(self, version: str) -> MagicMock:
+        wfs = MagicMock()
+        wfs.version = version
+        wfs.url = "https://example.test/owsproxy/wfs/SERVICE?apikey=k"
+        wfs.auth = "auth-object"
+        # Behaves like OWSLib: the object's own get_schema cannot be told the
+        # parameter name, so it always describes the first feature type here.
+        wfs.get_schema.side_effect = lambda typename: _lgl_like_get_schema(wfs.url, typename)
+        return wfs
+
+    def test_2_0_0_schema_request_carries_typenames(self, monkeypatch):
+        seen = {}
+
+        def fake_get_schema(url, typename, version="1.0.0", **kwargs):
+            seen.update(url=url, typename=typename, version=version, **kwargs)
+            return _lgl_like_get_schema(url, typename)
+
+        monkeypatch.setattr("owslib.feature.schema.get_schema", fake_get_schema)
+        schema = _describe_schema(self._wfs("2.0.0"), "nora:v_al_flur")
+
+        assert seen["typename"] == "nora:v_al_flur"
+        assert seen["version"] == "2.0.0"
+        assert seen["auth"] == "auth-object"
+        from urllib.parse import parse_qs, urlparse
+
+        query = parse_qs(urlparse(seen["url"]).query)
+        assert query["typeNames"] == ["nora:v_al_flur"]
+        assert query["apikey"] == ["k"], "the caller's own query string survives"
+        assert list(schema["properties"]) == ["gemarkung_id", "flurnummer"]
+
+    def test_2_0_0_schema_request_overrides_stale_control_parameters(self, monkeypatch):
+        """OWSLib keeps service/request/version already in the URL; we must not.
+
+        A URL still carrying ``request=GetCapabilities`` or another version
+        would make the DescribeFeatureType request ask for something else.
+        """
+        seen = {}
+
+        def fake_get_schema(url, typename, version="1.0.0", **kwargs):
+            seen["url"] = url
+            return _lgl_like_get_schema(url, typename)
+
+        monkeypatch.setattr("owslib.feature.schema.get_schema", fake_get_schema)
+        wfs = self._wfs("2.0.0")
+        wfs.url = "https://example.test/wfs?service=WFS&request=GetCapabilities&version=1.1.0"
+        _describe_schema(wfs, "nora:v_al_flur")
+        from urllib.parse import parse_qs, urlparse
+
+        query = parse_qs(urlparse(seen["url"]).query)
+        assert query["request"] == ["DescribeFeatureType"]
+        assert query["version"] == ["2.0.0"]
+        assert query["service"] == ["WFS"]
+        assert query["typeNames"] == ["nora:v_al_flur"]
+
+    def test_sortable_attribute_and_geometry_column_come_from_the_layer(self, monkeypatch):
+        monkeypatch.setattr("owslib.feature.schema.get_schema", _lgl_like_get_schema)
+        wfs = self._wfs("2.0.0")
+        assert _detect_sortable_attribute(wfs, "nora:v_al_flur") == "gemarkung_id"
+        assert _detect_geometry_column(wfs, "nora:v_al_flur") == "the_geom"
+
+    @pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])
+    def test_1_x_keeps_owslibs_own_request(self, version, monkeypatch):
+        def must_not_be_called(*args, **kwargs):
+            raise AssertionError("1.x uses wfs.get_schema, whose typeName is correct")
+
+        monkeypatch.setattr("owslib.feature.schema.get_schema", must_not_be_called)
+        wfs = self._wfs(version)
+        _describe_schema(wfs, "nora:v_al_flur")
+        wfs.get_schema.assert_called_once_with("nora:v_al_flur")
 
 
 # =============================================================================
@@ -1291,6 +1437,27 @@ class TestCRSNegotiation:
             ("http://www.opengis.net/def/crs/EPSG/0/4326", "EPSG:4326"),
             ("EPSG:3857", "EPSG:3857"),
             ("urn:ogc:def:crs:EPSG::3857", "EPSG:3857"),
+            ("epsg:25830", "EPSG:25830"),
+            # #1046: a versioned URN carries the EPSG database version, not the code
+            ("urn:x-ogc:def:crs:EPSG:6.11:31287", "EPSG:31287"),
+            ("urn:ogc:def:crs:EPSG:6.9:4326", "EPSG:4326"),
+            # #1046: the GML srs URL form
+            ("http://www.opengis.net/gml/srs/epsg.xml#31287", "EPSG:31287"),
+            # #1046: the legacy URN and the form OWSLib re-emits it as
+            ("urn:EPSG:geographicCRS:25830", "EPSG:25830"),
+            ("urn:EPSG:def:crs:::25830", "EPSG:25830"),
+            ("urn:ogc:def:crs:OGC:1.3:CRS84", "EPSG:4326"),
+            ("CRS:84", "EPSG:4326"),
+            # A compound URN names the horizontal CRS first, then the vertical one
+            ("urn:ogc:def:crs,crs:EPSG::4326,crs:EPSG::5773", "EPSG:4326"),
+            ("urn:ogc:def:crs,crs:EPSG:6.3:25832,crs:EPSG:6.3:5783", "EPSG:25832"),
+            # Not an EPSG code: left alone
+            ("ESRI:102100", "ESRI:102100"),
+            # EPSG inside another word is not a URI part, so not a code
+            ("not-a-crs-EPSG:4326", "not-a-crs-EPSG:4326"),
+            ("urn:ogc:def:crs:XEPSG::4326", "urn:ogc:def:crs:XEPSG::4326"),
+            # Non-ASCII digits are not a code
+            ("EPSG:\u0664\u0663\u0662\u0666", "EPSG:\u0664\u0663\u0662\u0666"),
         ],
     )
     def test_crs_variant_normalization(self, crs_variant, expected_normalized):
@@ -2579,19 +2746,11 @@ class TestAutoPageSingleWorker:
 class TestAxisOrder:
     """Test axis order detection and bbox parameter building.
 
-    WFS 1.1.0+ with URN format CRS uses lat,lon (YX) axis order per OGC spec,
-    while simple EPSG:4326 format uses lon,lat (XY).
+    The bbox order and label come from the request CRS axes (pyproj). WGS84
+    lon/lat goes x,y as CRS84, another north-first CRS goes in authority order
+    with the EPSG URN, an east-first CRS goes x,y with its short label, and
+    WFS 1.0.0 always goes x,y with no label.
     """
-
-    def test_is_urn_crs_detects_urn_format(self):
-        """Should correctly identify URN format CRS strings."""
-        from geoparquet_io.core.wfs import _is_urn_crs
-
-        assert _is_urn_crs("urn:ogc:def:crs:EPSG::4326") is True
-        assert _is_urn_crs("urn:x-ogc:def:crs:EPSG::4326") is True
-        assert _is_urn_crs("URN:OGC:DEF:CRS:EPSG::3857") is True
-        assert _is_urn_crs("EPSG:4326") is False
-        assert _is_urn_crs("http://www.opengis.net/def/crs/EPSG/0/4326") is False
 
     def test_is_geographic_crs_detects_geographic_systems(self):
         """Should correctly identify geographic (lat/lon) CRS."""
@@ -2619,77 +2778,138 @@ class TestAxisOrder:
         assert _is_geographic_crs("EPSG:25830") is False  # ETRS89 / UTM 30N (projected)
 
     @pytest.mark.parametrize(
-        "crs,version,axis_order,expected_swap",
-        [
-            # WFS 1.0.0 always uses XY
-            ("EPSG:4326", "1.0.0", "auto", False),
-            ("urn:ogc:def:crs:EPSG::4326", "1.0.0", "auto", False),
-            # WFS 1.1.0+ with simple EPSG format uses XY
-            ("EPSG:4326", "1.1.0", "auto", False),
-            ("EPSG:4326", "2.0.0", "auto", False),
-            # WFS 1.1.0+ with URN format uses YX (lat,lon)
-            ("urn:ogc:def:crs:EPSG::4326", "1.1.0", "auto", True),
-            ("urn:ogc:def:crs:EPSG::4326", "2.0.0", "auto", True),
-            ("urn:x-ogc:def:crs:EPSG::4326", "1.1.0", "auto", True),
-            # CRS:84 is always XY by definition
-            ("CRS:84", "1.1.0", "auto", False),
-            ("urn:ogc:def:crs:OGC:1.3:CRS84", "2.0.0", "auto", False),
-            # Projected CRS never swaps
-            ("urn:ogc:def:crs:EPSG::3857", "1.1.0", "auto", False),
-            # Forced axis order overrides auto-detection
-            ("urn:ogc:def:crs:EPSG::4326", "1.1.0", "xy", False),
-            ("EPSG:4326", "1.1.0", "latlon", True),
-        ],
-    )
-    def test_needs_axis_swap(self, crs, version, axis_order, expected_swap):
-        """Axis swap decision based on CRS format, version, and override."""
-        from geoparquet_io.core.wfs import _needs_axis_swap
-
-        result = _needs_axis_swap(crs, version, axis_order)
-        assert result is expected_swap
-
-    @pytest.mark.parametrize(
         "bbox,crs,version,axis_order,expected",
         [
             # WFS 1.0.0: no CRS suffix
             ((-122.5, 37.5, -122.0, 38.0), "EPSG:4326", "1.0.0", "auto", "-122.5,37.5,-122.0,38.0"),
-            # WFS 1.1.0+: Always EPSG:4326 with XY order (bbox is always WGS84)
-            # This ensures compatibility with servers that only accept WGS84 bbox
+            # WFS 1.1.0+: a lon/lat request is labelled CRS84, XY order
             (
                 (-122.5, 37.5, -122.0, 38.0),
                 "EPSG:4326",
                 "1.1.0",
                 "auto",
-                "-122.5,37.5,-122.0,38.0,EPSG:4326",
+                "-122.5,37.5,-122.0,38.0,urn:ogc:def:crs:OGC:1.3:CRS84",
             ),
-            # Even with URN output CRS, bbox uses simple EPSG:4326
+            # A URN 4326 request CRS is labelled CRS84 too (#397)
             (
                 (-122.5, 37.5, -122.0, 38.0),
                 "urn:ogc:def:crs:EPSG::4326",
                 "1.1.0",
                 "auto",
-                "-122.5,37.5,-122.0,38.0,EPSG:4326",
+                "-122.5,37.5,-122.0,38.0,urn:ogc:def:crs:OGC:1.3:CRS84",
             ),
-            # WFS 2.0.0 also uses EPSG:4326 for bbox
+            # WFS 2.0.0 behaves the same
             (
                 (4.82, 50.44, 4.92, 50.48),
                 "urn:ogc:def:crs:EPSG::4326",
                 "2.0.0",
                 "auto",
-                "4.82,50.44,4.92,50.48,EPSG:4326",
+                "4.82,50.44,4.92,50.48,urn:ogc:def:crs:OGC:1.3:CRS84",
             ),
-            # Projected output CRS still uses WGS84 bbox
+            # A projected request CRS labels the bbox with that CRS (#640)
             (
-                (-122.5, 37.5, -122.0, 38.0),
+                (-13636000.0, 4500000.0, -13580000.0, 4580000.0),
                 "EPSG:3857",
                 "1.1.0",
                 "auto",
-                "-122.5,37.5,-122.0,38.0,EPSG:4326",
+                "-13636000.0,4500000.0,-13580000.0,4580000.0,EPSG:3857",
+            ),
+            # --axis-order latlon sends a geographic bbox lat,lon with the
+            # lat,lon URN. ArcGIS WFS reads every 4326 bbox lat,lon, whatever
+            # the label says.
+            (
+                (-122.5, 37.5, -122.0, 38.0),
+                "EPSG:4326",
+                "1.1.0",
+                "latlon",
+                "37.5,-122.5,38.0,-122.0,urn:ogc:def:crs:EPSG::4326",
+            ),
+            # WFS 1.0.0 is always read x,y and carries no label, so latlon
+            # cannot apply there
+            (
+                (-122.5, 37.5, -122.0, 38.0),
+                "EPSG:4326",
+                "1.0.0",
+                "latlon",
+                "-122.5,37.5,-122.0,38.0",
+            ),
+            ((0.0, 40.0, 20.0, 60.0), "EPSG:4258", "1.0.0", "auto", "0.0,40.0,20.0,60.0"),
+            # A geographic CRS whose authority order is lat,lon and that is not
+            # WGS84 has no lon,lat twin. The short EPSG:4258 label is read
+            # lat,lon by MapServer and lon,lat by GeoServer and deegree, so the
+            # bbox goes out lat,lon with the URN every server reads that way.
+            (
+                (0.0, 40.0, 20.0, 60.0),
+                "EPSG:4258",
+                "1.1.0",
+                "auto",
+                "40.0,0.0,60.0,20.0,urn:ogc:def:crs:EPSG::4258",
+            ),
+            (
+                (0.0, 40.0, 20.0, 60.0),
+                "urn:ogc:def:crs:EPSG::4258",
+                "2.0.0",
+                "auto",
+                "40.0,0.0,60.0,20.0,urn:ogc:def:crs:EPSG::4258",
+            ),
+            (
+                (-125.0, 24.0, -66.0, 50.0),
+                "http://www.opengis.net/def/crs/EPSG/0/4269",
+                "1.1.0",
+                "auto",
+                "24.0,-125.0,50.0,-66.0,urn:ogc:def:crs:EPSG::4269",
+            ),
+            (
+                (-125.0, 24.0, -66.0, 50.0),
+                "EPSG:4269",
+                "2.0.0",
+                "latlon",
+                "24.0,-125.0,50.0,-66.0,urn:ogc:def:crs:EPSG::4269",
+            ),
+            # A projected CRS whose authority order is northing,easting (SWEREF99 TM)
+            (
+                (670000.0, 6570000.0, 680000.0, 6590000.0),
+                "EPSG:3006",
+                "1.1.0",
+                "auto",
+                "6570000.0,670000.0,6590000.0,680000.0,urn:ogc:def:crs:EPSG::3006",
+            ),
+            # The request CRS is CRS84 itself
+            (
+                (4.82, 50.44, 4.92, 50.48),
+                "urn:ogc:def:crs:OGC:1.3:CRS84",
+                "1.1.0",
+                "auto",
+                "4.82,50.44,4.92,50.48,urn:ogc:def:crs:OGC:1.3:CRS84",
+            ),
+            # A CRS pyproj cannot read keeps x,y and its own label
+            (
+                (1.0, 2.0, 3.0, 4.0),
+                "urn:example:local",
+                "1.1.0",
+                "auto",
+                "1.0,2.0,3.0,4.0,urn:example:local",
+            ),
+            # --axis-order xy keeps the CRS84 label
+            (
+                (-122.5, 37.5, -122.0, 38.0),
+                "urn:ogc:def:crs:EPSG::4326",
+                "1.1.0",
+                "xy",
+                "-122.5,37.5,-122.0,38.0,urn:ogc:def:crs:OGC:1.3:CRS84",
+            ),
+            # A projected bbox has no lat,lon order, so latlon leaves it alone
+            (
+                (100.0, 200.0, 300.0, 400.0),
+                "EPSG:3857",
+                "1.1.0",
+                "latlon",
+                "100.0,200.0,300.0,400.0,EPSG:3857",
             ),
         ],
     )
     def test_build_bbox_param_axis_order(self, bbox, crs, version, axis_order, expected):
-        """Bbox parameter string should always use WGS84 for server compatibility."""
+        """The bbox is labelled with the short form of the request CRS (XY order)."""
         from geoparquet_io.core.wfs import _build_bbox_param
 
         result = _build_bbox_param(bbox, crs, version, axis_order)
@@ -3672,47 +3892,614 @@ class TestResolveCRSForOutput:
         assert result.num_rows == 1
 
     @pytest.mark.usefixtures("offline_wfs_probes")
-    def test_wfs_to_table_strips_server_crs_marker_when_no_projjson(self):
-        """The internal server-CRS marker never leaks into the output schema.
-
-        Even when no geo metadata is written (projjson unavailable for the
-        resolved CRS), the ``_wfs_server_crs`` marker must be removed.
-        """
+    def _wfs_to_table_with_server_crs(self, server_crs: str, x: float, y: float):
         from unittest.mock import MagicMock, patch
 
-        from geoparquet_io.core.wfs import (
-            _SERVER_CRS_METADATA_KEY,
-            _with_server_crs,
-            wfs_to_table,
-        )
+        from geoparquet_io.core.wfs import _with_server_crs, wfs_to_table
 
-        table = _with_server_crs(self._point_table(4527586.01, 6386852.32), "EPSG:22174")
-
+        table = _with_server_crs(self._point_table(x, y), server_crs)
         with (
             patch("geoparquet_io.core.wfs.negotiate_wfs_version") as mock_version,
             patch("geoparquet_io.core.wfs.get_layer_info") as mock_layer_info,
             patch("geoparquet_io.core.wfs.fetch_all_features_duckdb", return_value=table),
-            patch("geoparquet_io.core.wfs.parse_crs_string_to_projjson", return_value=None),
         ):
             mock_version.return_value = ("2.0.0", MagicMock())
             mock_layer_info.return_value = MagicMock(
                 typename="mock:layer",
                 title="Mock Layer",
-                crs_list=["EPSG:22174"],
-                default_crs="EPSG:22174",
+                crs_list=[server_crs],
+                default_crs=server_crs,
                 available_formats=["application/json"],
                 sortable_attribute=None,
                 bbox=None,
             )
-            result = wfs_to_table(
+            return wfs_to_table(
                 service_url="https://mock.wfs.server/wfs",
                 typename="mock:layer",
-                output_crs="EPSG:22174",
+                auto_tile=False,
             )
 
-        metadata = result.schema.metadata or {}
-        assert _SERVER_CRS_METADATA_KEY not in metadata
-        assert b"geo" not in metadata
+    def test_wfs_to_table_strips_server_crs_marker(self):
+        """The internal server-CRS marker never leaks into the output schema."""
+        from geoparquet_io.core.wfs import _SERVER_CRS_METADATA_KEY
+
+        result = self._wfs_to_table_with_server_crs("EPSG:22174", 4527586.01, 6386852.32)
+
+        assert _SERVER_CRS_METADATA_KEY not in (result.schema.metadata or {})
+
+    @pytest.mark.parametrize(
+        "server_crs",
+        ["urn:EPSG:geographicCRS:25830", "urn:EPSG:def:crs:::25830"],
+    )
+    def test_wfs_to_table_resolves_legacy_urns(self, server_crs):
+        """#1046: both legacy URN forms are EPSG:25830, not a CRS84 default."""
+        import json
+
+        result = self._wfs_to_table_with_server_crs(server_crs, 440000.0, 4470000.0)
+
+        geo = json.loads(result.schema.metadata[b"geo"])
+        assert geo["columns"]["geometry"]["crs"]["id"] == {"authority": "EPSG", "code": 25830}
+
+    def test_wfs_to_table_resolves_a_non_epsg_crs_through_pyproj(self):
+        """A CRS that is not an EPSG code still resolves when pyproj knows it."""
+        import json
+
+        result = self._wfs_to_table_with_server_crs("ESRI:102100", 4527586.01, 6386852.32)
+
+        geo = json.loads(result.schema.metadata[b"geo"])
+        assert geo["columns"]["geometry"]["crs"]["id"] == {"authority": "ESRI", "code": 102100}
+
+    @pytest.mark.parametrize(
+        "server_crs",
+        [
+            "urn:EPSG:def:crs:::999999",
+            "urn:example:crs:local-grid",
+            pytest.param("x" * 5000, id="oversized"),
+        ],
+    )
+    def test_wfs_to_table_refuses_a_crs_it_cannot_resolve(self, server_crs):
+        """#1046: an unresolvable server CRS is refused, never written as CRS84."""
+        with pytest.raises(WFSError, match="could not resolve") as excinfo:
+            self._wfs_to_table_with_server_crs(server_crs, 4527586.01, 6386852.32)
+        assert len(str(excinfo.value)) < 600
+
+
+class TestOutputCrsProjjson:
+    """_output_crs_projjson: PROJJSON gpio can write, or a refusal."""
+
+    def test_an_epsg_urn_resolves_to_full_projjson(self):
+        from geoparquet_io.core.wfs import _output_crs_projjson
+
+        projjson = _output_crs_projjson("http://www.opengis.net/gml/srs/epsg.xml#31287")
+
+        assert projjson["id"] == {"authority": "EPSG", "code": 31287}
+        assert projjson["type"] == "ProjectedCRS"
+
+    def test_an_unknown_epsg_code_is_not_written_as_an_id_stub(self):
+        from geoparquet_io.core.wfs import _output_crs_projjson
+
+        with pytest.raises(WFSError, match="could not resolve"):
+            _output_crs_projjson("EPSG:999999")
+
+    def test_a_cached_entry_that_is_not_an_object_falls_back_to_pyproj(self):
+        from geoparquet_io.core.wfs import _output_crs_projjson
+
+        with patch("geoparquet_io.core.wfs._projjson_from_authority", return_value="[]"):
+            projjson = _output_crs_projjson("EPSG:31287")
+
+        assert projjson["id"] == {"authority": "EPSG", "code": 31287}
+
+
+class TestBboxCrsContract:
+    """#640: --bbox is read in the request CRS, and tiling follows suit."""
+
+    LAYER_WGS84 = (-3.8, 40.3, -3.6, 40.5)
+
+    def _layer(self, bbox=LAYER_WGS84):
+        return WFSLayerInfo(
+            typename="t:l",
+            title="",
+            crs_list=[],
+            default_crs=None,
+            bbox=bbox,
+            geometry_column="geom",
+            available_formats=[],
+        )
+
+    def test_a_user_bbox_is_used_as_given(self):
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        user = (440000.0, 4470000.0, 450000.0, 4480000.0)
+        assert _get_tiling_bbox(user, True, self._layer(), "EPSG:25830") == user
+
+    def test_the_layer_bbox_stays_wgs84_for_a_wgs84_request(self):
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        tiles = _get_tiling_bbox(None, True, self._layer(), "urn:ogc:def:crs:EPSG::4326")
+        assert tiles == self.LAYER_WGS84
+
+    def test_the_layer_bbox_is_reprojected_into_a_projected_request_crs(self):
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        xmin, ymin, xmax, ymax = _get_tiling_bbox(
+            None, True, self._layer(), "urn:ogc:def:crs:EPSG::25830"
+        )
+        # Madrid in ETRS89 / UTM 30N
+        assert 400_000 < xmin < xmax < 500_000
+        assert 4_400_000 < ymin < ymax < 4_500_000
+
+    def test_an_unprojectable_layer_bbox_disables_tiling(self, caplog):
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        with caplog.at_level(logging.WARNING):
+            assert _get_tiling_bbox(None, True, self._layer(), "urn:example:local") is None
+        assert "tiling" in caplog.text
+
+    def test_a_world_layer_bbox_is_clipped_to_the_crs_area_of_use(self):
+        """Web Mercator stops near 85 degrees, so y stays near 20e6 m, not 242e6."""
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        xmin, ymin, xmax, ymax = _get_tiling_bbox(
+            None, True, self._layer(bbox=(-180.0, -90.0, 180.0, 90.0)), "EPSG:3857"
+        )
+        limit = 20_037_509
+        assert -limit <= xmin < xmax <= limit
+        assert -1.01 * limit <= ymin < ymax <= 1.01 * limit
+
+    def test_a_world_layer_bbox_is_clipped_for_a_national_crs(self):
+        """RD New covers the Netherlands, not the world."""
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        xmin, ymin, xmax, ymax = _get_tiling_bbox(
+            None, True, self._layer(bbox=(-180.0, -90.0, 180.0, 90.0)), "EPSG:28992"
+        )
+        assert -100_000 < xmin < xmax < 400_000
+        assert 250_000 < ymin < ymax < 700_000
+
+    def test_an_area_of_use_across_the_antimeridian_clips_only_latitude(self):
+        """NAD83 spans 167.65E to 40.73W, so its west edge is east of its east edge."""
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        xmin, ymin, xmax, ymax = _get_tiling_bbox(
+            None, True, self._layer(bbox=(-125.0, 0.0, -66.0, 50.0)), "EPSG:4269"
+        )
+        assert xmin == pytest.approx(-125.0, abs=0.01)
+        assert xmax == pytest.approx(-66.0, abs=0.01)
+        assert ymin == pytest.approx(14.92, abs=0.01)
+        assert ymax == pytest.approx(50.0, abs=0.01)
+
+    def test_a_layer_outside_the_crs_area_of_use_disables_tiling(self, caplog):
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        with caplog.at_level(logging.WARNING):
+            sydney = self._layer(bbox=(150.0, -34.0, 151.5, -33.5))
+            assert _get_tiling_bbox(None, True, sydney, "EPSG:28992") is None
+        assert "tiling" in caplog.text
+
+    def test_latlon_on_wfs_1_0_0_warns_that_it_is_ignored(self, caplog):
+        from geoparquet_io.core.wfs import _warn_if_axis_order_ignored
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_axis_order_ignored("1.0.0", "latlon")
+        assert "--axis-order latlon" in caplog.text
+        assert "1.0.0" in caplog.text
+
+    @pytest.mark.parametrize(
+        "version,axis_order", [("1.0.0", "auto"), ("1.0.0", "xy"), ("1.1.0", "latlon")]
+    )
+    def test_axis_order_on_a_version_that_honours_it_is_quiet(self, caplog, version, axis_order):
+        from geoparquet_io.core.wfs import _warn_if_axis_order_ignored
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_axis_order_ignored(version, axis_order)
+        assert caplog.text == ""
+
+    def test_no_bbox_anywhere_means_no_tiling(self):
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        assert _get_tiling_bbox(None, True, self._layer(bbox=None), "EPSG:25830") is None
+
+    def test_a_lon_lat_looking_bbox_on_a_projected_crs_warns(self, caplog):
+        from geoparquet_io.core.wfs import _warn_if_bbox_looks_lon_lat
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_bbox_looks_lon_lat((-3.8, 40.3, -3.6, 40.5), "urn:ogc:def:crs:EPSG::25830")
+        assert "EPSG:25830" in caplog.text
+        assert "--bbox" in caplog.text
+
+    MOLDOVA_WGS84 = (26.63, 45.44, 30.13, 48.47)
+    CHISINAU = (28.8, 47.0, 28.85, 47.03)
+
+    def test_the_lon_lat_warning_names_the_crs_and_gives_a_hint(self, caplog):
+        """Option A on #1278: --bbox stays in the layer CRS, gpio prints a hint."""
+        from pyproj import Transformer
+
+        from geoparquet_io.core.wfs import _warn_if_bbox_looks_lon_lat
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_bbox_looks_lon_lat(self.CHISINAU, "EPSG:4026", self.MOLDOVA_WGS84)
+
+        text = caplog.text
+        assert "EPSG:4026 (MOLDREF99 / Moldova TM)" in text
+        assert "26.63,45.44,30.13,48.47" in text
+        hint = text.split("try --bbox ")[1].split()[0]
+        xmin, ymin, xmax, ymax = (float(v) for v in hint.split(","))
+        to_xy = Transformer.from_crs("OGC:CRS84", "EPSG:4026", always_xy=True)
+        x, y = to_xy.transform(28.82, 47.01)
+        assert xmin <= x <= xmax and ymin <= y <= ymax
+        assert len(text.strip().splitlines()) <= 4
+
+    def test_the_lon_lat_warning_shows_the_layer_extent_in_its_crs(self, caplog):
+        from geoparquet_io.core.wfs import _warn_if_bbox_looks_lon_lat
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_bbox_looks_lon_lat(self.CHISINAU, "EPSG:4026", self.MOLDOVA_WGS84)
+
+        extent = caplog.text.split("lon/lat and ")[1].split()[0]
+        xmin, ymin, xmax, ymax = (float(v) for v in extent.split(","))
+        # Easting first, then northing, as --bbox takes it
+        assert 50_000 < xmin < 100_000 and 300_000 < xmax < 400_000
+        assert 0 <= ymin < 50_000 and 350_000 < ymax < 400_000
+
+    def test_the_lon_lat_warning_works_without_a_layer_extent(self, caplog):
+        from geoparquet_io.core.wfs import _warn_if_bbox_looks_lon_lat
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_bbox_looks_lon_lat(self.CHISINAU, "EPSG:4026", None)
+        assert "try --bbox " in caplog.text
+        assert "extent" not in caplog.text
+
+    def test_an_empty_bbox_result_explains_the_crs(self, monkeypatch, caplog):
+        """A bbox that matched nothing says which CRS it was read in."""
+        from geoparquet_io.core import wfs
+
+        layer = WFSLayerInfo(
+            typename="cadastru_data:terenuri",
+            title="",
+            crs_list=["EPSG:4026"],
+            default_crs="EPSG:4026",
+            bbox=self.MOLDOVA_WGS84,
+            geometry_column="geom",
+            available_formats=[],
+        )
+        monkeypatch.setattr(wfs, "get_layer_info", lambda *a, **k: layer)
+        monkeypatch.setattr(wfs, "negotiate_wfs_version", lambda *a, **k: ("1.1.0", None))
+        monkeypatch.setattr(wfs, "_get_feature_count", lambda *a, **k: 0)
+        monkeypatch.setattr(wfs, "fetch_all_features_duckdb", lambda **k: pa.table({"a": []}))
+
+        with caplog.at_level(logging.WARNING):
+            with contextlib.suppress(Exception):
+                wfs.wfs_to_table(
+                    "http://mock/wfs",
+                    "cadastru_data:terenuri",
+                    bbox=(230403.0, 207012.0, 234224.0, 210368.0),
+                )
+
+        assert "No features found in bbox" in caplog.text
+        assert "read in the layer CRS EPSG:4026 (MOLDREF99 / Moldova TM)" in caplog.text
+        assert "26.63,45.44,30.13,48.47" in caplog.text
+
+    def _run_empty_moldova(self, monkeypatch, caplog, bbox):
+        from geoparquet_io.core import wfs
+
+        layer = WFSLayerInfo(
+            typename="cadastru_data:terenuri",
+            title="",
+            crs_list=["EPSG:4026"],
+            default_crs="EPSG:4026",
+            bbox=self.MOLDOVA_WGS84,
+            geometry_column="geom",
+            available_formats=[],
+        )
+        monkeypatch.setattr(wfs, "get_layer_info", lambda *a, **k: layer)
+        monkeypatch.setattr(wfs, "negotiate_wfs_version", lambda *a, **k: ("1.1.0", None))
+        monkeypatch.setattr(wfs, "_get_feature_count", lambda *a, **k: 0)
+        monkeypatch.setattr(wfs, "fetch_all_features_duckdb", lambda **k: pa.table({"a": []}))
+        with caplog.at_level(logging.WARNING):
+            with contextlib.suppress(Exception):
+                wfs.wfs_to_table("http://mock/wfs", "cadastru_data:terenuri", bbox=bbox)
+        return caplog.text
+
+    def test_an_empty_lon_lat_bbox_result_prints_the_hint_once(self, monkeypatch, caplog):
+        """Round 4 on #1278: the early warning already gave the hint."""
+        text = self._run_empty_moldova(monkeypatch, caplog, self.CHISINAU)
+
+        assert "No features found in bbox" in text
+        assert text.count("try --bbox") == 1
+        assert text.count("Layer extent is") == 1
+
+    def test_an_empty_projected_bbox_result_shows_the_extent_once(self, monkeypatch, caplog):
+        text = self._run_empty_moldova(
+            monkeypatch, caplog, (230403.0, 207012.0, 234224.0, 210368.0)
+        )
+
+        assert "No features found in bbox" in text
+        assert text.count("Layer extent is") == 1
+        assert "try --bbox" not in text
+
+    def test_the_no_features_warning_alone_still_gives_the_hint(self, caplog):
+        """Without the early warning, the 0-features warning carries the hint once."""
+        from geoparquet_io.core.wfs import _warn_no_features_in_bbox
+
+        with caplog.at_level(logging.WARNING):
+            _warn_no_features_in_bbox("t", self.CHISINAU, "EPSG:4026", self.MOLDOVA_WGS84)
+        assert caplog.text.count("try --bbox") == 1
+        assert caplog.text.count("Layer extent is") == 1
+
+    def test_the_hint_is_tracked_per_call(self, monkeypatch, caplog):
+        """A second run warns again, so nothing is kept between calls."""
+        self._run_empty_moldova(monkeypatch, caplog, self.CHISINAU)
+        caplog.clear()
+        text = self._run_empty_moldova(monkeypatch, caplog, self.CHISINAU)
+
+        assert text.count("try --bbox") == 1
+
+    @pytest.mark.parametrize(
+        "crs,order",
+        [
+            ("EPSG:5513", "westing first"),
+            ("EPSG:4026", "easting first"),
+            ("EPSG:3006", "easting first"),
+            ("EPSG:3031", "easting first"),
+            ("EPSG:2056", "easting first"),
+            ("EPSG:4326", "lon,lat"),
+        ],
+    )
+    def test_the_crs_line_names_the_first_axis_gpio_holds(self, crs, order):
+        """Round 4 on #1278: Krovak 5513 is held westing first, not easting first."""
+        from geoparquet_io.core.wfs import _bbox_crs_line
+
+        assert f"x,y ({order})" in _bbox_crs_line(crs)
+
+    def test_small_metres_inside_the_layer_extent_are_quiet(self, caplog):
+        """Round 4 on #1278: 3857 metres near 0,0 are not lon/lat degrees."""
+        from geoparquet_io.core.wfs import _warn_if_bbox_looks_lon_lat
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_bbox_looks_lon_lat((10.0, 10.0, 100.0, 80.0), "EPSG:3857", (-1, -1, 1, 1))
+        assert caplog.text == ""
+
+    def test_small_metres_without_a_layer_extent_still_warn(self, caplog):
+        """No extent, no way to tell, so the old range check decides."""
+        from geoparquet_io.core.wfs import _warn_if_bbox_looks_lon_lat
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_bbox_looks_lon_lat((10.0, 10.0, 100.0, 80.0), "EPSG:3857")
+        assert "looks like lon/lat" in caplog.text
+
+    def test_degrees_inside_the_lon_lat_extent_still_warn(self, caplog):
+        """Moldova degrees sit in the lon/lat extent and far from the 4026 extent."""
+        from geoparquet_io.core.wfs import _warn_if_bbox_looks_lon_lat
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_bbox_looks_lon_lat(self.CHISINAU, "EPSG:4026", self.MOLDOVA_WGS84)
+        assert "looks like lon/lat" in caplog.text
+
+    @pytest.mark.parametrize(
+        "bbox,crs",
+        [
+            ((-3.8, 40.3, -3.6, 40.5), "urn:ogc:def:crs:EPSG::4326"),
+            ((440000.0, 4470000.0, 450000.0, 4480000.0), "EPSG:25830"),
+        ],
+    )
+    def test_a_bbox_that_fits_its_crs_is_quiet(self, caplog, bbox, crs):
+        from geoparquet_io.core.wfs import _warn_if_bbox_looks_lon_lat
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_bbox_looks_lon_lat(bbox, crs)
+        assert caplog.text == ""
+
+
+class TestBboxAxisRuleByCrs:
+    """Second review of #1278: the bbox order comes from the first axis name."""
+
+    BOX = (1.0, 2.0, 3.0, 4.0)
+
+    @pytest.mark.parametrize(
+        "crs,expected",
+        [
+            # WGS84 lon/lat goes x,y labelled CRS84
+            ("EPSG:4326", "1.0,2.0,3.0,4.0,urn:ogc:def:crs:OGC:1.3:CRS84"),
+            # Latitude or northing first, and no x,y twin
+            ("EPSG:4258", "2.0,1.0,4.0,3.0,urn:ogc:def:crs:EPSG::4258"),
+            ("EPSG:4269", "2.0,1.0,4.0,3.0,urn:ogc:def:crs:EPSG::4269"),
+            ("EPSG:3006", "2.0,1.0,4.0,3.0,urn:ogc:def:crs:EPSG::3006"),
+            # UPS North lists northing first, both axes point south
+            ("EPSG:32661", "2.0,1.0,4.0,3.0,urn:ogc:def:crs:EPSG::32661"),
+            # Easting first
+            ("EPSG:2056", "1.0,2.0,3.0,4.0,EPSG:2056"),
+            ("EPSG:21781", "1.0,2.0,3.0,4.0,EPSG:21781"),
+            ("EPSG:3857", "1.0,2.0,3.0,4.0,EPSG:3857"),
+            ("EPSG:25832", "1.0,2.0,3.0,4.0,EPSG:25832"),
+            # Polar stereographic, easting first but both axes north or south
+            ("EPSG:3031", "1.0,2.0,3.0,4.0,EPSG:3031"),
+            ("EPSG:3413", "1.0,2.0,3.0,4.0,EPSG:3413"),
+            ("EPSG:3995", "1.0,2.0,3.0,4.0,EPSG:3995"),
+            ("EPSG:5041", "1.0,2.0,3.0,4.0,EPSG:5041"),
+            ("urn:x-ogc:def:crs:EPSG:3031", "1.0,2.0,3.0,4.0,EPSG:3031"),
+        ],
+    )
+    def test_the_bbox_order_follows_the_first_axis(self, crs, expected):
+        from geoparquet_io.core.wfs import _build_bbox_param
+
+        assert _build_bbox_param(self.BOX, crs, "1.1.0") == expected
+        assert _build_bbox_param(self.BOX, crs, "2.0.0") == expected
+
+    @pytest.mark.parametrize(
+        "crs",
+        [
+            "CRS:84",
+            "crs:84",
+            "urn:ogc:def:crs:OGC:1.3:CRS84",
+            "http://www.opengis.net/def/crs/OGC/1.3/CRS84",
+        ],
+    )
+    def test_a_crs84_layer_goes_x_y_labelled_crs84(self, crs):
+        from geoparquet_io.core.wfs import _build_bbox_param
+
+        assert (
+            _build_bbox_param(self.BOX, crs, "1.1.0")
+            == "1.0,2.0,3.0,4.0,urn:ogc:def:crs:OGC:1.3:CRS84"
+        )
+
+    @pytest.mark.parametrize("crs", ["CRS:84", "http://www.opengis.net/def/crs/OGC/1.3/CRS84"])
+    def test_a_crs84_layer_resolves_to_lon_lat_crs84(self, crs):
+        from pyproj import CRS
+
+        from geoparquet_io.core.wfs import _output_crs_projjson
+
+        resolved = CRS.from_json_dict(_output_crs_projjson(crs))
+        assert resolved.equals(CRS.from_user_input("OGC:CRS84"))
+
+    @pytest.mark.parametrize(
+        "crs,expected",
+        [
+            ("EPSG:4258", "1.0,2.0,3.0,4.0,EPSG:4258"),
+            ("EPSG:3006", "1.0,2.0,3.0,4.0,EPSG:3006"),
+            ("urn:ogc:def:crs:EPSG::4258", "1.0,2.0,3.0,4.0,EPSG:4258"),
+            ("EPSG:4326", "1.0,2.0,3.0,4.0,urn:ogc:def:crs:OGC:1.3:CRS84"),
+            ("EPSG:3857", "1.0,2.0,3.0,4.0,EPSG:3857"),
+        ],
+    )
+    def test_axis_order_xy_forces_x_y(self, crs, expected):
+        from geoparquet_io.core.wfs import _build_bbox_param
+
+        assert _build_bbox_param(self.BOX, crs, "1.1.0", "xy") == expected
+
+    def test_the_bbox_count_probe_sends_the_srs_name(self, monkeypatch):
+        """QGIS Server reads the bbox in srsName or the layer CRS, not its label."""
+        from geoparquet_io.core.wfs import _get_feature_count
+
+        http = FakeTransport.install(monkeypatch)
+        http.respond("/wfs", xml_reply(b'<c numberOfFeatures="8"/>'))
+
+        count = _get_feature_count(
+            "http://mock/wfs", "layer", "1.1.0", bbox=(7.5, 47.19, 7.56, 47.22), crs="EPSG:4326"
+        )
+
+        assert count == 8
+        assert http.last.params["srsName"] == "EPSG:4326"
+        assert http.last.params["bbox"] == ("7.5,47.19,7.56,47.22,urn:ogc:def:crs:OGC:1.3:CRS84")
+
+    def test_the_tile_probe_sends_the_srs_name(self, monkeypatch):
+        from geoparquet_io.core.wfs import _refine_tiles_adaptive
+
+        http = FakeTransport.install(monkeypatch)
+        http.respond("/wfs", xml_reply(b'<c numberOfFeatures="3"/>'))
+
+        tiles = _refine_tiles_adaptive(
+            [(0.0, 0.0, 10.0, 10.0)],
+            "http://mock/wfs",
+            "layer",
+            "1.1.0",
+            "EPSG:2056",
+            "auto",
+            max_per_tile=100,
+        )
+
+        assert tiles == [(0.0, 0.0, 10.0, 10.0)]
+        assert http.last.params["srsName"] == "EPSG:2056"
+
+    @pytest.mark.parametrize(
+        "axes,expected",
+        [
+            ((("A", "north"), ("B", "east")), True),
+            ((("A", "south"), ("B", "west")), True),
+            ((("A", "north"), ("B", "north")), False),
+            ((("A", "east"), ("B", "north")), False),
+            ((("A", "north"),), False),
+        ],
+    )
+    def test_an_unnamed_axis_falls_back_to_both_directions(self, axes, expected):
+        from types import SimpleNamespace
+
+        from geoparquet_io.core.wfs import _first_axis_is_north
+
+        info = [SimpleNamespace(name=name, direction=direction) for name, direction in axes]
+        assert _first_axis_is_north(info) is expected
+
+    def test_an_oversized_crs_string_is_not_read(self):
+        from geoparquet_io.core.wfs import _MAX_CRS_STRING, _request_pyproj_crs
+
+        assert _request_pyproj_crs("EPSG:" + "9" * _MAX_CRS_STRING) is None
+
+    def test_a_layer_bbox_across_the_antimeridian_says_so(self, caplog):
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        layer = WFSLayerInfo(
+            typename="t:l",
+            title="",
+            crs_list=[],
+            default_crs=None,
+            bbox=(170.0, 50.0, -130.0, 72.0),
+            geometry_column="geom",
+            available_formats=[],
+        )
+        with caplog.at_level(logging.WARNING):
+            assert _get_tiling_bbox(None, True, layer, "EPSG:3857") is None
+        assert "antimeridian" in caplog.text
+        assert "outside" not in caplog.text
+
+    @pytest.mark.parametrize(
+        "crs",
+        [
+            # Krovak with Southing, Westing axes, which always_xy leaves alone
+            "EPSG:2065",
+            "EPSG:5224",
+            "EPSG:5513",
+            "EPSG:5515",
+            "EPSG:8044",
+            "EPSG:8045",
+            "EPSG:8352",
+            # Krovak East North, the one in real use
+            "EPSG:5514",
+            # North first, and east first, for contrast
+            "EPSG:4258",
+            "EPSG:3035",
+            "EPSG:32633",
+        ],
+    )
+    def test_the_tiling_bbox_goes_out_in_the_authority_order(self, crs):
+        """Fourth review of #1278: a tile bbox is swapped exactly once, at send time."""
+        from pyproj import CRS, Transformer
+
+        from geoparquet_io.core.wfs import _build_bbox_param, _get_tiling_bbox
+
+        area = CRS.from_user_input(crs).area_of_use
+        lon, lat = (area.west + area.east) / 2, (area.south + area.north) / 2
+        layer = WFSLayerInfo(
+            typename="t:l",
+            title="",
+            crs_list=[],
+            default_crs=None,
+            bbox=(lon - 0.1, lat - 0.1, lon + 0.1, lat + 0.1),
+            geometry_column="geom",
+            available_formats=[],
+        )
+        tile = _get_tiling_bbox(None, True, layer, crs)
+        sent = [float(v) for v in _build_bbox_param(tile, crs, "1.1.0").split(",")[:4]]
+
+        to_authority = Transformer.from_crs("OGC:CRS84", crs, always_xy=False)
+        a0, a1 = to_authority.transform(lon, lat)
+        assert sent[0] <= a0 <= sent[2]
+        assert sent[1] <= a1 <= sent[3]
+
+    def test_a_user_bbox_across_the_antimeridian_is_not_tiled(self, caplog):
+        """Fourth review of #1278: treat it like a layer bbox that crosses it."""
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        layer = WFSLayerInfo(
+            typename="t:l",
+            title="",
+            crs_list=[],
+            default_crs=None,
+            bbox=(-180.0, -90.0, 180.0, 90.0),
+            geometry_column="geom",
+            available_formats=[],
+        )
+        with caplog.at_level(logging.WARNING):
+            assert _get_tiling_bbox((170.0, 50.0, -130.0, 72.0), True, layer, "EPSG:4326") is None
+        assert "antimeridian" in caplog.text
 
 
 # =============================================================================

@@ -1,5 +1,7 @@
 """Unit tests for overview zoom-band selection (pure functions, no DuckDB)."""
 
+import re
+
 import pytest
 
 from geoparquet_io.core.exceptions import InvalidParameterError
@@ -192,3 +194,39 @@ class TestParseBands:
     def test_rejects_unusable_specs(self, spec, message):
         with pytest.raises(InvalidParameterError, match=message):
             parse_bands(spec)
+
+    @pytest.mark.parametrize(
+        "spec,message",
+        [
+            # gpio#1103 spelled its own example finest-first; the z0 check was
+            # true of the first pair and silent about the order of all of them.
+            ("8:11,7:10,6:9,5:7,4:5,2:0", r"reversed.*try '2:0,4:5,5:7,6:9,7:10,8:11'"),
+            ("8:6,5:0", r"reversed.*try '5:0,8:6'"),
+            ("country:9,region:0", r"reversed.*try 'region:0,country:9'"),
+            # Reversed *and* broken: both are named, and no spelling is offered.
+            ("8:6,8:0", r"reversed.*still fail: a level may appear only once"),
+            ("8:11,7:10", r"reversed.*still fail: the first band must start at z0, got z10"),
+            # Not descending: a plan that starts late, not a flipped one.
+            ("5:1,8:6", r"^(?!.*reversed).*must start at z0"),
+            ("²:0", "level must be an integer"),
+            ("--5:0", "level must be an integer"),
+        ],
+    )
+    def test_a_finest_first_plan_is_told_so(self, spec, message):
+        with pytest.raises(InvalidParameterError, match=message):
+            parse_bands(spec)
+
+    def test_the_suggested_spelling_is_the_plan_the_user_meant(self):
+        with pytest.raises(InvalidParameterError) as exc:
+            parse_bands("8:11,7:10,6:9,5:7,4:5,2:0")
+        suggestion = re.search(r"try '([^']+)'", str(exc.value))
+        assert suggestion is not None, str(exc.value)
+        bands = parse_bands(suggestion.group(1))
+        assert [(b.level, b.minzoom) for b in bands] == [
+            (2, 0),
+            (4, 5),
+            (5, 7),
+            (6, 9),
+            (7, 10),
+            (8, 11),
+        ]

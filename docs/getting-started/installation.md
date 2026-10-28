@@ -48,7 +48,7 @@ uv sync --all-extras
 
 - **Python**: 3.10+
 - **PyArrow**: 12.0.0+
-- **DuckDB**: >=1.5.5,<1.6 (the range the `geography` extension is published for)
+- **DuckDB**: >=1.5.6,<1.6 (the range the `geography` extension is published for)
 
 All dependencies are installed automatically.
 
@@ -63,8 +63,8 @@ uv sync --all-extras
 ### Documentation
 
 ```bash
-uv sync --group docs
-uv run mkdocs serve
+uv sync --extra docs
+uv run zensical serve
 ```
 
 ## Verifying Installation

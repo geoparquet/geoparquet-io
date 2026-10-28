@@ -15,6 +15,7 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     load_community_extension,
     quote_identifier,
+    register_arrow,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite
@@ -22,6 +23,7 @@ from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
+from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import execute_transform
@@ -73,7 +75,8 @@ def add_h3_table(
         # Load H3 extension
         load_community_extension(con, "h3")
 
-        con.register("__input_table", table)
+        warn_planar_math("add_h3", table, geom_col)
+        registered = register_arrow(con, "__input_table", table)
 
         # Check if geometry column is BLOB (needs conversion)
         columns_info = con.execute("DESCRIBE __input_table").fetchall()
@@ -126,6 +129,7 @@ def add_h3_table(
         if table.schema.metadata:
             result = result.replace_schema_metadata(table.schema.metadata)
 
+        result = registered.restore_edges(result)
         return result
     finally:
         con.close()
@@ -204,6 +208,8 @@ def add_h3_column(
     if not 0 <= h3_resolution <= 15:
         raise InvalidParameterError("resolution", f"must be between 0 and 15, got {h3_resolution}")
 
+    warn_planar_math_for_file("add_h3", input_parquet)
+
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
@@ -236,7 +242,7 @@ def add_h3_column(
 
     # H3 keying expects lon/lat degrees; reproject non-CRS84 input first (#525).
     geom_ref = transform_geom_sql(
-        quote_identifier(geom_col), source_crs_string(input_parquet, verbose)
+        quote_identifier(geom_col), source_crs_string(input_parquet, verbose, geom_col)
     )
 
     # Define the H3 SQL expression (using string format for portability)

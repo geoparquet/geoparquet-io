@@ -1,6 +1,7 @@
 """Tests for mypy type checking configuration."""
 
 import importlib
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -86,8 +87,15 @@ class TestMypyConfiguration:
                 py_path = _REPO_ROOT / Path(*parts).with_suffix(".py")
                 # Try as a package (__init__.py)
                 pkg_path = _REPO_ROOT / Path(*parts) / "__init__.py"
-                if not py_path.exists() and not pkg_path.exists():
-                    missing.append(module_name)
+                if py_path.exists() or pkg_path.exists():
+                    continue
+                # A third-party override (e.g. numpy's stub skip) is valid
+                # when the module resolves in the environment; the guard
+                # still catches typos and entries gone stale.
+                root = module_name.removesuffix(".*").split(".")[0]
+                if importlib.util.find_spec(root) is not None:
+                    continue
+                missing.append(module_name)
 
         assert not missing, f"mypy overrides reference non-existent modules: {missing}"
 

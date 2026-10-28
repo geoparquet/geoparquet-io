@@ -9,20 +9,20 @@ under a ``gpio:pyramid`` key in the archive's metadata JSON.
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.geojson_stream import require_planar_geojson_file
 from geoparquet_io.core.logging_config import configure_verbose, debug, success, warn
 from geoparquet_io.core.pmtiles import (
     TippecanoeNotFoundError,
     _check_tippecanoe,
     _validate_path,
     create_pmtiles_from_geoparquet,
+    resolve_scratch_directory,
 )
 from geoparquet_io.core.process.overview.detect import (
     AggregateInfo,
@@ -36,27 +36,14 @@ from geoparquet_io.core.process.overview.run import (
     parse_levels,
     plan_bands,
 )
+from geoparquet_io.core.tile_join import (
+    TileJoinNotFoundError,
+    _build_tile_join_command,
+    _check_tile_join,
+    _run_tile_join,
+)
 
 VALID_LAYER_MODES = ("single", "grouped", "per-level")
-
-
-class TileJoinNotFoundError(Exception):
-    """Raised when tile-join is not found in PATH."""
-
-    def __init__(self):
-        super().__init__(
-            "tile-join not found in PATH.\n\n"
-            "tile-join ships with tippecanoe; gpio pmtiles pyramid needs it to\n"
-            "merge the per-level archives. Install tippecanoe:\n"
-            "  macOS:  brew install tippecanoe\n"
-            "  Ubuntu: sudo apt install tippecanoe\n"
-            "  Source: https://github.com/felt/tippecanoe#installation"
-        )
-
-
-def _check_tile_join() -> bool:
-    """Check if tile-join is available in PATH."""
-    return shutil.which("tile-join") is not None
 
 
 def _layer_name(layer_mode: str, scheme: str, level: int | str, stem: str) -> str:
@@ -112,39 +99,6 @@ def _resolve_feature_zooms(
             "aggregate bands",
         )
     return max_zoom, features_min_zoom
-
-
-def _build_tile_join_command(
-    output_path: str,
-    band_files: list[str],
-    *,
-    name: str,
-    attribution: str | None = None,
-    force: bool = False,
-) -> list[str]:
-    """argv for merging per-band archives (never joined through a shell)."""
-    cmd = ["tile-join", "-o", output_path, "-pk"]
-    if force:
-        cmd.append("--force")
-    cmd.append(f"--name={name}")
-    if attribution:
-        cmd.append(f"--attribution={attribution}")
-    cmd.extend(band_files)
-    return cmd
-
-
-def _run_tile_join(cmd: list[str], verbose: bool) -> None:
-    if verbose:
-        debug(f"Running: {' '.join(cmd)}")
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        stderr = proc.stderr.strip()
-        raise RuntimeError(
-            f"tile-join failed with exit code {proc.returncode}"
-            + (f"\nstderr:\n{stderr}" if stderr else "")
-        )
-    if verbose and proc.stderr.strip():
-        debug(proc.stderr.strip())
 
 
 def _merge_pyramid_metadata(pmtiles_path: str, pyramid: dict) -> None:
@@ -295,7 +249,7 @@ def _detect_and_plan(
     bytes_per_cell: float | None,
     base_max_zoom: int | None,
     verbose: bool,
-    bands_spec: str | None = None,
+    stated_bands: list[Band] | None = None,
 ) -> tuple[AggregateInfo, list[Band]]:
     """Detect the aggregate's shape and select zoom bands for the pyramid."""
     with aggregate_connection(input_path, verbose) as (con, relation):
@@ -306,12 +260,12 @@ def _detect_and_plan(
                 "aggregate has no geometry column; re-run gpio process aggregate "
                 "with --out-geometry polygon or centroid before tiling",
             )
-        if bands_spec is not None:
+        if stated_bands is not None:
             # An explicit plan replaces the probe entirely: the caller has
             # stated the handovers, so there is nothing to estimate and no
             # budget to respect. Probing anyway would only cost a full scan to
             # produce an answer that is then discarded.
-            return info, parse_bands(bands_spec)
+            return info, stated_bands
         parsed_levels = parse_levels(levels, info) if levels is not None else None
         # Cap band transitions one below the base band's max zoom so the base
         # band starts by that zoom (and never inverts into minzoom > maxzoom).
@@ -345,6 +299,7 @@ def create_pmtiles_pyramid(
     attribution: str | None = None,
     force: bool = False,
     verbose: bool = False,
+    temporary_directory: str | None = None,
 ) -> None:
     """Create a banded multi-level PMTiles archive from an aggregate file.
 
@@ -374,6 +329,13 @@ def create_pmtiles_pyramid(
         attribution: Attribution HTML for the tiles.
         force: Overwrite the output archive if it exists.
         verbose: Enable verbose output.
+        temporary_directory: Scratch for this run -- tippecanoe's ``-t``, the
+            gpio children's temp files and the parent of the intermediate
+            per-band archives (and of any overview levels built on the fly).
+            Must exist; defaults to the OS temp directory (``TMPDIR``).
+            tile-join has no scratch flag, and the in-process DuckDB rollup
+            that builds missing overview levels spills under ``TMPDIR`` as
+            every gpio connection does.
 
     Raises:
         TippecanoeNotFoundError: tippecanoe missing from PATH.
@@ -404,6 +366,10 @@ def create_pmtiles_pyramid(
         # Not an error the way --levels is: this one tunes the probe rather
         # than restating the plan, and the probe simply does not run.
         warn("Ignoring --bytes-per-cell: --bands skips the tile-size probe it feeds.")
+    # A plan that cannot be used is reported now, not after the tool checks and
+    # a full scan of the input: parsing needs nothing from the file.
+    stated_bands = parse_bands(bands) if bands is not None else None
+    scratch = resolve_scratch_directory(temporary_directory)
     if features_source:
         _validate_path(features_source)
     # Fail fast before any tiling work: tile-join would only reject an
@@ -419,12 +385,16 @@ def create_pmtiles_pyramid(
     if not _check_tile_join():
         raise TileJoinNotFoundError()
 
+    require_planar_geojson_file(input_path, use_primary_geometry=True)
+    if include_features and features_source:
+        require_planar_geojson_file(features_source, use_primary_geometry=True)
+
     info, plan = _detect_and_plan(
-        input_path, levels, max_tile_kb, bytes_per_cell, base_max, verbose, bands_spec=bands
+        input_path, levels, max_tile_kb, bytes_per_cell, base_max, verbose, stated_bands
     )
     stem = Path(output_path).stem
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with tempfile.TemporaryDirectory(dir=scratch) as tmpdir:
         sources = _resolve_band_sources(input_path, info, plan, tmpdir, verbose)
         band_files: list[str] = []
         for i, band in enumerate(plan):
@@ -444,6 +414,7 @@ def create_pmtiles_pyramid(
                 attribution=attribution,
                 force=True,
                 verbose=verbose,
+                temporary_directory=scratch,
             )
             band_files.append(band_file)
 
@@ -467,6 +438,7 @@ def create_pmtiles_pyramid(
                 attribution=attribution,
                 force=True,
                 verbose=verbose,
+                temporary_directory=scratch,
             )
             band_files.append(features_file)
 

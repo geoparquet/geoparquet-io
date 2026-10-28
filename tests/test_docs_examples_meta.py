@@ -43,7 +43,25 @@ DOCS_ROOT = GUIDE_DIR.parent
 #: environment). The headroom keeps ordinary doc edits from tripping them while
 #: still catching a drift of any size; moving either number is a deliberate act
 #: that shows up in a diff and needs a justification in the pull request.
-MAX_SKIPPED_BLOCKS = 243
+# 243 -> 244: the --simplify-crs guide example (#1197) needs the optional
+# simplify extra AND an unseeded per-UTM-zone input file, so it cannot run.
+# 244 -> 249: merging main (new convert/extract guide examples,
+# #1189/#1182) makes both sides' skipped blocks count together with the new
+# process-simplify/raster guide pages; neither side alone passed its ceiling.
+# 249 -> 251: the `add bbox-metadata --bbox-name` pair in add.md. Its whole
+# premise is a bbox struct ANOTHER tool wrote under a name gpio will not vouch
+# for, so the input cannot be seeded with gpio commands: every gpio write that
+# produces such a column also declares it, which is the case the example is not
+# about. Same reason as the `file_with_bbox.parquet` block above it.
+# 251 -> 253: the `extract bigquery --sql` CLI/Python pair in extract.md. It
+# runs a GoogleSQL query job, which needs BigQuery credentials and a billing
+# project; there is no local stand-in for bigquery_query().
+# 253 -> 255: the spherical-edges repair-skip CLI/Python pair in convert.md
+# (#1287). It needs an input whose geo metadata declares `edges: spherical`;
+# no gpio command writes that declaration onto the seeded sample data, and
+# hand-building one inline would drown the two-line example it illustrates.
+# tests/test_skip_planar_repair_spherical_edges.py runs the real thing.
+MAX_SKIPPED_BLOCKS = 255
 MIN_EXECUTED_BLOCKS = 217
 
 #: Looks like a command rather than prose or sample output.

@@ -35,6 +35,7 @@ from geoparquet_io.core.add import h3 as core_h3
 from geoparquet_io.core.add import kdtree as core_kdtree
 from geoparquet_io.core.add import quadkey as core_quadkey
 from geoparquet_io.core.add import s2 as core_s2
+from geoparquet_io.core.process import simplify as core_simplify
 from geoparquet_io.core.process.aggregate import by_a5 as core_aggregate_a5
 from geoparquet_io.core.process.aggregate import by_h3 as core_aggregate_h3
 from tests.conftest import (
@@ -480,35 +481,41 @@ FRONT_DOOR_CASES: list[FrontDoorCase] = [
             metric="sum:population",
             breakdown="category",
             breakdown_limit=5,
+            breakdown_metric="max:population",
             out_geometry="centroid",
             geometry_column="geometry",
             where="population > 0",
             metric_nodata="-999",
             bucket_point="bbox",
             bbox_column="bounds",
+            memory_limit="512MB",
         ),
         table_call=lambda t: t.aggregate_h3(
             resolution=6,
             metric="sum:population",
             breakdown="category",
             breakdown_limit=5,
+            breakdown_metric="max:population",
             out_geometry="centroid",
             where="population > 0",
             metric_nodata="-999",
             bucket_point="bbox",
             bbox_column="bounds",
+            memory_limit="512MB",
         ),
         expected={
             "resolution": 6,
             "metric": "sum:population",
             "breakdown": "category",
             "breakdown_limit": 5,
+            "breakdown_metric": "max:population",
             "out_geometry": "centroid",
             "geometry_column": "geometry",
             "where": "population > 0",
             "metric_nodata": "-999",
             "bucket_point": "bbox",
             "bbox_column": "bounds",
+            "memory_limit": "512MB",
         },
     ),
     FrontDoorCase(
@@ -522,35 +529,41 @@ FRONT_DOOR_CASES: list[FrontDoorCase] = [
             metric="mean:population",
             breakdown="category",
             breakdown_limit=5,
+            breakdown_metric="max:population",
             out_geometry="centroid",
             geometry_column="geometry",
             where="population > 0",
             metric_nodata="-999",
             bucket_point="bbox",
             bbox_column="bounds",
+            memory_limit="512MB",
         ),
         table_call=lambda t: t.aggregate_a5(
             resolution=8,
             metric="mean:population",
             breakdown="category",
             breakdown_limit=5,
+            breakdown_metric="max:population",
             out_geometry="centroid",
             where="population > 0",
             metric_nodata="-999",
             bucket_point="bbox",
             bbox_column="bounds",
+            memory_limit="512MB",
         ),
         expected={
             "resolution": 8,
             "metric": "mean:population",
             "breakdown": "category",
             "breakdown_limit": 5,
+            "breakdown_metric": "max:population",
             "out_geometry": "centroid",
             "geometry_column": "geometry",
             "where": "population > 0",
             "metric_nodata": "-999",
             "bucket_point": "bbox",
             "bbox_column": "bounds",
+            "memory_limit": "512MB",
         },
     ),
     FrontDoorCase(
@@ -650,6 +663,44 @@ FRONT_DOOR_CASES: list[FrontDoorCase] = [
             "assume_crs84": True,
         },
     ),
+    FrontDoorCase(
+        id="simplify",
+        core_module=core_simplify,
+        core_name="simplify_table",
+        ops_call=lambda t: ops.simplify(
+            t,
+            0.5,
+            coverage=True,
+            preserve_topology=False,
+            simplify_boundary=False,
+            threads=2,
+            geometry_column="geometry",
+            drop_empty=True,
+            simplify_crs="EPSG:3857",
+            verbose=True,
+        ),
+        table_call=lambda t: t.simplify(
+            0.5,
+            coverage=True,
+            preserve_topology=False,
+            simplify_boundary=False,
+            threads=2,
+            drop_empty=True,
+            simplify_crs="EPSG:3857",
+        ),
+        expected={
+            "tolerance": 0.5,
+            "coverage": True,
+            "preserve_topology": False,
+            "simplify_boundary": False,
+            "threads": 2,
+            "geometry_column": "geometry",
+            "drop_empty": True,
+            "simplify_crs": "EPSG:3857",
+        },
+        ops_only_expected={"verbose": True},
+        ops_module=core_simplify,
+    ),
 ]
 
 FRONT_DOOR_IDS = [case.id for case in FRONT_DOOR_CASES]
@@ -666,9 +717,19 @@ NOT_TABLE_IN_TABLE_OUT: dict[str, str] = {
     "add_geometry_metrics": "file round trip onto add_geometry_metrics",
     "aggregate_admin": "Table.aggregate_admin calls ops.aggregate_admin -- one door, "
     "and that one round-trips through a file",
+    # File in, nothing out: `ops.add_stac_metadata` patches an already-written
+    # file's footer, where `Table.add_stac_metadata` sets the same key on a
+    # schema in memory. Same key, same validation, no shared in-memory call.
+    "add_stac_metadata": "file in, nothing out: the ops door patches a footer on "
+    "disk, the Table door sets the key on a schema; compared in "
+    "tests/test_add_stac_metadata.py",
     # Not a transform of a table at all.
     "explain_analyze": "file path in, dict out; Table's is a classmethod, not an operation",
     "from_wfs": "constructor: fetches a service over the network, no input table",
+    "polygonize": "constructor: reads a raster from disk, no input table; doors "
+    "compared behaviourally in tests/test_process_polygonize.py",
+    "contour": "constructor: reads a raster from disk, no input table; doors "
+    "compared behaviourally in tests/test_process_contour.py",
     # Table in, partition tree out. Both doors are run for real, and asserted to
     # write the same tree, by TestOpsPartition.
     "partition_by_a5": "writes a partition tree; covered by TestOpsPartition",
@@ -756,6 +817,9 @@ OPS_ONLY_SURFACE: dict[str, str] = {
     "spelled twin",
     "convert_to_geopackage": "`Table.write(format=...)` is the method-side spelling",
     "convert_to_shapefile": "`Table.write(format=...)` is the method-side spelling",
+    "create_overview_file": "file in, one levelled overview GeoParquet out: the whole "
+    "point is the on-disk row-group layout the format requires, which a table "
+    "handed back in memory cannot carry",
     "create_overviews": "`Table.overview` <-> `ops.create_overviews`, differently spelled "
     "twin: the method rolls one level in memory, the function writes a whole pyramid",
     "create_pmtiles": "file in, PMTiles out through tippecanoe: no table on either end",
@@ -764,7 +828,11 @@ OPS_ONLY_SURFACE: dict[str, str] = {
     "from_carto": "reader: fetches a service over the network, no input table",
     "from_wfs_layers": "reader: writes many layers to a directory, so there is no single "
     "table to hand back (`from_wfs`, which returns one, is a shared name)",
+    "add_stac_metadata_table": "`Table.add_stac_metadata` is the method-side spelling; "
+    "`ops.add_stac_metadata` is taken by the file form, which patches a footer on disk",
     "get_row_group_geo_stats": "inspection helper: reads row-group stats off a path",
+    "preview_bbox_filter": "inspection helper: previews a bbox read off a path's "
+    "row-group statistics before anything is read; there is no table on either end",
     "read_bigquery": "`Table.from_bigquery` <-> `ops.read_bigquery`, differently spelled twin",
     # Directory sub-partitioning (#853) is deliberately `Table`-twin-less: the
     # unit of work is a directory of files on disk, splitting each oversized one
@@ -2242,10 +2310,18 @@ class TestCheckResult:
         """Test CheckResult.failures() method."""
         from geoparquet_io.api.check import CheckResult
 
-        result = CheckResult({"passed": False, "issues": ["Issue 1", "Issue 2"]}, check_type="test")
+        result = CheckResult(
+            {"passed": False, "severity": "failure", "issues": ["Issue 1", "Issue 2"]},
+            check_type="test",
+        )
         failures = result.failures()
         assert len(failures) == 2
         assert "Issue 1" in failures
+
+        # A miss that states no severity is advice: a warning, not a failure (#1252).
+        advice = CheckResult({"passed": False, "issues": ["Issue 1"]}, check_type="test")
+        assert advice.failures() == []
+        assert advice.warnings() == ["Issue 1"]
 
     def test_check_result_to_dict(self):
         """Test CheckResult.to_dict() method."""
@@ -2290,9 +2366,9 @@ class TestCheckResult:
         result = CheckResult(
             {"passed": True, "issues": ["Info message 1", "Info message 2"]}, check_type="test"
         )
-        # For single checks, issues are NOT included in warnings (only in failures when failed)
-        # This behavior is only for "all" checks
-        assert result.warnings() == []
+        # Issues a passing check mentions are advice, for single checks as for "all"
+        assert result.warnings() == ["Info message 1", "Info message 2"]
+        assert result.failures() == []
 
     def test_check_result_warnings_all_check_aggregates(self):
         """Test CheckResult.warnings() aggregates warnings from all check categories."""
@@ -2384,7 +2460,8 @@ class TestCheckResult:
 
         # Failing check with issues and warnings
         result = CheckResult(
-            {"passed": False, "issues": ["Issue 1"], "warnings": ["Warn 1"]}, check_type="bbox"
+            {"passed": False, "severity": "failure", "issues": ["Issue 1"], "warnings": ["Warn 1"]},
+            check_type="bbox",
         )
         repr_str = repr(result)
         assert "bbox" in repr_str

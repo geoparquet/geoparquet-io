@@ -25,16 +25,16 @@ belongs here.
 
 import os
 
-import duckdb
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
 from geoparquet_io.core.bbox_structure import check_bbox_structure
-from geoparquet_io.core.duckdb_metadata import get_column_names
+from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadata
 from geoparquet_io.core.duckdb_utils import (
     _DuckDBSchemaWrapper,
     _get_query_column_type,
     _get_query_columns,
+    _strip_trailing_order_by,
     get_duckdb_connection,
     load_community_extension,
     quote_identifier,
@@ -50,7 +50,7 @@ from geoparquet_io.core.file_utils import (
     is_partition_path,
     resolve_file_url,
 )
-from geoparquet_io.core.geo_metadata import build_bbox_covering
+from geoparquet_io.core.geo_metadata import build_bbox_covering, geoarrow_primary_encoding
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -241,6 +241,18 @@ def compute_geometry_types_via_sql(
         List of spec geometry type names with dimension suffixes
         (e.g., ["Point", "LineString ZM"]) or empty list if column not in query
     """
+    # A SELECT DISTINCT over every row cannot change with the order they arrive
+    # in -- but DuckDB keeps the ORDER_BY operator in the plan of an ordered
+    # subquery, so measuring the types cost a full sort of the input on top of
+    # the sort the COPY already does (#1177). Stripped here, in the canonical
+    # implementation, because `disk-rewrite` calls it directly rather than
+    # through `compute_geo_stats_via_sql`, which strips for its own scan. The
+    # COPY is built from the caller's query and is untouched: the output's row
+    # order does not change.
+    query = _strip_trailing_order_by(query)
+
+    import duckdb
+
     # Check if geometry column exists in query result
     try:
         columns = _get_query_columns(con, query)
@@ -294,6 +306,15 @@ def compute_geometry_dimensions_via_sql(
         Set of geoarrow dimension codes (1=XY, 2=XYZ, 3=XYM, 4=XYZM). Empty set when
         the column is absent, native nested (STRUCT), or the dimension is undetectable.
     """
+    # Same DISTINCT shape, same reason as the type scan above: the set of
+    # dimensions present cannot change with the order the rows arrive in, and
+    # `arrow-streaming` calls this itself -- its bbox and types go through
+    # `compute_geo_stats_via_sql`, which strips, so this was the last sorted
+    # extra scan on the 1.1-geoarrow path (#1177).
+    query = _strip_trailing_order_by(query)
+
+    import duckdb
+
     try:
         columns = _get_query_columns(con, query)
         if geometry_column not in columns:
@@ -361,7 +382,23 @@ def resolve_geoparquet_version_from_file(parquet_file: str, verbose: bool = Fals
         "parquet_geo_only": "parquet-geo-only",
         "geoparquet_v1": "1.1",
     }.get(info.get("file_type"))
+    if detected == "1.1" and _declares_geoarrow_encoding(parquet_file):
+        # A GeoArrow-native 1.1 file declares version 1.1.0 just as a WKB one
+        # does, so "1.1" is the version but not the *encoding*: writing it meant
+        # passing the nested-list geometry through under `encoding: WKB`, a block
+        # contradicting the schema beside it (#1176). "1.1-geoarrow" is the one
+        # version that preserves what the input actually is.
+        return "1.1-geoarrow"
     return _resolve_auto_version(detected)
+
+
+def _declares_geoarrow_encoding(parquet_file: str) -> bool:
+    """Whether the file's ``geo`` block declares native GeoArrow for its primary column."""
+    try:
+        return geoarrow_primary_encoding(get_geo_metadata(parquet_file)) is not None
+    except Exception as e:  # unreadable footer: the version decision stands as made
+        debug(f"GeoArrow encoding check failed for {parquet_file}: {e}")
+        return False
 
 
 def resolve_geoparquet_version_from_table(table, verbose: bool = False) -> str | None:
@@ -626,7 +663,7 @@ TO {sql_path(output_parquet)}
         progress(display_query)
         info(f"\n-- Note: Using {compression_desc} compression")
         info("-- This query creates a new parquet file with the computed column added")
-        info("-- Metadata would also be updated with proper GeoParquet covering information")
+        info("-- The covering metadata is updated only if the output has a bbox column")
         con.close()
         return
 

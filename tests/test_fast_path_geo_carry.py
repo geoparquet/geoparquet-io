@@ -473,8 +473,9 @@ class TestMultiFileInputsDeclineTheCarry:
 class TestTheCarriedBlockGoesThroughTheCrsRule:
     """``apply_output_crs`` is the single source of truth for null-vs-default CRS.
 
-    The carried block bypassed it, so a ``crs: null`` input came back out with
-    ``crs: null`` on the fast path while the rewrite path stripped it.
+    The carried block once bypassed it, so the two paths disagreed on a
+    ``crs: null`` input. Both now go through it, and it keeps ``null`` (unknown)
+    while dropping an explicit default (#1276).
     """
 
     @pytest.fixture
@@ -493,11 +494,14 @@ class TestTheCarriedBlockGoesThroughTheCrsRule:
         }
         return _write_v2_input(fields_v2_file, tmp_path / "crs84.parquet", geo)
 
-    def test_a_null_crs_is_not_written_through(self, v2_crs_null, tmp_path):
+    def test_a_null_crs_is_kept_unknown(self, v2_crs_null, tmp_path):
+        """An unknown CRS must not be written as an absent one, which means CRS84 (#1276)."""
         out = tmp_path / "crs_null_out.parquet"
         _sort(v2_crs_null, out)
 
-        assert "crs" not in _geo(out)["columns"]["geometry"]
+        column = _geo(out)["columns"]["geometry"]
+        assert "crs" in column
+        assert column["crs"] is None
 
     def test_a_null_crs_input_matches_the_rewrite_path(self, v2_crs_null, tmp_path):
         fast = _write_through(v2_crs_null, tmp_path / "crs_null_fast.parquet", False)
@@ -517,8 +521,8 @@ class TestTheCarriedBlockGoesThroughTheCrsRule:
 
         assert fast == rewritten
 
-    def test_a_stripped_default_crs_alone_does_not_justify_the_carry(self):
-        """The CRS rule runs before the gate, so the block is judged as it will be written."""
+    def test_a_null_crs_alone_justifies_the_carry(self):
+        """The CRS rule runs before the gate and keeps ``null``, so the block is carried (#1276)."""
         from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
         metadata = {
@@ -537,4 +541,94 @@ class TestTheCarriedBlockGoesThroughTheCrsRule:
             )
         }
 
+        carried = _geo_block_to_carry_on_fast_path(metadata, "geometry", "2.0")
+
+        assert carried is not None
+        assert carried["columns"]["geometry"]["crs"] is None
+
+    def test_a_stripped_default_crs_alone_does_not_justify_the_carry(self):
+        """An explicit default is dropped before the gate, which leaves nothing to carry."""
+        from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
+
+        metadata = {
+            "geo": json.dumps(
+                {
+                    "version": "2.0.0",
+                    "primary_column": "geometry",
+                    "columns": {
+                        "geometry": {
+                            "encoding": "WKB",
+                            "geometry_types": ["Polygon"],
+                            "crs": {
+                                "type": "GeographicCRS",
+                                "name": "WGS 84 (CRS84)",
+                                "id": {"authority": "OGC", "code": "CRS84"},
+                            },
+                        }
+                    },
+                }
+            )
+        }
+
         assert _geo_block_to_carry_on_fast_path(metadata, "geometry", "2.0") is None
+
+
+class TestTheDecisionIsNotAskedWhenTheRewriteIsAlreadyDecided:
+    """The decision costs schema probes, and its answer is readable on the fast path only.
+
+    ``carried_geo_block`` is read inside the ``if not rewrite_needed:`` branch and
+    nowhere else, so a 1.x -> 2.0 write -- which always rewrites -- paid for the
+    decision's ``SELECT * FROM (query) LIMIT 0`` steps and threw the answer away.
+    Asking it only when it can still be used is the whole claim; what it costs
+    when it *is* asked belongs to the paths it calls.
+    """
+
+    @staticmethod
+    def _decisions_for(monkeypatch, source, destination, output_version: str) -> int:
+        """How many times this write asks ``_fast_path_geo_decision``."""
+        from geoparquet_io.core import write_funnels
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+
+        real_decision = write_funnels._fast_path_geo_decision
+        calls = []
+
+        def spy(*args, **kwargs):
+            calls.append(args)
+            return real_decision(*args, **kwargs)
+
+        monkeypatch.setattr(write_funnels, "_fast_path_geo_decision", spy)
+
+        original = dict(pq.ParquetFile(str(source)).schema_arrow.metadata or {})
+        con = get_duckdb_connection(load_spatial=True)
+        try:
+            write_funnels.write_parquet_with_metadata(
+                con=con,
+                query=f"SELECT * FROM '{source}'",
+                output_file=str(destination),
+                original_metadata=original,
+                compression="ZSTD",
+                compression_level=None,
+                geoparquet_version=output_version,
+                input_file=str(source),
+            )
+        finally:
+            con.close()
+        return len(calls)
+
+    def test_a_write_that_always_rewrites_does_not_ask(
+        self, monkeypatch, places_test_file, tmp_path
+    ):
+        """1.0 -> 2.0: the rewrite is settled before the decision could inform it."""
+        out = tmp_path / "rewritten.parquet"
+
+        assert self._decisions_for(monkeypatch, places_test_file, out, "2.0") == 0
+        assert _geo(out)["version"].startswith("2.")
+
+    def test_the_decision_is_still_asked_where_its_answer_is_used(
+        self, monkeypatch, v2_epoch_orientation_bbox, tmp_path
+    ):
+        """The control: a 2.0 -> 2.0 write reaches the fast path, so the question is real."""
+        out = tmp_path / "carried.parquet"
+
+        assert self._decisions_for(monkeypatch, v2_epoch_orientation_bbox, out, "2.0") == 1
+        assert "covering" in _geo(out)["columns"]["geometry"]

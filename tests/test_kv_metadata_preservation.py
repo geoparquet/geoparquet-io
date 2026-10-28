@@ -294,6 +294,47 @@ class TestTableWritePreservesKv:
         assert geo["version"].startswith("1.0")
 
 
+class TestApiConvertWritePreservesKv:
+    """``api.convert(path).write(...)`` keeps the source's non-geo keys (#1268).
+
+    ``convert()`` builds its table from a DuckDB query, which hands back no
+    schema metadata, so every key but the regenerated ``geo`` was lost.
+    """
+
+    @pytest.mark.parametrize("strategy", WRITE_STRATEGIES)
+    def test_convert_then_write_keeps_non_geo_keys(self, kv_source, tmp_path, strategy):
+        out = tmp_path / f"convert_{strategy}.parquet"
+        api.convert(str(kv_source)).write(str(out), write_strategy=strategy)
+        assert {"fiboa", "custom_note"} <= kv_keys(out), f"{strategy} dropped keys"
+        assert kv_value(out, "custom_note") == CUSTOM_VALUE
+        assert_single_valid_geo(out)
+
+    def test_stale_pandas_block_is_still_dropped(self, kv_source, tmp_path):
+        """A pandas block describes the source's columns, not the rewrite's."""
+        src = tmp_path / "with_pandas.parquet"
+        table = pq.read_table(kv_source)
+        metadata = dict(table.schema.metadata)
+        metadata[b"pandas"] = b"{}"
+        pq.write_table(table.replace_schema_metadata(metadata), src)
+        out = tmp_path / "out.parquet"
+        api.convert(str(src)).write(str(out))
+        assert "pandas" not in kv_keys(out)
+        assert {"fiboa", "custom_note"} <= kv_keys(out)
+
+    def test_non_parquet_source_has_no_carried_keys(self, tmp_path):
+        out = tmp_path / "from_geojson.parquet"
+        api.convert("tests/data/buildings_test.geojson").write(str(out))
+        assert kv_keys(out) == {"geo"}
+
+    def test_parquet_source_with_only_geo(self, kv_source, tmp_path):
+        src = tmp_path / "geo_only.parquet"
+        table = pq.read_table(kv_source)
+        pq.write_table(table.replace_schema_metadata({b"geo": table.schema.metadata[b"geo"]}), src)
+        out = tmp_path / "out.parquet"
+        api.convert(str(src)).write(str(out))
+        assert kv_keys(out) == {"geo"}
+
+
 class TestBuildKvMetadataClause:
     """The shared clause builder escapes exactly once and quotes keys."""
 
@@ -363,6 +404,14 @@ class TestNonGeoTablePreservesKv:
         api.read(str(nongeo_kv_source)).write(str(out))
 
         assert "geo" not in kv_keys(out)
+
+    def test_convert_without_geometry_keeps_keys(self, nongeo_kv_source, tmp_path):
+        """``convert()`` reads a geometry-less Parquet as a plain table (#1268)."""
+        out = tmp_path / "nongeo_convert.parquet"
+        api.convert(str(nongeo_kv_source)).write(str(out))
+
+        assert {"fiboa", "custom_note"} <= kv_keys(out)
+        assert kv_value(out, "custom_note") == CUSTOM_VALUE
 
     def test_rows_survive(self, nongeo_kv_source, tmp_path):
         out = tmp_path / "nongeo_rows.parquet"

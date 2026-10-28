@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pyarrow as pa
 
+from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.constants import DEFAULT_H3_COLUMN_NAME
 from geoparquet_io.core.process.aggregate.grid_common import (
     GridScheme,
@@ -30,6 +31,10 @@ H3_SCHEME = GridScheme(
     latlng_template="h3_cell_to_latlng({cell})",
     # h3_cell_to_latlng returns [lat, lng]; ST_Point wants (lng, lat).
     centroid_wkb_template="ST_AsWKB(ST_Point({ll}[2], {ll}[1]))",
+    # H3 is *not* equal-area -- a cell near a pole is about a quarter smaller
+    # than one at the equator -- so `pct_cell` divides each cell by its own
+    # measured area rather than a per-resolution average (#1181).
+    cell_area_template="h3_cell_area({cell}, 'm^2')",
 )
 
 
@@ -54,8 +59,11 @@ def aggregate_by_h3(
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> None:
     """Aggregate a GeoParquet file into H3 cells. Writes the output file."""
+    compression_level = resolve_process_compression_level(compression, compression_level)
     aggregate_grid_file(
         H3_SCHEME,
         input_parquet,
@@ -78,6 +86,8 @@ def aggregate_by_h3(
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
+        memory_limit=memory_limit,
     )
 
 
@@ -94,6 +104,8 @@ def aggregate_h3_table(
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> pa.Table:
     """Aggregate an in-memory Arrow table by h3 cell. Returns a new Arrow table."""
     return aggregate_grid_table(
@@ -110,4 +122,6 @@ def aggregate_h3_table(
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
+        memory_limit=memory_limit,
     )

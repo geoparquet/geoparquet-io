@@ -25,10 +25,10 @@ class CheckResult:
     Example:
         >>> table = gpio.read('data.parquet')
         >>> result = table.check()
-        >>> if result.passed():
-        ...     print("All checks passed!")
-        >>> else:
+        >>> if result.verdict() == "failure":
         ...     print("Failures:", result.failures())
+        >>> else:
+        ...     print("Advice:", result.warnings())
     """
 
     def __init__(
@@ -70,73 +70,75 @@ class CheckResult:
         # Handle single check results
         return self._results.get("passed", False)
 
-    def judged(self) -> bool:
+    def verdict(self) -> str:
         """
-        Whether every check reached a verdict.
+        How bad the result is: ``"pass"``, ``"warning"`` or ``"failure"``.
 
-        The spatial-order check withholds its verdict below eight row groups:
-        ``passed()`` is then True, because no failure was found, and this is
-        False. ``warnings()`` carries the reason.
+        The classification ``gpio check`` uses for its exit code: a failure
+        exits 1, a warning exits 0 (1 with ``--strict``). Unlike :meth:`passed`,
+        which is False for either, this tells advice apart from a defect. The
+        strict equivalent is ``verdict() != "pass"``.
+
+        It covers the checks this result ran. :meth:`Table.check` runs the
+        structure checks (row groups, bbox, covering, compression, bloom
+        filters) -- not spatial order or spec validation, which ``gpio check
+        all`` adds -- so a CI gate wanting ``check all``'s answer takes the
+        worst of ``check()``, ``check_spatial()`` and ``validate()``.
+
+        Returns:
+            The verdict's label
         """
-        from geoparquet_io.core.check_spatial_order import spatial_verdict_withheld
+        from geoparquet_io.core.check_verdict import result_verdict, worst
 
+        return worst(result_verdict(r) for _, r in self._categories()).label
+
+    def _categories(self) -> list[tuple[str | None, dict]]:
+        """``(category, results)`` pairs: one per check for ``"all"``, else the one result."""
         if self._check_type == "all":
-            return not any(
-                spatial_verdict_withheld(cat_results)
-                for cat_results in self._results.values()
-                if isinstance(cat_results, dict)
-            )
-        return not spatial_verdict_withheld(self._results)
+            return [(c, r) for c, r in self._results.items() if isinstance(r, dict)]
+        return [(None, self._results)]
+
+    def _bucket(self, failures: bool) -> list[str]:
+        """Issues labelled failure (``failures``), or labelled warning or less."""
+        from geoparquet_io.core.check_verdict import Verdict, labelled_issues, result_verdict
+
+        out: list[str] = []
+        for category, results in self._categories():
+
+            def tag(message: str, category=category) -> str:
+                return f"[{category}] {message}" if category else message
+
+            labelled = labelled_issues(results)
+            if failures:
+                found = [tag(i) for level, i in labelled if level is Verdict.FAILURE]
+                if not found and result_verdict(results) is Verdict.FAILURE and category:
+                    found = [tag("Check failed")]
+                out.extend(found)
+            else:
+                out.extend(tag(w) for w in results.get("warnings", []))
+                out.extend(tag(i) for level, i in labelled if level is not Verdict.FAILURE)
+        return out
 
     def warnings(self) -> list[str]:
         """
-        Get list of warning messages.
+        Get list of warning messages: advice, by the same severity as :meth:`verdict`.
 
         Returns:
             List of warning strings
         """
-        warnings = []
-
-        if self._check_type == "all":
-            # Aggregate warnings from all categories
-            for category, cat_results in self._results.items():
-                if isinstance(cat_results, dict):
-                    cat_warnings = cat_results.get("warnings", [])
-                    if cat_warnings:
-                        warnings.extend([f"[{category}] {w}" for w in cat_warnings])
-                    # Some checks use "issues" as warnings when passed
-                    if cat_results.get("passed", True):
-                        issues = cat_results.get("issues", [])
-                        if issues:
-                            warnings.extend([f"[{category}] {i}" for i in issues])
-        else:
-            warnings = self._results.get("warnings", [])
-
-        return warnings
+        return self._bucket(failures=False)
 
     def failures(self) -> list[str]:
         """
-        Get list of failure messages.
+        Get list of failure messages: defects, by the same severity as :meth:`verdict`.
+
+        An issue a check reports as advice (a non-ZSTD codec, say) is a
+        warning, listed by :meth:`warnings`, not here.
 
         Returns:
             List of failure/issue strings
         """
-        failures = []
-
-        if self._check_type == "all":
-            # Aggregate failures from all categories
-            for category, cat_results in self._results.items():
-                if isinstance(cat_results, dict) and not cat_results.get("passed", True):
-                    issues = cat_results.get("issues", [])
-                    if issues:
-                        failures.extend([f"[{category}] {i}" for i in issues])
-                    else:
-                        failures.append(f"[{category}] Check failed")
-        else:
-            if not self._results.get("passed", True):
-                failures = self._results.get("issues", [])
-
-        return failures
+        return self._bucket(failures=True)
 
     def recommendations(self) -> list[str]:
         """

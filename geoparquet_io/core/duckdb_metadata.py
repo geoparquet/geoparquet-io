@@ -15,7 +15,6 @@ import json
 import re
 from typing import Any
 
-import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -31,6 +30,7 @@ from geoparquet_io.core.file_utils import (
     is_partition_path,
     resolve_file_url,
 )
+from geoparquet_io.core.geoarrow_compat import srid_crs_as_text
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.remote import is_remote_url, is_s3_url, needs_httpfs
 
@@ -127,11 +127,19 @@ def _pyarrow_get_schema_info(parquet_file: str) -> list[dict] | None:
             parquet_schema = pf.schema  # Physical Parquet schema
         result = []
 
-        # Build a map from column name to Parquet physical schema for logical type lookup
+        # Build a map from TOP-LEVEL column name to Parquet physical schema for
+        # logical type lookup. `parquet_schema.column(i)` walks *leaves*, whose
+        # `name` is the leaf's own, so a `GEOMETRY` leaf nested in a struct
+        # (`meta.label`) was keyed as "label" and overwrote the real top-level
+        # column of that name -- which is how a VARCHAR column came to be
+        # reported with a Geometry logical type, and read back as a secondary
+        # geometry column by anything deriving geometry columns from this listing
+        # (#1175). A leaf whose `path` is its `name` is top-level by definition.
         parquet_col_map = {}
         for i in range(len(parquet_schema)):
             col = parquet_schema.column(i)
-            parquet_col_map[col.name] = col
+            if col.path == col.name:
+                parquet_col_map[col.name] = col
 
         # Get schema info with proper type mapping
         for field in schema:
@@ -277,7 +285,7 @@ def _get_pyarrow_logical_type(field) -> str | None:
             if hasattr(field.type, "extension_metadata") and field.type.extension_metadata:
                 try:
                     ext_meta = json.loads(field.type.extension_metadata)
-                    crs = ext_meta.get("crs")
+                    crs = srid_crs_as_text(ext_meta).get("crs")
                     if crs:
                         return _format_geometry_type_crs(crs)
                 except (json.JSONDecodeError, TypeError):
@@ -397,6 +405,36 @@ def get_kv_metadata(parquet_file: str, con=None) -> dict[bytes, bytes]:
         return _pyarrow_get_kv_metadata(resolved_path)
 
     # Slow path: use DuckDB for remote files or when connection is provided
+    # Convert to dict with bytes keys for backward compatibility
+    kv_dict = {}
+    for key_bytes, val_bytes in _read_kv_entries(parquet_file, con):
+        if key_bytes:
+            kv_dict[key_bytes] = val_bytes
+    return kv_dict
+
+
+def count_kv_key(parquet_file: str, key: str, con=None) -> int:
+    """How many file-level key/value entries the footer carries under ``key``.
+
+    The Parquet footer is a list, not a map, so a key can repeat. Every dict
+    this module returns collapses the repeats to one value, which is why a
+    footer with two ``geo`` entries looked fine to ``gpio check spec`` (#1229).
+    Read through DuckDB, local files included, since pyarrow's
+    ``FileMetaData.metadata`` is a dict too. DuckDB refuses a footer whose
+    ``geo`` value it cannot parse; ``parquet_footer.read_footer_kv`` reads a
+    local footer without that limit.
+
+    Raises:
+        GeoParquetError: If file is not a valid Parquet file or cannot be read.
+    """
+    wanted = key.encode("utf-8")
+    return sum(1 for key_bytes, _ in _read_kv_entries(parquet_file, con) if key_bytes == wanted)
+
+
+def _read_kv_entries(parquet_file: str, con=None) -> list[tuple[bytes | None, bytes | None]]:
+    """Every footer key/value entry, in order and with repeats, read by DuckDB."""
+    import duckdb
+
     metadata_path = _metadata_path(parquet_file)
     connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
 
@@ -407,15 +445,14 @@ def get_kv_metadata(parquet_file: str, con=None) -> dict[bytes, bytes]:
             FROM parquet_kv_metadata({sql_path(metadata_path)})
         """).fetchall()
 
-        # Convert to dict with bytes keys for backward compatibility
-        kv_dict = {}
-        for k, v in result:
-            # Handle both bytes and string types
-            key_bytes = k if isinstance(k, bytes) else k.encode("utf-8") if k else None
-            val_bytes = v if isinstance(v, bytes) else v.encode("utf-8") if v else None
-            if key_bytes:
-                kv_dict[key_bytes] = val_bytes
-        return kv_dict
+        # Handle both bytes and string types
+        return [
+            (
+                k if isinstance(k, bytes) else k.encode("utf-8") if k else None,
+                v if isinstance(v, bytes) else v.encode("utf-8") if v else None,
+            )
+            for k, v in result
+        ]
     except duckdb.InvalidInputException as e:
         # File is not a valid Parquet file (e.g., wrong format, corrupt)
         error_msg = str(e)
@@ -449,6 +486,8 @@ def get_geo_metadata(parquet_file: str, con=None) -> dict | None:
         return _pyarrow_get_geo_metadata(resolved_path)
 
     # Slow path: use DuckDB for remote files or when connection is provided
+    import duckdb
+
     metadata_path = _metadata_path(parquet_file)
     connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
 
@@ -822,8 +861,10 @@ def parse_geometry_logical_type(logical_type: str) -> dict | None:
     if crs is not None:
         result["crs"] = crs
 
-    # Parse algorithm for Geography
-    algo_match = re.search(r"algorithm=(planar|spherical)", params)
+    # Parse algorithm for Geography: the full parquet.thrift vocabulary, not
+    # just the 1.x pair -- an ellipsoidal algorithm read as "no algorithm"
+    # degraded to spherical in every caller's fallback (#1272).
+    algo_match = re.search(r"algorithm=(planar|spherical|vincenty|thomas|andoyer|karney)", params)
     if algo_match:
         result["algorithm"] = algo_match.group(1)
 
@@ -937,6 +978,9 @@ def resolve_crs_reference(parquet_file: str, crs_value: Any) -> Any:
     # Handle srid:XXXX format - convert to PROJJSON using pyproj
     if isinstance(crs_value, str) and crs_value.lower().startswith("srid:"):
         srid = crs_value[5:]  # Skip "srid:"
+        if srid.strip() == "0":
+            # `srid:0` is the type's spelling of an unknown CRS, not EPSG:0.
+            return None
         try:
             from pyproj import CRS
 
@@ -974,6 +1018,32 @@ def detect_geometry_columns(parquet_file: str, con=None) -> dict[str, str]:
             geo_columns[name] = "Geography"
 
     return geo_columns
+
+
+# Arrow storage types that hold coordinates rather than serialized bytes.
+_NESTED_TYPE_PREFIXES = ("struct", "list", "large_list", "fixed_size_list")
+
+
+def detect_native_geometry_columns(parquet_file: str, con=None) -> dict[str, str]:
+    """The subset of ``detect_geometry_columns`` stored as Parquet GEOMETRY/GEOGRAPHY.
+
+    The local schema reader also reports a GeoArrow extension column
+    (``geoarrow.point`` and its kin) as ``GeometryType()``, which is right for
+    "which columns are geometry" but wrong for "does this file use the native
+    Parquet geo types". Those types annotate a BYTE_ARRAY, so a struct or list
+    column carrying a GeoArrow extension name is never one, and a file whose
+    only geometry is such a column is not ``parquet_geo_only`` (#624).
+    """
+    geo_columns = detect_geometry_columns(parquet_file, con)
+    if not geo_columns:
+        return geo_columns
+    nested = {
+        col.get("name")
+        for col in get_schema_info(parquet_file, con)
+        if col.get("num_children")
+        or str(col.get("type") or "").lower().startswith(_NESTED_TYPE_PREFIXES)
+    }
+    return {name: kind for name, kind in geo_columns.items() if name not in nested}
 
 
 def get_bbox_from_row_group_stats(
@@ -1124,6 +1194,41 @@ def get_row_group_stats_summary(parquet_file: str, con=None) -> dict:
             connection.close()
 
 
+def get_row_group_sizes(parquet_file: str, con=None) -> list[dict]:
+    """Per-row-group row counts and compressed byte sizes.
+
+    The physical cost of touching each row group: what a reader downloads
+    (every column chunk's compressed bytes) and how many rows it gets back.
+    The bbox preview (:mod:`geoparquet_io.core.preview`) prices its selected
+    groups with this.
+
+    Returns:
+        One dict per row group, ordered by row_group_id, with ``row_group_id``,
+        ``num_rows`` and ``compressed_bytes`` (summed over all column chunks).
+    """
+    metadata_path = _metadata_path(parquet_file)
+    # parquet_metadata() only: no spatial extension, which is most of a connection's cost.
+    connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
+
+    try:
+        result = connection.execute(f"""
+            SELECT
+                row_group_id,
+                MIN(row_group_num_rows) AS num_rows,
+                SUM(total_compressed_size)::BIGINT AS compressed_bytes
+            FROM parquet_metadata({sql_path(metadata_path)})
+            GROUP BY row_group_id
+            ORDER BY row_group_id
+        """).fetchall()
+        return [
+            {"row_group_id": row[0], "num_rows": int(row[1]), "compressed_bytes": int(row[2])}
+            for row in result
+        ]
+    finally:
+        if should_close:
+            connection.close()
+
+
 def get_bloom_filter_info(parquet_file: str, con=None) -> list[dict]:
     """
     Get bloom filter information for all columns in a parquet file.
@@ -1162,48 +1267,6 @@ def get_bloom_filter_info(parquet_file: str, con=None) -> list[dict]:
     finally:
         if should_close:
             connection.close()
-
-
-def has_bbox_column(parquet_file: str, con=None) -> tuple[bool, str | None]:
-    """
-    Check if file has a bbox struct column with proper structure.
-
-    Returns (has_bbox, bbox_column_name).
-
-    Note:
-        DuckDB's parquet_schema() returns nested struct fields without parent prefix.
-        For a struct column 'bbox' with fields xmin/ymin/xmax/ymax:
-        - bbox appears with num_children=4
-        - Child fields appear as 'xmin', 'ymin', 'xmax', 'ymax' (not 'bbox.xmin')
-    """
-    schema = get_schema_info(parquet_file, con)
-
-    # Check for columns ending with these suffixes (e.g., geometry_bbox, bbox)
-    conventional_suffixes = ["bbox", "bounds", "extent"]
-    required_fields = {"xmin", "ymin", "xmax", "ymax"}
-
-    for i, col in enumerate(schema):
-        name = col.get("name", "")
-        num_children = col.get("num_children", 0)
-
-        if not name:
-            continue
-
-        # Check if column name ends with conventional suffixes and has struct children
-        is_bbox_name = any(name.endswith(suffix) for suffix in conventional_suffixes)
-        if is_bbox_name and num_children >= 4:
-            # Get the next num_children entries as the struct's child fields
-            child_names = set()
-            for j in range(1, num_children + 1):
-                if i + j < len(schema):
-                    child_name = schema[i + j].get("name", "")
-                    child_names.add(child_name)
-
-            # Check if all required fields are present
-            if required_fields.issubset(child_names):
-                return True, name
-
-    return False, None
 
 
 def find_primary_geometry_column_duckdb(parquet_file: str, con=None) -> str:

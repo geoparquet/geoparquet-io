@@ -83,6 +83,17 @@ _RING_CASES = {
     ),
     # a5-style: contiguous, but running past +180.
     "beyond_180": "POLYGON ((175 10, 185 10, 185 20, 175 20, 175 10))",
+    # The other side of the same defect, and the one the FTW global runs hit
+    # (#1180): a5 cell 10914438512560308224 over Fiji, reported by
+    # `a5_cell_to_boundary` as a contiguous ring whose westmost vertex is at
+    # -180.2016. Nothing about it is torn and nothing runs past +180, so it
+    # reaches the repair only through the `ST_XMin < -180` guard, and it is
+    # brought back into range by sliding the whole ring one turn east.
+    "west_of_180": (
+        "POLYGON ((-179.78650501 -16.28244061, -179.65400278 -15.95044733, "
+        "-179.97609235 -15.93789957, -180.20158736 -16.20802930, "
+        "-180.05026800 -16.50811266, -179.78650501 -16.28244061))"
+    ),
     # h3 81033ffffffffff, which contains the north pole.
     "north_pole": (
         "POLYGON ((8.38436067 87.82361750, 145.55819769 87.36469532, "
@@ -107,6 +118,8 @@ _RING_CENTRES = {
     "plain": (10.5, 10.5),
     "torn": (179.80304066, -18.38547805),
     "beyond_180": (180.0, 15.0),
+    # a5_cell_to_lonlat for the Fiji cell, which reports in range already.
+    "west_of_180": (-179.93353041, -16.17740545),
     "north_pole": (-110.58483359, 86.88988502),
     "south_pole": (-110.58483359, -86.88988502),
 }
@@ -186,7 +199,7 @@ def test_untouched_ring_stays_a_single_polygon(repaired_rings):
     assert row["area"] == pytest.approx(1.0)
 
 
-@pytest.mark.parametrize("case", ["torn", "beyond_180", "north_pole", "south_pole"])
+@pytest.mark.parametrize("case", ["torn", "beyond_180", "west_of_180", "north_pole", "south_pole"])
 def test_crossing_ring_becomes_a_multipolygon(repaired_rings, case):
     assert repaired_rings[case]["type"] == "MULTIPOLYGON"
 
@@ -195,6 +208,46 @@ def test_cut_preserves_the_ring_area(repaired_rings):
     """Cutting at the seam moves vertices, it does not lose area: the 10x10 box
     at 175..185 keeps its 100 square degrees on both sides of the line."""
     assert repaired_rings["beyond_180"]["area"] == pytest.approx(100.0)
+
+
+# The cut shape for the Fiji cell at 1e-6 degrees, so a change to the repair has
+# to state what it did to a real dateline cell. The same pin is taken from the
+# live extension in `test_process_aggregate_a5_dateline.py`; here it guards every
+# pull request rather than only the nightly lane.
+_WEST_OF_180_CUT = (
+    "MULTIPOLYGON ((("
+    "179.798413 -16.208029, 180 -15.96654, 180 -16.465104, "
+    "179.949732 -16.508113, 179.798413 -16.208029)), (("
+    "-179.654003 -15.950447, -179.786505 -16.282441, -180 -16.465104, "
+    "-180 -15.96654, -179.976092 -15.9379, -179.654003 -15.950447)))"
+)
+
+
+def test_ring_west_of_180_keeps_its_area_and_pinned_shape():
+    """The a5 Fiji cell: slid east, cut at the seam, and neither half lost.
+
+    `test_repaired_ring_is_valid_and_in_range` already says the result is in
+    range; this says it is still the *same cell* -- the cut keeps the ring's
+    area, and the two halves land where they did before.
+    """
+    scheme = _ring_case_scheme()
+    sql = wrap_grid_geometry(
+        "SELECT * FROM (VALUES ('west_of_180')) AS t(cell)", scheme, "cell", "polygon"
+    )
+    con = _spatial_connection()
+    try:
+        wkt, area, raw_area = con.execute(
+            f"""
+            SELECT ST_AsText(ST_ReducePrecision(ST_GeomFromWKB(geometry), 0.000001)),
+                   ST_Area(ST_GeomFromWKB(geometry)),
+                   ST_Area(ST_GeomFromText('{_RING_CASES["west_of_180"]}'))
+            FROM ({sql})
+            """
+        ).fetchone()
+    finally:
+        con.close()
+    assert area == pytest.approx(raw_area), "the cut lost part of the cell"
+    assert wkt == _WEST_OF_180_CUT
 
 
 @pytest.mark.parametrize("case,pole", [("north_pole", 90.0), ("south_pole", -90.0)])

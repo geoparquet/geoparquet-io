@@ -313,7 +313,10 @@ gpio convert data.csv output.parquet
 
 Default is 50MB. Increase if your WKT geometries are larger.
 
-**Note**: Large values increase memory usage during CSV parsing. On memory-constrained systems, avoid setting excessively high limits.
+**Note**: Large values increase memory usage during CSV parsing: gpio pins DuckDB's
+CSV read buffer to this limit, so the reader allocates roughly this much per read
+regardless of how small the file is. On memory-constrained systems, avoid setting
+excessively high limits, and keep `--write-memory` above the value you choose.
 
 ### A Command Succeeded but the Process Exited 134
 

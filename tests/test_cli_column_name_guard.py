@@ -40,15 +40,19 @@ from click.testing import CliRunner
 from geoparquet_io.cli.decorators import _validate_column_name
 from geoparquet_io.cli.main import cli
 
-# Options whose value becomes a SQL identifier. Keyed by the command path,
+# Options that carry the shared Click-layer guard. Keyed by the command path,
 # valued by the option flag.
 #
-# Membership is decided by tracing the value to ``quote_identifier()``, never by
-# the flag's spelling: ``--geometry-column`` and ``--quadkey-column`` are the
-# same exposure as ``--bbox-name`` and were missed by a sweep that matched
-# ``--*-name``.
+# Membership is decided by tracing the value, never by the flag's spelling:
+# ``--geometry-column`` and ``--quadkey-column`` are the same exposure as
+# ``--bbox-name`` and were missed by a sweep that matched ``--*-name``.
+# Almost every entry is here because the value becomes a SQL identifier through
+# ``quote_identifier()``; ``add bbox-metadata --bbox-name`` is the exception,
+# where the value is written into the ``geo`` block as JSON and the guard is
+# what turns a blank value into a usage error before the footer is touched.
 GUARDED_OPTIONS = {
     ("add", "bbox"): "--bbox-name",
+    ("add", "bbox-metadata"): "--bbox-name",
     ("add", "h3"): "--h3-name",
     ("add", "a5"): "--a5-name",
     ("add", "s2"): "--s2-name",
@@ -94,6 +98,16 @@ REVIEWED_UNGUARDED = {
     # A skill lookup key on disk, never SQL; an unknown name already reports
     # cleanly.
     ("skills",): ["--name"],
+    # --geometry-column is resolved against the table's own schema first
+    # ("geometry column '   ' not found in table", core/process/simplify.py);
+    # the raster column names are Arrow field names the output table is
+    # *created* with (core/process/raster/). Polygonize's repair scan does run
+    # DuckDB SQL, but only the geometry column crosses into it, under the
+    # owner's quoting (core/geometry_repair.py) and a hard-coded "geometry"
+    # name -- --value-column never reaches SQL.
+    ("process", "simplify"): ["--geometry-column"],
+    ("process", "polygonize"): ["--value-column"],
+    ("process", "contour"): ["--max-column", "--min-column"],
 }
 
 
@@ -104,6 +118,12 @@ def _positional_args(path: tuple[str, ...], tmp_path) -> list[str]:
     error, which would let these tests pass for the wrong reason.
     """
     source = "tests/data/places_test.parquet"
+    # `add bbox-metadata` edits one file in place and takes no destination; an
+    # extra positional would be its own usage error and let these tests pass for
+    # the wrong reason. The guard fires before the file is read, so handing it
+    # the shared fixture cannot modify anything.
+    if path == ("add", "bbox-metadata"):
+        return [source]
     destination = "out_dir" if path[0] == "partition" else "out.parquet"
     return [source, str(tmp_path / destination)]
 

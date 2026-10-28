@@ -192,8 +192,7 @@ def _isolate_package_logging(pytestconfig):
 #
 # Four more pieces of module-level state have a reset of their own but no
 # ``cache_clear``, so the walk cannot see them; ``_reset_module_state`` names
-# them. Not reset: the ``AWS_PROFILE`` that ``remote.setup_aws_profile_if_needed``
-# writes into ``os.environ`` -- a developer's real environment may carry one.
+# them.
 #
 # Scope: autouse fixtures in this file apply to ``tests/`` only. The
 # ``docs/guide`` example lane runs each fenced example in a subprocess, so an
@@ -210,17 +209,25 @@ from geoparquet_io.core import (  # noqa: E402
     geo_metadata,
     http_retry,
     overture,
+    wfs,
 )
 from geoparquet_io.core.write_strategies import WriteStrategyFactory  # noqa: E402
 
 PACKAGE_CACHES = (
+    crs_utils._canonical_projjson,
     crs_utils._emit_crs_disagreement_warning,
+    crs_utils._emit_ignored_crs_id_warning,
+    crs_utils._emit_empty_crs_warning,
     crs_utils._emit_null_crs_warning,
+    crs_utils._emit_srid0_crs_warning,
+    crs_utils._free_form_source,
     crs_utils._projjson_from_authority,
     file_type.detect_geoparquet_file_type,
     geo_metadata._emit_malformed_geo_warning,
     geo_metadata._note_undeclarable_bbox_column,
     WriteStrategyFactory.get_strategy,
+    wfs._bbox_axes,
+    wfs._request_pyproj_crs,
 )
 
 
@@ -267,6 +274,35 @@ PLACES_TEST_FILE = TEST_DATA_DIR / "places_test.parquet"
 BUILDINGS_TEST_FILE = TEST_DATA_DIR / "buildings_test.parquet"
 CANONICAL_PLACES_FILE = TEST_DATA_DIR / "canonical" / "places.parquet"
 COUNTRY_PARTITION_DIR = TEST_DATA_DIR / "country_partition"
+
+
+#: A pid no real process holds in the tests below. Windows pids are multiples
+#: of 4 and Linux caps them at 2**22, so this odd value above both is never live.
+DEAD_SPILL_PID = 999_999_999
+
+
+@pytest.fixture
+def dead_pid(monkeypatch):
+    """A pid whose spill directories the sweep must treat as orphaned.
+
+    Spawning a child and keeping its pid after it exits is not enough on
+    Windows: the OS hands freed pids out again almost at once, and with xdist
+    workers spawning processes the "dead" pid can belong to a new process by
+    the time the sweep runs. The sweep then reads it as alive, which is the
+    conservative answer the production code wants, and the test flakes.
+
+    So the owner check is pinned for this one fake pid only. Every other pid,
+    ``os.getpid()`` included, still goes through the real psutil check.
+    """
+    from geoparquet_io.core import duckdb_utils
+
+    real_check = duckdb_utils._process_is_alive
+
+    def process_is_alive(pid: int) -> bool:
+        return pid != DEAD_SPILL_PID and real_check(pid)
+
+    monkeypatch.setattr(duckdb_utils, "_process_is_alive", process_is_alive)
+    return DEAD_SPILL_PID
 
 
 @pytest.fixture

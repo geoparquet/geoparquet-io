@@ -246,14 +246,25 @@ class FakeTransport:
     def install(cls, monkeypatch: pytest.MonkeyPatch) -> FakeTransport:
         """Redirect the shared HTTP client and the retry sleeps at this test."""
         fake = cls()
-        client = httpx.Client(transport=httpx.MockTransport(fake._handle), follow_redirects=True)
+        # Model the real singleton: the client is built once, by the first
+        # caller, with *that caller's* timeout, and kept until a reset. A later
+        # caller asking for another timeout gets the same client back, so a
+        # request's recorded ``timeout`` is what production would apply (#1184).
+        pool: dict[str, httpx.Client] = {}
 
         def _get_client(timeout: float = 60.0, **_kwargs: Any) -> httpx.Client:
             fake.client_timeouts.append(timeout)
-            return client
+            if "client" not in pool:
+                pool["client"] = httpx.Client(
+                    transport=httpx.MockTransport(fake._handle),
+                    follow_redirects=True,
+                    timeout=timeout,
+                )
+            return pool["client"]
 
         def _reset() -> None:
             fake.resets += 1
+            pool.pop("client", None)
 
         for module_name, getter, resetter in _CLIENT_SEAMS:
             monkeypatch.setattr(f"{module_name}.{getter}", _get_client)

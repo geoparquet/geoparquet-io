@@ -1961,7 +1961,7 @@ class TestCarriedSchemaMetadataKeysHasOneDefinition:
     """
 
     def test_bytes_form_is_derived_from_the_string_form(self):
-        from geoparquet_io.core.arrow_geo_metadata import (
+        from geoparquet_io.core.parquet_writer import (
             _CARRIED_SCHEMA_METADATA_KEYS,
             _CARRIED_SCHEMA_METADATA_KEYS_BYTES,
         )

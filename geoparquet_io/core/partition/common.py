@@ -7,7 +7,13 @@ from contextlib import contextmanager
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_metadata import get_row_count
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    fetch_rows,
+    get_duckdb_connection,
+    quote_identifier,
+    sql_path,
+    uses_aws_profile,
+)
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.logging_config import debug, error, info, progress, warn
@@ -24,7 +30,6 @@ from geoparquet_io.core.partition.staging import (
 from geoparquet_io.core.remote import (
     needs_httpfs,
     remote_write_context,
-    setup_aws_profile_if_needed,
     show_remote_read_message,
     upload_if_remote,
 )
@@ -632,8 +637,9 @@ def preview_partition(
         ORDER BY record_count DESC
     """
 
-    result = con.execute(query)
-    all_partitions = result.fetchall()
+    # fetch_rows reads a TIMESTAMPTZ column as UTC and makes it aware with
+    # zoneinfo. fetchall() would need pytz for it.
+    all_partitions = fetch_rows(con, query)
 
     con.close()
 
@@ -754,6 +760,7 @@ def _determine_output_path(
     return output_filename
 
 
+@uses_aws_profile
 def partition_by_column(
     input_parquet: str,
     output_folder: str,
@@ -818,9 +825,6 @@ def partition_by_column(
     # write, and --skip-analysis/--force must not get past this either (#823).
     raise_if_no_rows(input_parquet)
 
-    # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, input_parquet, output_folder)
-
     # Show remote read message
     show_remote_read_message(input_parquet, verbose)
 
@@ -859,21 +863,16 @@ def partition_by_column(
             if verbose:
                 debug(f"Created output directory: {actual_output}")
 
-            # Resolved here, once, from the file this run reads -- see
-            # PartitionWriteOptions for why a per-partition write cannot do it.
-            #
-            # For `partition string` that file is the user's own, so auto mode
-            # keeps a native-geo-only input native (#600). The index-adding
-            # drivers pass their scratch file instead, so they resolve from a
-            # 1.1 WKB rewrite and the upgrade does not reach them. That is a
-            # gap, not an oversight to patch here: their scratch write also
-            # loses the input's CRS, so resolving from the user's file would
-            # give them a native 2.0 output asserting the wrong CRS -- exactly
-            # what `sort quadkey` does today. Fix the scratch write instead.
+            # Resolved here, once, from the file this run reads, which is also
+            # every partition write's witness for the CRS and edges the staging
+            # file cannot carry -- see PartitionWriteOptions. For `partition
+            # string` that file is the user's own; the index-adding drivers pass
+            # their scratch file, which is lossless with respect to it (#993).
             write_options = PartitionWriteOptions(
                 geoparquet_version=resolve_output_geoparquet_version(
                     geoparquet_version, input_file=input_parquet, verbose=verbose
                 ),
+                input_file=input_parquet,
                 compression=compression,
                 compression_level=compression_level,
                 row_group_size_mb=row_group_size_mb,

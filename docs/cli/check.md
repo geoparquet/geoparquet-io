@@ -20,3 +20,9 @@ This will show all available subcommands and options.
 - `check optimization` - Combined spatial query optimization score (5 factors)
 - `check spec` - Validate against GeoParquet specification
 - `check stac` - Validate STAC Item or Collection JSON
+
+## Exit Codes
+
+Every subcommand exits `1` when a check fails and `0` when it only warns; pass
+`--strict` to make warnings exit `1` too. An input that matches no files exits
+`1`. See [Exit Codes](../guide/check.md#exit-codes) in the user guide.

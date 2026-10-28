@@ -15,6 +15,7 @@ command that never actually produced anything.
 from __future__ import annotations
 
 import shutil
+import struct
 from pathlib import Path
 
 CANONICAL_DIR = Path(__file__).resolve().parent.parent / "data" / "canonical"
@@ -71,7 +72,22 @@ def seed_workdir(workdir: Path) -> Path:
             shutil.copyfile(source, workdir / placeholder)
     for name in SEED_DIRS:
         (workdir / name).mkdir(exist_ok=True)
+    _seed_spherical_geography(workdir / "world_geography.parquet")
     return workdir
+
+
+def _seed_spherical_geography(path: Path) -> None:
+    """Supply the add guide's native GEOGRAPHY input with real spherical edges."""
+    import geoarrow.pyarrow as ga
+
+    from tests.native_geo_probes import write_native_geo_only
+
+    line = struct.pack("<BIIdddd", 1, 2, 2, -30.0, 60.0, 30.0, 60.0)
+    write_native_geo_only(
+        path,
+        [(1, "example", line)],
+        {"geometry": (2, ga.wkb().with_edge_type(ga.EdgeType.SPHERICAL))},
+    )
 
 
 def missing_canonical_files() -> list[str]:

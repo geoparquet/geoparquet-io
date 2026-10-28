@@ -137,6 +137,10 @@ Many commands share these options:
 - `1` - Error (with error message printed)
 - `2` - Invalid usage (incorrect arguments)
 
+`gpio check` refines `0` and `1` for its findings: a failed check exits `1`, a
+warning exits `0` unless `--strict` is passed. See
+[Exit Codes](../guide/check.md#exit-codes).
+
 ## Next Steps
 
 Explore individual command references for detailed options and examples.

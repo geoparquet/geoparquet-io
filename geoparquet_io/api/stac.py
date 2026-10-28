@@ -149,9 +149,11 @@ def validate_stac(stac_path: str | Path, verbose: bool = False) -> CheckResult:
         ...         print(failure)
     """
     from geoparquet_io.api.check import CheckResult
-    from geoparquet_io.core.stac_check import validate_stac_file
+    from geoparquet_io.core.check_verdict import SEVERITY_KEY
+    from geoparquet_io.core.stac_check import stac_verdict, validate_stac_file
 
     results = validate_stac_file(str(stac_path), verbose=verbose)
+    results[SEVERITY_KEY] = stac_verdict(results).label
 
     # Translate "valid" key to "passed" for CheckResult compatibility
     results["passed"] = results.pop("valid", True)

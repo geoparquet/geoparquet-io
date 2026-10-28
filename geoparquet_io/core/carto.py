@@ -22,7 +22,7 @@ from geoparquet_io.core.column_selection import (
     resolve_columns_against_schema,
     split_column_list,
 )
-from geoparquet_io.core.crs_utils import parse_crs_string_to_projjson
+from geoparquet_io.core.crs_utils import _projjson_from_authority
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
@@ -32,6 +32,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, sanitize_error_message
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
+from geoparquet_io.core.http_retry import parse_retry_after
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
@@ -56,10 +57,6 @@ STATUS_PROBE_TIMEOUT = 30.0  # seconds
 # answers a bad query with a short JSON error; the cap keeps a body that is
 # not short from becoming a download.
 PROBE_DETAIL_BYTES = 2048
-
-# The longest a server's Retry-After is honoured for, so a hostile or confused
-# header cannot park the client for an hour.
-MAX_RETRY_AFTER = 60.0  # seconds
 
 # Statuses that mean "try again": the server is asking for it (429), asked the
 # client to resend (408), or is itself failing (5xx).
@@ -573,7 +570,9 @@ def _apply_column_exclusions(
         The table without the excluded columns.
 
     Raises:
-        InvalidParameterError: If a name is absent from the fetched table.
+        InvalidParameterError: If a name is absent from the fetched table, or if
+            the exclusion would leave no columns at all -- the tabular path used
+            to write a 0-column file silently (#1176).
     """
     exclude_list = resolve_columns_against_schema(
         exclude_list, table.column_names, "--exclude-cols"
@@ -585,38 +584,184 @@ def _apply_column_exclusions(
         return table
 
     exclude_set = set(exclude_list)
-    table = table.select([col for col in table.column_names if col not in exclude_set])
+    keep = [col for col in table.column_names if col not in exclude_set]
+    if not keep:
+        # A 0-column file was written without a word (#1176). The request is a
+        # typo, and the only useful answer is to name it -- the same refusal
+        # `extract arcgis` and `build_column_selection` make.
+        raise InvalidParameterError(
+            "--exclude-cols",
+            f"excluding {', '.join(sorted(exclude_set))} would leave no columns at all "
+            f"(the fetched table has: {', '.join(table.column_names)})",
+        )
+    table = table.select(keep)
     debug(f"Excluded columns: {exclude_set}")
     return table
 
 
-def _create_empty_geoparquet_table(geoparquet_version: str | None = None) -> pa.Table:
-    """Create an empty table with proper GeoParquet metadata.
+# The geometry column Carto's GeoJSON format serializes, and the one
+# _build_carto_query always selects.
+_CARTO_GEOMETRY_COLUMN = "the_geom"
+
+# PostGIS SRIDs read as a CRS other than ``EPSG:<srid>``. 4326 is CRS84 because
+# ST_AsGeoJSON writes it lon/lat; 900913 is the legacy Google Mercator code
+# older Carto accounts still carry. Every other SRID is looked up under EPSG.
+_SRID_CRS = {
+    4326: ("OGC", "CRS84"),
+    900913: ("EPSG", "3857"),
+}
+
+
+def _coerce_srid(raw: object) -> int | None:
+    """An integer SRID out of a JSON value, or None when it is not one."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return None
+    if isinstance(raw, float) and not raw.is_integer():
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _probe_geometry_srids(
+    url: str,
+    table_name: str,
+    api_key: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+    source_sql: str | None = None,
+) -> list[int]:
+    """The SRIDs ``the_geom`` holds, read with one bounded query.
+
+    Carto's GeoJSON format is ``ST_AsGeoJSON(the_geom)`` with no transform, so
+    the coordinates gpio receives are in these SRIDs (#1059).
 
     Args:
-        geoparquet_version: GeoParquet version string (default: "1.1.0")
+        source_sql: The data query that was fetched. When given, its own rows
+            are asked for up to two distinct SRIDs, since an unconstrained
+            PostGIS ``geometry`` column can mix them. That costs no more than
+            the fetch did. Without it (no rows were fetched) the table is asked
+            for its first SRID only: there are no coordinates to mislabel.
 
     Returns:
-        Empty PyArrow table with valid GeoParquet metadata
-    """
-    version = geoparquet_version or "1.1.0"
-    crs = parse_crs_string_to_projjson("OGC:CRS84")
+        The distinct SRIDs found, empty when there is no non-NULL geometry.
 
+    Raises:
+        CartoError: If the probe request fails.
+    """
+    _validate_table_name(table_name)
+    geom = quote_identifier(_CARTO_GEOMETRY_COLUMN)
+    if source_sql is None:
+        sql = (
+            f"SELECT ST_SRID({geom}) AS srid FROM {quote_identifier(table_name)} "
+            f"WHERE {geom} IS NOT NULL LIMIT 1"
+        )
+    else:
+        sql = (
+            f"SELECT DISTINCT ST_SRID({geom}) AS srid FROM ({source_sql}) AS q "
+            f"WHERE {geom} IS NOT NULL LIMIT 2"
+        )
+    rows = _carto_sql_json(url, sql, api_key, timeout).get("rows")
+    srids: list[int] = []
+    for row in rows if isinstance(rows, list) else []:
+        srid = _coerce_srid(row.get("srid")) if isinstance(row, dict) else None
+        if srid is not None and srid not in srids:
+            srids.append(srid)
+    return srids
+
+
+def _crs_for_srid(srid: int) -> dict | None:
+    """PROJJSON for a PostGIS SRID, or None when no authority defines it."""
+    if srid <= 0:
+        return None
+    authority, code = _SRID_CRS.get(srid, ("EPSG", str(srid)))
+    cached = _projjson_from_authority(authority, code)
+    return json.loads(cached) if cached is not None else None
+
+
+def _crs84() -> dict:
+    return _crs_for_srid(4326)  # type: ignore[return-value]
+
+
+def _resolve_table_crs(
+    url: str,
+    table_name: str,
+    api_key: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+    source_sql: str | None = None,
+) -> dict:
+    """The CRS to tag the output with, from the SRID the table really stores.
+
+    Never a CRS gpio did not check: a probe that fails, rows in more than one
+    SRID, or an SRID no authority defines, is refused rather than written as
+    OGC:CRS84 (#1059, as #1045 did for ArcGIS). A column with no geometry to
+    ask has no coordinates to mislabel, so it keeps CRS84.
+
+    Raises:
+        CartoError: If the SRID cannot be read, is mixed, or does not resolve.
+    """
+    try:
+        srids = _probe_geometry_srids(url, table_name, api_key, timeout, source_sql)
+    except CartoError as e:
+        raise CartoError(
+            f"Carto: could not read the SRID of '{table_name}'.{_CARTO_GEOMETRY_COLUMN}, so "
+            f"the output cannot be tagged with a CRS: {sanitize_error_message(str(e))}"
+        ) from e
+    if not srids:
+        debug("No non-NULL geometry to read an SRID from; tagging OGC:CRS84")
+        return _crs84()
+    if len(srids) > 1:
+        raise CartoError(
+            f"Table '{table_name}' stores {_CARTO_GEOMETRY_COLUMN} in more than one SRID "
+            f"(at least {srids[0]} and {srids[1]}), and a GeoParquet column has one CRS. "
+            f"Filter with --where 'ST_SRID({_CARTO_GEOMETRY_COLUMN}) = <srid>' to extract one."
+        )
+    srid = srids[0]
+    crs = _crs_for_srid(srid)
+    if crs is None:
+        raise CartoError(
+            f"Table '{table_name}' stores {_CARTO_GEOMETRY_COLUMN} in SRID {srid}, which "
+            "resolves to no EPSG definition, so the output cannot be tagged with a CRS. "
+            "Writing it as OGC:CRS84 would label its coordinates as longitude/latitude."
+        )
+    if srid != 4326:
+        info(f"Table geometry is stored in SRID {srid}; tagging the output with it")
+    return crs
+
+
+def _with_geo_metadata(table: pa.Table, version: str | None, crs: dict) -> pa.Table:
+    """Attach the ``geo`` block for the ``geometry`` column, keeping other metadata."""
     geo_metadata = {
-        "version": version,
+        "version": version or "1.1.0",
         "primary_column": "geometry",
         "columns": {
             "geometry": {
                 "encoding": "WKB",
                 "crs": crs,
-                "geometry_types": [],
+                "geometry_types": [],  # Mixed types possible
             }
         },
     }
+    existing_metadata = table.schema.metadata or {}
+    return table.replace_schema_metadata(
+        {**existing_metadata, b"geo": json.dumps(geo_metadata).encode("utf-8")}
+    )
 
+
+def _create_empty_geoparquet_table(
+    geoparquet_version: str | None = None, crs: dict | None = None
+) -> pa.Table:
+    """Create an empty table with proper GeoParquet metadata.
+
+    Args:
+        geoparquet_version: GeoParquet version string (default: "1.1.0")
+        crs: PROJJSON for the geometry column (default: OGC:CRS84)
+
+    Returns:
+        Empty PyArrow table with valid GeoParquet metadata
+    """
     table = pa.table({"geometry": pa.array([], type=pa.binary())})
-    new_metadata = {b"geo": json.dumps(geo_metadata).encode("utf-8")}
-    return table.replace_schema_metadata(new_metadata)
+    return _with_geo_metadata(table, geoparquet_version, crs or _crs84())
 
 
 def _status_from_duckdb_error(exc: BaseException) -> int | None:
@@ -706,11 +851,8 @@ def _read_probe_detail(response) -> str | None:
 
 
 def _retry_after(response) -> float | None:
-    """A ``Retry-After`` given in seconds, capped; None when absent or a date."""
-    raw = response.headers.get("Retry-After")
-    if raw and raw.strip().isdigit():
-        return min(float(raw), MAX_RETRY_AFTER)
-    return None
+    """The server's ``Retry-After``, capped; None when absent or unreadable."""
+    return parse_retry_after(response.headers.get("Retry-After"))
 
 
 def _classify_fetch_failure(
@@ -1048,7 +1190,8 @@ def _carto_geo_table(
 
     if total_count == 0:
         warn("No rows match the specified filters")
-        return _create_empty_geoparquet_table(geoparquet_version)
+        crs = _resolve_table_crs(url, table_name, api_key, timeout)
+        return _create_empty_geoparquet_table(geoparquet_version, crs)
 
     # Build query
     sql = _build_carto_query(
@@ -1072,9 +1215,15 @@ def _carto_geo_table(
         max_retries=max_retries,
     )
 
+    # Probed after the fetch, so a missing table or a rejected key still gets
+    # the fetch's own status handling rather than a bare probe failure.
+    crs = _resolve_table_crs(
+        url, table_name, api_key, timeout, source_sql=sql if table.num_rows else None
+    )
+
     if table.num_rows == 0:
         warn("Query returned no rows")
-        return _create_empty_geoparquet_table(geoparquet_version)
+        return _create_empty_geoparquet_table(geoparquet_version, crs)
 
     debug(f"Received {table.num_rows:,} rows")
 
@@ -1095,25 +1244,8 @@ def _carto_geo_table(
     # rename above is why that is the only set that answers exactly (#991).
     table = _apply_column_exclusions(table, exclude_list, protect_geometry=True)
 
-    # Add CRS metadata (Carto uses WGS84)
-    version = geoparquet_version or "1.1.0"
-    crs = parse_crs_string_to_projjson("OGC:CRS84")
-    if crs:
-        geo_metadata = {
-            "version": version,
-            "primary_column": "geometry",
-            "columns": {
-                "geometry": {
-                    "encoding": "WKB",
-                    "crs": crs,
-                    "geometry_types": [],  # Mixed types possible
-                }
-            },
-        }
-
-        existing_metadata = table.schema.metadata or {}
-        new_metadata = {**existing_metadata, b"geo": json.dumps(geo_metadata).encode("utf-8")}
-        table = table.replace_schema_metadata(new_metadata)
+    # Tag the CRS the coordinates are really in (#1059).
+    table = _with_geo_metadata(table, geoparquet_version, crs)
 
     # Repair invalid geometry (issue #506). Helper preserves schema metadata.
     if table.num_rows > 0:

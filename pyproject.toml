@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "geoparquet-io"
-version = "1.5.0"
+version = "1.7.0"
 description = "Fast I/O and transformation tools for GeoParquet files"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -39,12 +39,18 @@ dependencies = [
     # extractions (#737) and why core/geometry_repair.py counts invalid
     # geometry in layers (#645).
     #
+    # 1.5.6 raises the floor past a 1.5.5 regression where ST_Read_Meta
+    # segfaults on a JSON file GDAL cannot open as a vector layer (an array of
+    # records, a {"data": [...]} wrapper), killing `gpio convert` with no
+    # message (#1102, duckdb/duckdb-spatial#860). The 'geography' extension is
+    # published for 1.5.6 too, so the S2 guarantee above still holds.
+    #
     # The <1.6 cap is unchanged from #778. Keeping it is what makes the S2
     # claim above hold: community extensions are built per DuckDB release, so
     # if 1.6 ships before 'geography' is published for it, an uncapped range
     # would let `uv sync` pull a DuckDB that silently breaks S2. Lift it in a
     # deliberate step once 1.6 exists and the extension is published for it.
-    "duckdb>=1.5.5,<1.6",
+    "duckdb>=1.5.6,<1.6",
     "pandas>=1.0.0",
     "fsspec>=2023.9.0",
     "rich>=13.0.0",
@@ -73,6 +79,7 @@ dependencies = [
     "idna>=3.15",  # CVE-2026-45409 fix
     "urllib3>=2.7.0",  # PYSEC-2026-141, PYSEC-2026-142 fix
     "msgpack>=1.2.1",  # GHSA-6v7p-g79w-8964 fix (transitive via CacheControl)
+    "multidict>=6.9.1",  # CVE-2026-104874 fix (transitive via aiohttp)
 ]
 
 [project.scripts]
@@ -113,15 +120,23 @@ dev = [
     "deptry>=0.25.0",
 ]
 docs = [
-    "mkdocs>=1.5.0",
-    "mkdocs-material>=9.5.0",
-    "mkdocstrings[python]>=0.24.0",
+    "zensical>=0.0.69; python_version >= '3.11'",
     "pymdown-extensions>=10.21.3",  # CVE-2026-46338 fix
 ]
 benchmark = [
     "geopandas>=0.14.0",
     "pyogrio>=0.7.0",
     "fiona>=1.9.0",
+]
+simplify = [
+    "coarsen>=0.2.0",  # Rust simplify/coverage_simplify (ADR-0007); abi3 wheels cp310+; LGPL-2.1; brings shapely>=2.1
+]
+raster = [
+    # contourrs ships wheels only for CPython 3.12-3.14; the marker keeps
+    # `uv sync --all-extras` and `pip install 'geoparquet-io[raster]'` working on
+    # 3.10/3.11 (core/optional_deps.py explains the floor at runtime there).
+    "contourrs>=0.8.0; python_version >= '3.12'",  # raster polygonize/contour (ADR-0007)
+    "rasterio>=1.3",  # GeoTIFF input for gpio process polygonize/contour
 ]
 
 [tool.uv]
@@ -325,6 +340,18 @@ module = [
 ]
 disable_error_code = ["arg-type", "index", "misc", "union-attr"]
 
+# contourrs pins numpy>=2.5.3, whose stubs use PEP 695 `type` statements that
+# mypy's python_version = "3.10" target refuses to parse — and duckdb's stubs
+# import numpy, so on a Python >= 3.12 venv every mypy run loads them and dies
+# on numpy's own files (the 3.11 CI meta leg resolves numpy 2.4.6 and never
+# saw this). Skipping types numpy as Any, the same footing as any unstubbed
+# dependency; `follow_imports` alone is not enough because mypy always follows
+# .pyi stubs unless follow_imports_for_stubs is set too.
+[[tool.mypy.overrides]]
+module = ["numpy"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
 [tool.mutmut]
 source_paths = ["geoparquet_io/"]
 # Fast tests only: slow/network tests are nondeterministic (live third-party
@@ -380,7 +407,7 @@ skips = [
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "1.5.0"
+version = "1.7.0"
 version_files = ["pyproject.toml:^version"]
 tag_format = "v$version"
 # Off: the changelog is generated from merged pull requests by
@@ -398,7 +425,7 @@ sort_by_size = true
 verbose = false
 
 [tool.codespell]
-# site/ (mkdocs build) and mutants/ (mutmut working tree) are gitignored
+# site/ (zensical build) and mutants/ (mutmut working tree) are gitignored
 # build artifacts; scanning them made test_codespell_passes fail on any
 # machine that had built docs or run mutation testing locally.
 # *.csv and *.geojson are sample data, not prose: real-world place names and
@@ -439,7 +466,7 @@ omit = [
 # rounded down); never lower it to admit a regression. The move is one command,
 # `uv run python scripts/coverage_floor.py --apply`, which re-measures and
 # rewrites this value, the dated figure above, and the prose that repeats it
-# (see ADR-0008). This is the ONE place the number lives: pytest-cov reads it
+# (see ADR-0006). This is the ONE place the number lives: pytest-cov reads it
 # on the CI coverage leg because COV_ARGS passes no --cov-fail-under, and
 # tests/test_coverage_job.py asserts that stays so (and that branch = true
 # stays on, since turning it off would silently turn this into a looser

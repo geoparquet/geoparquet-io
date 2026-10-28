@@ -583,7 +583,7 @@ class TestGeoMetadataEdgeCases:
         assert result["description"] == "Données géographiques"
 
     def test_deeply_nested_covering(self):
-        """Handles deeply nested covering structures."""
+        """Nested index entries survive beside a bbox member; never without one (#954)."""
         custom = {
             "covering": {
                 "h3": {"column": "h3", "resolution": 10},
@@ -594,10 +594,22 @@ class TestGeoMetadataEdgeCases:
         result = create_geo_metadata(
             original_metadata=None,
             geom_col="geometry",
-            bbox_info=None,
+            bbox_info={"has_bbox_column": True, "bbox_column_name": "bbox"},
             custom_metadata=custom,
         )
 
         covering = result["columns"]["geometry"]["covering"]
         assert covering["h3"]["resolution"] == 10
         assert covering["s2"]["level"] == 15
+        assert "bbox" in covering
+
+        # Without a bbox column there is no spec-conformant member to write,
+        # so the whole covering is omitted (geopandas indexes covering["bbox"]
+        # unguarded).
+        bboxless = create_geo_metadata(
+            original_metadata=None,
+            geom_col="geometry",
+            bbox_info=None,
+            custom_metadata=custom,
+        )
+        assert "covering" not in bboxless["columns"]["geometry"]

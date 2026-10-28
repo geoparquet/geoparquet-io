@@ -5,7 +5,6 @@ import shutil
 
 import click
 
-from geoparquet_io.core.check_spatial_order import spatial_verdict_withheld
 from geoparquet_io.core.file_utils import is_same_file_path
 from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT
 from geoparquet_io.core.remote import is_remote_url
@@ -123,6 +122,7 @@ def verify_fixes(
     check_names = {
         "row_groups": "Row Groups",
         "bbox": "Bbox/Metadata",
+        "covering": "Covering",
         "compression": "Compression",
     }
 
@@ -149,13 +149,7 @@ def verify_fixes(
             )
         return all_passed
 
-    spatial_withheld = isinstance(final_spatial_result, dict) and spatial_verdict_withheld(
-        final_spatial_result
-    )
-    if all_passed and spatial_withheld:
-        click.echo(click.style("\n✓ No check failed after fixes", fg="green", bold=True))
-        click.echo(click.style(f"   {_withheld_reason(final_spatial_result)}", fg="yellow"))
-    elif all_passed:
+    if all_passed:
         click.echo(click.style("\n✓ All checks passed after fixes!", fg="green", bold=True))
     else:
         click.echo(click.style("\n⚠️  Some issues remain after fixes:", fg="yellow", bold=True))
@@ -263,101 +257,14 @@ def handle_fix_common(
 
     # A fix that fails leaves no orphan .bak beside an unrewritten file: the
     # staged rewrite never landed, so the backup is put back and removed.
+    # Ctrl-C (a BaseException) is undone the same way, so it leaves no .bak.
     try:
         fix_func(parquet_file, output_path, verbose, profile)
-    except Exception as e:
+    except BaseException as e:
         handle_fix_error(e, no_backup, output_path, parquet_file, created_backup)
         raise
 
     return output_path, created_backup
-
-
-def display_spatial_result(spatial_result, show_output):
-    """Display spatial order check result.
-
-    Args:
-        spatial_result: Can be either a dict with 'ratio' and 'passed' keys,
-                       or just a float ratio for backward compatibility
-        show_output: Whether to display output
-    """
-    if not show_output:
-        return
-
-    # Handle both dict result and plain ratio for backward compatibility
-    if isinstance(spatial_result, dict):
-        ratio = spatial_result.get("ratio")
-        passed = spatial_result.get("passed", ratio < 0.5 if ratio is not None else True)
-    else:
-        ratio = spatial_result
-        passed = ratio < 0.5 if ratio is not None else True
-
-    if ratio is None:
-        return
-
-    details = spatial_result if isinstance(spatial_result, dict) else {}
-    sampling = details.get("method") == "sampling"
-    efficiency = details.get("skip_rate_efficiency")
-    numbers = f" (efficiency {efficiency:.2f})" if efficiency is not None else ""
-    if spatial_verdict_withheld(details):
-        # A withheld verdict: the reason and the number, no check mark.
-        click.echo(f"  {_withheld_reason(details)}{numbers}")
-    elif passed:
-        what = (
-            "Consecutive features are spatially close (sampling method)"
-            if sampling
-            else "Data appears to be spatially ordered"
-        )
-        click.echo(click.style(f"✓ {what}{numbers}", fg="green"))
-    else:
-        what = (
-            "Consecutive features are not spatially close (sampling method)"
-            if sampling
-            else "Data may not be optimally spatially ordered"
-        )
-        click.echo(
-            click.style(
-                f"⚠️  {what}{numbers}\n"
-                "Consider running 'gpio sort hilbert' to improve spatial locality",
-                fg="yellow",
-            )
-        )
-
-
-def _withheld_reason(spatial_result: dict) -> str:
-    return str((spatial_result.get("warnings") or ["Spatial ordering not judged"])[0])
-
-
-def no_fix_needed_message(spatial_result: dict) -> str:
-    """What ``--fix`` says when it leaves a file alone: ordered, not judged, or not measured."""
-    if spatial_verdict_withheld(spatial_result):
-        return click.style(
-            f"\n{_withheld_reason(spatial_result)}; nothing to fix automatically.", fg="yellow"
-        )
-    if spatial_result.get("method") == "sampling":
-        return click.style(
-            "\nNo fix applied: the sampling method found consecutive features close, but it "
-            "does not measure row-group pruning. Add a bbox column with 'gpio add bbox' to "
-            "judge pruning.",
-            fg="yellow",
-        )
-    return click.style("\n✓ No fix needed - already spatially ordered!", fg="green")
-
-
-def aggregate_check_results(structure_results, spatial_result):
-    """Aggregate check results for runner tracking.
-
-    Returns:
-        tuple: (combined_passed, combined_issues, all_check_results)
-    """
-    all_check_results = {**structure_results, "spatial": spatial_result}
-    combined_passed = all(
-        r.get("passed", True) for r in all_check_results.values() if isinstance(r, dict)
-    )
-    combined_issues = []
-    for r in all_check_results.values():
-        if isinstance(r, dict):
-            combined_issues.extend(r.get("issues", []))
-    return combined_passed, combined_issues, all_check_results
 
 
 def apply_check_all_fixes(
@@ -474,7 +381,7 @@ def apply_check_all_fixes(
             if not no_backup and fixing_in_place and backup_path and os.path.exists(backup_path):
                 click.echo(f"Backup: {backup_path}")
 
-    except Exception as e:
+    except BaseException as e:  # Ctrl-C too, so an interrupted fix leaves no .bak
         handle_fix_error(e, no_backup, output_path, file_path, backup_path)
         raise
 

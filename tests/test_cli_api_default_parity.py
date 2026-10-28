@@ -263,7 +263,56 @@ _KDTREE_AUTO_SPELLING = (
     "tests/test_cli_api_call_parity_scaffold.py's 'add kdtree' case compares."
 )
 
+_ENCODING_IS_TWO_KNOBS = (
+    "Intentional. The two `encoding` parameters are homonyms, not one default spelled twice. "
+    "`gpio convert geoparquet --encoding` names the *source* text encoding (a shapefile DBF "
+    "without .cpg, a Latin-1 CSV), unset meaning 'trust the driver'; its API twin is "
+    "`gpio.convert(encoding=)`, where the default is the same None. `Table.write(encoding=)` "
+    "is the GDAL *output* encoding for Shapefile/GeoPackage writes, which Parquet output "
+    "never uses, so `convert geoparquet` has no output-encoding knob at all."
+)
+
+_SIMPLIFY_TRISTATE = (
+    "The CLI declares None so it can reject --preserve-topology/--simplify-boundary "
+    "in the mode they do not apply to; it maps None to the API's True before core."
+)
+
 KNOWN_DIVERGENCES: dict[tuple[str, str, str, str, str], str] = {
+    (
+        "process simplify",
+        "ops.simplify",
+        "preserve_topology",
+        "'<unset>'",
+        "True",
+    ): _SIMPLIFY_TRISTATE,
+    (
+        "process simplify",
+        "ops.simplify",
+        "simplify_boundary",
+        "'<unset>'",
+        "True",
+    ): _SIMPLIFY_TRISTATE,
+    (
+        "process simplify",
+        "Table.simplify",
+        "preserve_topology",
+        "'<unset>'",
+        "True",
+    ): _SIMPLIFY_TRISTATE,
+    (
+        "process simplify",
+        "Table.simplify",
+        "simplify_boundary",
+        "'<unset>'",
+        "True",
+    ): _SIMPLIFY_TRISTATE,
+    (
+        "convert geoparquet",
+        "Table.write",
+        "encoding",
+        "'<unset>'",
+        "'UTF-8'",
+    ): _ENCODING_IS_TWO_KNOBS,
     ("add kdtree", "ops.add_kdtree", "auto", "'<unset>'", "False"): _KDTREE_AUTO_SPELLING,
     ("add kdtree", "Table.add_kdtree", "auto", "'<unset>'", "False"): _KDTREE_AUTO_SPELLING,
     (

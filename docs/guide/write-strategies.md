@@ -135,6 +135,10 @@ This matters in three situations:
     TMPDIR=/mnt/scratch gpio sort hilbert huge.parquet sorted.parquet
     ```
 
+    `gpio pmtiles create` and `pyramid` follow the same variable and also take
+    it as a flag, `--temporary-directory`, because tippecanoe's scratch is the
+    largest gpio ever produces — see [Scratch space](geojson.md#scratch-space-temporary-directory).
+
 - **A RAM-backed `/tmp`.** systemd mounts `/tmp` as a tmpfs sized at half of RAM
   by default on Fedora, Arch and openSUSE, and so do Kubernetes'
   `emptyDir: {medium: Memory}` and `docker run --tmpfs /tmp`. Spilling onto a
@@ -193,11 +197,61 @@ Leftover spill directories: 1 (250.00 MB)
 
 ### Automatic Detection
 
-gpio automatically detects available memory and configures DuckDB to use 50% of it. This detection is container-aware:
+**Every DuckDB connection gpio opens** runs under a memory limit of 50% of the process's
+memory *ceiling*. That covers the writes — the `duckdb-kv` strategy (with or without a
+geometry column), the plain COPY that writes GeoParquet 2.0 and `parquet-geo-only` output
+when no metadata rewrite is needed, the single-pass split behind `gpio partition` and
+`gpio pmtiles create --chunks`, the admin dataset cache downloads, the full rewrite
+`gpio add bbox-metadata` falls back to, and the `disk-rewrite` strategy's first phase — and
+equally the DuckDB work that is not a write: the full-input spatial join
+`gpio partition admin` and `gpio add admin-divisions` materialize into a temp table before
+anything is written, the format exports behind
+`gpio convert csv`/`flatgeobuf`/`geojson`/`geopackage`/`shapefile`, and the queries behind
+`gpio process aggregate` and `gpio process overview`. The `streaming` and `in-memory`
+strategies read through a bounded connection like everything else, but the rows they have
+read sit in Arrow, outside DuckDB's accounting: the limit bounds the query feeding them, not
+the buffers they build from it.
 
-- **cgroup v2** (modern Docker, Kubernetes): Reads `/sys/fs/cgroup/memory.max`
-- **cgroup v1** (older Docker): Reads `/sys/fs/cgroup/memory/memory.limit_in_bytes`
-- **Bare metal**: Falls back to psutil for system memory detection
+`--write-memory` overrides the default on the commands that have the option, including the
+admin joins; `gpio pmtiles create`, `gpio add bbox-metadata` and the format exports do not
+have it, so they always use the default.
+
+The precedence, highest first:
+
+1. **An explicit `--write-memory`** (or `memory_limit=`, where the Python API takes one).
+2. **A stricter limit you set on your own DuckDB connection** — gpio will not raise it, and
+   restores it after the write.
+3. **gpio's ceiling-aware default**, 50% of the cgroup cap or physical RAM, whichever is
+   lower.
+4. **DuckDB's own default** (about 80% of host RAM), which is what remains when no ceiling
+   can be read at all.
+
+Half, not DuckDB's own default of 80%: DuckDB's limit covers only its own buffers. The
+Parquet writer, compression and spatial functions allocate beside it, and a large Hilbert
+sort was measured running 30–70% past the limit, so 80% can reach a container or job cap
+before DuckDB spills, and the process is killed. For the same reason gpio lowers DuckDB's
+thread count while a small limit is in force (about 512 MB per thread): spread too thin,
+DuckDB raises `Out of Memory Error` instead of spilling. The cap applies around a bounded
+statement — a write, an export, an admin join — and again when a connection is opened under
+the default, so work that no such statement wraps is not left spreading a small limit across
+every core. It only ever lowers the thread count, and a thread count you ask for is yours.
+
+The ceiling, not the memory currently free: a cgroup counts its page cache as used, so
+after a job has read a large input, "free" memory can read near zero.
+
+A limit you set on your own DuckDB connection (Python API) is respected when it is
+stricter, and restored after the write — on every write path, including `duckdb-kv`, which
+previously raised it to the percentage default for the duration of the write.
+
+The ceiling is container- and scheduler-aware. gpio reads the process's own cgroup from
+`/proc/self/cgroup` and walks up to the root, taking the tightest cap it finds:
+
+- **cgroup v2** (modern Docker, Kubernetes, Slurm): `memory.max`
+- **cgroup v1** (older Docker, Slurm on RHEL/Rocky 8): `memory/…/memory.limit_in_bytes`
+- **Bare metal**: physical RAM via psutil
+
+A batch scheduler such as Slurm caps the *job's* cgroup, not the root of the hierarchy,
+so a check of the root alone sees no limit there.
 
 ### Explicit Memory Limits
 

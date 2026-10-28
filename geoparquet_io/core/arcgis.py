@@ -30,21 +30,23 @@ from geoparquet_io.core.crs_utils import (
     parse_crs_string_to_projjson,
     projjson_from_wkt,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path, uses_aws_profile
 from geoparquet_io.core.exceptions import (
     BatchTooLargeError,
     GeoParquetError,
     InvalidParameterError,
     RemoteAccessError,
 )
-from geoparquet_io.core.geo_metadata import _compute_geometry_types
+from geoparquet_io.core.geo_metadata import (
+    _compute_geometry_types,
+    prune_geo_metadata_to_columns,
+)
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
     DEFAULT_TIMEOUT,
     make_request_with_retry,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
-from geoparquet_io.core.remote import setup_aws_profile_if_needed
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 # ArcGIS Online token endpoint
@@ -86,6 +88,59 @@ class ArcGISLayerInfo:
 # Adaptive batch size fallback sequence
 BATCH_SIZE_FALLBACKS = [1000, 500, 100, 50, 10, 1]
 
+# The ArcGIS REST error envelopes that mean "this query failed on the server"
+# and nothing more specific. On a *paged* feature query - issued only after the
+# layer metadata and the feature count for the same where/bbox/token have come
+# back fine, so what the page adds is the geometry and the requested outFields/
+# outSR - that is how a page too heavy to serialize is reported (#1134).
+# Compared after lower-casing, collapsing whitespace and dropping the trailing
+# period: the live Wallonia envelope has no period, the issue's example does.
+# Anything else with code 500 stays fatal; the message then names --batch-size.
+_PAGE_PRESSURE_CODE = 500
+_PAGE_PRESSURE_MESSAGES = frozenset(
+    {
+        "error performing query operation",
+        "unable to complete operation",
+        "unable to perform query operation",
+    }
+)
+
+
+def _error_envelope(data: dict) -> dict:
+    """The ``error`` object of an ArcGIS response; a bare string becomes its message."""
+    error = data["error"]
+    return error if isinstance(error, dict) else {"message": str(error)}
+
+
+def _error_details(error: dict) -> list:
+    """The ``details`` of an ArcGIS error envelope as a list (a bare string is one detail)."""
+    details = error.get("details")
+    if details is None or details == "":
+        return []
+    return details if isinstance(details, list) else [details]
+
+
+def _is_generic_query_failure(text: object) -> bool:
+    if not isinstance(text, str):
+        return False
+    return " ".join(text.lower().split()).rstrip(".") in _PAGE_PRESSURE_MESSAGES
+
+
+def _is_page_pressure_error(error: dict) -> bool:
+    """Whether an ArcGIS JSON ``error`` envelope is the generic "query failed".
+
+    Narrow on purpose: exactly code 500, one of the known query-failure
+    messages, and no ``details`` beyond those same phrases. Authentication
+    (498/499), bad parameters (400), an unsupported operation (501) and an
+    unavailable service (503) are not a page-size problem, and a 500 whose
+    message or details say what went wrong is reported as what it says.
+    """
+    if error.get("code") != _PAGE_PRESSURE_CODE:
+        return False
+    if not _is_generic_query_failure(error.get("message")):
+        return False
+    return all(_is_generic_query_failure(detail) for detail in _error_details(error))
+
 
 @contextmanager
 def _gdal_geojson_size_limit_lifted():
@@ -112,6 +167,85 @@ def _gdal_geojson_size_limit_lifted():
             os.environ.pop("OGR_GEOJSON_MAX_OBJ_SIZE", None)
         else:
             os.environ["OGR_GEOJSON_MAX_OBJ_SIZE"] = previous
+
+
+def _warn_batch_reduced(
+    failed_batch: int, offset: int, new_batch: int, reason: str, restart_from: int
+) -> None:
+    """The one line a user sees each time the ladder descends a rung.
+
+    ``restart_from`` is the offset the download resumes at: the refused offset
+    itself on the sequential path, the start of the window on the parallel path
+    (whose sibling pages are re-fetched at the new size).
+    """
+    warn(
+        f"Server returned an error for batch_size={failed_batch} at offset {offset} "
+        f"({reason}). Reducing to {new_batch} and retrying from offset {restart_from}; "
+        f"later pages keep this size."
+    )
+
+
+def _batch_ladder_exhausted(offset: int, reason: str) -> GeoParquetError:
+    """The terminal error once batch_size=1 has failed too: the facts, then the levers."""
+    return GeoParquetError(
+        f"Server refused even a page of batch_size=1 at offset {offset} ({reason}); "
+        "the batch-size ladder is exhausted. Either this layer's geometries are too "
+        "large to serialize one at a time - try --max-allowable-offset to generalize "
+        "them server-side, or --timeout for a slow server - or the service itself is "
+        "failing; retry later."
+    )
+
+
+# What a layer's metadata means when it says nothing about its page size.
+ABSENT_MAX_RECORD_COUNT = 1000
+
+
+def _server_int(value: object) -> int | None:
+    """A whole number a server sent as an int, an integral float or a digit string.
+
+    None for anything else, booleans included (``True`` is an ``int`` in Python
+    but never a count).
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _checked_max_record_count(data: dict) -> int:
+    """The layer's ``maxRecordCount``, or a safe page size when it is unusable (#1053)."""
+    if "maxRecordCount" not in data:
+        return ABSENT_MAX_RECORD_COUNT
+    raw = data["maxRecordCount"]
+    value = _server_int(raw)
+    if value is None or value <= 0:
+        warn(
+            f"Layer advertises an unusable maxRecordCount ({raw!r}), "
+            f"using a page size of {DEFAULT_PAGE_SIZE}"
+        )
+        return DEFAULT_PAGE_SIZE
+    return value
+
+
+def _checked_feature_count(data: dict, query_url: str) -> int:
+    """The ``count`` of a returnCountOnly reply, refused when it is not a count (#1053)."""
+    if "count" not in data:
+        return 0
+    raw = data["count"]
+    value = _server_int(raw)
+    if value is None or value < 0:
+        raise RemoteAccessError(
+            query_url, f"Server returned an invalid feature count: count={raw!r}"
+        )
+    return value
 
 
 def _get_reduced_batch_size(current_batch: int) -> int | None:
@@ -166,7 +300,8 @@ def _make_request(
 
     Raises:
         RemoteAccessError: For HTTP errors
-        BatchTooLargeError: When server returns non-JSON (batch too large)
+        BatchTooLargeError: On a paged request, when the server returns non-JSON
+            or a 5xx that survived every retry (batch too large)
     """
     return make_request_with_retry(
         method=method,
@@ -181,19 +316,22 @@ def _make_request(
     )
 
 
-def _handle_arcgis_response(data: dict, context: str) -> dict:
-    """Handle ArcGIS REST API response and check for errors."""
+def _handle_arcgis_response(data: dict, context: str, hint: str = "") -> dict:
+    """Handle ArcGIS REST API response and check for errors.
+
+    ``hint`` is appended to a non-auth error, for a caller that knows a lever
+    the user could still pull (a paged query names ``--batch-size``).
+    """
     if "error" in data:
-        error = data["error"]
+        error = _error_envelope(data)
         code = error.get("code", "Unknown")
-        message = error.get("message", "Unknown error")
-        details = error.get("details", [])
+        message = str(error.get("message", "Unknown error")).rstrip(".")
 
         if code in (498, 499):
             raise GeoParquetError(f"{context}: Invalid or expired token. Please re-authenticate.")
-        else:
-            detail_str = "; ".join(details) if details else ""
-            raise GeoParquetError(f"{context}: Error {code} - {message}. {detail_str}")
+        detail_str = "; ".join(str(detail) for detail in _error_details(error))
+        text = f"{context}: Error {code} - {message}. {detail_str}".rstrip()
+        raise GeoParquetError(f"{text} {hint}".rstrip())
 
     return data
 
@@ -416,7 +554,7 @@ def get_layer_info(
         geometry_type=data.get("geometryType", "esriGeometryPoint"),
         spatial_reference=spatial_reference,
         fields=data.get("fields", []),
-        max_record_count=data.get("maxRecordCount", 1000),
+        max_record_count=_checked_max_record_count(data),
         total_count=count,
     )
 
@@ -463,7 +601,7 @@ def get_feature_count(
     data = _make_request("GET", query_url, params=params, timeout=timeout)
     data = _handle_arcgis_response(data, "Feature count")
 
-    count = data.get("count", 0)
+    count = _checked_feature_count(data, query_url)
     if verbose:
         debug(f"Total feature count: {count}")
 
@@ -542,10 +680,29 @@ def fetch_features_page(
 
     data = _make_request("GET", query_url, params=params, timeout=timeout, batch_size=limit)
 
-    # GeoJSON responses don't have the standard error format
-    # Check if we got features or an error
+    # A successful page has no "error" key in either GeoJSON or EsriJSON. ArcGIS
+    # reports a page it could not serialize as HTTP 200 + a JSON error envelope
+    # (code 500, "Error performing query operation") on the EsriJSON path, so
+    # that envelope has to reach the batch-size ladder exactly like the HTML
+    # error page the GeoJSON path gets for the same failure (#1134).
     if "error" in data:
-        _handle_arcgis_response(data, "Feature query")
+        error = _error_envelope(data)
+        if _is_page_pressure_error(error):
+            raise BatchTooLargeError(
+                url=query_url,
+                batch_size=limit,
+                reason=f"ArcGIS error {error['code']}: {str(error['message']).rstrip('.')}",
+            )
+        _handle_arcgis_response(
+            data,
+            "Feature query",
+            hint=(
+                f"If this page of {limit} features is too heavy for the server, "
+                f"retry with a smaller --batch-size."
+                if str(error.get("code")) == str(_PAGE_PRESSURE_CODE)
+                else ""
+            ),
+        )
 
     return data
 
@@ -642,16 +799,9 @@ def fetch_all_features(
                 new_batch = _get_reduced_batch_size(current_batch)
                 if new_batch is None:
                     # Already at minimum batch size, can't reduce further
-                    raise GeoParquetError(
-                        f"Server cannot handle even batch_size=1. "
-                        f"This layer may have geometry too complex to download. "
-                        f"Original error: {e.reason}"
-                    ) from e
+                    raise _batch_ladder_exhausted(offset, e.reason) from e
 
-                warn(
-                    f"Server returned error for batch_size={current_batch}. "
-                    f"Reducing to {new_batch} and retrying..."
-                )
+                _warn_batch_reduced(current_batch, offset, new_batch, e.reason, restart_from=offset)
                 effective_batch = new_batch
                 # Don't increment offset - retry same position with smaller batch
                 continue
@@ -720,18 +870,20 @@ def fetch_all_features(
 
                 # Collect results in order
                 results = []
-                batch_too_large = False
-                failed_batch_size = None
-                failed_at_index = None
+                batch_too_large: BatchTooLargeError | None = None
+                failed_batch_size = 0
+                failed_offset = 0
+                failed_at_index = 0
 
                 for idx, (offset, req_batch_size, future) in enumerate(futures):
                     try:
                         page = future.result()
                         results.append((offset, page))
-                    except BatchTooLargeError:
+                    except BatchTooLargeError as e:
                         # Mark for retry with smaller batch
-                        batch_too_large = True
+                        batch_too_large = e
                         failed_batch_size = req_batch_size
+                        failed_offset = offset
                         failed_at_index = idx
                         break
                     except Exception as e:
@@ -740,7 +892,7 @@ def fetch_all_features(
                             service_url, f"Failed to fetch features at offset {offset}: {e}"
                         ) from e
 
-                if batch_too_large:
+                if batch_too_large is not None:
                     # Cancel/drain remaining futures to avoid duplicate requests
                     from concurrent.futures import CancelledError
 
@@ -757,16 +909,18 @@ def fetch_all_features(
                     futures.clear()
                     results.clear()
 
-                    # Reduce batch size and restart from batch_start
-                    new_batch = _get_reduced_batch_size(failed_batch_size or effective_batch)
+                    # Reduce batch size and restart the whole window from batch_start
+                    new_batch = _get_reduced_batch_size(failed_batch_size)
                     if new_batch is None:
-                        raise GeoParquetError(
-                            "Server cannot handle even batch_size=1. "
-                            "This layer may have geometry too complex to download."
-                        )
-                    warn(
-                        f"Server returned error for batch_size={failed_batch_size}. "
-                        f"Reducing to {new_batch} and retrying..."
+                        raise _batch_ladder_exhausted(
+                            failed_offset, batch_too_large.reason
+                        ) from batch_too_large
+                    _warn_batch_reduced(
+                        failed_batch_size,
+                        failed_offset,
+                        new_batch,
+                        batch_too_large.reason,
+                        restart_from=batch_start,
                     )
                     effective_batch = new_batch
                     # Don't increment batch_start - retry from same position
@@ -951,6 +1105,18 @@ def _tag_output_crs(
     verbose: bool,
 ) -> pa.Table:
     """Attach the ``geo`` block: CRS84 on the GeoJSON path, the server's SR on the outSR path."""
+    if "geometry" not in table.column_names:
+        # --exclude-cols dropped the geometry: an attribute table, with no CRS
+        # to resolve (or warn about) and no geo block to attach. Any carried
+        # block goes through the same pruner `gpio extract geoparquet` uses (#966).
+        warn(
+            "The geometry column was excluded, so the result is an attribute "
+            "table with no geo metadata."
+        )
+        existing = dict(table.schema.metadata or {})
+        return table.replace_schema_metadata(
+            prune_geo_metadata_to_columns(existing, table.column_names) or None
+        )
     if output_wkid is None:
         # f=geojson is WGS84 per RFC 7946, whatever the layer advertises.
         crs = parse_crs_string_to_projjson("OGC:CRS84")
@@ -1078,6 +1244,53 @@ def _build_schema_from_layer_info(layer_info: ArcGISLayerInfo) -> pa.Schema:
     return pa.schema(fields)
 
 
+def _target_schema(layer_info: ArcGISLayerInfo, out_fields: str) -> pa.Schema:
+    """The downloaded table's schema: ``geometry`` plus the ``outFields`` requested.
+
+    ``out_fields`` is ``*`` or a comma-separated field list; geometry is always
+    kept, and field names match case-insensitively, as the server does.
+    """
+    schema = _build_schema_from_layer_info(layer_info)
+    if out_fields == "*":
+        return schema
+    requested = {f.strip().lower() for f in out_fields.split(",")}
+    return pa.schema(
+        [field for field in schema if field.name == "geometry" or field.name.lower() in requested]
+    )
+
+
+def _require_columns_remain(column_names, exclude_list: list[str] | None) -> None:
+    """Refuse an ``--exclude-cols`` that would leave the table with no columns.
+
+    The guard used to be ``if cols_to_keep:``, which silently ignored the whole
+    option -- so ``--exclude-cols geometry`` on a geometry-only layer wrote full
+    GeoParquet including the column the user asked to drop (#1176). An empty
+    table is not what was asked for either; the request is a typo and the only
+    useful answer is to name it.
+    """
+    if not exclude_list:
+        return
+    excluded = set(exclude_list)
+    if any(name not in excluded for name in column_names):
+        return
+    raise InvalidParameterError(
+        "--exclude-cols",
+        f"excluding {', '.join(sorted(excluded))} would leave the output with no "
+        f"columns at all (the layer has: {', '.join(column_names)})",
+    )
+
+
+def _exclude_columns(table: pa.Table, exclude_list: list[str] | None) -> pa.Table:
+    """Drop the ``--exclude-cols`` names from a fetched table (client-side)."""
+    if not exclude_list:
+        return table
+    _require_columns_remain(table.column_names, exclude_list)
+    cols_to_exclude = set(exclude_list)
+    cols_to_keep = [name for name in table.column_names if name not in cols_to_exclude]
+    debug(f"Excluded columns: {cols_to_exclude}")
+    return table.select(cols_to_keep)
+
+
 def _json_doc_to_table(doc: dict, exclude: str, suffix: str, con=None) -> pa.Table:
     """Write a JSON document to a temp file and convert it via DuckDB ST_Read.
 
@@ -1149,21 +1362,45 @@ def _geojson_page_to_table(features: list[dict], con=None) -> pa.Table | None:
     )
 
 
+def _prepare_esrijson_for_gdal(page: dict) -> dict:
+    """Return a shallow copy of an EsriJSON page with `features` moved last.
+
+    GDAL identifies the format from the beginning of the file. When a large
+    `features` array comes before `geometryType`, it picks the GeoJSON driver
+    and fails to read the Esri-shaped features (issue #501).
+
+    `geometryType` goes first, `features` goes last, and every other member
+    keeps its original order. Which members GDAL treats as ESRIJSON markers is
+    GDAL's business (`fields` and `fieldAliases` count too), so none of them is
+    moved ahead of another: apart from the few bytes `geometryType` adds in
+    front, no member other than `features` starts later than it did in `page`.
+    Values are shared with `page`, which is left unchanged.
+    """
+    prepared = {"geometryType": page["geometryType"]} if "geometryType" in page else {}
+    prepared.update(page)
+    if "features" in prepared:
+        prepared["features"] = prepared.pop("features")
+    return prepared
+
+
 def _esrijson_page_to_table(page: dict, con=None) -> pa.Table | None:
     """Convert a page of EsriJSON features to a PyArrow Table with WKB geometry.
 
     Unlike GeoJSON, GDAL's ESRIJSON driver needs the whole response object
-    (geometryType / spatialReference / fields / features), so the raw page is
-    written verbatim. `attributes` are flattened to columns by the driver.
-    GDAL may or may not add OGC_FID for EsriJSON; extra columns are kept here
-    and dropped later by _cast_table_to_schema.
+    (geometryType / spatialReference / fields / features), so the page is
+    written whole, with `geometryType` first and `features` last so GDAL
+    recognizes it whatever order the server used. `attributes` are flattened
+    to columns by the driver. GDAL may or may not add OGC_FID for EsriJSON;
+    extra columns are kept here and dropped later by _cast_table_to_schema.
 
     Returns a PyArrow Table with WKB geometry column, or None if no features.
     """
     if not page.get("features"):
         return None
 
-    return _json_doc_to_table(page, exclude="geom", suffix=".json", con=con)
+    return _json_doc_to_table(
+        _prepare_esrijson_for_gdal(page), exclude="geom", suffix=".json", con=con
+    )
 
 
 def _stream_features_to_parquet(
@@ -1212,18 +1449,7 @@ def _stream_features_to_parquet(
     """
     # Build fixed schema from layer metadata upfront to prevent type mismatches
     # between batches (issue #290)
-    target_schema = _build_schema_from_layer_info(layer_info)
-
-    # Filter schema to match requested fields (if out_fields specified)
-    if out_fields != "*":
-        requested_fields = {f.strip().lower() for f in out_fields.split(",")}
-        # Always include geometry
-        filtered_fields = [target_schema.field("geometry")]
-        # Add only requested attribute fields (case-insensitive match)
-        for field in target_schema:
-            if field.name != "geometry" and field.name.lower() in requested_fields:
-                filtered_fields.append(field)
-        target_schema = pa.schema(filtered_fields)
+    target_schema = _target_schema(layer_info, out_fields)
 
     debug(f"Built schema from layer metadata: {len(target_schema)} fields")
 
@@ -1345,7 +1571,9 @@ def _resolve_geometry_types(table: pa.Table, esri_geometry_type: str, verbose: b
     Polygon or no geometry at all) named a type the file does not contain.
     ``[]`` -- the spec's way of saying the types are not known -- is the honest
     answer wherever the data does not supply one, and gpio's own
-    geometry_types-vs-statistics check would flag the guess anyway.
+    geometry_types-vs-statistics check would flag the guess anyway. (An
+    excluded geometry column no longer reaches this function: since #966 the
+    result is an attribute table with no geo block at all.)
 
     The two ways of arriving at ``[]`` are still worth telling apart for the
     user: unreadable geometry is a data-quality problem worth chasing, an empty
@@ -1353,15 +1581,11 @@ def _resolve_geometry_types(table: pa.Table, esri_geometry_type: str, verbose: b
     ``_compute_geometry_types`` swallows the geoarrow error itself, so the
     non-NULL geometries are counted first.
     """
-    geometry = table.column("geometry") if "geometry" in table.column_names else None
-    if geometry is None:
-        # The user dropped the column with --exclude-cols; the service may well
-        # have returned geometry. Blaming the fetch here would point at the
-        # wrong thing and give the user nothing to act on.
-        warn(
-            "The geometry column was excluded, so there is nothing to describe; "
-            "declaring geometry_types as [] (types not known)."
-        )
+    # Only reached with a geometry column: an excluded one (--exclude-cols) never
+    # gets a geo block at all (#966, see _tag_output_crs).
+    geometry = table.column("geometry")
+    if len(geometry) == 0:
+        # An empty layer or filter result: already reported, nothing to describe.
         return []
     if geometry.null_count == len(geometry):
         warn("Fetched data holds no geometries; declaring geometry_types as [] (types not known).")
@@ -1457,6 +1681,16 @@ def arcgis_to_table(
             "max_allowable_offset", "must be a positive number (units of the output CRS)."
         )
 
+    # The CLI's IntRange(1, 5000) never runs for the Python API, and
+    # fetch_all_features used to swap a non-positive value for the default page
+    # size -- the very page the caller was trying to escape -- or raise
+    # TypeError on a string after the metadata and count probes had gone out.
+    # Refuse here so every door fails fast, before any request.
+    if batch_size is not None and (
+        isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1
+    ):
+        raise InvalidParameterError("batch_size", "must be a positive integer (features per page).")
+
     # Split the column lists before any network work. A blank entry is rejected
     # here, not only by the Click callback: the Python API never goes through
     # Click, and ``include_cols="name,,pop"`` went to the server verbatim as
@@ -1489,6 +1723,13 @@ def arcgis_to_table(
     if output_crs == "native":
         output_wkid = _resolve_native_wkid(layer_info.spatial_reference)
 
+    # Determine outFields for server-side column selection
+    out_fields = ",".join(include_list) if include_list else "*"
+
+    # The layer's advertised fields are enough to see an --exclude-cols that
+    # would leave nothing, so say so before a single feature is downloaded.
+    _require_columns_remain(_target_schema(layer_info, out_fields).names, exclude_list)
+
     if layer_info.total_count == 0:
         filters_applied = where != "1=1" or bbox is not None
         if filters_applied:
@@ -1500,11 +1741,20 @@ def arcgis_to_table(
             warn(f"No features match filter: {', '.join(filter_desc)}")
         else:
             warn("Layer has no features")
-        # Return empty table with geometry column
-        return pa.table({"geometry": pa.array([], type=pa.binary())})
+        # The same columns and geo block a non-empty fetch returns, so a filter
+        # that matches nothing neither changes the output's schema nor writes a
+        # geometry column --exclude-cols dropped (#966). from_pydict, not
+        # from_batches([]): each column keeps one (empty) chunk.
+        schema = _target_schema(layer_info, out_fields)
+        empty = pa.Table.from_pydict({name: [] for name in schema.names}, schema=schema)
+        return _tag_output_crs(
+            _exclude_columns(empty, exclude_list),
+            None,
+            output_wkid,
+            layer_info.geometry_type,
+            verbose,
+        )
 
-    # Determine outFields for server-side column selection
-    out_fields = ",".join(include_list) if include_list else "*"
     if include_list:
         debug(f"Requesting fields: {out_fields}")
 
@@ -1538,13 +1788,7 @@ def arcgis_to_table(
         table = pq.read_table(temp_parquet)
 
         # Apply client-side column exclusion if specified
-        if exclude_list:
-            cols_to_exclude = set(exclude_list)
-            # Keep geometry column unless explicitly excluded
-            cols_to_keep = [name for name in table.column_names if name not in cols_to_exclude]
-            if cols_to_keep:
-                table = table.select(cols_to_keep)
-                debug(f"Excluded columns: {cols_to_exclude}")
+        table = _exclude_columns(table, exclude_list)
 
         # Repair invalid geometry (issue #506) before the geo block is built:
         # ST_MakeValid can change a geometry's type (a bowtie Polygon comes back
@@ -1569,6 +1813,7 @@ def arcgis_to_table(
                 debug(f"Could not remove temp file {temp_parquet}")
 
 
+@uses_aws_profile
 def convert_arcgis_to_geoparquet(
     service_url: str,
     output_file: str,
@@ -1644,9 +1889,6 @@ def convert_arcgis_to_geoparquet(
     """
     configure_verbose(verbose)
 
-    # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, output_file)
-
     # Check if output file exists and overwrite is False
     if not overwrite and Path(output_file).exists():
         raise GeoParquetError(
@@ -1682,15 +1924,19 @@ def convert_arcgis_to_geoparquet(
         timeout=timeout,
     )
 
+    # --exclude-cols geometry leaves an attribute table: nothing to Hilbert-sort
+    # or bbox, and the write below is plain Parquet with no geo block (#966).
+    has_geometry = "geometry" in table.column_names
+
     # Apply Hilbert ordering if not skipped
-    if not skip_hilbert and table.num_rows > 0:
+    if not skip_hilbert and table.num_rows > 0 and has_geometry:
         progress("Applying Hilbert spatial ordering...")
         from geoparquet_io.core.hilbert_order import hilbert_order_table
 
         table = hilbert_order_table(table)
 
     # Add bbox column for spatial query optimization
-    if not skip_bbox and table.num_rows > 0:
+    if not skip_bbox and table.num_rows > 0 and has_geometry:
         progress("Adding bbox column for spatial query optimization...")
         from geoparquet_io.core.add.bbox import add_bbox_table
 

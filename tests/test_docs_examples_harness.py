@@ -10,6 +10,8 @@ the guides use.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from tests.docs_examples.collector import (
@@ -313,6 +315,21 @@ def test_seed_workdir_creates_the_placeholder_names(tmp_path):
     for placeholder in SEED_FILES:
         assert (work / placeholder).stat().st_size > 0, placeholder
     assert (work / "output_dir").is_dir()
+
+
+def test_seed_workdir_supplies_native_spherical_geography(tmp_path):
+    """The warning examples need real GEOGRAPHY, not a renamed planar file."""
+    import geoarrow.pyarrow as ga
+    import pyarrow.parquet as pq
+
+    path = seed_workdir(tmp_path / "work") / "world_geography.parquet"
+    parquet = pq.ParquetFile(path)
+    geometry = parquet.schema.column(parquet.schema.names.index("geometry"))
+    assert json.loads(geometry.logical_type.to_json())["Type"] == "Geography"
+    assert b"geo" not in (parquet.metadata.metadata or {})
+    field = parquet.schema_arrow.field("geometry")
+    assert field.type.edge_type == ga.EdgeType.SPHERICAL
+    assert parquet.metadata.num_rows > 0
 
 
 def test_seeded_files_are_independent_copies(tmp_path):

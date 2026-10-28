@@ -62,9 +62,13 @@ A coarser parent cell straddles the antimeridian more readily than its children,
 | `min_*` / `max_*` | min / max | exact |
 | `count_*` breakdowns (incl. `count_other`) | sum | exact |
 | `avg_*` | count-weighted mean over children with a value | exact **when the metric had no NULLs** |
+| `pct_*` | recomputed: `100 × Σ sum_<col>` over the **parent's own** cell area | exact |
 
 !!! note "The `avg_*` caveat"
     A child cell's `avg_x` was computed over its non-NULL values, but the rollup weights it by the cell's full `count` (children whose `avg_x` is entirely NULL are excluded). When some features had NULL `x`, the weighting is approximate. With no NULLs, the count-weighted mean is exactly the mean over all original features.
+
+!!! note "`pct_*` is recomputed, never averaged"
+    A percentage is a ratio against the cell's area, and a parent cell is larger than its children, so the mean of the children's percentages is not the parent's. gpio recomputes it from the total instead: `100 × Σ sum_<col>` divided by the parent level's own cell area (see [Percent of the cell covered](process-aggregate.md#percent-of-the-cell-covered-pct_cell)). This is why `--metric pct_cell:<col>` also writes `sum_<col>` — a `pct_<col>` column with no matching `sum_<col>` beside it cannot be rolled up and is dropped with a warning, as is any `pct_*` column on an admin rollup, where a country has no cell area.
 
 Columns that don't match a rollup role are dropped with a warning. The `unassigned` bucket (features with no assignable cell/region) flows through with a NULL geometry.
 
@@ -102,7 +106,9 @@ probe with an explicit plan of `level:minzoom` pairs:
 Each entry says which zoom a level starts at; ends follow from the next entry
 and the last band is open-ended, so the bands always cover every zoom. The
 first must start at z0, zooms must strictly increase, a level may appear only
-once, and grid levels must get finer as the zoom rises.
+once, and grid levels must get finer as the zoom rises. A plan written from the
+detailed end (`8:11,7:10,...,2:0`) is refused with the coarsest-first spelling
+to use instead.
 
 Because there is no probe left to feed, `--max-tile-kb` no longer applies, and
 `--levels` or `--bytes-per-cell` alongside `--bands` is an error rather than a
@@ -116,6 +122,82 @@ Auto selection remains the better default for a single archive: it measures
 the data instead of guessing, and `--bands` will happily produce a 20 MB tile
 if that is what you asked for.
 
+## One levelled file (`--overview-out`)
+
+By default each level is written as its own sibling (`cells_r7.parquet`, …),
+and a tiler then has to pick a zoom band per level. `--overview-out` also
+assembles the ladder into **one** GeoParquet in tylertoo's
+[overviews format](https://github.com/geoparquet/tylertoo/blob/main/context/OVERVIEWS_SPEC.md):
+levels are additional *rows* tagged by an INT32 `level` column, coarse to
+fine, each ending on a row-group boundary, with a `geo:overviews` footer
+recording each level's row-group range and ground sample distance (GSD, in
+metres). The sibling files are still written — under `--output-dir`, or beside
+the input.
+
+`tylertoo export-pmtiles` tiles that file in one pass, reading the levels as
+written — no per-level tippecanoe run and no hand-pinned zoom bands. The
+rollup lives in gpio because a coarse level of a count layer is a
+**re-aggregation**, not a generalization: a tiler's coarse zoom would show
+some of the fine cells and drop the rest, not their sum.
+
+=== "CLI"
+
+    <!-- doctest: setup="gpio process aggregate h3 buildings.parquet cells.parquet --resolution 9" -->
+    ```bash
+    gpio process overview cells.parquet --levels 8,7,6 --overview-out pyramid.parquet
+    ```
+
+    <!-- doctest: skip="tylertoo is not a gpio dependency" -->
+    ```bash
+    tylertoo export-pmtiles pyramid.parquet out.pmtiles
+    ```
+
+=== "Python"
+
+    <!-- doctest: setup="gpio process aggregate h3 buildings.parquet cells.parquet --resolution 9" -->
+    ```python
+    from geoparquet_io.api import ops
+
+    ops.create_overview_file('cells.parquet', 'pyramid.parquet', levels='8,7,6')
+    ```
+
+### Sizing the levels (`--cell-detail`, `--gsd`)
+
+Each level's GSD is measured from the level itself: the median width of its
+cells in metres (flat 111,320 m per degree, as the format prescribes), divided
+by `--cell-detail` (default `4`, so a cell spans four GSD units at the zoom
+that serves it). That is scheme-agnostic — H3, A5 and admin regions all have a
+measurable cell width — and shrinks as levels refine. A larger `--cell-detail`
+gives every level a smaller GSD, so tylertoo serves each level at a finer
+zoom; a smaller one serves them coarser:
+
+<!-- doctest: setup="gpio process aggregate h3 buildings.parquet cells.parquet --resolution 9" -->
+```bash
+gpio process overview cells.parquet --overview-out pyramid.parquet --levels 8,7 --cell-detail 8
+```
+
+For full control, `--gsd` takes absolute metres, coarse to fine, strictly
+decreasing — one per built level **plus the base** — and overrides the
+measurement:
+
+<!-- doctest: setup="gpio process aggregate h3 buildings.parquet cells.parquet --resolution 9" -->
+```bash
+gpio process overview cells.parquet --overview-out pyramid.parquet \
+    --levels 7,8 --gsd 4000,1500,600
+```
+
+The footer's `zoom` field is written only when the levels round to distinct
+zooms; tylertoo derives zooms from `gsd` otherwise.
+
+!!! note "The finest level is the aggregate, not the source features"
+
+    The format's canonical level normally reproduces the source exactly. Here
+    the finest level *is* an aggregate — the base cells — so that is what the
+    file declares as canonical, in `duplicating` mode: every level is a
+    complete rendering and a reader picks exactly one. Not yet written: the
+    1.1 bbox covering the format requires (§4.4) and a spatial order within a
+    level (§5.1); `tylertoo validate` reports the former.
+
 ## Options
 
 | Option | Default | Description |
@@ -128,8 +210,14 @@ if that is what you asked for.
 | `--scheme` | auto | Bucketing scheme (`a5`/`h3`/`admin`) when inference is ambiguous, e.g. H3 ids stored as integers |
 | `--output-dir` | input's directory | Where to write overview files |
 | `--force` | off | Overwrite existing overview output files |
+| `--overview-out` | off | Also assemble the ladder into one levelled GeoParquet at this path |
+| `--cell-detail` | 4 | Cell width in GSD units at the level serving it (with `--overview-out`) |
+| `--gsd` | measured | Explicit GSDs in metres, coarse to fine, one per built level plus the base (with `--overview-out`) |
+| `--write-memory` | half the memory ceiling | DuckDB memory limit for the rollups (e.g. `8GB`). The default follows the container or Slurm job cap when that is lower than RAM |
 
-Compression (`--compression`, `--compression-level`), `--geoparquet-version`, `--verbose`, and `--show-sql` behave as elsewhere in gpio.
+Compression (`--compression`, `--compression-level`), `--geoparquet-version`, `--verbose`, and `--show-sql` behave as elsewhere in gpio,
+except that an unset `--compression-level` resolves to ZSTD 9 rather than the write funnel's 15 — see
+[Compression](../concepts/best-practices.md#compression) for why.
 
 ## See Also
 

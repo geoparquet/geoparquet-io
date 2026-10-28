@@ -201,11 +201,13 @@ class TestBinaryHelpersAbsentVsNull:
     def test_absent_does_not_equal_an_empty_crs_value(self, compare):
         """``{}`` / ``""`` name no CRS at all, so they cannot be the default.
 
-        ``is_default_crs`` answers True for any falsy value, so the absent
-        branch must not lean on it alone or the two helpers drift apart here.
+        ``is_default_crs`` agrees since #1267: an empty value is unknown, the
+        same as an explicit null.
         """
         assert compare(CRS_ABSENT, {}) is False
         assert compare(CRS_ABSENT, "") is False
+        assert compare(CRS_ABSENT, []) is False
+        assert compare(CRS_ABSENT, 0) is False
 
     @BINARY_HELPERS
     def test_absent_equals_id_less_crs84_projjson(self, compare):

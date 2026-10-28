@@ -26,13 +26,9 @@ from urllib.parse import unquote
 from geoparquet_io.core.duckdb_utils import sql_path
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.logging_config import debug
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
+from geoparquet_io.core.remote import is_remote_url
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
-from geoparquet_io.core.write_strategies.duckdb_kv import (
-    get_default_memory_limit,
-)
-from geoparquet_io.core.write_strategies.duckdb_kv import (
-    validate_memory_limit as _validate_memory_limit,
-)
 
 # Internal alias used to drive the single-pass PARTITION_BY split. DuckDB drops
 # the PARTITION_BY column from the written files, so using a dedicated alias lets
@@ -72,9 +68,31 @@ class PartitionWriteOptions:
     both correct at once. ``test_write_facade_version_owner.py`` measures every
     driver's output against the user's file, in the ``geo`` block and the Parquet
     logical type separately.
+
+    ``input_file`` is that same file, handed on to every partition write as its
+    witness. The version is not the only fact that lives in the input's schema
+    and nowhere in the staging file: a native-geo-only input states its CRS only
+    in the Parquet logical type, and a ``GEOGRAPHY``'s spherical edges are gone
+    from staging altogether, because DuckDB reads a ``GEOGRAPHY`` as a planar
+    ``GEOMETRY``. Without the witness both could come only from the input's
+    ``geo`` block, which this input class does not have -- so a 1.1 partition
+    declared no CRS (read as ``OGC:CRS84``) and every partition dropped
+    ``edges`` (#1233, #1234). A staging partition holds a subset of that file's
+    rows with the same geometry, so it is a truthful witness for each one
+    (#1005). ``test_partition_schema_witness.py`` checks every construction site
+    names it.
+
+    Only a *local* witness reaches the writes, though. Every partition write
+    reads it again, and a local footer is a pyarrow read of about half a
+    millisecond; a remote one is several fetches on a new connection each
+    (#1013), which took 100 partitions of an HTTP input from 5 s to over five
+    minutes. A remote input therefore keeps the ``geo``-block-only answer it had
+    before: a native-geo-only remote input still loses its CRS at 1.x and its
+    GEOGRAPHY edges, until the witness can be read once per run.
     """
 
     geoparquet_version: str | None = None
+    input_file: str | None = None
     compression: str = "ZSTD"
     compression_level: int = 15
     row_group_size_mb: int | None = None
@@ -87,6 +105,7 @@ class PartitionWriteOptions:
         """Return the kwargs accepted by ``write_parquet_with_metadata``."""
         return {
             "geoparquet_version": self.geoparquet_version,
+            "input_file": None if is_remote_url(self.input_file) else self.input_file,
             "compression": self.compression,
             "compression_level": self.compression_level,
             "row_group_size_mb": self.row_group_size_mb,
@@ -155,22 +174,28 @@ def run_partitioned_copy(con, select_sql, partition_cols, staging_dir, verbose, 
     writer (issue #478). Staging files use native geometry + SNAPPY (fast,
     transient); the final files are rewritten with the requested settings and
     correct per-partition metadata by the caller.
-    """
-    con.execute("SET threads = 1")  # one file per partition + bounded memory
-    con.execute("SET preserve_insertion_order = false")
-    effective_limit = _validate_memory_limit(memory_limit or get_default_memory_limit())
-    con.execute(f"SET memory_limit = '{effective_limit}'")
 
+    The COPY runs inside ``scoped_write_memory_limit`` (#1156): ``memory_limit``
+    is the user's ``--write-memory``, and without one the ceiling-based default
+    applies, so a large partition inside a batch job spills instead of being
+    OOM-killed. ``threads = 1`` (one file per partition) holds only for the
+    COPY; the connection belongs to the caller, which goes on finalizing every
+    partition on it, so all three settings are restored afterwards.
+    """
     part_cols = ", ".join(partition_cols)
     copy_sql = (
         f"COPY ({select_sql}) TO {sql_path(staging_dir)} "
         f"(FORMAT PARQUET, PARTITION_BY ({part_cols}), "
         f"COMPRESSION SNAPPY, GEOPARQUET_VERSION 'NONE', OVERWRITE_OR_IGNORE)"
     )
-    if verbose:
-        debug("Single-pass partition COPY (one scan of input):")
-        debug(copy_sql)
-    con.execute(copy_sql)
+    # threads=1: one file per partition (and bounded memory); insertion order
+    # is not needed for the split.
+    pinned = {"threads": 1, "preserve_insertion_order": False}
+    with scoped_write_memory_limit(con, memory_limit, verbose, pinned=pinned):
+        if verbose:
+            debug("Single-pass partition COPY (one scan of input):")
+            debug(copy_sql)
+        con.execute(copy_sql)
 
 
 def iter_staging_partitions(staging_dir):

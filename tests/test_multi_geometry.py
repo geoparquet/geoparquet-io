@@ -724,7 +724,10 @@ class TestMultiGeometryDerivedStatsInvalidation:
     * A multi-file merge or a partition split carries the FIRST file's (or the
       whole input's) stats, which under-cover or misdescribe the output. Those
       cannot be kept, so the key is emptied to ``[]`` — the spec's "not known"
-      — rather than deleted.
+      — rather than deleted. Since #952 the duckdb-kv write then treats that
+      emptiness as the gap it is and recomputes the REAL list from the rows it
+      writes, so the merge/partition assertions below pin ``["Polygon"]``, not
+      the sentinel the strip leaves behind.
     """
 
     @staticmethod
@@ -751,12 +754,43 @@ class TestMultiGeometryDerivedStatsInvalidation:
         )
         assert failed == [], f"gpio check spec failed on gpio's own output: {failed}"
 
+    #: The merged boundary extent of :meth:`_glob_input`'s two parts. The first
+    #: part's own stats say ``[-0.5, -0.5, 2.5, 2.5]``: carried, they would
+    #: under-cover the merge.
+    MERGED_BOUNDARY_BBOX = [-0.5, -0.5, 12.5, 12.5]
+
     def _glob_input(self, tmp_path):
-        """Two identical files behind a glob — the multi-file merge shape."""
+        """Two files behind a glob -- the multi-file merge shape.
+
+        The second part is the first shifted by (10, 10) but still carries the
+        first's ``geo`` block, so a write that kept the carried stats instead of
+        recomputing them would be caught by the merged extent.
+        """
+        import duckdb
+
         folder = tmp_path / "parts"
         folder.mkdir()
-        for name in ("a.parquet", "b.parquet"):
-            create_multi_geometry_geoparquet(str(folder / name))
+        create_multi_geometry_geoparquet(str(folder / "a.parquet"))
+        create_multi_geometry_geoparquet(str(folder / "b.parquet"))
+        table = pq.read_table(str(folder / "b.parquet"))
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            con.register("t", table)
+            shifted = (
+                con.execute(
+                    """SELECT * REPLACE (
+                       ST_AsWKB(ST_Translate(ST_GeomFromWKB(geometry), 10, 10)) AS geometry,
+                       ST_AsWKB(ST_Translate(ST_GeomFromWKB(boundary), 10, 10)) AS boundary
+                   ) FROM t"""
+                )
+                .arrow()
+                .read_all()
+            )
+        finally:
+            con.close()
+        shifted = shifted.cast(table.schema).replace_schema_metadata(table.schema.metadata)
+        pq.write_table(shifted, str(folder / "b.parquet"))
         return str(folder / "*.parquet")
 
     # --- extract: row filter over a single file (scoped) --------------------
@@ -898,20 +932,27 @@ class TestMultiGeometryDerivedStatsInvalidation:
         assert boundary["bbox"] == [-0.5, -0.5, 2.5, 2.5]
         self._assert_spec_valid(output_file)
 
-    # --- extract: multi-file merge (emptied) --------------------------------
+    # --- extract: multi-file merge (recomputed) -----------------------------
 
-    def test_extract_over_a_glob_empties_rather_than_deletes(self, tmp_path):
-        """The first file's stats under-cover the merge, so they cannot be kept."""
+    def test_extract_over_a_glob_recomputes_rather_than_carries(self, tmp_path):
+        """The first file's stats under-cover the merge, so they cannot be kept.
+
+        The strip empties the key to ``[]``; the write then fills the gap from
+        the rows it writes (#952), so the output carries the real list rather
+        than the sticky sentinel it used to.
+        """
         from geoparquet_io.core.extract import extract
 
         output_file = tmp_path / "out.parquet"
         extract(self._glob_input(tmp_path), str(output_file))
 
-        assert self._geo(output_file)["columns"]["boundary"]["geometry_types"] == []
+        boundary = self._geo(output_file)["columns"]["boundary"]
+        assert boundary["geometry_types"] == ["Polygon"]
+        assert boundary["bbox"] == self.MERGED_BOUNDARY_BBOX
         assert len(self._assert_duckdb_reads(output_file)) == 6
         self._assert_spec_valid(output_file)
 
-    # --- sort: multi-file merge (emptied) -----------------------------------
+    # --- sort: multi-file merge (recomputed) ---------------------------------
 
     def test_sort_by_column_over_a_glob(self, tmp_path):
         from geoparquet_io.core.sort_by_column import sort_by_column
@@ -919,7 +960,9 @@ class TestMultiGeometryDerivedStatsInvalidation:
         output_file = tmp_path / "out.parquet"
         sort_by_column(self._glob_input(tmp_path), str(output_file), columns="id")
 
-        assert self._geo(output_file)["columns"]["boundary"]["geometry_types"] == []
+        boundary = self._geo(output_file)["columns"]["boundary"]
+        assert boundary["geometry_types"] == ["Polygon"]
+        assert boundary["bbox"] == self.MERGED_BOUNDARY_BBOX
         assert len(self._assert_duckdb_reads(output_file)) == 6
         self._assert_spec_valid(output_file)
 
@@ -929,7 +972,9 @@ class TestMultiGeometryDerivedStatsInvalidation:
         output_file = tmp_path / "out.parquet"
         sort_by_quadkey(self._glob_input(tmp_path), str(output_file))
 
-        assert self._geo(output_file)["columns"]["boundary"]["geometry_types"] == []
+        boundary = self._geo(output_file)["columns"]["boundary"]
+        assert boundary["geometry_types"] == ["Polygon"]
+        assert boundary["bbox"] == self.MERGED_BOUNDARY_BBOX
         assert len(self._assert_duckdb_reads(output_file)) == 6
         self._assert_spec_valid(output_file)
 
@@ -944,10 +989,10 @@ class TestMultiGeometryDerivedStatsInvalidation:
 
         assert self._geo(output_file)["columns"]["boundary"]["geometry_types"] == ["Polygon"]
 
-    # --- partition (emptied) -------------------------------------------------
+    # --- partition (recomputed) ----------------------------------------------
 
     def test_partition_writes_readable_partitions(self, tmp_path):
-        """Each partition holds a subset, and the carried stats describe the whole."""
+        """Each partition's secondary stats now describe that partition (#952)."""
         from geoparquet_io.core.partition.common import partition_by_column
 
         input_file = tmp_path / "in.parquet"
@@ -959,7 +1004,15 @@ class TestMultiGeometryDerivedStatsInvalidation:
 
         written = sorted(output_folder.rglob("*.parquet"))
         assert written, "partitioning produced no files"
+        own_extent = {
+            "A": [-0.5, -0.5, 0.5, 0.5],
+            "B": [0.5, 0.5, 1.5, 1.5],
+            "C": [1.5, 1.5, 2.5, 2.5],
+        }
         for part in written:
-            assert self._geo(part)["columns"]["boundary"]["geometry_types"] == []
+            boundary = self._geo(part)["columns"]["boundary"]
+            assert boundary["geometry_types"] == ["Polygon"]
+            # Its own rows' extent, not the whole input's [-0.5, -0.5, 2.5, 2.5].
+            assert boundary["bbox"] == own_extent[part.stem], part.name
             self._assert_duckdb_reads(part)
             self._assert_spec_valid(part)

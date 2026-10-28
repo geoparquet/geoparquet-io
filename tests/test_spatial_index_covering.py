@@ -140,20 +140,28 @@ class TestSpatialIndexCoveringWithBbox:
         assert covering[index_key] == entry
         assert covering["bbox"] == _bbox_covering("my_bounds")
 
-    def test_index_covering_present_without_bbox_column(
+    def test_no_covering_at_all_without_bbox_column(
         self, buildings_test_file, tmp_path, index_key, writer, kwargs, entry
     ):
-        """The bbox-free input keeps working — this is the branch that always passed."""
+        """No bbox column → no covering block, index entry included (#954).
+
+        The spec's ``covering`` keys "MUST be a supported encoding. Currently
+        the only supported encoding is 'bbox'", and geopandas indexes
+        ``covering["bbox"]`` unguarded — a covering carrying only the index
+        entry made every such file unreadable there. The index entry is only
+        recorded beside a bbox member, never alone.
+        """
         output = tmp_path / f"{index_key}.parquet"
 
         writer(buildings_test_file, str(output), **kwargs)
 
         covering = _covering(output)
-        assert index_key in covering
-        assert covering[index_key] == entry
-        # Self-guard: if this fixture ever grew a bbox column the case above
-        # would silently become a duplicate of the bbox-bearing test.
-        assert "bbox" not in covering, f"control input gained a bbox covering: {sorted(covering)}"
+        assert covering == {}, (
+            f"a covering with no bbox member reached the file: {sorted(covering)}"
+        )
+        # Self-guard: if this fixture ever grew a bbox column this case would
+        # silently become a duplicate of the bbox-bearing test.
+        assert "bbox" not in pq.ParquetFile(str(output)).schema_arrow.names
 
 
 def test_second_index_keeps_the_first(places_v11_file, tmp_path):

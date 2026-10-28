@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.duckdb_metadata import (
     detect_geometry_columns,
     get_bbox_from_row_group_stats,
@@ -19,11 +20,11 @@ from geoparquet_io.core.duckdb_metadata import (
     get_per_row_group_bbox_stats,
     get_per_row_group_native_geo_stats,
     get_schema_info,
-    has_bbox_column,
     parse_geometry_logical_type,
 )
 from geoparquet_io.core.duckdb_utils import sql_path
 from geoparquet_io.core.geo_metadata import is_covering_path
+from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.sizing import format_size
 
@@ -77,10 +78,10 @@ def has_parquet_geo_row_group_stats(parquet_file: str, geometry_column: str | No
     if not geometry_column:
         return result
 
-    # Check for bbox column using DuckDB
-    has_bbox, bbox_col_name = has_bbox_column(parquet_file)
+    # The PRIMARY geometry's bbox covering column, or none (#1171).
+    bbox_col_name = check_bbox_structure(parquet_file).get("bbox_column_name")
 
-    if not has_bbox or not bbox_col_name:
+    if not bbox_col_name:
         return result
 
     # Get row group stats for first row group
@@ -118,10 +119,12 @@ def extract_bbox_from_row_group_stats(
         list: [xmin, ymin, xmax, ymax] or None if bbox cannot be calculated
     """
 
-    # Check for bbox column using DuckDB
-    has_bbox, bbox_col_name = has_bbox_column(parquet_file)
+    # The PRIMARY geometry's bbox covering column, or none. Name-matching any
+    # column ending in bbox/bounds/extent handed back a SECONDARY geometry
+    # column's envelope as the primary's bounds (#1171).
+    bbox_col_name = check_bbox_structure(parquet_file).get("bbox_column_name")
 
-    if not has_bbox or not bbox_col_name:
+    if not bbox_col_name:
         return None
 
     # Get overall bbox from row group stats using DuckDB
@@ -211,7 +214,7 @@ def _format_parquet_metadata_json(
             "details": bloom_filter_info,
         }
 
-    print(json.dumps(metadata_dict, indent=2))
+    print(dumps_json(metadata_dict, indent=2))
 
 
 def _format_bbox_corner(x: float, y: float) -> str:
@@ -564,12 +567,12 @@ def format_parquet_geo_metadata(
     num_row_groups = file_meta.get("num_row_groups", 0)
 
     geo_columns = detect_geometry_columns(parquet_file)
-    has_bbox, bbox_col_name = has_bbox_column(parquet_file)
+    bbox_col_name = check_bbox_structure(parquet_file).get("bbox_column_name")
 
     geo_columns_info = _build_geo_columns_info(schema_info, geo_columns)
 
     # Add row group stats: try bbox column first, then native geo_bbox
-    if has_bbox and bbox_col_name:
+    if bbox_col_name:
         rg_bbox_stats = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
         for col_name in geo_columns_info:
             for rg_stat in rg_bbox_stats:
@@ -609,7 +612,7 @@ def format_parquet_geo_metadata(
             "row_groups_examined": num_row_groups,
             "total_row_groups": num_row_groups,
         }
-        print(json.dumps(output, indent=2))
+        print(dumps_json(output, indent=2))
     else:
         _format_parquet_geo_terminal(
             geo_columns_info, num_row_groups, num_rg_to_show, row_groups_limit
@@ -634,7 +637,7 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
 
     if not geo_meta:
         if json_output:
-            print(json.dumps(None, indent=2))
+            print(dumps_json(None, indent=2))
         else:
             console = Console()
             console.print()
@@ -646,7 +649,7 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
 
     if json_output:
         # Output the exact geo metadata as JSON
-        print(json.dumps(geo_meta, indent=2))
+        print(dumps_json(geo_meta, indent=2))
     else:
         # Human-readable output
         console = Console()
@@ -802,7 +805,7 @@ def format_all_metadata(
             "parquet_geo_metadata": "See --parquet-geo flag for full output",
             "geoparquet_metadata": geo_meta,
         }
-        print(json.dumps(output, indent=2))
+        print(dumps_json(output, indent=2))
     else:
         # Terminal output - show all three sections
         geo_meta = get_geo_metadata(parquet_file)
@@ -841,13 +844,13 @@ def format_row_group_geo_stats(
 
     # Fall back to bbox column if no native stats
     if not rg_stats:
-        has_bbox, bbox_col_name = has_bbox_column(parquet_file)
-        if has_bbox and bbox_col_name:
+        bbox_col_name = check_bbox_structure(parquet_file).get("bbox_column_name")
+        if bbox_col_name:
             rg_stats = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
 
     if not rg_stats:
         if json_output:
-            print(json.dumps({"row_group_geo_stats": [], "message": "No geo stats found"}))
+            print(dumps_json({"row_group_geo_stats": [], "message": "No geo stats found"}))
         else:
             console = Console()
             console.print()
@@ -870,7 +873,7 @@ def format_row_group_geo_stats(
     stats_with_rows = stats_with_rows[:effective_limit]
 
     if json_output:
-        print(json.dumps({"row_group_geo_stats": stats_with_rows}, indent=2))
+        print(dumps_json({"row_group_geo_stats": stats_with_rows}, indent=2))
     else:
         _format_geo_stats_terminal(stats_with_rows, total_row_groups)
 

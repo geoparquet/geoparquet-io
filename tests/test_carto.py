@@ -1498,3 +1498,175 @@ class TestFailureClassificationUsesTheHttpStatus:
 
         carto_module._probe_request_status("http://x/", 2.0)
         assert seen["timeout"] == 2.0
+
+
+def _geo_crs(table) -> dict:
+    return json.loads(table.schema.metadata[b"geo"])["columns"]["geometry"]["crs"]
+
+
+class TestTableCrs:
+    """The output is tagged with the SRID ``the_geom`` really has (#1059).
+
+    Carto's GeoJSON format is ``ST_AsGeoJSON(the_geom)`` with no transform, so
+    a table stored in a projected SRID comes back in projected coordinates.
+    Tagging it OGC:CRS84 labelled easting/northing as lon/lat.
+    """
+
+    URL = "https://x.carto.com/api/v2/sql"
+
+    @staticmethod
+    def _srid_rows(rows):
+        return mock.patch.object(carto_module, "_carto_sql_json", return_value={"rows": rows})
+
+    @pytest.mark.parametrize(
+        ("rows", "expected"),
+        [
+            ([{"srid": 4326}], [4326]),
+            ([{"srid": "2272"}], [2272]),
+            ([{"srid": 3857.0}], [3857]),
+            ([{"srid": 4326}, {"srid": 2272}], [4326, 2272]),
+            ([{"srid": 4326}, {"srid": "4326"}], [4326]),
+            ([], []),
+            (None, []),
+            (["garbage"], []),
+            ([{"srid": True}], []),
+            ([{"srid": 3.5}], []),
+            ([{"srid": "abc"}], []),
+            ([{"srid": None}], []),
+            ([{"srid": {"code": 4326}}], []),
+        ],
+        ids=[
+            "int",
+            "quoted",
+            "integral-float",
+            "mixed",
+            "duplicate",
+            "no-rows",
+            "rows-null",
+            "row-not-a-mapping",
+            "bool",
+            "fractional",
+            "not-a-number",
+            "srid-null",
+            "srid-not-a-scalar",
+        ],
+    )
+    def test_probe_reads_the_srids(self, rows, expected):
+        with self._srid_rows(rows) as probe:
+            assert carto_module._probe_geometry_srids(self.URL, "tbl") == expected
+        sql = probe.call_args.args[1]
+        assert 'ST_SRID("the_geom")' in sql
+        assert "LIMIT 1" in sql
+        assert "DISTINCT" not in sql
+
+    def test_probe_over_the_data_query_looks_for_a_second_srid(self):
+        data_sql = 'SELECT * FROM "tbl" WHERE (x = 1\n) LIMIT 10'
+        with self._srid_rows([{"srid": 4326}]) as probe:
+            carto_module._probe_geometry_srids(self.URL, "tbl", source_sql=data_sql)
+        sql = probe.call_args.args[1]
+        assert "SELECT DISTINCT ST_SRID" in sql
+        assert f"FROM ({data_sql}) AS q" in sql
+        assert "LIMIT 2" in sql
+
+    def test_mixed_srids_are_refused(self):
+        with self._srid_rows([{"srid": 4326}, {"srid": 2272}]):
+            with pytest.raises(CartoError, match="more than one SRID") as exc:
+                carto_module._resolve_table_crs(self.URL, "tbl", source_sql="SELECT 1")
+        assert "4326" in str(exc.value)
+        assert "2272" in str(exc.value)
+
+    @pytest.mark.parametrize(
+        ("srid", "authority", "code"),
+        [
+            (4326, "OGC", "CRS84"),
+            (3857, "EPSG", 3857),
+            (900913, "EPSG", 3857),
+            (2272, "EPSG", 2272),
+        ],
+        ids=["wgs84-is-crs84", "web-mercator", "legacy-google-mercator", "state-plane"],
+    )
+    def test_a_known_srid_resolves(self, srid, authority, code):
+        crs = carto_module._crs_for_srid(srid)
+        assert crs["id"]["authority"] == authority
+        assert crs["id"]["code"] == code
+
+    @pytest.mark.parametrize("srid", [0, -1, 999999])
+    def test_an_unknown_srid_does_not_resolve(self, srid):
+        assert carto_module._crs_for_srid(srid) is None
+
+    def test_no_geometry_value_tags_crs84(self):
+        with self._srid_rows([]):
+            crs = carto_module._resolve_table_crs(self.URL, "tbl")
+        assert crs["id"] == {"authority": "OGC", "code": "CRS84"}
+
+    def test_a_projected_srid_is_tagged(self):
+        with self._srid_rows([{"srid": 2272}]):
+            crs = carto_module._resolve_table_crs(self.URL, "tbl")
+        assert crs["id"] == {"authority": "EPSG", "code": 2272}
+
+    @pytest.mark.parametrize("srid", [0, 999999])
+    def test_an_unresolvable_srid_is_refused(self, srid):
+        with self._srid_rows([{"srid": srid}]):
+            with pytest.raises(CartoError, match=f"SRID {srid}") as exc:
+                carto_module._resolve_table_crs(self.URL, "tbl")
+        assert "OGC:CRS84" in str(exc.value)
+
+    def test_a_failed_probe_is_refused_without_the_api_key(self):
+        secret = "s3cr3t-key"
+        with mock.patch.object(
+            carto_module,
+            "_carto_sql_json",
+            side_effect=CartoError(f"Carto SQL request failed: https://x/?api_key={secret}"),
+        ):
+            with pytest.raises(CartoError, match="could not read the SRID") as exc:
+                carto_module._resolve_table_crs(self.URL, "tbl", api_key=secret)
+        assert secret not in str(exc.value)
+
+    def test_empty_table_takes_the_crs_it_is_given(self):
+        table = _create_empty_geoparquet_table(crs=carto_module._crs_for_srid(2272))
+        assert _geo_crs(table)["id"]["code"] == 2272
+
+    def _extract(self, srid_rows, fetched, total_count):
+        """Run carto_to_table with every request mocked: SRID probe, count, fetch."""
+        import pyarrow as pa
+
+        with (
+            self._srid_rows(srid_rows),
+            mock.patch.object(carto_module, "_get_row_count", return_value=total_count),
+            mock.patch.object(
+                carto_module, "_fetch_with_retry", return_value=pa.table(fetched)
+            ) as fetch,
+            mock.patch.object(
+                carto_module,
+                "repair_arrow_table_geometry",
+                side_effect=lambda t, col, repair: (t, 0),
+            ),
+        ):
+            table = carto_to_table(self.URL, "tbl", geometry=True)
+        return table, fetch
+
+    def test_a_projected_table_is_written_with_its_own_crs(self):
+        table, _ = self._extract([{"srid": 2272}], {"id": [1], "geom": [b"\x00"]}, 1)
+        assert _geo_crs(table)["id"] == {"authority": "EPSG", "code": 2272}
+
+    def test_a_wgs84_table_is_still_crs84(self):
+        table, _ = self._extract([{"srid": 4326}], {"id": [1], "geom": [b"\x00"]}, 1)
+        assert _geo_crs(table)["id"] == {"authority": "OGC", "code": "CRS84"}
+
+    def test_an_unresolvable_table_writes_nothing(self):
+        with pytest.raises(CartoError, match="SRID 999999"):
+            self._extract([{"srid": 999999}], {"id": [1], "geom": [b"\x00"]}, 1)
+
+    def test_no_matching_rows_still_carries_the_tables_crs(self):
+        table, fetch = self._extract([{"srid": 2272}], {"id": [1], "geom": [b"\x00"]}, 0)
+        assert table.num_rows == 0
+        assert fetch.call_count == 0
+        assert _geo_crs(table)["id"]["code"] == 2272
+
+    def test_a_fetch_with_no_rows_still_carries_the_tables_crs(self):
+        import pyarrow as pa
+
+        empty = {"id": pa.array([], pa.int64()), "geom": pa.array([], pa.binary())}
+        table, _ = self._extract([{"srid": 2272}], empty, None)
+        assert table.num_rows == 0
+        assert _geo_crs(table)["id"]["code"] == 2272

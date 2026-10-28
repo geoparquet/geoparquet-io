@@ -11,12 +11,14 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
+    planar_view,
     quote_identifier,
     sql_path,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
@@ -175,6 +177,23 @@ def _find_optimal_iterations(total_rows, target_rows, verbose=False):
     return best_iterations
 
 
+def _centroid_sql(con, input_path, geom_col) -> str:
+    """``ST_Centroid`` of ``geom_col`` in ``input_path``, whatever type DuckDB reads it as.
+
+    A GeoParquet column reads back as native ``GEOMETRY``, but a WKB column
+    written without a ``geo`` key (an in-memory table spilled to a scratch file
+    by ``add_kdtree_table``) reads back as ``BLOB``, and ``ST_Centroid(BLOB)``
+    does not bind (#1222). ``input_path`` is RAW, escaped here by ``sql_path``.
+    """
+    quoted = quote_identifier(geom_col)
+    (column_type,) = con.execute(
+        f"SELECT column_type FROM (DESCRIBE SELECT {quoted} FROM {sql_path(input_path)})"
+    ).fetchone()
+    if column_type.upper().startswith("GEOMETRY"):
+        return f"ST_Centroid({quoted})"
+    return f"ST_Centroid(ST_GeomFromWKB({quoted}))"
+
+
 def _build_sampling_query(
     input_path, geom_col, kdtree_column_name, iterations, sample_size, con, verbose=False
 ):
@@ -192,14 +211,15 @@ def _build_sampling_query(
     2. Build a series of CTEs that iteratively compute partition IDs
     3. Each CTE checks boundaries and appends '0' or '1' to partition ID
     """
+    centroid = _centroid_sql(con, input_path, geom_col)
     # Phase 1: Compute boundaries from sample
     # We need to capture the actual boundary value used at each split
     boundaries_query = f"""
         WITH RECURSIVE kdtree_sample(iteration, x, y, partition_id, split_value) AS (
             SELECT
                 0 AS iteration,
-                ST_X(ST_Centroid({quote_identifier(geom_col)})) AS x,
-                ST_Y(ST_Centroid({quote_identifier(geom_col)})) AS y,
+                ST_X({centroid}) AS x,
+                ST_Y({centroid}) AS y,
                 '0' AS partition_id,
                 NULL::DOUBLE AS split_value
             FROM {sql_path(input_path)} USING SAMPLE {sample_size} ROWS
@@ -262,8 +282,8 @@ def _build_sampling_query(
     cte_parts.append(f"""
         data_with_coords AS (
             SELECT *,
-                ST_X(ST_Centroid({quote_identifier(geom_col)})) AS _kdtree_x,
-                ST_Y(ST_Centroid({quote_identifier(geom_col)})) AS _kdtree_y,
+                ST_X({centroid}) AS _kdtree_x,
+                ST_Y({centroid}) AS _kdtree_y,
                 '0' AS _kdtree_partition
             FROM {sql_path(input_path)}
         )
@@ -382,7 +402,11 @@ def add_kdtree_table(
     os.close(temp_fd)
 
     try:
-        pq.write_table(table, temp_path)
+        # DuckDB reads a GEOGRAPHY column back as planar GEOMETRY, so the temp
+        # copy is the planar view and the result gets the input's edges back (#1253).
+        warn_planar_math("add_kdtree", table, geom_col)
+        view, registered = planar_view(table, "kdtree_input")
+        pq.write_table(view, temp_path)
 
         if iterations is None:
             # The temp copy's size stands in for the input's: an in-memory table
@@ -408,7 +432,7 @@ def add_kdtree_table(
             if table.schema.metadata:
                 result = result.replace_schema_metadata(table.schema.metadata)
 
-            return result
+            return registered.restore_edges(result)
         finally:
             con.close()
     finally:
@@ -473,6 +497,8 @@ def add_kdtree_column(
     configure_verbose(verbose)
 
     require_iterations_or_auto(iterations, auto_target_rows)
+
+    warn_planar_math_for_file("add_kdtree", input_parquet)
 
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
@@ -557,12 +583,13 @@ def add_kdtree_column(
             debug(f"Computing KD-tree partitions (exact mode: {iterations} iterations)...")
             debug("  This will process the full dataset recursively...")
         # https://duckdb.org/2024/09/09/spatial-extension.html
+        centroid = _centroid_sql(con, input_path, geom_col)
         query = f"""
             WITH RECURSIVE kdtree(iteration, x, y, partition_id, row_id) AS (
                 SELECT
                     0 AS iteration,
-                    ST_X(ST_Centroid({quote_identifier(geom_col)})) AS x,
-                    ST_Y(ST_Centroid({quote_identifier(geom_col)})) AS y,
+                    ST_X({centroid}) AS x,
+                    ST_Y({centroid}) AS y,
                     '0' AS partition_id,
                     ROW_NUMBER() OVER () AS row_id
                 FROM {sql_path(input_path)}

@@ -12,7 +12,7 @@ from unittest import mock
 import pytest
 
 from geoparquet_io.core.crs_utils import (
-    crs_string_for_transform,
+    crs_authority_code,
     source_crs_string,
     transform_geom_sql,
 )
@@ -21,22 +21,22 @@ from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 EPSG_28992 = {"id": {"authority": "EPSG", "code": 28992}}
 
 
-class TestCrsStringForTransform:
+class TestCrsAuthorityCode:
     def test_projected_dict_returns_auth_code(self):
-        assert crs_string_for_transform(EPSG_28992) == "EPSG:28992"
+        assert crs_authority_code(EPSG_28992) == "EPSG:28992"
 
     def test_projected_string_returns_auth_code(self):
-        assert crs_string_for_transform("EPSG:28992") == "EPSG:28992"
+        assert crs_authority_code("EPSG:28992") == "EPSG:28992"
 
     def test_none_returns_none(self):
-        assert crs_string_for_transform(None) is None
+        assert crs_authority_code(None) is None
 
     @pytest.mark.parametrize(
         "crs", ["EPSG:4326", "OGC:CRS84", {"id": {"authority": "OGC", "code": "CRS84"}}]
     )
     def test_default_crs_returns_none(self, crs):
         # The default CRS needs no transform when the target is lon/lat.
-        assert crs_string_for_transform(crs) is None
+        assert crs_authority_code(crs) is None
 
 
 class TestTransformGeomSql:

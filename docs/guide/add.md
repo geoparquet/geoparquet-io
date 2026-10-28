@@ -25,13 +25,38 @@ The `add` commands enhance GeoParquet files with spatial indices, geometry metri
     scratch file first, so those commands preserve the version and the CRS now
     too.
 
-    Two shapes are not fully covered yet, both pinned by failing-on-purpose
-    tests: a native `GEOGRAPHY` column comes back as a planar `GEOMETRY` while
-    the metadata still declares spherical edges
+    A native `GEOGRAPHY` column stays `GEOGRAPHY` with its spherical edges
     ([#999](https://github.com/geoparquet/geoparquet-io/issues/999)), and a
-    *secondary* geometry column keeps its own Parquet type but is left out of
-    `geo.columns` and loses its CRS
+    *secondary* geometry column is described in `geo.columns` with its own CRS
     ([#1000](https://github.com/geoparquet/geoparquet-io/issues/1000)).
+
+!!! warning "Spherical edges and planar math"
+    The values these commands compute treat edges as straight lines on the
+    plane. That covers `bbox`, the cell keys (`h3`, `s2`, `a5`, `quadkey`) and
+    `kdtree`, and also `simplify`, `reproject` and the `aggregate` commands. On
+    a column with spherical edges they still run, and the values they add are
+    the planar ones. The output keeps the column's edges, and each command or
+    Python call logs one warning. A CLI input read from stdin is not checked.
+    Geodesic versions are tracked in
+    [#1286](https://github.com/geoparquet/geoparquet-io/issues/1286) and
+    [#1289](https://github.com/geoparquet/geoparquet-io/issues/1289).
+    Operations that only pass the geometry through, such as `sort` or
+    `extract`, keep the edges and do not warn.
+
+    === "CLI"
+
+        ```bash
+        gpio add bbox world_geography.parquet world_bbox.parquet
+        ```
+
+    === "Python"
+
+        ```python
+        import geoparquet_io as gpio
+
+        # Logs one warning, and the bbox values are planar
+        gpio.read("world_geography.parquet").add_bbox()
+        ```
 
 !!! note "Coordinate Reference Systems"
     The grid-index commands (`h3`, `s2`, `a5`, `quadkey`) and `admin-divisions` are
@@ -69,9 +94,18 @@ Add precomputed bounding boxes for faster spatial queries:
     gpio.read('input.parquet').add_bbox(column_name='bounds').write('output.parquet')
     ```
 
-Creates a struct column with `{xmin, ymin, xmax, ymax}` for each feature, plus the `covering` metadata that points at it. Because gpio computes the column from the geometry in the same statement, it can declare the covering. For a column gpio did not compute, the only name it will vouch for is a struct column called exactly `bbox` — the universal convention every 1.0-era writer emitted before `covering` existed, which any write carries forward with a covering. Any other name (`bounds`, `extent`, `tile_bbox`) is left undeclared, since a covering asserts a relationship gpio cannot verify from a column name; `gpio add bbox-metadata` is where you assert it deliberately. The `covering` key is not part of the GeoParquet 2.0 specification text — it was introduced in 1.1 and removed in 2.0 in favour of the native statistics. 2.0 readers must tolerate unknown fields, so a covering stays legal to carry, and [geoparquet#302](https://github.com/opengeospatial/geoparquet/pull/302) *proposes* reinstating it as an option (still open at time of writing). The motivation is real either way: native statistics prune whole row groups, while a bbox column's page index also prunes pages within one.
+Creates a struct column with `{xmin, ymin, xmax, ymax}` for each feature, plus the `covering` metadata that points at it. Because gpio computes the column from the geometry in the same statement, it can declare the covering. For a column gpio did not compute, the only name it will vouch for is a struct column called exactly `bbox` — the universal convention every 1.0-era writer emitted before `covering` existed, which any write carries forward with a covering. Any other name (`bounds`, `extent`, `tile_bbox`) is left undeclared, since a covering asserts a relationship gpio cannot verify from a column name; `gpio add bbox-metadata` is where you assert it deliberately. Inventing one is the only thing the name rule governs: a covering that *already exists* — one gpio just computed under `--bbox-name bounds`, or one GDAL wrote over `geometry_bbox` — is somebody's assertion already, and every write carries it forward whatever the column is called. The `covering` key is not part of the GeoParquet 2.0 specification text — it was introduced in 1.1 and removed in 2.0 in favour of the native statistics. 2.0 readers must tolerate unknown fields, so a covering stays legal to carry, and [geoparquet#302](https://github.com/opengeospatial/geoparquet/pull/302) *proposes* reinstating it as an option (still open at time of writing). The motivation is real either way: native statistics prune whole row groups, while a bbox column's page index also prunes pages within one.
 
 ### Existing Bbox Detection
+
+An "existing bbox column" means the same two things everywhere in gpio: the
+column the **primary** geometry column's own `covering.bbox` names, or a struct
+column called exactly `bbox` that no other column's covering claims. A
+`bounds`, `tile_extent` or `boundary_bbox` struct nothing declared is ordinary
+data — `gpio add bbox` computes its own column beside it,
+`gpio extract --bbox` filters on the geometry rather than pre-filtering on
+values nothing vouched for, and `gpio add bbox-metadata` reports that there is
+no bbox column to declare unless you name one with `--bbox-name`.
 
 The command automatically checks for existing bbox columns:
 
@@ -80,6 +114,7 @@ The command automatically checks for existing bbox columns:
 - **If `--bbox-name` asks for a different name**: That column is computed and added alongside the existing one, with a warning that the file will have two bbox columns
 - **If a write option is asked for explicitly** (`--geoparquet-version`, `--compression`, `--compression-level`, `--row-group-size`): the column is recomputed instead of copied, because a verbatim copy reproduces the input's settings and cannot honour the requested ones
 - **Use `--force`**: Replace existing bbox column with a freshly computed one
+- **If the name is taken by something that is not a bbox struct** (a string tile id called `bbox`, or the same name spelled `BBOX`): that column is the input's own data, so it is kept as it is and the computed bbox is written under the next free name (`bbox_1`, `bbox_2`, …) with the covering declared over that column; a warning names both. `gpio convert` and the Python API's `Table.add_bbox()` take the same decision, so one collision means one thing whichever path writes the column ([#1176](https://github.com/geoparquet/geoparquet-io/issues/1176))
 
 The copy matters for pipelines: `gpio add bbox in.parquet out.parquet` always leaves a file at `out.parquet` with a bbox column, whether or not one had to be computed, so the next step in a script has something to read ([#728](https://github.com/geoparquet/geoparquet-io/issues/728)). Every copy is reported on the console, so a recomputed bbox is never confused with a copied one. `--dry-run` says which of the two it would be. When no output file is given there is nothing to write, and the command only reports.
 
@@ -127,6 +162,24 @@ If your file already has a bbox column but lacks covering metadata (e.g., from e
 
     This modifies the file in-place to add only the metadata, without creating a new file.
 
+    !!! info "The data is not re-encoded"
+
+        The `geo` key is rewritten in the footer and every page below it is copied
+        byte for byte ([#1141](https://github.com/geoparquet/geoparquet-io/issues/1141)),
+        so the compression codec *and its level*, the encodings, the bloom filters,
+        the page index, the row-group boundaries, the row order and every other
+        footer key come out exactly as they went in. The file grows by the size of
+        the key and nothing else, and the work is proportional to the footer rather
+        than to the file.
+
+        This matters because a Parquet file does not record the compression *level*
+        it was written at. The command used to re-encode every page with a DuckDB
+        `COPY`, which had no level to carry over and fell back to DuckDB's default
+        of 3: a file written at zstd 15 came back 11.6% bigger on the reported
+        fixture and 36% bigger on a real one. A footer gpio cannot read — an
+        encrypted one, or a thrift structure it does not recognise — falls back to
+        that rewrite, with a warning saying so.
+
     !!! note "Requires GeoParquet 1.1+"
 
         The `covering` key was introduced in GeoParquet 1.1, so this command fails on a
@@ -172,6 +225,132 @@ If your file already has a bbox column but lacks covering metadata (e.g., from e
     table.add_bbox_metadata().write('output.parquet')
     ```
 
+#### Declaring a column gpio will not vouch for
+
+Auto-detection names two columns and no others: the one the **primary** geometry
+column's own `covering.bbox` already points at, and a struct called exactly
+`bbox` that no other column's covering claims. A file GDAL wrote carries its
+struct as `geometry_bbox` — exactly the right four numbers, under a name that is
+not evidence of what they bound. `--bbox-name` is where you supply that
+evidence:
+
+=== "CLI"
+
+    <!-- doctest: skip="needs a gdal_written.parquet carrying a geometry_bbox struct" -->
+    ```bash
+    gpio add bbox-metadata gdal_written.parquet --bbox-name geometry_bbox
+    ```
+
+=== "Python"
+
+    <!-- doctest: skip="needs a gdal_written.parquet carrying a geometry_bbox struct" -->
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.read('gdal_written.parquet')
+    table.add_bbox_metadata(bbox_column='geometry_bbox').write('output.parquet')
+    ```
+
+Naming a column is an assertion about its values, so three things stay refused.
+A column the file does not have. A struct the spec forbids a `covering` to point
+at (Overture's `xmin, xmax, ymin, ymax`) — see the field-order note above. And a
+struct some **other** geometry column already declares as *its* covering: those
+values bound that column's geometry, not the primary's, so declaring them on the
+primary would make readers prune rows that genuinely match. Compute the
+primary's own column instead with `gpio add bbox`.
+
+## STAC Collection Metadata
+
+A [stac-geoparquet](https://github.com/stac-utils/stac-geoparquet) file holds
+STAC Items as rows. The specification lets it carry the Collections those
+Items belong to in the file's own footer, under the `stac-geoparquet` key, so a
+reader that has the file has the Collection too and does not need a catalog to
+interpret it. `gpio add stac-metadata` writes that key:
+
+The setup each example below runs first — copying a file to `items.parquet`
+and writing a small `collection.json` — lives in a `doctest:` comment above
+each fence, so the examples execute in the docs lane rather than being skipped.
+
+=== "CLI"
+
+    <!-- doctest: setup="cp input.parquet items.parquet", setup="printf %s '{@type@:@Collection@,@id@:@PSScene@,@stac_version@:@1.1.0@,@description@:@PlanetScope scenes@,@license@:@proprietary@,@extent@:{@spatial@:{@bbox@:[[-180,-90,180,90]]},@temporal@:{@interval@:[[null,null]]}},@links@:[]}' | tr @ '\042' > collection.json" -->
+    ```bash
+    # In place
+    gpio add stac-metadata items.parquet --collection collection.json
+
+    # Or to a copy
+    gpio add stac-metadata items.parquet out.parquet --collection collection.json
+    ```
+
+=== "Python"
+
+    <!-- doctest: setup="cp input.parquet items.parquet", setup="printf %s '{@type@:@Collection@,@id@:@PSScene@,@stac_version@:@1.1.0@,@description@:@PlanetScope scenes@,@license@:@proprietary@,@extent@:{@spatial@:{@bbox@:[[-180,-90,180,90]]},@temporal@:{@interval@:[[null,null]]}},@links@:[]}' | tr @ '\042' > collection.json" -->
+    ```python
+    from geoparquet_io.api import ops
+
+    # The file form patches the footer of a file already on disk
+    ops.add_stac_metadata('items.parquet', 'collection.json')
+    ```
+
+    <!-- doctest: setup="cp input.parquet items.parquet", setup="printf %s '{@type@:@Collection@,@id@:@PSScene@,@stac_version@:@1.1.0@,@description@:@PlanetScope scenes@,@license@:@proprietary@,@extent@:{@spatial@:{@bbox@:[[-180,-90,180,90]]},@temporal@:{@interval@:[[null,null]]}},@links@:[]}' | tr @ '\042' > collection.json" -->
+    ```python
+    import geoparquet_io as gpio
+
+    # Or set it before the file is written
+    table = gpio.read('items.parquet')
+    table.add_stac_metadata('collection.json').write('out.parquet')
+    ```
+
+The value written is:
+
+```json
+{"version": "1.1.0", "collections": {"PSScene": {"type": "Collection", "id": "PSScene"}}}
+```
+
+!!! note "`collections` is a map, and the singular `collection` is deprecated"
+
+    `collections` is keyed by collection id, which is what an Item's
+    `collection` field points at. A Collection with no `id` is refused rather
+    than filed under a made-up key. stac-geoparquet 1.0.0 defined a singular
+    `collection` key instead; 1.1.0 **deprecated** it, so under the default
+    1.1.0 gpio never writes it. With `--stac-geoparquet-version 1.0.0` gpio
+    writes `collection` (for a strict 1.0.0 reader) beside the map, and refuses
+    a file that would name more than one Collection, which 1.0.0 cannot
+    express. Those are the only two versions the specification defines;
+    anything else is refused, because the version in the footer is what a
+    reader dispatches on.
+
+!!! warning "The rows should be STAC Items, and the Collection should be one"
+
+    gpio warns, but does not refuse, when the file lacks a column the
+    specification requires of an Item row (`id`, `geometry`, `bbox`, `links`,
+    `assets`, `stac_extensions`), or when the object passed is not of type
+    `Collection`. The Collection is embedded as given — including any signed
+    hrefs in its links — so check it before publishing the file.
+
+!!! info "The data is not re-encoded"
+
+    Like `gpio add bbox-metadata`, this rewrites the footer and copies every
+    page below it byte for byte, so the compression codec *and its level*, the
+    encodings, the bloom filters, the page index, the row-group boundaries and
+    the row order all come out as they went in. Unlike `add bbox-metadata`
+    there is no rewrite behind it: a footer gpio cannot patch is reported
+    rather than re-encoded, since re-encoding a whole file to add one key
+    would cost its compression level to buy nothing. The file is still copied
+    once, so the command needs room for a second copy beside it.
+
+    Remote URLs are not supported — download the file, add the key, upload it.
+
+!!! note "A second call adds a collection, it does not replace the map"
+
+    `collections` is a map precisely so one stac-geoparquet file can index
+    Items from more than one Collection. Running `gpio add stac-metadata`
+    again with a different `--collection` adds that Collection alongside the
+    ones already in the footer; running it again with the same collection id
+    replaces that one entry. A 1.0.0 file's singular `collection`, and any
+    other top-level field, is carried over too. The version declared by the
+    most recent call wins.
+
 ## H3 Hexagonal Cells
 
 !!! note "Input CRS"
@@ -179,6 +358,14 @@ If your file already has a bbox column but lacks covering metadata (e.g., from e
     non-CRS84 CRS is reprojected to lon/lat automatically before cell assignment,
     so projected data (e.g. national grids in metres) keys correctly with no
     manual reprojection. Input already in OGC:CRS84 / EPSG:4326 is untouched.
+
+!!! note "Index entries in the `covering` metadata"
+    The index commands (`h3`, `s2`, `a5`, `quadkey`, `kdtree`) record their
+    column in the geometry's `covering` metadata only beside a `bbox` entry —
+    the one covering encoding the GeoParquet spec defines, and the one readers
+    such as geopandas require. An input with no bbox column gets no covering at
+    all, and adding the bbox column later does not bring the index entry back;
+    run `gpio add bbox` first if you want it recorded.
 
 Add [H3](https://h3geo.org/) hexagonal cell IDs based on geometry centroids:
 

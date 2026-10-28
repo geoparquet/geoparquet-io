@@ -10,6 +10,7 @@ the same way every time and nobody hand-writes 130 bullets.
     uv run python scripts/release_notes.py 1.4.0              # print the section
     uv run python scripts/release_notes.py 1.4.0 --write      # splice into CHANGELOG.md
     uv run python scripts/release_notes.py 1.4.0 --contributors   # who is new, and why
+    uv run python scripts/release_notes.py 1.4.0 --release-body   # GitHub release body
 
 Not every contributor writes a conventional-commit title, and the pull request
 keeps whatever it merged with. `release_title_overrides.json` rewrites a title
@@ -295,6 +296,35 @@ def splice(changelog: str, section: str) -> str:
     return f"{head}{section}\n{rest}" if rest else f"{head}{section}"
 
 
+# "[@user](https://github.com/user)", the changelog's author link. GitHub's
+# release-page Contributors list counts only plain @mentions, so the release
+# body unwraps it. Bots link to /apps/ and never match, which is what we want.
+AUTHOR_LINK_RE = re.compile(r"\[@([A-Za-z0-9-]+)\]\(https://github\.com/\1\)")
+
+
+def release_body(changelog: str, version: str) -> str:
+    """The GitHub release body for a version, built from its CHANGELOG.md section.
+
+    CHANGELOG.md keeps the author links, since the docs site renders it and a
+    bare @mention links nothing there. The release page needs the reverse.
+    """
+    match = re.search(rf"^## v{re.escape(version)} .*$", changelog, re.MULTILINE)
+    if not match:
+        raise ReleaseNotesError(f"CHANGELOG.md has no v{version} section.")
+    heading = match.group(0)
+    end = changelog.find("\n## ", match.end())
+    body = changelog[match.end() : end if end != -1 else None].strip()
+    # GitHub's anchor: the heading lowercased, anything but a letter, digit,
+    # space or hyphen dropped, then spaces to hyphens. "## v1.4.0 (2026-08-30)"
+    # gives "v140-2026-08-30", so it is not built from the version string.
+    anchor = re.sub(r"[^a-z0-9 -]", "", heading[3:].lower()).replace(" ", "-")
+    body = AUTHOR_LINK_RE.sub(r"@\1", body)
+    return (
+        f"{body}\n\n"
+        f"Full changelog entry: https://github.com/{REPO}/blob/main/CHANGELOG.md#{anchor}\n"
+    )
+
+
 def generate(version: str, previous: str | None) -> Notes:
     """Ask GitHub for the notes between the previous tag and this version."""
     args = [
@@ -328,10 +358,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="list each first-time contributor and every PR they wrote",
     )
+    parser.add_argument(
+        "--release-body",
+        action="store_true",
+        help="print the GitHub release body from this version's CHANGELOG.md section",
+    )
     parser.add_argument("--overrides", type=Path, default=OVERRIDES_PATH)
     args = parser.parse_args(argv)
 
     try:
+        if args.release_body:
+            print(release_body(CHANGELOG.read_text(), args.version), end="")
+            return 0
         notes = apply_overrides(
             generate(args.version, args.previous), load_overrides(args.overrides)
         )

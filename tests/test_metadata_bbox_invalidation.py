@@ -395,6 +395,124 @@ class TestReprojectBboxRefreshed:
         assert bbox[2] >= max_x - 1e-6
 
 
+def _make_undeclared_bbox_struct_file(path, column="bounds"):
+    """Points plus a bbox-shaped struct that nothing declares as the covering.
+
+    The #1171 narrowing stopped reading `bounds`/`extent`/`*_bbox` as the
+    primary's bbox column, which is right -- gpio cannot know those values bound
+    the geometry -- but it also means reproject no longer regenerates them, so
+    they are carried through in the SOURCE CRS without a word.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    bbox_type = pa.struct([(axis, pa.float64()) for axis in ("xmin", "ymin", "xmax", "ymax")])
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+    }
+    table = pa.table(
+        {
+            "id": [1, 2],
+            "geometry": [_wkb_point(1, 1), _wkb_point(2, 2)],
+            column: pa.array(
+                [
+                    {"xmin": 1.0, "ymin": 1.0, "xmax": 1.0, "ymax": 1.0},
+                    {"xmin": 2.0, "ymin": 2.0, "xmax": 2.0, "ymax": 2.0},
+                ],
+                type=bbox_type,
+            ),
+        }
+    )
+    pq.write_table(
+        table.replace_schema_metadata({b"geo": json.dumps(geo).encode("utf-8")}), str(path)
+    )
+
+
+def _struct_column(path, column):
+    import pyarrow.parquet as pq
+
+    return pq.read_table(str(path)).column(column).to_pylist()
+
+
+class TestReprojectWarnsAboutCarriedBboxStructs:
+    """A bbox-shaped struct nobody declares survives a reprojection unchanged.
+
+    After #1171 only the primary's own `covering` -- or the one self-evident
+    name `bbox` -- is regenerated, which is correct but silent: a `bounds`
+    struct comes out of `gpio convert reproject` still holding degrees beside
+    geometry in meters. Carrying it is the only safe behaviour (gpio cannot
+    vouch that those values bound the geometry), so this says so instead.
+    """
+
+    def _reproject(self, src, out):
+        reproject_impl(str(src), str(out), target_crs="EPSG:3857", source_crs="OGC:CRS84")
+
+    def test_an_undeclared_struct_is_carried_and_announced(self, tmp_path, caplog):
+        src = tmp_path / "src.parquet"
+        out = tmp_path / "out.parquet"
+        _make_undeclared_bbox_struct_file(src)
+
+        with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+            self._reproject(src, out)
+
+        assert "bounds" in caplog.text
+        assert "gpio add bbox-metadata" in caplog.text
+        assert "gpio add bbox --force" in caplog.text
+        assert _struct_column(out, "bounds") == _struct_column(src, "bounds")
+
+    def test_the_primarys_declared_covering_is_regenerated_in_silence(self, tmp_path, caplog):
+        src = tmp_path / "src.parquet"
+        out = tmp_path / "out.parquet"
+        _make_bbox_column_file(src)
+
+        with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+            self._reproject(src, out)
+
+        assert "bbox" not in caplog.text
+        # Degrees 1..2 become ~111k..222k metres: regenerated, not carried.
+        assert all(box["xmin"] > 1000 for box in _struct_column(out, "bbox"))
+
+    def test_a_secondarys_declared_covering_is_carried_in_silence(self, tmp_path, caplog):
+        """Its values legitimately describe the secondary geometry, untouched here."""
+        from tests.fixtures.multi_geometry import create_multi_geometry_with_secondary_bbox
+
+        src = tmp_path / "src.parquet"
+        out = tmp_path / "out.parquet"
+        create_multi_geometry_with_secondary_bbox(str(src), declare_boundary_covering=True)
+
+        with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+            self._reproject(src, out)
+
+        assert "boundary_bbox" not in caplog.text
+        assert _struct_column(out, "boundary_bbox") == _struct_column(src, "boundary_bbox")
+
+    def test_the_streaming_path_says_it_too(self, tmp_path, caplog):
+        """Both query builders ask, so a piped reprojection is not the silent one."""
+        from geoparquet_io.core.reproject import _reproject_streaming
+
+        src = tmp_path / "src.parquet"
+        out = tmp_path / "out.parquet"
+        _make_undeclared_bbox_struct_file(src)
+
+        with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+            _reproject_streaming(
+                str(src),
+                str(out),
+                target_crs="EPSG:3857",
+                source_crs="OGC:CRS84",
+                compression="ZSTD",
+                compression_level=None,
+                verbose=False,
+                profile=None,
+                geoparquet_version="1.1",
+            )
+
+        assert "bounds" in caplog.text
+        assert _struct_column(out, "bounds") == _struct_column(src, "bounds")
+
+
 class TestExtractBboxReflectsFilter:
     """Filtered extract must reflect only surviving rows."""
 

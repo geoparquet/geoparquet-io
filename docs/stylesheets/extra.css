@@ -1,0 +1,133 @@
+/*
+ * geoparquet-io brand colors.
+ *
+ *   blue    #051d35  header, footer, dark-mode background, light-mode text
+ *   cream   #fdebcb  light-mode background, dark-mode text, header text
+ *   orange  #f27216  accent only: hover, active, focus, and selection states
+ *
+ * Orange stays rare. Body text and links never use it at rest, because
+ * orange on cream reads at about 2.5:1 and fails WCAG AA for text.
+ */
+
+:root {
+  --gpio-blue: #051d35;
+  --gpio-blue-light: #0c2d4d;
+  --gpio-blue-dark: #03121f;
+  --gpio-cream: #fdebcb;
+  --gpio-cream-light: #fef4e2;
+  --gpio-cream-dark: #f5dcb0;
+  --gpio-orange: #f27216;
+}
+
+/* Header, tabs, and footer: the same blue in both schemes. */
+[data-md-color-primary="custom"] {
+  --md-primary-fg-color: var(--gpio-blue);
+  --md-primary-fg-color--light: var(--gpio-blue-light);
+  --md-primary-fg-color--dark: var(--gpio-blue-dark);
+  --md-primary-bg-color: var(--gpio-cream);
+  --md-primary-bg-color--light: #fdebcbb3;
+}
+
+[data-md-color-accent="custom"] {
+  --md-accent-fg-color: var(--gpio-orange);
+  --md-accent-fg-color--transparent: #f272161a;
+  --md-accent-bg-color: var(--gpio-blue);
+  --md-accent-bg-color--light: #051d35b3;
+}
+
+/* Light scheme: blue on cream. */
+[data-md-color-scheme="default"] {
+  --md-default-fg-color: var(--gpio-blue);
+  --md-default-fg-color--light: #051d35b3;
+  --md-default-fg-color--lighter: #051d3566;
+  --md-default-fg-color--lightest: #051d351a;
+  --md-default-bg-color: var(--gpio-cream);
+  --md-default-bg-color--light: #fdebcbb3;
+  --md-default-bg-color--lighter: #fdebcb4d;
+  --md-default-bg-color--lightest: #fdebcb1f;
+  --md-code-fg-color: var(--gpio-blue);
+  --md-code-bg-color: var(--gpio-cream-light);
+  --md-typeset-color: var(--gpio-blue);
+  --md-typeset-a-color: var(--gpio-blue);
+  --md-typeset-table-color: #051d3526;
+  --md-typeset-table-color--light: #051d350a;
+  --md-admonition-bg-color: var(--gpio-cream-light);
+  --md-footer-fg-color: var(--gpio-cream);
+  --md-footer-bg-color: var(--gpio-blue);
+  --md-footer-bg-color--dark: var(--gpio-blue-dark);
+}
+
+/* Dark scheme: cream on blue. */
+[data-md-color-scheme="slate"] {
+  --md-default-fg-color: #fdebcbe6;
+  --md-default-fg-color--light: #fdebcbb3;
+  --md-default-fg-color--lighter: #fdebcb66;
+  --md-default-fg-color--lightest: #fdebcb1f;
+  --md-default-bg-color: var(--gpio-blue);
+  --md-default-bg-color--light: #051d35b3;
+  --md-default-bg-color--lighter: #051d354d;
+  --md-default-bg-color--lightest: #051d351f;
+  --md-code-fg-color: var(--gpio-cream);
+  --md-code-bg-color: var(--gpio-blue-light);
+  --md-typeset-color: var(--md-default-fg-color);
+  --md-typeset-a-color: var(--gpio-cream);
+  --md-typeset-table-color: #fdebcb26;
+  --md-typeset-table-color--light: #fdebcb0a;
+  --md-admonition-bg-color: var(--gpio-blue-light);
+  --md-footer-fg-color: var(--gpio-cream);
+  --md-footer-bg-color: var(--gpio-blue-dark);
+  --md-footer-bg-color--dark: #020b14;
+}
+
+/*
+ * Links match the body text, so an underline marks them. The underline
+ * turns orange on hover: one of the few places the accent shows.
+ */
+.md-typeset a {
+  text-decoration: underline;
+  text-decoration-color: var(--md-default-fg-color--lighter);
+  text-underline-offset: 0.15em;
+}
+
+.md-typeset a:hover,
+.md-typeset a:focus {
+  color: var(--md-typeset-a-color);
+  text-decoration-color: var(--gpio-orange);
+  text-decoration-thickness: 0.12em;
+}
+
+/* Headerlinks, tab labels, and badge rows carry no underline. */
+.md-typeset a.headerlink,
+.md-typeset .tabbed-labels a,
+.md-typeset p > a:has(> img) {
+  text-decoration: none;
+}
+
+/*
+ * The theme marks the current page in the navigation with the accent.
+ * Orange on blue reads well, so dark mode keeps it. Orange on cream does
+ * not, so light mode marks the current page in blue at a heavier weight.
+ */
+.md-nav__link--active,
+.md-nav__item--active > .md-nav__link {
+  font-weight: 700;
+}
+
+[data-md-color-scheme="default"] .md-nav__link--active,
+[data-md-color-scheme="default"] .md-nav__link--active:hover {
+  color: var(--gpio-blue);
+}
+
+/* The header mark is a dark square, so soften its corners on cream. */
+.md-header__button.md-logo img {
+  border-radius: 0.2rem;
+}
+
+/* The home page logo. */
+.md-typeset .gpio-logo {
+  display: block;
+  width: 320px;
+  max-width: 70%;
+  margin: 0 auto 1.5rem;
+  border-radius: 0.6rem;
+}

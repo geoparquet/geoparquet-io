@@ -27,6 +27,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import _sanitize_url_for_logging, is_remote_url
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
@@ -381,11 +382,14 @@ def _count_rows(con, source, is_table_ref=False):
 
 
 def _setup_dataset_and_columns(
-    input_parquet, dataset_name, dataset_source, levels, verbose, no_cache=False
+    input_parquet, dataset_name, dataset_source, levels, verbose, no_cache=False, memory_limit=None
 ):
     """Setup dataset and get column information."""
 
     dataset = AdminDatasetFactory.create(dataset_name, dataset_source, verbose)
+    # --write-memory also bounds the dataset's cache downloads (#1156), the
+    # first of which may run right here.
+    dataset.memory_limit = memory_limit
 
     if verbose:
         debug(f"\nUsing admin dataset: {dataset.get_dataset_name()}")
@@ -782,7 +786,11 @@ def _execute_per_level_joins(
             )
         else:
             temp_table = f"_gpio_admin_step_{i}"
-            con.execute(f"CREATE OR REPLACE TEMP TABLE {temp_table} AS {level_query}")
+            # The same memory policy as the final write below: this join
+            # materializes the whole input, so leaving it at DuckDB's own
+            # host-sized default is what reached the cgroup cap (#1174).
+            with scoped_write_memory_limit(con, memory_limit, verbose):
+                con.execute(f"CREATE OR REPLACE TEMP TABLE {temp_table} AS {level_query}")
             current_source = temp_table
 
     if dry_run:
@@ -858,12 +866,18 @@ def add_admin_divisions_multi(
         input_bbox_col,
         admin_bbox_col,
     ) = _setup_dataset_and_columns(
-        input_parquet, dataset_name, dataset_source, levels, verbose, no_cache=no_cache
+        input_parquet,
+        dataset_name,
+        dataset_source,
+        levels,
+        verbose,
+        no_cache=no_cache,
+        memory_limit=memory_limit,
     )
 
     # Admin boundaries are OGC:CRS84; reproject a non-CRS84 input before the join
     # (otherwise ST_Intersects errors on the CRS mismatch or matches nothing, #525).
-    source_crs = source_crs_string(input_parquet, verbose)
+    source_crs = source_crs_string(input_parquet, verbose, input_geom_col)
 
     # Get metadata before processing (skip in dry-run)
     metadata = None

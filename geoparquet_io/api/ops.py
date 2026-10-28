@@ -28,6 +28,9 @@ from geoparquet_io.core.add.h3 import add_h3_table
 from geoparquet_io.core.add.kdtree import DEFAULT_KDTREE_TARGET_ROWS, add_kdtree_table
 from geoparquet_io.core.add.quadkey import add_quadkey_table
 from geoparquet_io.core.add.s2 import add_s2_table
+from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
+from geoparquet_io.core.add.stac_metadata import add_stac_metadata as _add_stac_metadata_file
+from geoparquet_io.core.add.stac_metadata import add_stac_metadata_table as _add_stac_metadata_table
 from geoparquet_io.core.extract import extract_table
 from geoparquet_io.core.hilbert_order import hilbert_order_table
 from geoparquet_io.core.reproject import reproject_table
@@ -37,7 +40,10 @@ from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE, str_order_table
 from geoparquet_io.core.wfs import DEFAULT_WFS_PAGE_SIZE
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
+
+    from geoparquet_io.core.preview import BboxFilterPreview
 
 
 def add_bbox(
@@ -94,6 +100,84 @@ def add_bbox_metadata(
         bbox_column=bbox_column,
         geometry_column=geometry_column,
     )
+
+
+def add_stac_metadata(
+    parquet_file: str | Path,
+    collection: dict | str | Path,
+    *,
+    version: str = DEFAULT_STAC_GEOPARQUET_VERSION,
+    output_file: str | Path | None = None,
+    overwrite: bool = False,
+) -> None:
+    """
+    Write the `stac-geoparquet` key into a Parquet file's footer.
+
+    Mirrors `gpio add stac-metadata`. The value is
+    `{"version": ..., "collections": {<id>: <collection>}}`: `collections` is a
+    map keyed by collection id, and the singular `collection` key of the 1.0.0 release
+    is deprecated in 1.1.0, so it is written only under version 1.0.0 (beside the map,
+    and a 1.0.0 value can hold just one Collection).
+
+    A file that already carries a `stac-geoparquet` key keeps every collection
+    it already named: this call's Collection is added to the existing
+    `collections` map (replacing its own id if that id was already there), not
+    written over the whole key. The declared version always becomes the one
+    this call asks for.
+
+    Only the footer is rewritten; every page below it is copied verbatim, so
+    the compression codec and level, the encodings, the bloom filters, the page
+    index, the row-group boundaries and the row order are all preserved.
+
+    Args:
+        parquet_file: Path to a local Parquet file. Modified in place unless
+            `output_file` is given.
+        collection: A STAC Collection dict, or a path to a JSON file with one.
+        version: stac-geoparquet spec version, "1.0.0" or "1.1.0"
+        output_file: Where to write the result instead of over the input
+        overwrite: Replace `output_file` if it already exists
+
+    Raises:
+        GeoParquetError: If a path is remote, the output exists and `overwrite`
+            was not given, the version is not one the spec defines, the
+            Collection cannot be read, or it has no `id`
+    """
+    _add_stac_metadata_file(
+        str(parquet_file),
+        collection,
+        version=version,
+        output_file=str(output_file) if output_file is not None else None,
+        overwrite=overwrite,
+    )
+
+
+def add_stac_metadata_table(
+    table: pa.Table,
+    collection: dict | str | Path,
+    *,
+    version: str = DEFAULT_STAC_GEOPARQUET_VERSION,
+) -> pa.Table:
+    """
+    Set the `stac-geoparquet` key on an in-memory table's schema metadata.
+
+    The in-memory counterpart of `add_stac_metadata()`, for a table that has
+    not been written yet. Every other schema metadata key — `geo` first among
+    them — is kept. A `stac-geoparquet` key the table already carries is
+    merged with, not replaced by, this call's Collection, the same way the
+    file path is.
+
+    Args:
+        table: Input PyArrow Table
+        collection: A STAC Collection dict, or a path to a JSON file with one
+        version: stac-geoparquet spec version, "1.0.0" or "1.1.0"
+
+    Returns:
+        New table carrying the key. The columns are untouched.
+
+    Raises:
+        GeoParquetError: If the version or the Collection is refused
+    """
+    return _add_stac_metadata_table(table, collection, version=version)
 
 
 def add_quadkey(
@@ -364,6 +448,8 @@ def aggregate_a5(
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> pa.Table:
     """
     Aggregate an Arrow table into A5 grid cells with per-cell statistics.
@@ -371,7 +457,9 @@ def aggregate_a5(
     Args:
         table: Input PyArrow Table with geometry column
         resolution: A5 resolution level 0-30
-        metric: Aggregation metric, e.g. "sum:area" or "mean:value"
+        metric: Aggregation metric, e.g. "sum:area" or "avg:value". Also
+            ``pct_cell:<column>`` (grids only) -> ``pct_<column>``, the percent
+            of the cell covered by a per-feature area in m2.
         breakdown: Column name to pivot into per-category count columns
         breakdown_limit: Max number of breakdown categories (default: 20)
         out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
@@ -383,6 +471,11 @@ def aggregate_a5(
             "bbox" (center of a bbox covering column), or a point column name
         bbox_column: Bbox covering column for bucket_point="bbox" (auto-detected
             when omitted)
+        breakdown_metric: What each breakdown column holds: None/'count'
+            (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
+            pivot named <func>_<col>_<value>
+        memory_limit: DuckDB memory limit for the aggregation (e.g. "8GB").
+            Default: half the process's memory ceiling
 
     Returns:
         New PyArrow Table with one row per A5 cell
@@ -401,6 +494,8 @@ def aggregate_a5(
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
+        memory_limit=memory_limit,
     )
 
 
@@ -416,6 +511,8 @@ def aggregate_h3(
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> pa.Table:
     """
     Aggregate an Arrow table into H3 grid cells with per-cell statistics.
@@ -423,7 +520,9 @@ def aggregate_h3(
     Args:
         table: Input PyArrow Table with geometry column
         resolution: H3 resolution level 0-15
-        metric: Aggregation metric, e.g. "sum:area" or "mean:value"
+        metric: Aggregation metric, e.g. "sum:area" or "avg:value". Also
+            ``pct_cell:<column>`` (grids only) -> ``pct_<column>``, the percent
+            of the cell covered by a per-feature area in m2.
         breakdown: Column name to pivot into per-category count columns
         breakdown_limit: Max number of breakdown categories (default: 20)
         out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
@@ -435,6 +534,11 @@ def aggregate_h3(
             "bbox" (center of a bbox covering column), or a point column name
         bbox_column: Bbox covering column for bucket_point="bbox" (auto-detected
             when omitted)
+        breakdown_metric: What each breakdown column holds: None/'count'
+            (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
+            pivot named <func>_<col>_<value>
+        memory_limit: DuckDB memory limit for the aggregation (e.g. "8GB").
+            Default: half the process's memory ceiling
 
     Returns:
         New PyArrow Table with one row per H3 cell
@@ -453,6 +557,8 @@ def aggregate_h3(
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
+        memory_limit=memory_limit,
     )
 
 
@@ -467,6 +573,8 @@ def aggregate_admin(
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> pa.Table:
     """
     Aggregate an Arrow table into administrative regions with per-region statistics.
@@ -474,7 +582,9 @@ def aggregate_admin(
     Args:
         table: Input PyArrow Table with geometry column
         level: Admin level to aggregate by ("country", "region", "subregion")
-        metric: Aggregation metric, e.g. "sum:area" or "mean:value"
+        metric: Aggregation metric, e.g. "sum:area" or "avg:value". Also
+            ``pct_cell:<column>`` (grids only) -> ``pct_<column>``, the percent
+            of the cell covered by a per-feature area in m2.
         breakdown: Column name to pivot into per-category count columns
         breakdown_limit: Max number of breakdown categories (default: 20)
         out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
@@ -485,6 +595,11 @@ def aggregate_admin(
             "bbox" (center of a bbox covering column), or a point column name
         bbox_column: Bbox covering column for bucket_point="bbox" (auto-detected
             when omitted)
+        breakdown_metric: What each breakdown column holds: None/'count'
+            (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
+            pivot named <func>_<col>_<value>
+        memory_limit: DuckDB memory limit for the aggregation (e.g. "8GB").
+            Default: half the process's memory ceiling
 
     Returns:
         New PyArrow Table with one row per admin region
@@ -508,6 +623,103 @@ def aggregate_admin(
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
+        memory_limit=memory_limit,
+    )
+
+
+def create_overview_file(
+    input_parquet: str,
+    overview_out: str,
+    *,
+    levels: str | list[int | str] | None = None,
+    cell_detail: float | None = None,
+    explicit_gsd: str | list[float] | None = None,
+    max_tile_kb: int = 500,
+    bytes_per_cell: float | None = None,
+    cell_column: str | None = None,
+    scheme: str | None = None,
+    output_dir: str | None = None,
+    compression: str = "ZSTD",
+    compression_level: int | None = None,
+    geoparquet_version: str | None = None,
+    force: bool = False,
+    verbose: bool = False,
+    show_sql: bool = False,
+    memory_limit: str | None = None,
+) -> str:
+    """
+    Assemble an aggregate's level ladder into ONE levelled overview GeoParquet.
+
+    `create_overviews` writes a sibling file per level, which a tiler then has
+    to pick zoom bands for. This writes the same ladder as a single file whose
+    levels are additional *rows* tagged by a ``level`` column, which
+    ``tylertoo export-pmtiles`` tiles in one pass, reading the levels as
+    written (#1117). No per-level tippecanoe run, no hand-pinned zoom bands.
+
+    Each level's ground sample distance is measured from the data -- the median
+    width of that level's own cells, in metres -- divided by ``cell_detail``,
+    so it is scheme-agnostic and shrinks as levels refine. The per-level
+    sibling files are written as well (see ``output_dir``) and left in place.
+
+    Args:
+        input_parquet: Path to a `gpio process aggregate` output.
+        overview_out: Path for the assembled overview GeoParquet.
+        levels: Coarser levels to build (comma string or list). Default:
+            auto-select against ``max_tile_kb``.
+        cell_detail: Cell width in GSD units at the level serving it (default
+            4): a level's GSD is its measured cell width divided by this.
+            Larger serves every level at a finer zoom.
+        explicit_gsd: Explicit GSDs in metres, coarse to fine, strictly
+            decreasing, one per built level plus the base (a comma string or a
+            list). Overrides ``cell_detail``.
+        max_tile_kb: Tile-size budget (KB) driving auto level selection.
+        bytes_per_cell: Override the estimated compressed bytes per cell.
+        cell_column: Cell id column when auto-detection fails.
+        scheme: Bucketing scheme (a5/h3/admin) when inference is ambiguous.
+        output_dir: Directory for the per-level sibling files (default:
+            beside the input).
+        compression: Parquet compression codec (default ZSTD).
+        compression_level: Optional compression level. Unset ZSTD resolves
+            to the process group's default of 9, not the funnel's 15.
+        geoparquet_version: GeoParquet spec version to write.
+        force: Overwrite an existing ``overview_out`` or sibling file.
+        memory_limit: DuckDB memory limit for the rollups (e.g. "8GB").
+            Default: half the process's memory ceiling.
+        verbose: Enable verbose debug logging.
+        show_sql: Log the rollup SQL.
+
+    Returns:
+        The path written.
+
+    Example:
+        >>> from geoparquet_io.api import ops
+        >>> ops.create_overview_file('cells.parquet', 'pyramid.parquet',
+        ...                          levels='8,7,6,5')
+        'pyramid.parquet'
+    """
+    from geoparquet_io.core.process.overview.run import (
+        create_overview_file as _create_overview_file,
+    )
+
+    return _create_overview_file(
+        input_parquet,
+        overview_out,
+        levels=levels,
+        cell_detail=cell_detail,
+        explicit_gsd=explicit_gsd,
+        max_tile_kb=max_tile_kb,
+        bytes_per_cell=bytes_per_cell,
+        cell_column=cell_column,
+        scheme=scheme,
+        output_dir=output_dir,
+        compression=compression,
+        compression_level=compression_level,
+        geoparquet_version=geoparquet_version,
+        force=force,
+        verbose=verbose,
+        show_sql=show_sql,
+        memory_limit=memory_limit,
     )
 
 
@@ -526,6 +738,7 @@ def create_overviews(
     force: bool = False,
     verbose: bool = False,
     show_sql: bool = False,
+    memory_limit: str | None = None,
 ) -> list[tuple[int | str, str]]:
     """
     Build coarser overview levels from an aggregate GeoParquet file.
@@ -548,11 +761,14 @@ def create_overviews(
             e.g. H3 ids stored as integers
         output_dir: Directory for overview files (default: beside the input)
         compression: Parquet compression codec (default: ZSTD)
-        compression_level: Optional compression level
+        compression_level: Optional compression level. Unset ZSTD resolves
+            to the process group's default of 9, not the funnel's 15
         geoparquet_version: GeoParquet version to write
         force: Overwrite existing overview output files
         verbose: Enable verbose output
         show_sql: Log the rollup SQL
+        memory_limit: DuckDB memory limit for the rollups (e.g. "8GB").
+            Default: half the process's memory ceiling
 
     Returns:
         List of (level, output_path) tuples, coarse to fine
@@ -578,6 +794,7 @@ def create_overviews(
         force=force,
         verbose=verbose,
         show_sql=show_sql,
+        memory_limit=memory_limit,
     )
 
 
@@ -1747,8 +1964,9 @@ def sub_partition_by_s2(
 
 
 def read_bigquery(
-    table_id: str,
+    table_id: str | None = None,
     *,
+    sql: str | None = None,
     project: str | None = None,
     credentials_file: str | None = None,
     where: str | None = None,
@@ -1774,8 +1992,20 @@ def read_bigquery(
     can be parsed by specifying geography_column and geometry_format.
 
     Args:
-        table_id: Fully qualified BigQuery table ID (project.dataset.table)
-        project: GCP project ID (overrides project in table_id if set)
+        table_id: Fully qualified BigQuery table ID (project.dataset.table).
+            Omit it when ``sql`` is given.
+        sql: GoogleSQL to run as the source, in place of ``table_id``. For
+            what ``where`` cannot express -- a window function, a join, a
+            GROUP BY. Must be a single SELECT or WITH query. Requires
+            ``project``, and is mutually exclusive with every argument that
+            shapes the query (``where``, ``bbox``,
+            ``bbox_mode``, ``bbox_threshold``, ``limit``, ``columns``,
+            ``exclude_columns``): the statement says all of that itself.
+            Filter inside it -- a query job materializes its whole result
+            first, so an unfiltered statement over a large relation fails
+            with "Response too large to return".
+        project: GCP project ID (overrides project in table_id if set;
+            required with ``sql``)
         credentials_file: Path to service account JSON file
         where: SQL WHERE clause for filtering (BigQuery SQL syntax)
         bbox: Bounding box for spatial filter as "minx,miny,maxx,maxy"
@@ -1798,8 +2028,15 @@ def read_bigquery(
         RuntimeError: If BigQuery query fails
 
     Note:
-        **Cannot read BigQuery views or external tables** - this is a
-        limitation of the BigQuery Storage Read API.
+        A view, materialized view or external table is read with a BigQuery
+        query job rather than the Storage Read API, which serves physical
+        tables only. gpio detects this from BigQuery's refusal on the read and
+        retries automatically. The job is billed by bytes scanned, and
+        ``where``, ``bbox`` and ``limit`` are pushed into it rather than
+        applied afterwards, so filter a large view or the job can fail with
+        "Response too large to return". So are the selected columns. On a
+        view ``where`` runs as GoogleSQL, so only bare column names, plain
+        single-quoted strings and no comments are accepted there.
 
     Example:
         >>> from geoparquet_io.api import ops
@@ -1813,6 +2050,13 @@ def read_bigquery(
         ...     geography_column='geometry',
         ...     geometry_format='wkt'
         ... )
+
+        >>> # Run your own GoogleSQL instead of reading a table
+        >>> table = ops.read_bigquery(
+        ...     sql="SELECT name, geog FROM `p.d.t` QUALIFY ROW_NUMBER() "
+        ...         "OVER (PARTITION BY id ORDER BY version DESC) = 1",
+        ...     project='myproject',
+        ... )
     """
     from geoparquet_io.core.column_selection import join_column_list
     from geoparquet_io.core.extract_bigquery import extract_bigquery
@@ -1825,25 +2069,27 @@ def read_bigquery(
     include_cols = join_column_list(columns, "columns")
     exclude_cols = join_column_list(exclude_columns, "exclude_columns")
 
+    source = table_id if table_id is not None else "the sql query"
+
     # Validate bbox_mode
     valid_bbox_modes = {"auto", "server", "local"}
     if bbox_mode not in valid_bbox_modes:
         raise ValueError(
-            f"Invalid bbox_mode '{bbox_mode}' for table '{table_id}'. "
+            f"Invalid bbox_mode '{bbox_mode}' for {source!r}. "
             f"Must be one of: {', '.join(sorted(valid_bbox_modes))}"
         )
 
     # Validate bbox_threshold
     if not isinstance(bbox_threshold, int) or bbox_threshold < 0:
         raise ValueError(
-            f"Invalid bbox_threshold '{bbox_threshold}' for table '{table_id}'. "
-            "Must be an integer >= 0."
+            f"Invalid bbox_threshold '{bbox_threshold}' for {source!r}. Must be an integer >= 0."
         )
 
     # Get PyArrow table (don't write to file)
     arrow_table = extract_bigquery(
         table_id=table_id,
         output_parquet=None,  # Return table instead of writing
+        sql=sql,
         project=project,
         credentials_file=credentials_file,
         where=where,
@@ -1861,7 +2107,7 @@ def read_bigquery(
     )
 
     if arrow_table is None:
-        raise RuntimeError(f"Failed to read from BigQuery table: {table_id}")
+        raise RuntimeError(f"Failed to read from BigQuery: {table_id or sql}")
 
     return arrow_table
 
@@ -2029,6 +2275,10 @@ def convert_to_geopackage(
     output_path: str,
     overwrite: bool = False,
     layer_name: str = "features",
+    bbox: str | tuple[float, float, float, float] | None = None,
+    geometry: str | None = None,
+    where: str | None = None,
+    use_first_geometry: bool = False,
 ) -> str:
     """
     Convert a GeoParquet table to GeoPackage format.
@@ -2040,6 +2290,13 @@ def convert_to_geopackage(
         output_path: Output file path (must be local, not cloud URL)
         overwrite: Overwrite existing file (default: False)
         layer_name: Layer name in GeoPackage (default: 'features')
+        bbox: Bounding box filter, (xmin, ymin, xmax, ymax) or
+            "xmin,ymin,xmax,ymax"; prunes on the bbox covering column when
+            the table has one
+        geometry: Geometry filter: GeoJSON or WKT text, or @filepath
+        where: DuckDB WHERE clause for filtering rows
+        use_first_geometry: Use the first geometry when ``geometry`` is a
+            FeatureCollection with several
 
     Returns:
         Output path
@@ -2053,12 +2310,20 @@ def convert_to_geopackage(
         "geopackage",
         overwrite=overwrite,
         layer_name=layer_name,
+        bbox=bbox,
+        geometry=geometry,
+        where=where,
+        use_first_geometry=use_first_geometry,
     )
 
 
 def convert_to_flatgeobuf(
     table: pa.Table,
     output_path: str,
+    bbox: str | tuple[float, float, float, float] | None = None,
+    geometry: str | None = None,
+    where: str | None = None,
+    use_first_geometry: bool = False,
 ) -> str:
     """
     Convert a GeoParquet table to FlatGeobuf format.
@@ -2068,6 +2333,12 @@ def convert_to_flatgeobuf(
     Args:
         table: Input PyArrow Table with geometry column
         output_path: Output file path (must be local, not cloud URL)
+        bbox: Bounding box filter, (xmin, ymin, xmax, ymax) or
+            "xmin,ymin,xmax,ymax"
+        geometry: Geometry filter: GeoJSON or WKT text, or @filepath
+        where: DuckDB WHERE clause for filtering rows
+        use_first_geometry: Use the first geometry when ``geometry`` is a
+            FeatureCollection with several
 
     Returns:
         Output path
@@ -2079,6 +2350,10 @@ def convert_to_flatgeobuf(
         output_path,
         write_flatgeobuf,
         "flatgeobuf",
+        bbox=bbox,
+        geometry=geometry,
+        where=where,
+        use_first_geometry=use_first_geometry,
     )
 
 
@@ -2087,6 +2362,10 @@ def convert_to_csv(
     output_path: str,
     include_wkt: bool = True,
     include_bbox: bool = True,
+    bbox: str | tuple[float, float, float, float] | None = None,
+    geometry: str | None = None,
+    where: str | None = None,
+    use_first_geometry: bool = False,
 ) -> str:
     """
     Convert a GeoParquet table to CSV format.
@@ -2099,6 +2378,12 @@ def convert_to_csv(
         output_path: Output file path (must be local, not cloud URL)
         include_wkt: Include WKT geometry column (default: True)
         include_bbox: Include bbox column if present (default: True)
+        bbox: Bounding box filter, (xmin, ymin, xmax, ymax) or
+            "xmin,ymin,xmax,ymax"
+        geometry: Geometry filter: GeoJSON or WKT text, or @filepath
+        where: DuckDB WHERE clause for filtering rows
+        use_first_geometry: Use the first geometry when ``geometry`` is a
+            FeatureCollection with several
 
     Returns:
         Output path
@@ -2112,6 +2397,10 @@ def convert_to_csv(
         "csv",
         include_wkt=include_wkt,
         include_bbox=include_bbox,
+        bbox=bbox,
+        geometry=geometry,
+        where=where,
+        use_first_geometry=use_first_geometry,
     )
 
 
@@ -2164,6 +2453,12 @@ def from_arcgis(
     max_allowable_offset: float | None = None,
     repair_geometry: bool = True,
     timeout: float = 60.0,
+    # Convention: `ops` signatures are positional-or-keyword, so a new parameter
+    # is appended last (as max_allowable_offset was in d9c9282) rather than
+    # grouped with its core neighbour; inserting mid-signature would silently
+    # re-map existing positional calls. `Table.extract_arcgis` is keyword-only
+    # and groups by meaning instead.
+    batch_size: int | None = None,
 ) -> pa.Table:
     """
     Fetch ArcGIS Feature Service as a PyArrow Table.
@@ -2186,6 +2481,10 @@ def from_arcgis(
             output-CRS units (degrees on the default WGS84 path).
         timeout: Per-request HTTP timeout in seconds (default 60). Increase for
             layers with very large/complex geometries that are slow to serialize.
+        batch_size: Features requested per page. Default None pages at the
+            server's advertised maxRecordCount, capped at 2000. Lower it for
+            layers the server cannot serialize a full page of (JSON error 500,
+            or a request timeout). Must be a positive integer.
 
     Returns:
         PyArrow Table with WKB geometry column
@@ -2213,6 +2512,7 @@ def from_arcgis(
         include_cols=include_cols,
         exclude_cols=exclude_cols,
         limit=limit,
+        batch_size=batch_size,
         max_workers=max_workers,
         output_crs=output_crs,
         max_allowable_offset=max_allowable_offset,
@@ -2246,12 +2546,21 @@ def from_wfs(
         typename: Feature type name (e.g., 'cities' or 'ns:cities')
         version: WFS version ('auto', '2.0.0', '1.1.0', '1.0.0'). Default 'auto'
             tries 2.0.0, then 1.1.0, then 1.0.0.
-        bbox: Optional bounding box filter (xmin, ymin, xmax, ymax)
+        bbox: Optional bounding box filter (xmin, ymin, xmax, ymax), x,y, in the
+            CRS requested from the layer (output_crs, else EPSG:4326, else the
+            layer's default CRS). It is not reprojected. When it looks like
+            lon/lat on a projected layer, or matches nothing, a warning prints
+            the box reprojected into the layer CRS as a hint.
         limit: Maximum features to fetch
         max_workers: Parallel requests for large datasets (default: 1)
         page_size: Features per page when using parallel mode (default: 100000)
-        axis_order: Bbox axis order ('auto', 'xy', 'latlon'). 'auto' detects from
-            CRS format - URN CRS with WFS 1.1.0+ uses lat,lon per OGC spec.
+        axis_order: Bbox axis order ('auto', 'xy', 'latlon'). Pass the bbox
+            x,y. 'auto' sends it in the form every server reads alike, CRS84
+            for lon/lat and lat,lon with the EPSG URN for other lat,lon CRSs
+            (EPSG:4258). 'xy' always sends x,y with the short EPSG:<code>
+            label (CRS84 for lon/lat). 'latlon' also sends a lon/lat bbox
+            lat,lon, for servers such as ArcGIS WFS that read every 4326 bbox
+            that way. Ignored on WFS 1.0.0, which reads x,y.
         strict_crs: If True, fail when the server returns a different CRS than
             requested. If False (default), warn and use the server's actual CRS.
             The CRS the server declares in its GeoJSON response is authoritative;
@@ -2321,7 +2630,7 @@ def from_wfs_layers(
         max_workers: Per-layer pagination workers (default: 1)
         page_size: Features per page (default: 100000)
         parallel_layers: Number of layers to extract concurrently (default: 1)
-        axis_order: Bbox axis order ('auto', 'xy', 'latlon')
+        axis_order: Bbox axis order ('auto', 'xy', 'latlon'), as in from_wfs
         strict_crs: If True, fail when the server returns a different CRS than requested
         auto_tile: Automatically subdivide into spatial tiles when the server
             caps responses (maxFeatures or startIndex limits). Matches the CLI
@@ -2471,11 +2780,11 @@ def get_row_group_geo_stats(parquet_file: str) -> list[dict]:
         List of dicts with per-row-group bbox statistics.
         Empty list if no geo stats are available.
     """
+    from geoparquet_io.core.bbox_structure import check_bbox_structure
     from geoparquet_io.core.duckdb_metadata import (
         get_file_metadata,
         get_per_row_group_bbox_stats,
         get_per_row_group_native_geo_stats,
-        has_bbox_column,
     )
     from geoparquet_io.core.metadata_utils import (
         _get_num_rows_per_row_group,
@@ -2487,8 +2796,8 @@ def get_row_group_geo_stats(parquet_file: str) -> list[dict]:
 
     # Fall back to bbox column if no native stats
     if not rg_stats:
-        has_bbox, bbox_col_name = has_bbox_column(parquet_file)
-        if has_bbox and bbox_col_name:
+        bbox_col_name = check_bbox_structure(parquet_file).get("bbox_column_name")
+        if bbox_col_name:
             rg_stats = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
 
     if not rg_stats:
@@ -2498,6 +2807,56 @@ def get_row_group_geo_stats(parquet_file: str) -> list[dict]:
     num_rows_per_rg = _get_num_rows_per_row_group(parquet_file, file_meta)
 
     return _merge_row_counts(rg_stats, num_rows_per_rg)
+
+
+def preview_bbox_filter(
+    parquet_file: str,
+    bbox: Sequence[float],
+    geometry_column: str | None = None,
+) -> BboxFilterPreview:
+    """
+    Preview the row groups a bbox-filtered read would touch, before reading.
+
+    Answers from the Parquet footer alone: which row groups can match the
+    query bbox, and how many rows and compressed bytes those groups hold --
+    a real denominator for a progress bar, or a size warning before a large
+    download. The estimate comes from per-row-group spatial statistics
+    (native Parquet geo statistics, or a bbox covering column's chunk
+    statistics); a file with neither gets an explicit "no estimate", never
+    a guess.
+
+    Args:
+        parquet_file: Path or URL of the (Geo)Parquet file
+        bbox: Query bounds as (xmin, ymin, xmax, ymax) in the file's CRS
+        geometry_column: Geometry column whose native statistics to read
+            (auto-detected if None)
+
+    Returns:
+        A ``BboxFilterPreview`` (from ``geoparquet_io.core.preview``) with
+        ``has_estimate``, ``reason``, ``stats_source``, ``row_groups``
+        (row_group_id, num_rows, compressed_bytes each), ``est_rows``,
+        ``est_bytes`` and the file's ``total_row_groups`` / ``total_rows`` /
+        ``total_bytes``. Check ``has_estimate`` before using the estimates.
+
+    Raises:
+        InvalidParameterError: If ``bbox`` is not four finite numbers with
+            xmin <= xmax and ymin <= ymax, or if ``geometry_column`` names
+            a column the file does not have.
+
+    Example:
+        >>> from geoparquet_io.api import ops
+        >>> preview = ops.preview_bbox_filter(
+        ...     'https://example.com/places.parquet',
+        ...     bbox=(-122.5, 37.7, -122.3, 37.9),
+        ... )
+        >>> if preview.has_estimate:
+        ...     print(f"~{preview.est_rows} rows, ~{preview.est_bytes} bytes")
+        ... else:
+        ...     print(f"no estimate: {preview.reason}")
+    """
+    from geoparquet_io.core.preview import preview_bbox_filter as _preview_bbox_filter
+
+    return _preview_bbox_filter(parquet_file, bbox, geometry_column=geometry_column)
 
 
 def compression_stats(path: str) -> list[dict]:
@@ -2589,6 +2948,8 @@ def create_pmtiles(
     maximum_tile_bytes: int | None = None,
     force: bool = False,
     repair_geometry: bool = True,
+    temporary_directory: str | None = None,
+    chunks: str | None = None,
 ) -> None:
     """
     Create PMTiles from a GeoParquet file using tippecanoe.
@@ -2621,6 +2982,12 @@ def create_pmtiles(
         maximum_tile_bytes: Set an explicit per-tile byte cap via
             --maximum-tile-bytes. Takes precedence over no_tile_size_limit.
         force: Pass --force to overwrite the output file if it already exists.
+        chunks: Split the input into an ``NxM`` grid of chunks, tile each and
+            tile-join them, bounding tippecanoe's scratch by the chunk (#1116).
+            Needs ``max_zoom``; cannot be combined with ``bbox``.
+        temporary_directory: Existing directory for this run's scratch
+            (tippecanoe's ``-t`` and the gpio children's temp files);
+            defaults to the OS temp directory.
 
     Raises:
         TippecanoeNotFoundError: If tippecanoe is not in PATH
@@ -2663,6 +3030,8 @@ def create_pmtiles(
         maximum_tile_bytes=maximum_tile_bytes,
         force=force,
         repair_geometry=repair_geometry,
+        temporary_directory=temporary_directory,
+        chunks=chunks,
     )
 
 
@@ -2682,6 +3051,7 @@ def create_pmtiles_pyramid(
     attribution: str | None = None,
     force: bool = False,
     verbose: bool = False,
+    temporary_directory: str | None = None,
 ) -> None:
     """
     Create a banded multi-level PMTiles pyramid from an aggregate file.
@@ -2716,6 +3086,8 @@ def create_pmtiles_pyramid(
         attribution: Attribution HTML for the tiles
         force: Overwrite the output archive if it exists
         verbose: Enable verbose output
+        temporary_directory: Existing directory for this run's scratch and
+            the intermediate band archives; defaults to the OS temp directory
 
     Raises:
         TippecanoeNotFoundError: If tippecanoe is not in PATH
@@ -2754,5 +3126,160 @@ def create_pmtiles_pyramid(
         max_zoom=max_zoom,
         attribution=attribution,
         force=force,
+        verbose=verbose,
+        temporary_directory=temporary_directory,
+    )
+
+
+def simplify(
+    table: pa.Table,
+    tolerance: float,
+    coverage: bool = False,
+    preserve_topology: bool = True,
+    simplify_boundary: bool = True,
+    threads: int | None = None,
+    geometry_column: str | None = None,
+    drop_empty: bool = False,
+    simplify_crs: str | None = None,
+    verbose: bool = False,
+) -> pa.Table:
+    """
+    Simplify a table's geometries with coarsen (GEOS-identical Rust).
+
+    Requires the ``simplify`` extra (``pip install 'geoparquet-io[simplify]'``).
+
+    Args:
+        table: Input PyArrow Table with a WKB geometry column
+        tolerance: Simplification tolerance, in the geometry's CRS units
+        coverage: Treat the input as a polygonal coverage: shared edges stay
+            shared and no gaps or overlaps are introduced
+        preserve_topology: Keep geometries valid while simplifying (plain mode)
+        simplify_boundary: Also simplify the coverage's outer boundary
+            (coverage mode)
+        threads: Worker threads for coarsen (default: let the library decide)
+        geometry_column: Geometry column (defaults to the carried primary)
+        drop_empty: Drop rows whose geometry is empty after simplification
+            (default: keep and warn)
+        simplify_crs: Project to this CRS for the simplification (tolerance
+            in its units), then back; 'auto-utm' picks the UTM zone from
+            the data
+        verbose: Whether to print verbose output
+
+    Returns:
+        New PyArrow Table with simplified geometries and refreshed metadata
+    """
+    from geoparquet_io.core.process.simplify import simplify_table
+
+    return simplify_table(
+        table,
+        tolerance,
+        coverage=coverage,
+        preserve_topology=preserve_topology,
+        simplify_boundary=simplify_boundary,
+        threads=threads,
+        geometry_column=geometry_column,
+        drop_empty=drop_empty,
+        simplify_crs=simplify_crs,
+        verbose=verbose,
+    )
+
+
+def polygonize(
+    input_raster: str,
+    band: int = 1,
+    values: list[float] | None = None,
+    value_column: str = "value",
+    nodata: float | None = None,
+    use_mask: bool = True,
+    verbose: bool = False,
+    repair_geometry: bool = True,
+) -> pa.Table:
+    """
+    Polygonize a categorical raster band into a GeoParquet-ready table.
+
+    Requires the ``raster`` extra (``pip install 'geoparquet-io[raster]'``;
+    contourrs needs Python >= 3.12).
+
+    Args:
+        input_raster: Path to the raster (anything rasterio can open)
+        band: Raster band to polygonize (default: 1)
+        values: Pixel values to keep (default: every class)
+        value_column: Name of the class attribute column (default: 'value')
+        nodata: Nodata value to exclude (default: the raster's own tag)
+        use_mask: Honor the raster's mask/nodata (default: True)
+        verbose: Whether to print verbose output
+        repair_geometry: Repair the self-touching rings contourrs emits where a
+            region pinches to one pixel corner -- not OGC-valid, where
+            rasterio's and GDAL's equivalent output is (default: True, as in
+            every command that offers ``--repair-geometry``). Appended last:
+            ops signatures are positional-or-keyword, so inserting it
+            mid-signature would silently re-map existing positional calls.
+            The count is reported either way; the repair itself can cost
+            several times the polygonization, because the self-touching
+            polygons are the large sprawling regions.
+
+    Returns:
+        PyArrow Table with one feature per contiguous class region
+    """
+    from geoparquet_io.core.process.raster.polygonize import polygonize_raster
+
+    return polygonize_raster(
+        input_raster,
+        band=band,
+        values=values,
+        value_column=value_column,
+        nodata=nodata,
+        use_mask=use_mask,
+        repair_geometry=repair_geometry,
+        verbose=verbose,
+    )
+
+
+def contour(
+    input_raster: str,
+    levels: list[float] | None = None,
+    interval: float | None = None,
+    base: float = 0.0,
+    band: int = 1,
+    nodata: float | None = None,
+    use_mask: bool = True,
+    min_column: str = "min",
+    max_column: str = "max",
+    verbose: bool = False,
+) -> pa.Table:
+    """
+    Extract filled contour bands from an elevation raster band.
+
+    Requires the ``raster`` extra (``pip install 'geoparquet-io[raster]'``;
+    contourrs needs Python >= 3.12).
+
+    Args:
+        input_raster: Path to the raster (anything rasterio can open)
+        levels: Explicit break values (e.g. [0, 100, 250]); or use interval
+        interval: Generate breaks every N units from ``base``, spanning the
+            band's range (mutually exclusive with levels)
+        base: Offset for interval breaks (default: 0.0)
+        band: Raster band to contour (default: 1)
+        nodata: Nodata value to exclude (default: the raster's own tag)
+        use_mask: Honor the raster's mask/nodata (default: True)
+        min_column: Column name for each band's lower break (default: 'min')
+        max_column: Column name for each band's upper break (default: 'max')
+        verbose: Whether to print verbose output
+
+    Returns:
+        PyArrow Table with one feature per contour band polygon
+    """
+    from geoparquet_io.core.process.raster.contour import contour_raster
+
+    return contour_raster(
+        input_raster,
+        levels=levels,
+        interval=interval,
+        base=base,
+        band=band,
+        nodata=nodata,
+        use_mask=use_mask,
+        min_column=min_column,
+        max_column=max_column,
         verbose=verbose,
     )

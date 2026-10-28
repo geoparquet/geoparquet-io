@@ -53,16 +53,6 @@ def _write_mb(path):
     return path
 
 
-def _dead_pid():
-    """A pid that has certainly exited, so its spill leaf counts as orphaned."""
-    import subprocess
-    import sys
-
-    proc = subprocess.Popen([sys.executable, "-c", ""])
-    proc.wait()
-    return proc.pid
-
-
 class TestAddAdminDivisionsClearCache:
     """``gpio add admin-divisions --clear-cache`` reports, prompts, then deletes."""
 
@@ -167,7 +157,7 @@ class TestAddAdminDivisionsClearCache:
         assert "No cache directory found." in result.output
 
     def test_leftover_spill_directories_are_priced_and_deleted(
-        self, admin_cache_dir, places_test_file, tmp_path
+        self, admin_cache_dir, places_test_file, tmp_path, dead_pid
     ):
         """An interrupted admin run leaves a spill directory *in the cache dir*.
 
@@ -177,7 +167,7 @@ class TestAddAdminDivisionsClearCache:
         """
         admin_cache_dir.mkdir(parents=True)
         gaul = _write_mb(admin_cache_dir / "gaul.parquet")
-        orphan = admin_cache_dir / f"gpio-spill-{_dead_pid()}-abcdef123456"
+        orphan = admin_cache_dir / f"gpio-spill-{dead_pid}-abcdef123456"
         orphan.mkdir()
         _write_mb(orphan / "duckdb_temp_storage_S192K-0.tmp")
 
@@ -202,11 +192,11 @@ class TestAddAdminDivisionsClearCache:
         assert not gaul.exists()
 
     def test_a_spill_directory_alone_is_still_worth_clearing(
-        self, admin_cache_dir, places_test_file, tmp_path
+        self, admin_cache_dir, places_test_file, tmp_path, dead_pid
     ):
         """No cached datasets but a multi-GB orphan is not "nothing to delete"."""
         admin_cache_dir.mkdir(parents=True)
-        orphan = admin_cache_dir / f"gpio-spill-{_dead_pid()}-abcdef123456"
+        orphan = admin_cache_dir / f"gpio-spill-{dead_pid}-abcdef123456"
         orphan.mkdir()
         _write_mb(orphan / "duckdb_temp_storage_S192K-0.tmp")
 
@@ -382,8 +372,29 @@ class TestAddKdtreeGuards:
         assert "--approx and --exact are mutually exclusive" in result.output
         impl.assert_not_called()
 
+    def test_exact_with_the_default_approx_typed_is_rejected(self, places_test_file, tmp_path):
+        # --approx 100000 equals the default; typing it alongside --exact is
+        # still a contradiction (#951), which the old value comparison missed.
+        runner = CliRunner()
+        with patch.object(cli_add, "add_kdtree_column_impl") as impl:
+            result = runner.invoke(
+                add,
+                [
+                    "kdtree",
+                    places_test_file,
+                    str(tmp_path / "out.parquet"),
+                    "--approx",
+                    "100000",
+                    "--exact",
+                ],
+            )
+
+        assert result.exit_code == 2
+        assert "--approx and --exact are mutually exclusive" in result.output
+        impl.assert_not_called()
+
     def test_exact_alone_is_accepted(self, places_test_file, tmp_path):
-        """The guard keys off an explicitly changed --approx, not --exact on its own."""
+        """The guard keys off a typed --approx, not --exact on its own."""
         runner = CliRunner()
         with patch.object(cli_add, "add_kdtree_column_impl") as impl:
             result = runner.invoke(
@@ -535,3 +546,36 @@ class TestPartitionKdtreeGuards:
         assert result.exit_code == 2
         assert "--approx and --exact are mutually exclusive" in result.output
         impl.assert_not_called()
+
+    def test_exact_with_the_default_approx_typed_is_rejected(self, places_test_file, tmp_path):
+        # Same contradiction with --approx equal to its default (#951): the
+        # source, not the value, is what counts.
+        runner = CliRunner()
+        with patch.object(cli_partition, "partition_by_kdtree_impl") as impl:
+            result = runner.invoke(
+                partition,
+                [
+                    "kdtree",
+                    places_test_file,
+                    str(tmp_path / "out"),
+                    "--approx",
+                    "100000",
+                    "--exact",
+                ],
+            )
+
+        assert result.exit_code == 2
+        assert "--approx and --exact are mutually exclusive" in result.output
+        impl.assert_not_called()
+
+    def test_exact_alone_is_accepted(self, places_test_file, tmp_path):
+        """A bare --exact must not read as a conflict: its --approx stays unsourced."""
+        runner = CliRunner()
+        with patch.object(cli_partition, "partition_by_kdtree_impl") as impl:
+            result = runner.invoke(
+                partition, ["kdtree", places_test_file, str(tmp_path / "out"), "--exact"]
+            )
+
+        assert result.exit_code == 0, result.output
+        # sample_size is the 13th positional argument of partition_by_kdtree_impl.
+        assert impl.call_args.args[12] is None

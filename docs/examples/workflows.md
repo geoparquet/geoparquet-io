@@ -159,21 +159,16 @@ gpio check all fixed.parquet
 
 ```python
 import geoparquet_io as gpio
-import subprocess
 
-# Check using CLI (no Python API for check yet)
-result = subprocess.run(
-    ['gpio', 'check', 'all', 'input.parquet'],
-    capture_output=True,
-    text=True
-)
-print(result.stdout)
+table = gpio.read('input.parquet')
+
+# Structure checks, spatial order and spec validation: what `gpio check all` runs
+results = [table.check(), table.check_spatial(), table.validate()]
+for result in results:
+    print(result.verdict(), result.failures(), result.warnings())
 
 # Manual fix using Python API
-gpio.read('input.parquet') \
-    .add_bbox() \
-    .sort_hilbert() \
-    .write('fixed.parquet')
+table.add_bbox().sort_hilbert().write('fixed.parquet')
 ```
 
 ---

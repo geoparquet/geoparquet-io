@@ -333,13 +333,6 @@ def test_spilling_write_survives_a_read_only_working_directory(tmp_path):
 ONE_MB = 1024 * 1024
 
 
-def _dead_pid() -> int:
-    """A pid that has certainly exited and been reaped."""
-    proc = subprocess.Popen([sys.executable, "-c", ""])
-    proc.wait()
-    return proc.pid
-
-
 def _plant_leaf(base: Path, pid: int, payload: int = ONE_MB) -> Path:
     """A spill leaf shaped exactly like one gpio would leave behind."""
     leaf = base / f"gpio-spill-{pid}-{uuid.uuid4().hex[:12]}"
@@ -361,8 +354,8 @@ class TestOrphanedSpillDirectoriesAreReaped:
     fixed ``.tmp`` had, which is why the sweep exists.
     """
 
-    def test_a_leaf_whose_owner_is_gone_is_removed(self, tmp_path):
-        leaf = _plant_leaf(tmp_path, _dead_pid())
+    def test_a_leaf_whose_owner_is_gone_is_removed(self, tmp_path, dead_pid):
+        leaf = _plant_leaf(tmp_path, dead_pid)
 
         spill_directory(tmp_path)
 
@@ -385,13 +378,13 @@ class TestOrphanedSpillDirectoriesAreReaped:
 
         assert odd.is_dir()
 
-    def test_neighbours_are_never_touched(self, tmp_path):
+    def test_neighbours_are_never_touched(self, tmp_path, dead_pid):
         cached = tmp_path / "overture-2025-10-22.0.parquet"
         cached.write_bytes(b"cached dataset")
         unrelated = tmp_path / "someone-elses-scratch"
         unrelated.mkdir()
         # A *file* whose name happens to match: gpio only ever makes directories.
-        decoy = tmp_path / f"gpio-spill-{_dead_pid()}-abcdef123456"
+        decoy = tmp_path / f"gpio-spill-{dead_pid}-abcdef123456"
         decoy.write_bytes(b"not a directory")
 
         spill_directory(tmp_path)
@@ -400,20 +393,20 @@ class TestOrphanedSpillDirectoriesAreReaped:
         assert unrelated.is_dir()
         assert decoy.exists()
 
-    def test_the_sweep_recognises_the_names_gpio_actually_mints(self, tmp_path):
+    def test_the_sweep_recognises_the_names_gpio_actually_mints(self, tmp_path, dead_pid):
         """Couples the minting and the matching so they cannot drift apart."""
         minted = Path(spill_directory(tmp_path)).name
         prefix, pid, suffix = minted.rsplit("-", 2)[0], os.getpid(), minted.rsplit("-", 1)[1]
         assert f"{prefix}-{pid}-{suffix}" == minted
 
-        orphan = tmp_path / f"{prefix}-{_dead_pid()}-{suffix}"
+        orphan = tmp_path / f"{prefix}-{dead_pid}-{suffix}"
         orphan.mkdir()
 
         spill_directory(tmp_path)
 
         assert not orphan.exists()
 
-    def test_repeated_interrupted_runs_do_not_accumulate(self, tmp_path):
+    def test_repeated_interrupted_runs_do_not_accumulate(self, tmp_path, dead_pid):
         """The accumulation the reviewer measured: 28MB -> 133MB -> 202MB.
 
         Each iteration is one gpio run that picks a spill path, spills, and is
@@ -426,16 +419,18 @@ class TestOrphanedSpillDirectoriesAreReaped:
             leaf = Path(spill_directory(tmp_path))
             # Pretend this run is a separate process, since the sweep -- rightly
             # -- refuses to delete a live process's directory.
-            leaf = leaf.parent / leaf.name.replace(f"-{os.getpid()}-", f"-{_dead_pid()}-")
+            leaf = leaf.parent / leaf.name.replace(f"-{os.getpid()}-", f"-{dead_pid}-")
             leaf.mkdir()
             (leaf / "duckdb_temp_storage_S192K-0.tmp").write_bytes(b"\0" * ONE_MB)
             sizes.append(_bytes_under(tmp_path))
 
         assert sizes == [ONE_MB, ONE_MB, ONE_MB]
 
-    def test_an_unremovable_leaf_does_not_fail_the_connection(self, tmp_path, monkeypatch):
+    def test_an_unremovable_leaf_does_not_fail_the_connection(
+        self, tmp_path, dead_pid, monkeypatch
+    ):
         """Best effort: a permission error on someone else's leftovers is not fatal."""
-        leaf = _plant_leaf(tmp_path, _dead_pid())
+        leaf = _plant_leaf(tmp_path, dead_pid)
 
         def refuse(*args, **kwargs):
             raise PermissionError(13, "Permission denied", str(leaf))
@@ -455,10 +450,12 @@ class TestOrphanedSpillDirectoriesAreReaped:
         """The default base always exists; an explicit one need not yet."""
         assert spill_directory(tmp_path / "not-created-yet")
 
-    def test_opening_a_default_connection_reaps_the_temp_directory(self, tmp_path, monkeypatch):
+    def test_opening_a_default_connection_reaps_the_temp_directory(
+        self, tmp_path, dead_pid, monkeypatch
+    ):
         """The sweep is on the path every gpio connection already takes."""
         monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
-        leaf = _plant_leaf(tmp_path, _dead_pid())
+        leaf = _plant_leaf(tmp_path, dead_pid)
 
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
         try:
@@ -468,8 +465,8 @@ class TestOrphanedSpillDirectoriesAreReaped:
 
         assert not leaf.exists()
 
-    def test_sweep_reports_what_it_removed(self, tmp_path):
-        dead = _plant_leaf(tmp_path, _dead_pid())
+    def test_sweep_reports_what_it_removed(self, tmp_path, dead_pid):
+        dead = _plant_leaf(tmp_path, dead_pid)
         alive = _plant_leaf(tmp_path, os.getpid())
 
         removed = sweep_orphaned_spill_dirs(tmp_path)

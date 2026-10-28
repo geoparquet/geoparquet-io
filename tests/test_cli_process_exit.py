@@ -42,7 +42,7 @@ _PROGRAM = (
 )
 
 
-#: Windows keeps the interpreter's exit (see ADR-0007), so finalization runs there.
+#: Windows keeps the interpreter's exit (see `_leave_process`), so finalization runs there.
 _WINDOWS = sys.platform == "win32"
 
 #: Arrow's end-of-stream marker: a zero-length continuation, and the last eight

@@ -12,15 +12,19 @@ from geoparquet_io.core.crs_utils import (
     crs_string_from_geo_meta,
     crs_string_from_table,
     get_crs_display_name,
+    is_empty_crs_value,
     parse_geo_metadata_from_schema,
     source_crs_string,
     transform_geom_sql,
+    warn_empty_crs_once,
 )
 from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadata
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
+    register_arrow,
     sql_path,
+    uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
@@ -28,6 +32,7 @@ from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
+from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
@@ -40,7 +45,6 @@ from geoparquet_io.core.remote import (
     _sanitize_url_for_logging,
     is_remote_url,
     needs_httpfs,
-    setup_aws_profile_if_needed,
     validate_profile_for_urls,
 )
 from geoparquet_io.core.stream_io import open_input, write_output
@@ -57,9 +61,10 @@ def _is_geographic_crs(crs_info: dict | str | None) -> bool | None:
     Check if CRS is geographic (lat/long) vs projected.
 
     Returns:
-        True if geographic, False if projected, None if unknown
+        True if geographic, False if projected, None if unknown (also for an
+        empty value such as ``""`` or ``{}``, #1267)
     """
-    if crs_info is None:
+    if crs_info is None or is_empty_crs_value(crs_info):
         return None
 
     if isinstance(crs_info, str):
@@ -122,6 +127,11 @@ def _validate_crs_from_geo_metadata(
 
     crs_info = columns_meta[geom_col].get("crs")
 
+    # An empty value names no CRS: unknown, like null, and said so (#1267).
+    if is_empty_crs_value(crs_info):
+        warn_empty_crs_once(crs_info)
+        return
+
     # No CRS specified means default (WGS84)
     if crs_info is None:
         if verbose:
@@ -173,7 +183,7 @@ def _streaming_source_crs(
     - True stdin: detect from the ``geo`` metadata carried on the Arrow stream.
     """
     if not is_stdin(input_path):
-        return source_crs_string(input_path, verbose)
+        return source_crs_string(input_path, verbose, geom_col)
     geo_meta = _parse_geo_metadata_from_schema(metadata)
     return crs_string_from_geo_meta(geo_meta, geom_col)
 
@@ -255,7 +265,8 @@ def add_quadkey_table(
             "VARCHAR",
         )
 
-        con.register("__input_table", table)
+        warn_planar_math("add_quadkey", table, geom_col)
+        registered = register_arrow(con, "__input_table", table)
 
         # Check if geometry column is BLOB (needs conversion)
         columns_info = con.execute("DESCRIBE __input_table").fetchall()
@@ -312,6 +323,7 @@ def add_quadkey_table(
         if table.schema.metadata:
             result = result.replace_schema_metadata(table.schema.metadata)
 
+        result = registered.restore_edges(result)
         return result
 
 
@@ -364,6 +376,8 @@ def add_quadkey_column(
         hive_input: Read a multi-file input with hive partitioning on, so the
             ``key=value`` directory names come through as columns
     """
+    warn_planar_math_for_file("add_quadkey", input_parquet)
+
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
@@ -541,6 +555,7 @@ def _quadkey_from_clause(path: str, allow_schema_diff: bool, hive_input: bool | 
     return f"read_parquet({sql_path(path)}, {', '.join(options)})"
 
 
+@uses_aws_profile
 def _add_quadkey_file_based(
     input_parquet: str,
     output_parquet: str | None,
@@ -573,9 +588,6 @@ def _add_quadkey_file_based(
     # Validate profile is only used with S3
     validate_profile_for_urls(profile, input_parquet, output_parquet)
 
-    # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, input_parquet, output_parquet)
-
     # RAW path: shown to the user in the dry-run header below, and escaped at
     # the SQL boundary by sql_path (#802).
     input_file_path = resolve_file_url(input_parquet, verbose)
@@ -586,7 +598,7 @@ def _add_quadkey_file_based(
     # Quadkeys require lon/lat degrees. Reproject a known non-CRS84 CRS (#525);
     # otherwise keep the guard (rejects projected input we can't identify, and
     # passes through default/unknown which is assumed WGS84).
-    source_crs = source_crs_string(input_parquet, verbose)
+    source_crs = source_crs_string(input_parquet, verbose, geom_col)
     needs_transform = source_crs is not None
     if not needs_transform:
         _validate_crs_for_quadkey(input_parquet, geom_col, verbose)

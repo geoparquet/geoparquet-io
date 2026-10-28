@@ -9,6 +9,7 @@ converting GEOGRAPHY columns to GeoParquet geometry with spherical edges.
 from __future__ import annotations
 
 import os
+import re
 
 import duckdb
 import pyarrow as pa
@@ -24,6 +25,7 @@ from geoparquet_io.core.duckdb_utils import (
     validate_where_clause,
     where_condition_fragment,
 )
+from geoparquet_io.core.exceptions import ValidationError
 from geoparquet_io.core.extract import parse_bbox
 from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
@@ -34,9 +36,9 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
+from geoparquet_io.core.memory_limits import validate_memory_limit
 from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
 from geoparquet_io.core.write_funnels import write_geoparquet_table
-from geoparquet_io.core.write_strategies.duckdb_kv import validate_memory_limit
 
 # Regex patterns for GCP resource validation
 # Project IDs: 6-30 chars, lowercase letters, digits, hyphens, must start with letter
@@ -409,10 +411,205 @@ def extract_bigquery_table(
     return result
 
 
+# The Storage Read API backs bigquery_scan, and it serves physical tables
+# only. BigQuery refuses a view, a materialized view or an external table in
+# these words. Matched lowercased, against the message of the raised error.
+_NON_TABLE_ENTITY = "non-table entities cannot be read with the storage api"
+
+
+#: What ``table_id`` is called in an error message when there is no table id,
+#: because the relation came from ``--sql``.
+_SQL_SOURCE_LABEL = "the --sql query"
+
+#: Raised when --sql is combined with anything that shapes the query. Shared
+#: with the CLI so the flag names a user sees are written once.
+_SQL_EXCLUSIVE_MESSAGE = (
+    "--sql replaces the table source; express columns, filters and limits in the SQL itself."
+)
+
+
+# One GoogleSQL lexeme the statement check must step over whole, so that a
+# ';' or a keyword inside it is not mistaken for code: a triple-quoted, quoted
+# or backtick-quoted literal (any r/b prefix; a backslash always escapes the
+# next character as far as finding the end is concerned), or a comment in any
+# of GoogleSQL's three spellings. Block comments do not nest in GoogleSQL.
+# (\x22 is a double quote, spelled out so the pattern reads as no quoting.)
+_GOOGLESQL_OPAQUE = re.compile(
+    r"(?:[rRbB]{1,2})?(?:'{3}(?:\\.|[^\\])*?'{3}|\x22{3}(?:\\.|[^\\])*?\x22{3})"
+    r"|(?:[rRbB]{1,2})?(?:'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\")"
+    r"|`(?:\\.|[^`\\])*`"
+    r"|(?:--|#)[^\n]*"
+    r"|/\*.*?\*/",
+    re.S,
+)
+_READ_ONLY_LEADS = ("SELECT", "WITH")
+
+
+def _require_single_query(sql: str) -> None:
+    """Refuse a ``--sql`` that is not exactly one SELECT (or WITH) query.
+
+    ``extract`` reads, but BigQuery runs whatever it is handed, and it runs it
+    while gpio is still only describing the schema. A DELETE, a CREATE, a
+    MERGE -- or a script that appends one after a ``;`` -- would change the
+    warehouse before a single row came back. So the statement must open with
+    SELECT or WITH (after any comments and opening parentheses) and contain no
+    ``;`` but an optional trailing one. Literals and comments are stepped over
+    with GoogleSQL's own quoting rules, so a ``;`` inside them is data.
+
+    This is a guard against accidents, with the same standing as the --where
+    keyword check, not a permission boundary: the credentials decide what the
+    job may touch.
+
+    Raises:
+        InvalidParameterError: If the statement is not a single query.
+    """
+    from geoparquet_io.core.exceptions import InvalidParameterError
+
+    # A comment becomes whitespace and a literal becomes an empty one, so what
+    # is left is the statement's code alone.
+    code = _GOOGLESQL_OPAQUE.sub(lambda m: " " if m.group(0)[0] in "-#/" else "''", sql)
+    statements = [part for part in code.split(";") if part.strip()]
+    head = code.lstrip(" \t\r\n(")
+    lead = head.split(None, 1)[0].upper() if head.strip() else ""
+    if len(statements) != 1 or lead not in _READ_ONLY_LEADS:
+        raise InvalidParameterError(
+            "sql",
+            "--sql must be a single SELECT (or WITH ... SELECT) query: extract "
+            "only reads, and BigQuery would run any other statement -- or a "
+            "second one after a ';' -- against the warehouse before a row came "
+            "back.",
+        )
+
+
+def _bigquery_query_relation(project: str, googlesql: str) -> str:
+    """Wrap a GoogleSQL statement as a DuckDB ``bigquery_query(...)`` relation.
+
+    The one place GoogleSQL crosses into DuckDB. Both callers -- the view
+    fallback in :func:`_bigquery_view_relation` and the ``--sql`` source --
+    come through here, so the escaping contract is stated once: the statement
+    travels inside a DuckDB **single-quoted string literal** and is escaped
+    exactly once, here, at the point of interpolation. ``_escape_sql_string``
+    is not idempotent, so no caller may pre-escape.
+
+    Containment, not sanitation, is what this guarantees. ``--sql`` exists to
+    run arbitrary BigQuery SQL, so there is nothing to sanitize on the
+    BigQuery side; what must hold is that the value cannot close the DuckDB
+    literal and become a second *DuckDB* statement, where it would reach
+    ``COPY ... TO``, ``ATTACH`` and the local filesystem.
+    ``TestHostileSqlCannotBreakTheDuckDbWrapper`` asserts that with
+    ``duckdb.extract_statements``.
+
+    Args:
+        project: Billing project for the query job, pre-validated by
+            :func:`_validate_project_id` or taken from a normalized table id
+        googlesql: The statement BigQuery should run, raw and unescaped
+    """
+    return f"bigquery_query('{_escape_sql_string(project)}', '{_escape_sql_string(googlesql)}')"
+
+
+def _bigquery_view_relation(
+    table_id: str,
+    conditions: list[str] | None = None,
+    limit: int | None = None,
+    columns: list[str] | None = None,
+) -> str:
+    """Build a ``bigquery_query(...)`` relation for a non-table entity.
+
+    ``bigquery_scan`` reads through the Storage Read API, which serves physical
+    tables only. ``bigquery_query`` runs a real query job instead, so it reads
+    a view the same way the BigQuery console does. It takes no ``filter=``
+    argument, so a server-side predicate becomes a GoogleSQL ``WHERE`` inside
+    the statement -- the better place for it anyway, because BigQuery can then
+    prune partitions rather than filtering a materialised stream.
+
+    The GoogleSQL travels inside a DuckDB string literal, so it is escaped
+    once, here, at the point of interpolation. ``table_id`` is interpolated raw
+    for the same reason as in :func:`_schema_rows`: the caller must have run it
+    through :func:`_normalize_table_id`, whose ``_TABLE_PART_PATTERN`` admits
+    only ``[A-Za-z0-9_-]`` per part and so cannot carry a backtick or a quote.
+
+    Args:
+        table_id: Pre-validated, fully qualified ``project.dataset.name``
+        conditions: GoogleSQL predicates to AND into the statement
+        limit: Row cap to push into the statement, when nothing filters after it
+        columns: RAW column names to project, or None for ``*``. A query job is
+            billed by the columns it reads, and BigQuery prunes columns through
+            a view only when the statement names them.
+    """
+    # bigquery_query bills the job to its first argument. _normalize_table_id
+    # has already made the id fully qualified, so its project is the right one.
+    project = table_id.split(".")[0]
+    projection = ", ".join(_quote_bigquery_identifier(c) for c in columns) if columns else "*"
+    inner = f"SELECT {projection} FROM `{table_id}`"
+    if conditions:
+        inner += " WHERE " + " AND ".join(conditions)
+    if limit is not None:
+        inner += f" LIMIT {limit}"
+    return _bigquery_query_relation(project, inner)
+
+
+# The only string literal both dialects lex identically: single quotes, with no
+# quote or backslash inside. DuckDB doubles a quote to escape it and treats a
+# backslash as a plain character; GoogleSQL backslash-escapes and reads three
+# quotes as a triple-quoted string.
+_PORTABLE_STRING = re.compile(r"'[^'\\]*'\s*")
+# Any other token is one unbroken word or operator; whitespace followed by more
+# text inside its span means a comment the tokenizer skipped.
+_PORTABLE_TOKEN = re.compile(r"\S+\s*")
+
+
+def _where_portability_problem(text: str, kind: object) -> str | None:
+    """Name what makes one token of a --where read differently in GoogleSQL."""
+    if kind == duckdb.token_type.string_const:
+        if _PORTABLE_STRING.fullmatch(text):
+            return None
+        return f"the string literal {text.strip()} (a quote, a backslash or a comment)"
+    if kind == duckdb.token_type.identifier and text.startswith('"'):
+        return f"the double-quoted name {text.strip()}, which GoogleSQL reads as a string"
+    if not _PORTABLE_TOKEN.fullmatch(text):
+        return "a comment"
+    return None
+
+
+def _require_where_portable_to_googlesql(where: str) -> None:
+    """Refuse a --where that BigQuery would read differently from DuckDB.
+
+    On a view the clause runs inside the GoogleSQL query job, but it was
+    validated -- and on a table is evaluated -- as DuckDB SQL. Where the two
+    lexers disagree the clause can silently change meaning (``"col"`` is a
+    STRING literal in GoogleSQL, so ``"name" = 'x'`` compares two constants),
+    and worse, a string boundary DuckDB saw can move: a backslash escape, a
+    doubled or tripled quote, or a nested ``/* */`` comment (DuckDB nests them,
+    GoogleSQL does not) can turn what DuckDB validated as data into GoogleSQL
+    code outside the WHERE. So only the lexical subset both dialects agree on
+    is let through: bare names, plain single-quoted strings, no comments.
+    Functions that differ between the dialects fail loudly in BigQuery.
+
+    Raises:
+        ValidationError: If any token falls outside that subset.
+    """
+    tokens = duckdb.tokenize(where)
+    problem = "a comment" if tokens and where[: tokens[0][0]].strip() else None
+    if "\\" in where:
+        problem = "a backslash"
+    ends = [pos for pos, _ in tokens[1:]] + [len(where)]
+    for (start, kind), end in zip(tokens, ends, strict=True):
+        problem = problem or _where_portability_problem(where[start:end], kind)
+    if problem:
+        raise ValidationError(
+            f"--where contains {problem}. This relation is a view, so the clause runs "
+            "inside BigQuery as GoogleSQL, and only bare column names, plain "
+            "single-quoted strings (no quote or backslash inside) and no comments "
+            "read the same there as in DuckDB. Simplify the clause, or write the "
+            "whole GoogleSQL statement with --sql."
+        )
+
+
 def _schema_rows(
     con: duckdb.DuckDBPyConnection,
-    table_id: str,
+    table_id: str | None = None,
     table_source: str = "bigquery",
+    relation: str | None = None,
 ) -> list[tuple[str, str]]:
     """Return ``(column name, column type)`` for every column, in schema order.
 
@@ -431,15 +628,32 @@ def _schema_rows(
     place; ``tests/test_extract_bigquery.py::TestSchemaIsReadOnce`` keeps it
     there. The local branch takes a real table name and quotes it.
 
+    ``relation`` is the third source: a relation expression the caller has
+    already built, which is how a ``--sql`` statement is described. It is
+    interpolated verbatim, so it must come from
+    :func:`_bigquery_query_relation`, which did the escaping -- never hand
+    this a raw string that came from a user.
+
+    Describing a ``--sql`` relation does not cost a second query job, which
+    is the thing worth knowing: the DESCRIBE and the read that follows name
+    the same relation, and the extension answers both out of one. Measured
+    against ``INFORMATION_SCHEMA.JOBS_BY_USER`` -- one ``--sql`` extraction,
+    one billed job.
+
     Args:
         con: DuckDB connection
-        table_id: Pre-validated BigQuery table ID, or a local table name
+        table_id: Pre-validated BigQuery table ID, or a local table name.
+            Unused, and may be None, when ``relation`` is given.
         table_source: "bigquery" for bigquery_scan, "local" for local tables
+        relation: A pre-built, already-escaped relation expression to describe
+            in place of one derived from ``table_id``
     """
-    if table_source == "bigquery":
-        schema_query = f"DESCRIBE SELECT * FROM bigquery_scan('{table_id}') LIMIT 0"
-    else:
-        schema_query = f"DESCRIBE SELECT * FROM {quote_identifier(table_id)} LIMIT 0"
+    if relation is None:
+        if table_source == "bigquery":
+            relation = f"bigquery_scan('{table_id}')"
+        else:
+            relation = quote_identifier(table_id)
+    schema_query = f"DESCRIBE SELECT * FROM {relation} LIMIT 0"
     return [(row[0], str(row[1])) for row in con.execute(schema_query).fetchall()]
 
 
@@ -505,8 +719,9 @@ def _detect_geometry_column_from_schema(
 
 def _schema_column_names(
     con: duckdb.DuckDBPyConnection,
-    table_id: str,
+    table_id: str | None = None,
     table_source: str = "bigquery",
+    schema_rows: list[tuple[str, str]] | None = None,
 ) -> list[str]:
     """Return the table's column names, in schema order.
 
@@ -514,14 +729,20 @@ def _schema_column_names(
         con: DuckDB connection
         table_id: BigQuery table ID or local table name
         table_source: "bigquery" for bigquery_scan, "local" for local tables
+        schema_rows: The schema, when the caller has already read it. Saves a
+            DESCRIBE round-trip, and is the only way to answer for a ``--sql``
+            relation, which has no table id to describe.
     """
-    return [name for name, _ in _schema_rows(con, table_id, table_source)]
+    if schema_rows is None:
+        schema_rows = _schema_rows(con, table_id, table_source)
+    return [name for name, _ in schema_rows]
 
 
 def _get_column_type(
     con: duckdb.DuckDBPyConnection,
-    table_id: str,
+    table_id: str | None,
     column_name: str,
+    schema_rows: list[tuple[str, str]] | None = None,
 ) -> str:
     """
     Get the DuckDB type of a column in a BigQuery table.
@@ -530,11 +751,14 @@ def _get_column_type(
         con: DuckDB connection
         table_id: BigQuery table ID
         column_name: Column name to check
+        schema_rows: The schema, when the caller has already read it
 
     Returns:
         Uppercase type string (e.g. "GEOMETRY", "VARCHAR")
     """
-    for name, col_type in _schema_rows(con, table_id):
+    if schema_rows is None:
+        schema_rows = _schema_rows(con, table_id)
+    for name, col_type in schema_rows:
         if name.lower() == column_name.lower():
             return col_type.upper()
     return "VARCHAR"
@@ -542,9 +766,10 @@ def _get_column_type(
 
 def _resolve_column_name(
     con: duckdb.DuckDBPyConnection,
-    table_id: str,
+    table_id: str | None,
     column_name: str,
     table_source: str = "bigquery",
+    schema_rows: list[tuple[str, str]] | None = None,
 ) -> str:
     """
     Resolve a column name to its actual schema spelling (case-sensitive).
@@ -554,11 +779,12 @@ def _resolve_column_name(
         table_id: BigQuery table ID or local table name
         column_name: Column name (possibly with different case)
         table_source: "bigquery" for bigquery_scan, "local" for local tables
+        schema_rows: The schema, when the caller has already read it
 
     Returns:
         The actual column name from the schema, or the input if not found
     """
-    for name in _schema_column_names(con, table_id, table_source):
+    for name in _schema_column_names(con, table_id, table_source, schema_rows):
         if name.lower() == column_name.lower():
             return name
     return column_name
@@ -598,8 +824,9 @@ def _build_select_with_wkb(
     columns: list[str] | None,
     geometry_column: str | None,
     con: duckdb.DuckDBPyConnection,
-    table_id: str,
+    table_id: str | None,
     geometry_format: str = "wkt",
+    schema_rows: list[tuple[str, str]] | None = None,
 ) -> tuple[str, list[str]]:
     """
     Build SELECT clause with ST_AsWKB for geometry columns.
@@ -616,18 +843,19 @@ def _build_select_with_wkb(
         con: DuckDB connection
         table_id: BigQuery table ID
         geometry_format: Format of geometry in VARCHAR columns ("wkt" or "geojson")
+        schema_rows: The schema, when the caller has already read it
 
     Returns:
         Tuple of (SELECT clause string, list of actual column names)
     """
     # Get all column names if selecting all
     if columns is None:
-        columns = _schema_column_names(con, table_id)
+        columns = _schema_column_names(con, table_id, schema_rows=schema_rows)
 
     # Detect geometry column type if we have one
     geom_col_type = ""
     if geometry_column:
-        geom_col_type = _get_column_type(con, table_id, geometry_column)
+        geom_col_type = _get_column_type(con, table_id, geometry_column, schema_rows)
 
     # Build SELECT with appropriate geometry conversion
     select_parts = []
@@ -666,6 +894,19 @@ def _handle_dry_run(
         query += f" LIMIT {limit}"
 
     progress(f"SQL: {query}")
+    progress("(Actual query will use ST_AsWKB for geometry columns)")
+
+
+def _handle_sql_dry_run(project: str, sql: str) -> None:
+    """Print the statement a ``--sql`` run would issue, without connecting.
+
+    There is nothing to decide here, unlike :func:`_handle_dry_run`: no bbox
+    strategy to weigh, no filters to place. The statement is the user's, and
+    the only gpio adds is the ``bigquery_query`` wrapper and the ``ST_AsWKB``
+    the geometry column gets once its type is known -- which needs the
+    schema, which needs a connection, which is what --dry-run is avoiding.
+    """
+    progress(f"SQL: SELECT * FROM {_bigquery_query_relation(project, sql)}")
     progress("(Actual query will use ST_AsWKB for geometry columns)")
 
 
@@ -747,6 +988,7 @@ def _determine_bbox_strategy(
     table_id: str,
     bbox_mode: str,
     bbox_threshold: int,
+    is_view: bool = False,
 ) -> bool:
     """
     Determine whether to use server-side bbox filtering.
@@ -761,7 +1003,14 @@ def _determine_bbox_strategy(
         debug("Using local bbox filter (forced by --bbox-mode local)")
         return False
 
-    # Auto mode - decide based on row count
+    # Auto mode weighs a row count against the threshold, but a view has no
+    # __TABLES__ entry to count. Falling through to the local default would
+    # stream the whole view across the wire to discard most of it, so a view
+    # filters server-side: BigQuery evaluates the predicate and can prune.
+    if is_view:
+        debug("Using server-side bbox filter (a view has no row count to weigh)")
+        return True
+
     row_count = _get_table_row_count(con, table_id)
     if row_count is not None:
         use_server = row_count >= bbox_threshold
@@ -840,10 +1089,79 @@ def _build_bbox_filters(
     return bq_filters, local_conditions
 
 
+def _validate_sql_source(
+    table_id: str | None,
+    sql: str | None,
+    project: str | None,
+    query_shaping: dict[str, object],
+) -> None:
+    """Check the ``--sql`` source against the table source and the other options.
+
+    ``--sql`` *replaces* the table source rather than filtering it, which is
+    what makes the exclusivity rule worth enforcing rather than merging: a
+    statement can select its own columns, filter its own rows and cap itself,
+    and the flags that do those things have nowhere sensible to go once it
+    does. Pushing ``--limit`` outside the statement would also be actively
+    wrong -- a query job materializes its whole result first, so an outer cap
+    saves nothing and an unfiltered one fails with "Response too large to
+    return".
+
+    ``--project`` becomes required because ``bigquery_query`` bills the job to
+    its first argument, and with no table id there is nothing to take one from.
+
+    Args:
+        table_id: The positional table source, if given
+        sql: The ``--sql`` statement, if given
+        project: The billing project, if given
+        query_shaping: Option name -> value, for every option that shapes the
+            query. A value the caller judged to be user-supplied raises; the
+            caller decides what "supplied" means, because only the CLI can
+            tell an explicit ``--bbox-mode auto`` from an untouched default.
+
+    Raises:
+        InvalidParameterError: If no source, both sources, a source without a
+            billing project, or ``--sql`` with a query-shaping option
+    """
+    from geoparquet_io.core.exceptions import InvalidParameterError
+
+    # "is None", not truthiness: an empty statement is a (bad) statement, and
+    # reading it as "no --sql" would silently fall back to the table.
+    if not table_id and sql is None:
+        raise InvalidParameterError(
+            "TABLE_ID",
+            "No BigQuery source given. Pass a TABLE_ID, or --sql with the "
+            "GoogleSQL statement to run.",
+        )
+    if sql is None:
+        return
+    if table_id:
+        raise InvalidParameterError(
+            "sql",
+            f"{_SQL_EXCLUSIVE_MESSAGE} Drop the TABLE_ID, and name the "
+            "relation inside the statement instead.",
+        )
+    if not project:
+        raise InvalidParameterError(
+            "project",
+            "--sql requires --project: the query job has to be billed to a "
+            "project, and with no TABLE_ID there is none to take it from.",
+        )
+    _require_single_query(sql)
+    # "is not None", not truthiness: limit=0 or an empty column list is still
+    # an answer to a question the statement already answers.
+    supplied = sorted(name for name, value in query_shaping.items() if value is not None)
+    if supplied:
+        raise InvalidParameterError(
+            "sql",
+            f"{_SQL_EXCLUSIVE_MESSAGE} Given with sql: {', '.join(supplied)}.",
+        )
+
+
 def extract_bigquery(
-    table_id: str,
+    table_id: str | None = None,
     output_parquet: str | None = None,
     *,
+    sql: str | None = None,
     project: str | None = None,
     credentials_file: str | None = None,
     where: str | None = None,
@@ -881,13 +1199,24 @@ def extract_bigquery(
     If no geometry column is found, the table is written as plain Parquet
     without GeoParquet metadata.
 
+    ``sql`` replaces ``table_id`` as the source: the statement is run as a
+    BigQuery query job and its result becomes the relation. It is for what a
+    ``where`` clause cannot express -- a window function, a join, a GROUP BY.
+    Because the statement already says which columns, which rows and how
+    many, it is mutually exclusive with every option that shapes the query
+    (see :func:`_validate_sql_source`); the options that shape the output file
+    all still apply.
+
     Args:
         table_id: BigQuery table ID. Supports both formats:
             - project.dataset.table (fully qualified)
             - dataset.table (requires --project parameter)
+            Omit it when ``sql`` is given.
         output_parquet: Output GeoParquet file path (None = return table only)
-        project: GCP project ID. Required for dataset.table format.
-            Overrides project in table_id if both are specified.
+        sql: GoogleSQL to run as the source, in place of ``table_id``.
+            Requires ``project``, and excludes every query-shaping argument.
+        project: GCP project ID. Required for dataset.table format and for
+            ``sql``. Overrides project in table_id if both are specified.
         credentials_file: Path to service account JSON file
         where: SQL WHERE clause for filtering (BigQuery SQL syntax)
         bbox: Bounding box for spatial filter as "minx,miny,maxx,maxy"
@@ -923,17 +1252,43 @@ def extract_bigquery(
     """
     configure_verbose(verbose)
 
+    # Settle the source before anything else: which of table_id and sql is in
+    # play decides what every step below is even about. The dict spells the
+    # Python API argument names: the CLI refuses these combinations itself,
+    # by flag name, before it gets here, so only an API caller reads them.
+    _validate_sql_source(
+        table_id,
+        sql,
+        project,
+        {
+            "columns": include_cols,
+            "exclude_columns": exclude_cols,
+            "where": where,
+            "bbox": bbox,
+            "bbox_mode": bbox_mode if bbox_mode != "auto" else None,
+            "bbox_threshold": bbox_threshold if bbox_threshold != 500000 else None,
+            "limit": limit,
+        },
+    )
+
     # Validate --where before it is interpolated into any query (dry-run or
     # real), and before any network connection is established (gpio #612 parity).
     if where:
         validate_where_clause(where)
 
-    # Normalize table_id early - validates format and applies project override
-    # This ensures validated_table_id is always project.dataset.table format
-    validated_table_id = _normalize_table_id(table_id, project)
+    if sql:
+        # --sql carries no table id, so the project is the one given, and the
+        # statement is its own relation. _validate_project_id is what keeps
+        # the id out of the DuckDB string literal's reach.
+        validated_table_id = None
+        normalized_project = _validate_project_id(project)
+    else:
+        # Normalize table_id early - validates format and applies project override
+        # This ensures validated_table_id is always project.dataset.table format
+        validated_table_id = _normalize_table_id(table_id, project)
 
-    # Extract project from normalized table_id for connection setup
-    normalized_project = validated_table_id.split(".")[0]
+        # Extract project from normalized table_id for connection setup
+        normalized_project = validated_table_id.split(".")[0]
 
     # Parse column lists
     include_list = split_column_list(include_cols, "--include-cols")
@@ -945,14 +1300,18 @@ def extract_bigquery(
 
     # Handle dry_run without connecting to BigQuery
     if dry_run:
-        _handle_dry_run(
-            validated_table_id, include_list, bbox, bbox_mode, bbox_threshold, where, limit
-        )
+        if sql:
+            _handle_sql_dry_run(normalized_project, sql)
+        else:
+            _handle_dry_run(
+                validated_table_id, include_list, bbox, bbox_mode, bbox_threshold, where, limit
+            )
         return None
 
     # Execute the actual BigQuery extraction
     return _execute_bigquery_extraction(
         validated_table_id=validated_table_id,
+        sql=sql,
         project=normalized_project,
         credentials_file=credentials_file,
         geography_column=geography_column,
@@ -978,9 +1337,60 @@ def extract_bigquery(
     )
 
 
+def _run_read(
+    con: duckdb.DuckDBPyConnection,
+    query: str,
+    show_sql: bool,
+) -> pa.Table:
+    """Issue one read and return its Arrow table."""
+    if show_sql:
+        progress(f"SQL: {query}")
+    debug(f"Executing BigQuery query: {query}")
+    progress("Querying BigQuery...")
+    return con.execute(query).arrow().read_all()
+
+
+def _read_with_view_fallback(
+    con: duckdb.DuckDBPyConnection,
+    build_query,
+    validated_table_id: str,
+    *,
+    show_sql: bool,
+) -> pa.Table:
+    """Read through ``bigquery_scan``, retrying as a query job for a non-table.
+
+    Whether an id is a table or a view is settled here, by BigQuery, rather
+    than guessed beforehand: a DESCRIBE answers out of table metadata and so
+    succeeds for a view, which leaves the read as the only place the
+    difference shows. The refused attempt opens no read session and scans no
+    bytes, so a table pays nothing for this and a view pays one wasted
+    round-trip. Reacting to the error also covers the external tables the
+    Storage Read API refuses in the same words.
+
+    Args:
+        con: DuckDB connection
+        build_query: ``is_view -> SQL``, i.e. :func:`_build_bigquery_query`
+            with everything but that one argument already bound
+        validated_table_id: The id being read, for the fallback notice
+        show_sql: Echo each statement before issuing it
+    """
+    try:
+        return _run_read(con, build_query(is_view=False), show_sql)
+    except duckdb.Error as exc:
+        if _NON_TABLE_ENTITY not in str(exc).lower():
+            raise
+        progress(
+            f"{validated_table_id} is a view or external table, which the Storage "
+            "Read API cannot serve; reading it with a BigQuery query job instead, "
+            "billed by bytes scanned"
+        )
+        return _run_read(con, build_query(is_view=True), show_sql)
+
+
 def _execute_bigquery_extraction(
     *,
-    validated_table_id: str,
+    validated_table_id: str | None,
+    sql: str | None = None,
     project: str | None,
     credentials_file: str | None,
     geography_column: str | None,
@@ -1018,15 +1428,23 @@ def _execute_bigquery_extraction(
             con.execute(f"SET memory_limit = '{validate_memory_limit(memory_limit)}'")
             debug(f"DuckDB memory limit: {memory_limit}")
 
+        # --sql is its own relation. Building it once here means every step
+        # below -- the DESCRIBE, the geometry detection, the read -- is
+        # pointed at the same statement, and that the escaping happens once.
+        sql_relation = _bigquery_query_relation(project, sql) if sql else None
+        # Everything downstream that wants a name for the source in a message
+        # has to say something when there is no table id.
+        source_name = validated_table_id if validated_table_id else _SQL_SOURCE_LABEL
+
         # One DESCRIBE serves everything that needs the schema here: the
         # geometry detection below and the --include-cols/--exclude-cols check
         # further down. Validation therefore costs no BigQuery round-trip at
         # all, on either branch.
-        schema_rows = _schema_rows(con, validated_table_id)
+        schema_rows = _schema_rows(con, validated_table_id, relation=sql_relation)
 
         # Detect geometry column from schema (native GEOMETRY type only)
         geom_col = _detect_geometry_column_from_schema(
-            con, validated_table_id, geography_column, schema_rows=schema_rows
+            con, source_name, geography_column, schema_rows=schema_rows
         )
         is_native_geometry = geom_col is not None  # Track whether geometry is native GEOGRAPHY type
         if geom_col:
@@ -1036,7 +1454,9 @@ def _execute_bigquery_extraction(
                 # User explicitly specified a column that isn't native GEOMETRY -
                 # still use it, parsing as WKT or GeoJSON
                 # Resolve to actual schema spelling for case-insensitive matching
-                geom_col = _resolve_column_name(con, validated_table_id, geography_column)
+                geom_col = _resolve_column_name(
+                    con, validated_table_id, geography_column, schema_rows=schema_rows
+                )
                 debug(
                     f"Using '{geom_col}' as geometry column (parsing as {geometry_format.upper()})"
                 )
@@ -1073,31 +1493,37 @@ def _execute_bigquery_extraction(
             con, validated_table_id, include_list, exclude_list, geom_col, schema_columns
         )
         select_cols, _ = _build_select_with_wkb(
-            cols_to_select, geom_col, con, validated_table_id, geometry_format
+            cols_to_select, geom_col, con, validated_table_id, geometry_format, schema_rows
         )
+        # A query job reads only these when it names them; None reads all.
+        source_columns = None if cols_to_select is None else list(cols_to_select)
 
         # Build query with bbox and where filters
-        query = _build_bigquery_query(
-            con=con,
-            validated_table_id=validated_table_id,
-            select_cols=select_cols,
-            bbox=bbox,
-            bbox_mode=bbox_mode,
-            bbox_threshold=bbox_threshold,
-            geom_col=geom_col,
-            where=where,
-            limit=limit,
-            is_native_geometry=is_native_geometry,
-            geometry_format=geometry_format,
-        )
+        def build_query(is_view: bool) -> str:
+            return _build_bigquery_query(
+                con=con,
+                validated_table_id=validated_table_id,
+                select_cols=select_cols,
+                bbox=bbox,
+                bbox_mode=bbox_mode,
+                bbox_threshold=bbox_threshold,
+                geom_col=geom_col,
+                where=where,
+                limit=limit,
+                is_native_geometry=is_native_geometry,
+                geometry_format=geometry_format,
+                is_view=is_view,
+                source_columns=source_columns,
+            )
 
-        if show_sql:
-            progress(f"SQL: {query}")
-
-        # Execute query
-        debug(f"Executing BigQuery query: {query}")
-        progress("Querying BigQuery...")
-        result = con.execute(query).arrow().read_all()
+        if sql_relation is not None:
+            # --sql is already a query job, so there is no Storage Read API
+            # attempt to make and nothing to fall back from.
+            result = _run_read(con, f"SELECT {select_cols} FROM {sql_relation}", show_sql)
+        else:
+            result = _read_with_view_fallback(
+                con, build_query, validated_table_id, show_sql=show_sql
+            )
         row_count = result.num_rows
         progress(f"Retrieved {row_count:,} rows from BigQuery")
 
@@ -1105,9 +1531,14 @@ def _execute_bigquery_extraction(
         final_geom_col = geom_col if geom_col and geom_col in result.column_names else None
 
         # Repair invalid geometry (issue #506). The geometry column is already
-        # WKB-encoded by the SELECT; the helper preserves schema metadata.
+        # WKB-encoded by the SELECT; the helper preserves schema metadata. A
+        # native GEOGRAPHY export declares spherical edges (final_edges), which
+        # skips the planar repair — it would corrupt pole-enclosing and
+        # antimeridian-winding rings that are valid on the sphere (#1287).
         if final_geom_col and result.num_rows > 0:
-            result, _ = repair_arrow_table_geometry(result, final_geom_col, repair=repair_geometry)
+            result, _ = repair_arrow_table_geometry(
+                result, final_geom_col, repair=repair_geometry, nonplanar_edges=final_edges
+            )
 
         # Write output if path provided
         if output_parquet:
@@ -1169,15 +1600,21 @@ def _build_bigquery_query(
     limit: int | None,
     is_native_geometry: bool = True,
     geometry_format: str = "wkt",
+    is_view: bool = False,
+    source_columns: list[str] | None = None,
 ) -> str:
-    """Build the BigQuery query with filters applied."""
+    """Build the BigQuery query with filters applied.
+
+    ``source_columns`` are the RAW names ``select_cols`` reads, or None when it
+    reads every column; only the view path uses them, to project the query job.
+    """
     bq_filters: list[str] = []
     local_conditions: list[str] = []
 
     # Handle bbox filtering
     if bbox and geom_col:
         use_server_side = _determine_bbox_strategy(
-            con, validated_table_id, bbox_mode, bbox_threshold
+            con, validated_table_id, bbox_mode, bbox_threshold, is_view=is_view
         )
         bq_filters, local_conditions = _build_bbox_filters(
             bbox, geom_col, use_server_side, is_native_geometry, geometry_format
@@ -1186,6 +1623,17 @@ def _build_bigquery_query(
         warn("--bbox specified but no geometry column detected; ignoring spatial filter")
 
     # Build base query
+    if is_view:
+        return _build_view_query(
+            validated_table_id,
+            select_cols,
+            bq_filters=bq_filters,
+            local_conditions=local_conditions,
+            where=where,
+            limit=limit,
+            source_columns=source_columns,
+            geom_col=geom_col,
+        )
     if bq_filters:
         # The GoogleSQL filter travels inside a DuckDB string literal, so it is
         # escaped once, here, at the point of interpolation. A BigQuery flexible
@@ -1211,4 +1659,52 @@ def _build_bigquery_query(
     if limit is not None:
         query += f" LIMIT {limit}"
 
+    return query
+
+
+def _build_view_query(
+    validated_table_id: str,
+    select_cols: str,
+    *,
+    bq_filters: list[str],
+    local_conditions: list[str],
+    where: str | None,
+    limit: int | None,
+    source_columns: list[str] | None,
+    geom_col: str | None,
+) -> str:
+    """Build the DuckDB query that reads a view through a BigQuery query job.
+
+    A view opens no Storage Read API session and so has no filter= argument;
+    the predicates ride inside the GoogleSQL instead.
+
+    --where goes down with them rather than staying an outer DuckDB filter. A
+    scan streams, so filtering late there only wastes bandwidth, but a query
+    job must finish its whole result first: left outside, ``SELECT * FROM
+    <view>`` asks BigQuery to materialise the entire relation, which on a
+    billion-row view fails outright with "Response too large to return", and
+    a partitioned view could not prune. The clause is checked first for the
+    DuckDB spellings that would silently change meaning in GoogleSQL.
+    """
+    view_conditions = list(bq_filters)
+    if where:
+        _require_where_portable_to_googlesql(where)
+        # Validated upstream in extract_bigquery(); wrapped so a trailing
+        # '--' cannot comment out the rest of the GoogleSQL either.
+        view_conditions.append(where_condition_fragment(where))
+    # The outer DuckDB filter reads the geometry column, so the query job must
+    # return it even when the user excluded it from the output.
+    columns = list(source_columns) if source_columns is not None else None
+    if columns is not None and local_conditions and geom_col and geom_col not in columns:
+        columns.append(geom_col)
+    # LIMIT only goes down when nothing filters after it. With a local bbox
+    # condition outside, an inner LIMIT would cut the candidates before that
+    # filter ran and return fewer rows than asked for.
+    push_limit = limit if not local_conditions else None
+    relation = _bigquery_view_relation(validated_table_id, view_conditions, push_limit, columns)
+    query = f"SELECT {select_cols} FROM {relation}"
+    if local_conditions:
+        query += " WHERE " + " AND ".join(local_conditions)
+    if limit is not None and push_limit is None:
+        query += f" LIMIT {limit}"
     return query

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import codecs
 import contextlib
+import hashlib
 import io
 import sys
 from typing import TYPE_CHECKING
@@ -32,16 +33,34 @@ if TYPE_CHECKING:
 
     import duckdb
 
-from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier, sql_path
-from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geo_metadata import parse_geo_metadata
-from geoparquet_io.core.geometry_detection import STANDARD_GEOMETRY_NAMES
+from geoparquet_io.core.crs_utils import (
+    crs_is_explicitly_null,
+    crs_string_from_table,
+    parse_geo_metadata_from_schema,
+    source_crs_string,
+    transform_source_label,
+    warn_null_crs_once,
+)
+from geoparquet_io.core.duckdb_utils import (
+    _escape_sql_string,
+    quote_identifier,
+    register_arrow,
+    sql_path,
+    uses_aws_profile,
+)
+from geoparquet_io.core.exceptions import GeoParquetError
+from geoparquet_io.core.file_utils import get_all_parquet_files, has_glob_pattern, resolve_file_url
+from geoparquet_io.core.geo_metadata import GEOGRAPHY_EDGE_ALGORITHMS
+from geoparquet_io.core.geometry_detection import (
+    STANDARD_GEOMETRY_NAMES,
+    find_primary_geometry_column,
+)
 from geoparquet_io.core.geometry_repair import repair_geometry_sql
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
-from geoparquet_io.core.remote import needs_httpfs, setup_aws_profile_if_needed
+from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.stream_io import _create_view_with_geometry
 from geoparquet_io.core.streaming import is_stdin
+from geoparquet_io.core.write_funnels import collect_nonplanar_edges, table_nonplanar_edges
 
 # RFC 8142 record separator character
 RS = "\x1e"
@@ -49,6 +68,74 @@ RS = "\x1e"
 
 # WGS84 CRS identifier for RFC 7946 compliance
 WGS84_CRS = "EPSG:4326"
+
+
+def _require_planar_geojson_edges(column: str, edges: str | None) -> None:
+    """Refuse an unsupported input contract before any planar export operation.
+
+    RFC 7946 section 3.1.1 gives GeoJSON Cartesian segments, not geodesics.
+    Skipping MakeValid still leaves planar precision reduction and, even with
+    both skipped, would silently change the meaning of the same coordinates.
+    The declaration decides this contract, including point-only or empty data.
+    """
+    if edges in GEOGRAPHY_EDGE_ALGORITHMS:
+        raise GeoParquetError(
+            f"GeoJSON export does not support non-planar edges. Column {column!r} "
+            f"declares {edges!r} edges. GeoJSON uses straight Cartesian segments. "
+            "Keep the data in GeoParquet, or use a geodesic-aware tool to densify "
+            "and cut the shapes into a planar representation before exporting. "
+            "Disabling geometry repair does not make this conversion safe."
+        )
+
+
+@uses_aws_profile
+def require_planar_geojson_file(
+    input_path: str,
+    geometry_column: str | None = None,
+    profile: str | None = None,
+    *,
+    use_primary_geometry: bool = False,
+) -> None:
+    """Check file edge declarations before GeoJSON or PMTiles preprocessing.
+
+    PMTiles extract/reproject/chunk paths select the metadata primary, whereas
+    direct GeoJSON uses its existing geometry detection. Resolve that choice
+    under the same scoped profile as the footer reads.
+    """
+    edges = {
+        column: algorithm
+        for path in _geojson_input_files(input_path)
+        for column, algorithm in collect_nonplanar_edges(path).items()
+    }
+    if not edges:
+        return
+    if geometry_column is None and use_primary_geometry:
+        geometry_column = find_primary_geometry_column(input_path)
+    if geometry_column is None:
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+
+        input_url = resolve_file_url(input_path)
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_path))
+        try:
+            geometry_column = _find_geometry_column(con, f"read_parquet({sql_path(input_url)})")
+        finally:
+            con.close()
+    _require_planar_geojson_edges(geometry_column, edges.get(geometry_column))
+
+
+def _geojson_input_files(input_path: str) -> list[str]:
+    """Enumerate every footer so a planar-first glob cannot hide non-planar rows."""
+    if has_glob_pattern(input_path):
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+
+        con = get_duckdb_connection(load_spatial=False, load_httpfs=needs_httpfs(input_path))
+        try:
+            return [
+                row[0] for row in con.execute("SELECT file FROM glob(?)", [input_path]).fetchall()
+            ]
+        finally:
+            con.close()
+    return get_all_parquet_files(input_path)
 
 
 def _encodes_utf8(stream: TextIO) -> bool:
@@ -100,43 +187,22 @@ def _utf8_stdout() -> Iterator[TextIO]:
 
 
 def _get_source_crs(input_path: str) -> str | None:
-    """
-    Get CRS from GeoParquet metadata.
+    """The primary geometry's ``ST_Transform`` source, or ``None`` for lon/lat.
+
+    Read through :func:`crs_utils.source_crs_string`, the resolver every other
+    command uses, so a native-geo-only input (CRS only in the Parquet logical
+    type, no ``geo`` block) is reprojected too (#1248), and so is a CRS with no
+    authority code (#1258). A CRS that cannot be resolved raises
+    :class:`crs_utils.UnresolvableCRSError` rather than being written as
+    RFC 7946 lon/lat.
 
     Args:
-        input_path: Path to input GeoParquet file
+        input_path: RAW path to input GeoParquet file
 
     Returns:
-        CRS string (e.g., "EPSG:4326") or None if not found
+        ``"AUTH:CODE"``, canonical PROJJSON, or ``None`` for lon/lat input
     """
-
-    try:
-        metadata, _ = get_parquet_metadata(input_path, verbose=False)
-        geo_meta = parse_geo_metadata(metadata, verbose=False)
-
-        if not geo_meta:
-            return None
-
-        # Get primary geometry column's CRS
-        primary_col = geo_meta.get("primary_column", "geometry")
-        columns = geo_meta.get("columns", {})
-        col_meta = columns.get(primary_col, {})
-
-        crs = col_meta.get("crs")
-        if crs:
-            # Extract EPSG code from CRS object
-            if isinstance(crs, dict):
-                # Check for EPSG identifier
-                auth = crs.get("id", {})
-                if auth.get("authority") == "EPSG":
-                    return f"EPSG:{auth.get('code')}"
-                # Fall back to projjson parsing
-                return None
-            return str(crs)
-
-        return None
-    except Exception:
-        return None
+    return source_crs_string(input_path)
 
 
 def _needs_reprojection(source_crs: str | None) -> bool:
@@ -493,6 +559,7 @@ def _find_geometry_column(
     )
 
 
+@uses_aws_profile
 def convert_to_geojson_stream(
     input_path: str,
     output_path: str | None = None,
@@ -535,6 +602,11 @@ def convert_to_geojson_stream(
 
     Returns:
         Number of features written
+
+    Raises:
+        GeoParquetError: If the exported column declares non-planar edges.
+            GeoJSON cannot preserve geodesic edges. Refused before output,
+            including when geometry repair is disabled or keep_crs is True.
     """
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
@@ -556,17 +628,15 @@ def convert_to_geojson_stream(
             repair_geometry=repair_geometry,
         )
 
-    # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, input_path)
-
     # Get safe URL for input
     input_url = resolve_file_url(input_path, verbose)
 
     # Check if reprojection is needed
-    source_crs = _get_source_crs(input_path)
-    needs_reproject = not keep_crs and _needs_reprojection(source_crs)
+    # --keep-crs writes the input coordinates, so the CRS is never resolved.
+    source_crs = None if keep_crs else _get_source_crs(input_path)
+    needs_reproject = _needs_reprojection(source_crs)
     if needs_reproject:
-        info(f"Reprojecting from {source_crs} to WGS84 (RFC 7946)")
+        info(f"Reprojecting from {transform_source_label(source_crs)} to WGS84 (RFC 7946)")
         debug(f"Source CRS: {source_crs}, reprojecting to {WGS84_CRS}")
 
     # Create DuckDB connection
@@ -577,6 +647,7 @@ def convert_to_geojson_stream(
 
         # Find geometry column
         geometry_column = _find_geometry_column(con, source_ref)
+        require_planar_geojson_file(input_path, geometry_column)
         debug(f"Using geometry column: {geometry_column}")
 
         # Get property columns
@@ -614,6 +685,18 @@ def convert_to_geojson_stream(
         con.close()
 
 
+def _warn_on_explicit_null_crs(table, geometry_column: str) -> None:
+    """Warn once per stream ``geo`` block whose column says ``"crs": null`` (unknown)."""
+    metadata = table.schema.metadata or {}
+    geo_meta = parse_geo_metadata_from_schema(metadata)
+    columns = geo_meta.get("columns") if isinstance(geo_meta, dict) else None
+    col_meta = columns.get(geometry_column) if isinstance(columns, dict) else None
+    if col_meta is None or not crs_is_explicitly_null(col_meta):
+        return
+    digest = hashlib.sha1(metadata[b"geo"], usedforsecurity=False).hexdigest()
+    warn_null_crs_once(f"table:{digest}")
+
+
 def _convert_from_stream(
     output_path: str | None = None,
     rs: bool = True,
@@ -646,13 +729,12 @@ def _convert_from_stream(
         Number of features written
 
     Note:
-        CRS detection from Arrow IPC stream is limited. For pipeline use,
-        ensure source data is already in WGS84 or use gpio convert reproject first.
+        The stream's CRS is read from its ``geo`` block, then from the geometry
+        field's GeoArrow CRS, through the same resolver a file input uses (#1261).
     """
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
     from geoparquet_io.core.streaming import (
         find_geometry_column_from_table,
-        get_crs_from_arrow_table,
         read_arrow_stream,
     )
 
@@ -676,11 +758,14 @@ def _convert_from_stream(
 
     debug(f"Using geometry column: {geometry_column}")
 
-    # Check CRS from Arrow table metadata (if available)
-    source_crs = get_crs_from_arrow_table(table, geometry_column)
-    needs_reproject = not keep_crs and _needs_reprojection(source_crs)
-    if needs_reproject and source_crs:
-        info(f"Reprojecting from {source_crs} to WGS84 (RFC 7946)")
+    edges = table_nonplanar_edges(table, geometry_column, None).get(geometry_column)
+    _require_planar_geojson_edges(geometry_column, edges)
+    _warn_on_explicit_null_crs(table, geometry_column)
+    # --keep-crs writes the input coordinates, so the CRS is never resolved.
+    source_crs = None if keep_crs else crs_string_from_table(table, geometry_column)
+    needs_reproject = _needs_reprojection(source_crs)
+    if needs_reproject:
+        info(f"Reprojecting from {transform_source_label(source_crs)} to WGS84 (RFC 7946)")
 
     # Get property columns
     excluded = {geometry_column.lower(), "bbox"}
@@ -692,7 +777,7 @@ def _convert_from_stream(
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
 
     try:
-        con.register("input_stream", table)
+        register_arrow(con, "input_stream", table)
 
         # Create view with proper geometry type
         source_ref = _create_view_with_geometry(con, "input_stream", geometry_column)
@@ -768,6 +853,11 @@ def convert_to_geojson(
 
     Returns:
         Number of features written
+
+    Raises:
+        GeoParquetError: If the exported column declares non-planar edges.
+            Densify and cut the geometry into a planar representation with
+            a geodesic-aware tool before exporting, or keep GeoParquet.
     """
     return convert_to_geojson_stream(
         input_path=input_path,

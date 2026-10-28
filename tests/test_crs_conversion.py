@@ -443,7 +443,8 @@ class TestCRSHelperFunctions:
         """Test that EPSG:4326 is recognized as default."""
         assert is_default_crs({"id": {"authority": "EPSG", "code": 4326}})
         assert is_default_crs(None)
-        assert is_default_crs({})
+        # An empty object names no CRS: unknown, not the default (#1267).
+        assert not is_default_crs({})
 
     def test_is_default_crs_non_default(self):
         """Test that non-default CRS is not recognized as default."""

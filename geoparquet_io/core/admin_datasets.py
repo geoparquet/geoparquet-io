@@ -30,6 +30,7 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
 )
 from geoparquet_io.core.logging_config import debug, info, warn
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.overture import OVERTURE_FALLBACK_RELEASE, get_latest_overture_release
 
 # =============================================================================
@@ -434,6 +435,11 @@ class AdminDataset(ABC):
     # Subclasses MUST define this attribute with their release version.
     VERSION: str = "unknown"
 
+    # The --write-memory limit for this dataset's cache downloads (#1156). The
+    # commands that have the flag set it once the dataset exists; everyone
+    # else keeps None, the ceiling-based default.
+    memory_limit: str | None = None
+
     def __init__(self, source_path: str | None = None, verbose: bool = False):
         """
         Initialize the admin dataset.
@@ -493,8 +499,11 @@ class AdminDataset(ABC):
                 else:
                     query = f"SELECT * FROM read_parquet({sql_path(source)})"
 
-                # Write to cache
-                con.execute(f"COPY ({query}) TO {sql_path(cache_path)} (FORMAT PARQUET)")
+                # Write to cache, bounded like every other gpio write (#1156):
+                # the source is a multi-GB remote dataset and this COPY used to
+                # run at DuckDB's own 80%-of-RAM default.
+                with scoped_write_memory_limit(con, self.memory_limit, self.verbose):
+                    con.execute(f"COPY ({query}) TO {sql_path(cache_path)} (FORMAT PARQUET)")
             finally:
                 con.close()
 
@@ -725,7 +734,13 @@ class AdminDataset(ABC):
         return f"admin:{level_name}"
 
     def get_s3_config(self) -> dict:
-        """Return S3 configuration for this dataset. Override in subclasses."""
+        """Return S3 configuration for this dataset. Override in subclasses.
+
+        A public dataset returns ``"profile": None`` so an outer AWS profile
+        (``--aws-profile`` or an exported ``AWS_PROFILE``) does not build a
+        signed ``credential_chain`` secret for it. That secret would sign the
+        anonymous read, and its endpoint would beat the dataset's own.
+        """
         return {}
 
     @abstractmethod
@@ -800,7 +815,7 @@ class CurrentAdminDataset(AdminDataset):
         return "bbox"
 
     def get_s3_config(self) -> dict:
-        return {"s3_endpoint": "data.source.coop", "s3_use_ssl": True}
+        return {"s3_endpoint": "data.source.coop", "s3_use_ssl": True, "profile": None}
 
     def configure_s3(self, con: duckdb.DuckDBPyConnection) -> None:
         """Configure S3 for source.coop endpoint."""
@@ -849,7 +864,7 @@ class GAULAdminDataset(AdminDataset):
         return "geometry_bbox"
 
     def get_s3_config(self) -> dict:
-        return {"s3_endpoint": "data.source.coop", "s3_use_ssl": True}
+        return {"s3_endpoint": "data.source.coop", "s3_use_ssl": True, "profile": None}
 
     def configure_s3(self, con: duckdb.DuckDBPyConnection) -> None:
         """Configure S3 for source.coop endpoint."""
@@ -860,7 +875,7 @@ class GAULAdminDataset(AdminDataset):
 
 class OvertureAdminDataset(AdminDataset):
     """
-    Overture Maps Divisions dataset (release 2026-05-20.0).
+    Overture Maps Divisions dataset (the latest release, see core/overture.py).
 
     Provides hierarchical administrative boundaries at two levels, compliant with
     the Vecorel administrative division extension specification:
@@ -1117,10 +1132,14 @@ class OvertureAdminDataset(AdminDataset):
                         continue
 
                     query = self._build_level_cache_query(level, source)
-                    con.execute(
-                        f"COPY ({query}) TO {sql_path(cache_path)} "
-                        "(FORMAT PARQUET, COMPRESSION ZSTD)"
-                    )
+                    # Bounded like every other gpio write (#1156): the remote
+                    # scan + simplification of the ~4.5GB Overture dataset used
+                    # to run at DuckDB's own 80%-of-RAM default.
+                    with scoped_write_memory_limit(con, self.memory_limit, self.verbose):
+                        con.execute(
+                            f"COPY ({query}) TO {sql_path(cache_path)} "
+                            "(FORMAT PARQUET, COMPRESSION ZSTD)"
+                        )
                     info(f"Cached {level} dataset at: {cache_path}")
             finally:
                 con.close()
@@ -1131,7 +1150,7 @@ class OvertureAdminDataset(AdminDataset):
         return cache_path
 
     def get_s3_config(self) -> dict:
-        return {"s3_region": "us-west-2"}
+        return {"s3_region": "us-west-2", "profile": None}
 
     def configure_s3(self, con: duckdb.DuckDBPyConnection) -> None:
         """Configure S3 for AWS us-west-2 region where Overture data is stored."""

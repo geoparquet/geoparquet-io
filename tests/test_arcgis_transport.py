@@ -17,6 +17,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.arcgis import (
+    DEFAULT_PAGE_SIZE,
     ArcGISAuth,
     ArcGISLayerInfo,
     _get_reduced_batch_size,
@@ -35,6 +36,7 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
     RemoteAccessError,
 )
+from geoparquet_io.core.http_retry import MAX_RETRY_AFTER
 from tests.http_transport import (
     FakeTransport,
     error_reply,
@@ -333,6 +335,68 @@ def test_a_layer_without_max_record_count_defaults_to_1000(monkeypatch):
     assert get_layer_info(SERVICE).max_record_count == 1000
 
 
+@pytest.mark.parametrize("advertised", [0, -1, None, "lots", 12.5, True, [1000]])
+def test_an_unusable_max_record_count_falls_back_to_the_default_page(
+    monkeypatch, caplog, advertised
+):
+    """A 0, -1, null or non-integer maxRecordCount must not reach the paging math (#1053)."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=1, layer=_layer_json(max_record_count=advertised))
+
+    with caplog.at_level("WARNING"):
+        info = get_layer_info(SERVICE)
+
+    assert info.max_record_count == DEFAULT_PAGE_SIZE
+    assert "maxRecordCount" in caplog.text
+    assert repr(advertised) in caplog.text
+
+
+@pytest.mark.parametrize(("advertised", "expected"), [("500", 500), (750.0, 750)])
+def test_an_integral_max_record_count_is_coerced(monkeypatch, advertised, expected):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=1, layer=_layer_json(max_record_count=advertised))
+
+    assert get_layer_info(SERVICE).max_record_count == expected
+
+
+def test_a_zero_max_record_count_still_pages_the_whole_layer(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=DEFAULT_PAGE_SIZE + 3, layer=_layer_json(max_record_count=0))
+
+    info = get_layer_info(SERVICE)
+    pages = list(fetch_all_features(SERVICE, info))
+
+    assert sum(len(page["features"]) for page in pages) == DEFAULT_PAGE_SIZE + 3
+    page_sizes = [r.params["resultRecordCount"] for r in http.matching(_is_query)]
+    assert page_sizes == [str(DEFAULT_PAGE_SIZE), "3"]
+
+
+@pytest.mark.parametrize("reported", [-1, None, "many", 2.5, True])
+def test_an_unusable_feature_count_is_refused_by_name(monkeypatch, reported):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_count, json_reply({"count": reported}))
+
+    with pytest.raises(RemoteAccessError) as excinfo:
+        get_feature_count(SERVICE)
+
+    assert "count" in excinfo.value.reason
+    assert repr(reported) in excinfo.value.reason
+
+
+def test_a_string_feature_count_is_coerced(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_count, json_reply({"count": "42"}))
+
+    assert get_feature_count(SERVICE) == 42
+
+
+def test_a_count_reply_without_a_count_is_zero(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_count, json_reply({}))
+
+    assert get_feature_count(SERVICE) == 0
+
+
 def test_feature_count_without_a_bbox_sends_no_spatial_params(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(_is_count, json_reply({"count": 5}))
@@ -425,24 +489,45 @@ def test_a_429_honours_an_integer_retry_after(monkeypatch):
     assert http.sleeps == [7.0]
 
 
-def test_an_http_date_retry_after_degrades_to_linear_backoff(monkeypatch):
-    """`Retry-After` is honoured only when `.isdigit()` (http_retry.py).
+def test_a_429_honours_a_decimal_retry_after(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_count, error_reply(429, retry_after="1.5"), json_reply({"count": 1}))
 
-    RFC 9110 allows an HTTP-date, and a server that sends one gets gpio's own
-    exponential backoff instead of the delay it asked for. That is graceful
-    degradation rather than a defect, but it is invisible unless asserted:
-    this test pins the current behaviour so a future change to parse the date
-    form shows up as a failing test rather than a silent one.
-    """
+    assert get_feature_count(SERVICE) == 1
+    assert http.sleeps == [1.5]
+
+
+def test_a_429_with_a_huge_retry_after_is_capped(monkeypatch, caplog):
+    """A day-long Retry-After must not park ``gpio extract`` for a day (#1052)."""
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_count, error_reply(429, retry_after=86400), json_reply({"count": 1}))
+
+    with caplog.at_level("WARNING"):
+        assert get_feature_count(SERVICE) == 1
+
+    assert http.sleeps == [MAX_RETRY_AFTER]
+    assert "86400" in caplog.text
+
+
+def test_an_http_date_retry_after_is_honoured_and_capped(monkeypatch):
+    """RFC 9110 allows an HTTP-date. A date far ahead waits the cap, not the date."""
     http = FakeTransport.install(monkeypatch)
     http.respond(
         _is_count,
-        error_reply(429, retry_after="Wed, 21 Oct 2026 07:28:00 GMT"),
+        error_reply(429, retry_after="Fri, 01 Jan 2100 00:00:00 GMT"),
         json_reply({"count": 1}),
     )
 
     assert get_feature_count(SERVICE) == 1
-    assert http.sleeps == [1.0]  # retry_delay * (attempt + 1), not the date
+    assert http.sleeps == [MAX_RETRY_AFTER]
+
+
+def test_an_unreadable_retry_after_degrades_to_linear_backoff(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_count, error_reply(429, retry_after="soon"), json_reply({"count": 1}))
+
+    assert get_feature_count(SERVICE) == 1
+    assert http.sleeps == [1.0]  # retry_delay * (attempt + 1)
 
 
 def test_retries_are_exhausted_and_then_reported(monkeypatch):
@@ -672,7 +757,7 @@ def test_the_ladder_gives_up_at_batch_size_one(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     stub_service(http, total=1, page_replies=(html_reply(b"<html>nope</html>"),))
 
-    with pytest.raises(GeoParquetError, match="cannot handle even batch_size=1"):
+    with pytest.raises(GeoParquetError, match="refused even a page of batch_size=1"):
         list(fetch_all_features(SERVICE, _layer_info(1), batch_size=1))
 
 
@@ -696,7 +781,10 @@ def _assert_ladder_walked_the_layer(http, pages) -> None:
         (int(request.params["resultOffset"]), int(request.params["resultRecordCount"]))
         for request in http.matching(_is_query)
     ]
-    assert windows[0] == (0, 100)  # the ladder starts at the size that was asked for
+    # The ladder starts at the size that was asked for. The offset-0 window is
+    # always issued (the collect loop waits on it first), but whether it reaches
+    # the transport before its sibling is the scheduler's.
+    assert (0, 100) in windows
     # Each refused rung is restarted from offset 0; how many of its siblings
     # were issued before the cancel is the scheduler's.
     assert {offset for offset, size in windows if size == 100} <= {0, 100}
@@ -748,8 +836,467 @@ def test_the_parallel_ladder_gives_up_at_batch_size_one(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     stub_service(http, total=2, page_replies=(html_reply(b"<html>nope</html>"),))
 
-    with pytest.raises(GeoParquetError, match="cannot handle even batch_size=1"):
+    with pytest.raises(GeoParquetError, match="refused even a page of batch_size=1"):
         list(fetch_all_features(SERVICE, _layer_info(2), batch_size=1, max_workers=2))
+
+
+# ---------------------------------------------------------------------------
+# The ladder recognises how ArcGIS Server actually reports a failed page (#1134)
+#
+# Probed live against geoservices.wallonie.be on 2026-09-21: the same failure,
+# "Error performing query operation", arrives as HTTP 200 + a JSON error
+# envelope with code 500 on the EsriJSON (f=json) path, and as HTTP 500 + an
+# HTML error page on the GeoJSON (f=geojson) path. The layer serves fine at a
+# smaller page. Before this fix neither response reached the ladder.
+# ---------------------------------------------------------------------------
+
+_QUERY_FAILED = {
+    "error": {"code": 500, "message": "Error performing query operation.", "details": []}
+}
+
+
+def _serves_pages_up_to(limit: int, total: int, refusal):
+    """A server that answers any page wider than ``limit`` with ``refusal``."""
+    serve = _offset_aware(total)
+
+    def _serve(request):
+        if int(request.params["resultRecordCount"]) > limit:
+            return refusal(request)
+        return serve(request)
+
+    return _serve
+
+
+def test_a_json_error_500_page_is_retried_at_the_same_offset_smaller(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=100, page_replies=(json_reply(_QUERY_FAILED), _offset_aware(100)))
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(100), batch_size=1000))
+
+    assert sum(len(page["features"]) for page in pages) == 100
+    offsets_and_sizes = [
+        (request.params["resultOffset"], request.params["resultRecordCount"])
+        for request in http.matching(_is_query)
+    ]
+    assert offsets_and_sizes == [("0", "100"), ("0", "50"), ("50", "50")]
+    assert http.sleeps == []  # an HTTP 200 body is the server's answer, not a blip
+
+
+def test_a_json_error_500_page_walks_the_parallel_ladder(monkeypatch, caplog):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(
+        http,
+        total=200,
+        page_replies=(_serves_pages_up_to(10, 200, json_reply(_QUERY_FAILED)),),
+    )
+
+    with caplog.at_level("WARNING"):
+        pages = list(fetch_all_features(SERVICE, _layer_info(200), batch_size=100, max_workers=2))
+
+    _assert_ladder_walked_the_layer(http, pages)
+    # The window is re-walked from its start, whichever sibling was refused.
+    assert "Error performing query operation" in caplog.text
+    assert "Reducing to 50 and retrying from offset 0" in caplog.text
+    assert "Reducing to 10 and retrying from offset 0" in caplog.text
+
+
+def test_a_json_error_500_message_without_the_trailing_period_still_counts(monkeypatch):
+    """The live Wallonia envelope has no period; the issue's example does."""
+    http = FakeTransport.install(monkeypatch)
+    no_period = {
+        "error": {"code": 500, "message": "Error performing query operation", "details": []}
+    }
+    stub_service(http, total=100, page_replies=(json_reply(no_period), _offset_aware(100)))
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(100), batch_size=1000))
+
+    assert sum(len(page["features"]) for page in pages) == 100
+    assert http.param_series("resultRecordCount") == ["100", "50", "50"]
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_a_json_error_500_at_batch_size_one_names_the_server_error(monkeypatch, workers):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=2, page_replies=(json_reply(_QUERY_FAILED),))
+
+    with pytest.raises(GeoParquetError) as excinfo:
+        list(fetch_all_features(SERVICE, _layer_info(2), batch_size=1, max_workers=workers))
+
+    message = str(excinfo.value)
+    assert "refused even a page of batch_size=1" in message
+    assert "Error performing query operation" in message  # what the server said
+    assert "--max-allowable-offset" in message  # the lever that is left
+
+
+def test_the_descent_warning_says_what_the_server_said_and_that_the_size_sticks(
+    monkeypatch, caplog
+):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=100, page_replies=(json_reply(_QUERY_FAILED), _offset_aware(100)))
+
+    with caplog.at_level("WARNING"):
+        list(fetch_all_features(SERVICE, _layer_info(100), batch_size=100))
+
+    assert "batch_size=100" in caplog.text
+    assert "offset 0" in caplog.text
+    assert "Error performing query operation" in caplog.text
+    assert "Reducing to 50" in caplog.text
+    assert "keep this size" in caplog.text
+
+
+@pytest.mark.parametrize("status", [500, 502, 504])
+def test_a_persistent_http_500_on_a_page_descends_the_ladder_after_the_retries(monkeypatch, status):
+    """The default (GeoJSON) path: ArcGIS answers HTTP 500 + HTML, not JSON; a
+    proxy in front of it gives up with 502/504.
+
+    The transport's same-size retries still run first (a 5xx can be a blip);
+    only when they are exhausted does the page size become the lever.
+    """
+    http = FakeTransport.install(monkeypatch)
+    arcgis_error_page = error_reply(
+        status, body=b"<html><title>Error: Error performing query operation</title></html>"
+    )
+    stub_service(http, total=100, page_replies=(_serves_pages_up_to(50, 100, arcgis_error_page),))
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(100), batch_size=1000))
+
+    assert sum(len(page["features"]) for page in pages) == 100
+    offsets_and_sizes = [
+        (request.params["resultOffset"], request.params["resultRecordCount"])
+        for request in http.matching(_is_query)
+    ]
+    # Three same-size attempts at 100 (the transport's retry policy, unchanged),
+    # then the ladder takes over at the same offset.
+    assert offsets_and_sizes == [("0", "100")] * 3 + [("0", "50"), ("50", "50")]
+    assert http.sleeps == [1.0, 2.0]
+
+
+def test_a_persistent_http_502_on_a_parallel_window_descends_the_ladder(monkeypatch):
+    """Wallonia answered HTTP 502 from nginx for a heavy 1000-row page."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(
+        http,
+        total=200,
+        page_replies=(_serves_pages_up_to(10, 200, error_reply(502)),),
+    )
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(200), batch_size=100, max_workers=2))
+
+    _assert_ladder_walked_the_layer(http, pages)
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [html_reply(b"<html>request too large</html>"), error_reply(502)],
+    ids=["html_refusal", "http_502"],
+)
+def test_the_parallel_ladder_does_not_care_which_window_reached_the_server_first(
+    monkeypatch, refusal
+):
+    """The sibling window's request lands before the offset-0 one.
+
+    Both windows are submitted together, so the transport can record them in
+    either order. This scheduling failed the ubuntu/3.11 job on PR #1240 at
+    random; here it is forced: the offset-0 page is held until the sibling has
+    been recorded.
+    """
+    import geoparquet_io.core.arcgis as arcgis_module
+
+    http = FakeTransport.install(monkeypatch)
+    server = _serves_pages_up_to(10, 200, refusal)
+    sibling_recorded = threading.Event()
+
+    def _serve(request):
+        if (request.params["resultOffset"], request.params["resultRecordCount"]) == ("100", "100"):
+            sibling_recorded.set()
+        return server(request)
+
+    stub_service(http, total=200, page_replies=(_serve,))
+    real_fetch_page = arcgis_module.fetch_features_page
+
+    def _offset_zero_waits_for_the_sibling(service_url, offset, batch_size, *args, **kwargs):
+        if (offset, batch_size) == (0, 100):
+            assert sibling_recorded.wait(timeout=30), "the sibling window was never issued"
+        return real_fetch_page(service_url, offset, batch_size, *args, **kwargs)
+
+    monkeypatch.setattr(arcgis_module, "fetch_features_page", _offset_zero_waits_for_the_sibling)
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(200), batch_size=100, max_workers=2))
+
+    first = http.matching(_is_query)[0]
+    assert (first.params["resultOffset"], first.params["resultRecordCount"]) == ("100", "100")
+    _assert_ladder_walked_the_layer(http, pages)
+
+
+def test_a_persistent_http_500_at_batch_size_one_is_reported_as_such(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=1, page_replies=(error_reply(500),))
+
+    with pytest.raises(GeoParquetError) as excinfo:
+        list(fetch_all_features(SERVICE, _layer_info(1), batch_size=1))
+
+    assert "refused even a page of batch_size=1" in str(excinfo.value)
+    assert "HTTP 500" in str(excinfo.value)
+    assert len(http.matching(_is_query)) == 3  # one rung, its retries, then stop
+
+
+def test_a_transient_http_500_on_a_page_is_still_retried_at_the_same_size(monkeypatch):
+    """The transport's transient tolerance is unchanged: one blip costs one retry, not a rung."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=100, page_replies=(error_reply(500), _offset_aware(100)))
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(100), batch_size=100))
+
+    assert sum(len(page["features"]) for page in pages) == 100
+    assert http.param_series("resultRecordCount") == ["100", "100"]
+    assert http.sleeps == [1.0]
+
+
+def test_an_http_500_carrying_a_page_pressure_envelope_descends_at_once(monkeypatch):
+    """Newer servers mirror the JSON code into the HTTP status; the body still decides."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(
+        http,
+        total=100,
+        page_replies=(json_reply(_QUERY_FAILED, status=500), _offset_aware(100)),
+    )
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(100), batch_size=1000))
+
+    assert sum(len(page["features"]) for page in pages) == 100
+    assert http.param_series("resultRecordCount") == ["100", "50", "50"]
+    assert http.sleeps == []  # the envelope is the answer; no same-size retries
+
+
+def test_an_http_500_carrying_a_specific_envelope_is_fatal_with_the_servers_words(monkeypatch):
+    """The narrow classifier is not bypassed by the HTTP status (review of this PR)."""
+    http = FakeTransport.install(monkeypatch)
+    envelope = {
+        "error": {"code": 500, "message": "Database connection lost", "details": ["ORA-03113"]}
+    }
+    stub_service(http, total=10, page_replies=(json_reply(envelope, status=500),))
+
+    with pytest.raises(GeoParquetError) as excinfo:
+        list(fetch_all_features(SERVICE, _layer_info(10), batch_size=100))
+
+    assert "Error 500 - Database connection lost. ORA-03113" in str(excinfo.value)
+    assert "--batch-size" in str(excinfo.value)
+    assert len(http.matching(_is_query)) == 1
+    assert http.sleeps == []
+
+
+def test_a_502_with_a_proxys_json_body_keeps_its_retries_and_then_descends(monkeypatch):
+    """Only ArcGIS's own 500 mirrors its envelope; a gateway's JSON body is not an answer."""
+    http = FakeTransport.install(monkeypatch)
+    gateway_body = {"error": {"code": "BAD_GATEWAY", "message": "upstream timed out"}}
+    stub_service(
+        http,
+        total=100,
+        page_replies=(_serves_pages_up_to(50, 100, json_reply(gateway_body, status=502)),),
+    )
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(100), batch_size=1000))
+
+    assert sum(len(page["features"]) for page in pages) == 100
+    assert http.param_series("resultRecordCount") == ["100"] * 3 + ["50", "50"]
+    assert http.sleeps == [1.0, 2.0]
+
+
+def test_the_parallel_warning_names_the_refused_offset_and_the_window_restart(monkeypatch, caplog):
+    """Refuse only the sibling window, so the two offsets in the warning differ."""
+    http = FakeTransport.install(monkeypatch)
+    serve = _offset_aware(200)
+
+    def _serve(request):
+        window = (int(request.params["resultOffset"]), int(request.params["resultRecordCount"]))
+        if window == (100, 100):
+            return json_reply(_QUERY_FAILED)(request)
+        return serve(request)
+
+    stub_service(http, total=200, page_replies=(_serve,))
+
+    with caplog.at_level("WARNING"):
+        pages = list(fetch_all_features(SERVICE, _layer_info(200), batch_size=100, max_workers=2))
+
+    assert sum(len(page["features"]) for page in pages) == 200
+    assert "batch_size=100 at offset 100" in caplog.text
+    assert "Reducing to 50 and retrying from offset 0" in caplog.text
+    # The window is re-walked at 50 from its start, each page exactly once.
+    fifties = sorted(
+        int(r.params["resultOffset"])
+        for r in http.matching(_is_query)
+        if r.params["resultRecordCount"] == "50"
+    )
+    assert fifties == [0, 50, 100, 150]
+
+
+def test_an_error_key_that_is_not_an_envelope_is_still_reported(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=10, page_replies=(json_reply({"error": "boom"}),))
+
+    with pytest.raises(GeoParquetError, match="Feature query: Error Unknown - boom"):
+        list(fetch_all_features(SERVICE, _layer_info(10), batch_size=100))
+
+
+@pytest.mark.parametrize(
+    ("status", "retry_after", "expected_sleeps"),
+    [
+        (503, None, [1.0, 2.0]),
+        (503, 30, [30.0, 30.0]),
+        (501, None, [1.0, 2.0]),
+    ],
+)
+def test_a_persistent_503_or_501_on_a_page_is_an_outage_not_a_page_problem(
+    monkeypatch, status, retry_after, expected_sleeps
+):
+    """Service Unavailable / Not Implemented say something specific: no ladder walk."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=100, page_replies=(error_reply(status, retry_after=retry_after),))
+
+    with pytest.raises(RemoteAccessError, match=f"HTTP error {status}"):
+        list(fetch_all_features(SERVICE, _layer_info(100), batch_size=1000))
+
+    assert http.param_series("resultRecordCount") == ["100"] * 3
+    assert http.sleeps == expected_sleeps
+
+
+def test_an_exhausted_http_error_never_echoes_the_request_url(monkeypatch):
+    """`str(HTTPStatusError)` embeds the full URL, token included; it must not reach the user."""
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_count, error_reply(500))
+
+    with pytest.raises(RemoteAccessError) as excinfo:
+        get_feature_count(SERVICE, token="SECRET-TOKEN")
+
+    assert "SECRET-TOKEN" not in str(excinfo.value)
+    assert "HTTP error 500" in str(excinfo.value)
+
+
+def test_the_ladder_keeps_the_esrijson_request_shape_across_a_rung(monkeypatch):
+    """The literal #1134 scenario: --output-crs sends f=json, and the retry must too."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(
+        http,
+        total=100,
+        page_replies=(json_reply(_QUERY_FAILED), _offset_aware(100)),
+    )
+
+    list(fetch_all_features(SERVICE, _layer_info(100), batch_size=1000, output_wkid=25830))
+
+    for request in http.matching(_is_query):
+        assert request.params["f"] == "json"
+        assert request.params["outSR"] == "25830"
+    assert http.param_series("resultRecordCount") == ["100", "50", "50"]
+
+
+def test_a_persistent_http_500_on_a_countless_request_is_still_fatal(monkeypatch):
+    """No page was requested, so the ladder has nothing to shrink (#606)."""
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_count, error_reply(500))
+
+    with pytest.raises(RemoteAccessError, match="HTTP error 500"):
+        get_feature_count(SERVICE)
+
+
+@pytest.mark.parametrize(
+    ("envelope", "needle"),
+    [
+        ({"code": 498, "message": "Invalid Token"}, "Invalid or expired token"),
+        ({"code": 499, "message": "Token Required"}, "Invalid or expired token"),
+        (
+            {"code": 400, "message": "Unable to complete operation.", "details": ["Invalid field"]},
+            "Error 400 - Unable to complete operation. Invalid field",
+        ),
+        (
+            {"code": 503, "message": "Service Unavailable", "details": []},
+            "Error 503 - Service Unavailable",
+        ),
+    ],
+)
+def test_json_errors_that_are_not_page_pressure_stay_fatal(monkeypatch, envelope, needle):
+    """Auth, bad parameters and an unavailable service are not a page-size problem."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=10, page_replies=(json_reply({"error": envelope}),))
+
+    with pytest.raises(GeoParquetError, match=needle):
+        list(fetch_all_features(SERVICE, _layer_info(10), batch_size=100))
+    assert http.param_series("resultRecordCount") == ["10"]  # one request, no ladder
+
+
+def test_a_json_error_500_with_an_unrecognised_message_is_fatal_with_a_hint(monkeypatch):
+    """A 500 the classifier does not know stays fatal, but tells the user the lever."""
+    http = FakeTransport.install(monkeypatch)
+    envelope = {"code": 500, "message": "Database connection lost", "details": ["ORA-03113"]}
+    stub_service(http, total=10, page_replies=(json_reply({"error": envelope}),))
+
+    with pytest.raises(GeoParquetError) as excinfo:
+        list(fetch_all_features(SERVICE, _layer_info(10), batch_size=100))
+
+    message = str(excinfo.value)
+    assert "Error 500 - Database connection lost. ORA-03113" in message
+    assert "--batch-size" in message
+    assert http.param_series("resultRecordCount") == ["10"]
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("Error performing query operation.", True),
+        ("Error performing query operation", True),
+        ("  error PERFORMING query operation  ", True),
+        ("Unable to complete operation.", True),
+        ("Unable to perform query operation.", True),
+        ("Database connection lost", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_the_page_pressure_classifier_normalises_the_message(message, expected):
+    from geoparquet_io.core.arcgis import _is_page_pressure_error
+
+    envelope = {"code": 500, "details": []}
+    if message is not None:
+        envelope["message"] = message
+    assert _is_page_pressure_error(envelope) is expected
+
+
+@pytest.mark.parametrize(
+    ("details", "expected"),
+    [
+        ([], True),
+        (None, True),
+        (["Unable to perform query operation."], True),  # the generic phrase, nested
+        (["Attempted to divide by zero."], False),  # the server said what went wrong
+        ("Unable to perform query operation.", True),  # a bare string, not a list
+        ("ORA-03113: end-of-file on communication channel", False),
+    ],
+)
+def test_the_page_pressure_classifier_reads_the_details_too(details, expected):
+    from geoparquet_io.core.arcgis import _is_page_pressure_error
+
+    envelope = {"code": 500, "message": "Unable to complete operation."}
+    if details is not None:
+        envelope["details"] = details
+    assert _is_page_pressure_error(envelope) is expected
+
+
+def test_a_string_details_field_is_reported_whole(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    envelope = {"error": {"code": 400, "message": "Bad.", "details": "Invalid field"}}
+    stub_service(http, total=10, page_replies=(json_reply(envelope),))
+
+    with pytest.raises(GeoParquetError, match=r"Error 400 - Bad\. Invalid field$"):
+        list(fetch_all_features(SERVICE, _layer_info(10), batch_size=100))
+
+
+@pytest.mark.parametrize("code", [400, 498, 499, 501, 503, 504, "500", None])
+def test_the_page_pressure_classifier_wants_exactly_code_500(code):
+    from geoparquet_io.core.arcgis import _is_page_pressure_error
+
+    envelope: dict = {"message": "Error performing query operation."}
+    if code is not None:
+        envelope["code"] = code
+    assert _is_page_pressure_error(envelope) is False
 
 
 # ---------------------------------------------------------------------------
@@ -757,7 +1304,8 @@ def test_the_parallel_ladder_gives_up_at_batch_size_one(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_an_empty_filtered_layer_returns_an_empty_geometry_table(monkeypatch, caplog):
+def test_an_empty_filtered_layer_returns_the_layers_schema(monkeypatch, caplog):
+    """Zero features keep the columns and geo block a non-empty fetch has (#966)."""
     http = FakeTransport.install(monkeypatch)
     stub_service(http, total=0)
 
@@ -765,9 +1313,51 @@ def test_an_empty_filtered_layer_returns_an_empty_geometry_table(monkeypatch, ca
         table = arcgis_to_table(SERVICE, where="pop > 1e9", bbox=(-1, -1, 1, 1))
 
     assert table.num_rows == 0
-    assert table.column_names == ["geometry"]
+    assert table.column_names == ["geometry", "OBJECTID", "name", "pop"]
+    geo = json.loads(table.schema.metadata[b"geo"])
+    assert geo["primary_column"] == "geometry"
+    assert geo["columns"]["geometry"]["geometry_types"] == []
     assert "No features match filter" in caplog.text
     assert "where='pop > 1e9'" in caplog.text
+    # An empty result is reported once, not also blamed on the geometry.
+    assert "holds no geometries" not in caplog.text
+
+
+def test_an_empty_layer_honours_include_and_exclude_cols(monkeypatch):
+    """A filter matching nothing must not undo the column selection (#966)."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=0)
+
+    included = arcgis_to_table(SERVICE, where="1=0", include_cols="name")
+    assert included.column_names == ["geometry", "name"]
+
+    excluded = arcgis_to_table(SERVICE, where="1=0", exclude_cols="geometry")
+    assert excluded.column_names == ["OBJECTID", "name", "pop"]
+    assert b"geo" not in (excluded.schema.metadata or {})
+
+
+def test_an_empty_layer_with_geometry_excluded_writes_plain_parquet(monkeypatch, tmp_path):
+    """The written file for a zero-feature result carries no geometry and no geo key."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=0)
+    out = tmp_path / "empty.parquet"
+
+    convert_arcgis_to_geoparquet(SERVICE, str(out), where="1=0", exclude_cols="geometry")
+
+    schema = pq.read_schema(str(out))
+    assert schema.names == ["OBJECTID", "name", "pop"]
+    assert b"geo" not in (schema.metadata or {})
+
+
+def test_an_empty_layer_is_tagged_with_the_requested_output_crs(monkeypatch):
+    """A zero-feature result on the outSR path still names the CRS it asked for."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=0)
+
+    table = arcgis_to_table(SERVICE, where="1=0", output_crs="EPSG:3857")
+
+    crs = json.loads(table.schema.metadata[b"geo"])["columns"]["geometry"]["crs"]
+    assert crs["id"] == {"authority": "EPSG", "code": 3857}
 
 
 def test_an_empty_unfiltered_layer_says_so_differently(monkeypatch, caplog):
@@ -884,6 +1474,39 @@ def test_a_native_crs_request_warns_when_the_server_returns_another(monkeypatch,
     assert http.matching(_is_query)[0].params["outSR"] == "3857"
 
 
+def test_an_attribute_table_is_not_tagged_or_warned_about_a_crs(monkeypatch, caplog):
+    """With geometry excluded there is no CRS to tag, so no CRS mismatch to report (#966)."""
+    http = FakeTransport.install(monkeypatch)
+    http.respond(
+        lambda r: r.path.endswith("/0") and not r.path.endswith("query"), json_reply(_layer_json())
+    )
+    http.respond(_is_count, json_reply({"count": 1}))
+    http.respond(
+        _is_query,
+        json_reply(
+            {
+                "geometryType": "esriGeometryPoint",
+                "spatialReference": {"wkid": 4326},
+                "fields": FIELDS,
+                "features": [
+                    {
+                        "geometry": {"x": -122.0, "y": 37.5},
+                        "attributes": {"OBJECTID": 1, "name": "a", "pop": 1},
+                    }
+                ],
+            }
+        ),
+    )
+
+    with caplog.at_level("WARNING"):
+        table = arcgis_to_table(SERVICE, output_crs="EPSG:3857", exclude_cols="geometry")
+
+    assert table.column_names == ["OBJECTID", "name", "pop"]
+    assert b"geo" not in (table.schema.metadata or {})
+    assert "server returned WKID" not in caplog.text
+    assert "geometry column was excluded" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # convert_arcgis_to_geoparquet - the file that gets written
 # ---------------------------------------------------------------------------
@@ -990,7 +1613,14 @@ def test_an_unknown_esri_field_type_falls_back_to_string(monkeypatch, caplog):
     assert table.schema.field("pop").type == pa.string()
 
 
-def test_excluding_the_geometry_column_declares_types_unknown(monkeypatch, caplog):
+def test_excluding_the_geometry_column_drops_the_geo_block(monkeypatch, caplog):
+    """``--exclude-cols geometry`` returns an attribute table, not GeoParquet (#966).
+
+    The block used to survive with ``primary_column: "geometry"`` naming a
+    column the table does not contain, which gpio's own validator rejects.
+    ``extract geoparquet`` documents the correct behaviour: no geometry column,
+    no ``geo`` metadata at all.
+    """
     http = FakeTransport.install(monkeypatch)
     stub_service(http, total=3)
 
@@ -999,7 +1629,64 @@ def test_excluding_the_geometry_column_declares_types_unknown(monkeypatch, caplo
 
     assert "geometry column was excluded" in caplog.text
     assert "geometry" not in table.column_names
-    assert json.loads(table.schema.metadata[b"geo"])["columns"]["geometry"]["geometry_types"] == []
+    assert b"geo" not in (table.schema.metadata or {})
+
+
+def test_excluding_the_geometry_column_writes_plain_parquet(monkeypatch, tmp_path):
+    """The written file carries no ``geo`` key; validate sees plain Parquet (#966).
+
+    ``gpio extract arcgis ... --exclude-cols geometry`` used to write a ``geo``
+    block whose ``primary_column`` named the excluded column, so
+    ``validate_geoparquet`` failed the file gpio had just written.
+    """
+    from geoparquet_io.core.validate import validate_geoparquet
+
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=3)
+    out = tmp_path / "plain.parquet"
+
+    convert_arcgis_to_geoparquet(SERVICE, str(out), exclude_cols="geometry")
+
+    metadata = pq.read_schema(str(out)).metadata or {}
+    assert b"geo" not in metadata
+    written = pq.read_table(str(out))
+    assert written.column_names == ["OBJECTID", "name", "pop"]
+    assert written.num_rows == 3
+
+    # The bug's signature was schema failures against the written file's own
+    # metadata ('geometry column "geometry" not found in schema', plus binder
+    # errors). Those must be gone. What remains is validate's file-type verdict
+    # that a plain Parquet file is not GeoParquet -- true of this output by
+    # design, exactly as it is of `extract geoparquet --exclude-cols geometry`.
+    failures = [c for c in validate_geoparquet(str(out)).checks if c.status.value == "failed"]
+    assert [c.name for c in failures] == ["file_type"]
+    assert "No GeoParquet metadata" in failures[0].message
+
+
+@pytest.mark.parametrize("write_strategy", ["duckdb-kv", "in-memory", "streaming", "disk-rewrite"])
+def test_the_api_extract_with_geometry_excluded_writes_plain_parquet(
+    monkeypatch, tmp_path, write_strategy
+):
+    """``gpio.extract_arcgis(..., exclude_cols="geometry").write()`` matches the CLI (#966).
+
+    The Table used to keep ``geometry_column="geometry"`` for a table without that
+    column, so the default write raised KeyError and ``streaming`` wrote the very
+    geo block #966 is about.
+    """
+    from geoparquet_io.api.table import extract_arcgis
+
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=3)
+
+    table = extract_arcgis(SERVICE, exclude_cols="geometry")
+    assert table.geometry_column is None
+
+    out = tmp_path / "api.parquet"
+    table.write(str(out), write_strategy=write_strategy)
+
+    schema = pq.read_schema(str(out))
+    assert schema.names == ["OBJECTID", "name", "pop"]
+    assert b"geo" not in (schema.metadata or {})
 
 
 def test_an_all_null_geometry_column_declares_types_unknown(monkeypatch, caplog):
@@ -1195,3 +1882,55 @@ def test_a_custom_projection_wkt_is_written_as_full_projjson(monkeypatch, tmp_pa
     assert crs["name"] == "Custom_Transverse_Mercator"
     assert "id" not in crs
     assert spec_problems(out) == []
+
+
+class TestExcludeColsThatLeavesNothing:
+    """``--exclude-cols`` that names every column was a silent no-op (#1176).
+
+    ``_exclude_columns`` returned the table unchanged when nothing would be left,
+    so ``--exclude-cols geometry`` on a geometry-only layer wrote full GeoParquet
+    including the column the user asked to drop. An empty table is not what was
+    asked for either: this is a typo, and the only useful answer is to say so.
+    """
+
+    def test_excluding_every_column_is_refused(self, monkeypatch):
+        http = FakeTransport.install(monkeypatch)
+        stub_service(http, total=3)
+
+        with pytest.raises(InvalidParameterError) as excinfo:
+            arcgis_to_table(SERVICE, exclude_cols="geometry,OBJECTID,name,pop")
+
+        message = str(excinfo.value)
+        assert "exclude" in message.lower()
+
+    def test_refused_before_any_feature_is_downloaded(self, monkeypatch):
+        http = FakeTransport.install(monkeypatch)
+        stub_service(http, total=3)
+
+        with pytest.raises(InvalidParameterError):
+            arcgis_to_table(SERVICE, exclude_cols="geometry,OBJECTID,name,pop")
+
+        assert not http.matching(_is_query), "features were downloaded before the refusal"
+
+    def test_excluding_every_column_of_a_narrowed_selection_is_refused(self, monkeypatch):
+        """``--include-cols name`` leaves ``geometry,name``; excluding both leaves nothing."""
+        http = FakeTransport.install(monkeypatch)
+        stub_service(http, total=3)
+
+        with pytest.raises(InvalidParameterError):
+            arcgis_to_table(SERVICE, include_cols="name", exclude_cols="geometry,name")
+
+    def test_an_empty_layer_is_refused_too(self, monkeypatch):
+        http = FakeTransport.install(monkeypatch)
+        stub_service(http, total=0)
+
+        with pytest.raises(InvalidParameterError):
+            arcgis_to_table(SERVICE, where="1=0", exclude_cols="geometry,OBJECTID,name,pop")
+
+    def test_a_partial_exclusion_still_works(self, monkeypatch):
+        http = FakeTransport.install(monkeypatch)
+        stub_service(http, total=3)
+
+        table = arcgis_to_table(SERVICE, exclude_cols="OBJECTID,name,pop")
+
+        assert table.column_names == ["geometry"]
