@@ -70,6 +70,21 @@ class CheckResult:
         # Handle single check results
         return self._results.get("passed", False)
 
+    def judged(self) -> bool:
+        """
+        Whether every check that ran reached a verdict at all.
+
+        The spatial-order check withholds its verdict under the spec's floors
+        (a file under 5 MB of row-group data, or too few row groups for a
+        pass). ``passed()`` stays True there -- no failure was found -- and
+        this is False, so a caller printing a check mark or counting outcomes
+        can tell the difference.
+
+        Returns:
+            False when any check withheld its verdict, True otherwise
+        """
+        return all(r.get("judged", True) for _, r in self._categories())
+
     def verdict(self) -> str:
         """
         How bad the result is: ``"pass"``, ``"warning"`` or ``"failure"``.

@@ -134,9 +134,7 @@ class TestCheckGroupAgreesWithTable:
 
     def test_check_spatial_agrees_on_a_one_row_group_file(self, places_with_covering_file):
         """One row group: both surfaces withhold the verdict rather than pass it."""
-        assert "not judged below 8 row groups" in _cli(
-            "check", "spatial", places_with_covering_file
-        )
+        assert "Spatial ordering not judged" in _cli("check", "spatial", places_with_covering_file)
         api = gpio.read(places_with_covering_file).check_spatial()
         assert api.to_dict()["judged"] is False
         assert api.passed() is True, "no verdict is not a failure"
@@ -174,10 +172,16 @@ class TestCheckGroupReadsTheFileItWasGiven:
         api = gpio.read(unsorted_test_file).check_compression().to_dict()
         assert api["current_compression"] == _geometry_codec(unsorted_test_file)
 
-    def test_cli_check_spatial_sees_the_files_order(self, unsorted_test_file):
+    def test_cli_check_spatial_sees_the_files_order(self, unsorted_test_file, monkeypatch):
+        import geoparquet_io.core.check_spatial_order as mod
+
+        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
         assert "Poor spatial ordering" in _cli("check", "spatial", unsorted_test_file)
 
-    def test_table_check_spatial_sees_the_files_order(self, unsorted_test_file):
+    def test_table_check_spatial_sees_the_files_order(self, unsorted_test_file, monkeypatch):
+        import geoparquet_io.core.check_spatial_order as mod
+
+        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
         assert gpio.read(unsorted_test_file).check_spatial().passed() is False
 
     def test_cli_check_optimization_scores_the_file(self, unsorted_test_file):

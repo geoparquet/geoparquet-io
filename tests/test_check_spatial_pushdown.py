@@ -3,9 +3,9 @@
 import pytest
 
 from geoparquet_io.core.check_spatial_order import (
-    _axis_hit_probability,
+    _axis_overlap_share,
     _compute_data_extent,
-    _expected_skip_rate,
+    _weighted_skip_rate,
     check_spatial_pushdown_readiness,
 )
 
@@ -35,53 +35,60 @@ class TestComputeDataExtent:
             _compute_data_extent([])
 
 
-class TestAxisHitProbability:
+class TestAxisOverlapShare:
     """Tests for the one-axis closed form the expected skip rate is built from."""
 
-    def test_box_spanning_the_extent_is_always_hit(self):
-        assert _axis_hit_probability(0.0, 100.0, 0.0, 100.0, 10.0) == 1.0
+    def test_source_inside_the_grown_target_is_always_hit(self):
+        assert _axis_overlap_share(0.0, 100.0, 0.0, 100.0, 10.0) == 1.0
 
-    def test_box_at_the_low_edge(self):
-        """Window low edge uniform on [0, 90]; hits [0, 10] when it lies in [-10, 10] -> 10/90."""
-        assert _axis_hit_probability(0.0, 10.0, 0.0, 100.0, 10.0) == pytest.approx(10 / 90)
+    def test_source_beside_the_target_overlaps_by_the_grown_margin(self):
+        """Centre uniform on [0, 10]; target [10, 20] grown by 5 starts at 5 -> 5/10."""
+        assert _axis_overlap_share(0.0, 10.0, 10.0, 20.0, 5.0) == pytest.approx(0.5)
 
-    def test_interior_box_counts_the_window_width(self):
-        """[40, 50] is hit by any low edge in [30, 50] -> 20/90."""
-        assert _axis_hit_probability(40.0, 50.0, 0.0, 100.0, 10.0) == pytest.approx(20 / 90)
+    def test_disjoint_source_and_target_never_overlap(self):
+        assert _axis_overlap_share(0.0, 10.0, 50.0, 60.0, 5.0) == 0.0
 
     def test_larger_window_hits_more(self):
-        small = _axis_hit_probability(40.0, 50.0, 0.0, 100.0, 5.0)
-        large = _axis_hit_probability(40.0, 50.0, 0.0, 100.0, 50.0)
+        small = _axis_overlap_share(0.0, 40.0, 40.0, 50.0, 5.0)
+        large = _axis_overlap_share(0.0, 40.0, 40.0, 50.0, 25.0)
         assert large > small
 
-    def test_degenerate_axis_is_always_hit(self):
-        """Zero-width extent, or a window as wide as the extent: every placement hits."""
-        assert _axis_hit_probability(5.0, 5.0, 5.0, 5.0, 0.0) == 1.0
-        assert _axis_hit_probability(0.0, 10.0, 0.0, 100.0, 100.0) == 1.0
+    def test_degenerate_span_is_an_indicator(self):
+        """A zero-width span puts all its probability on one coordinate."""
+        assert _axis_overlap_share(5.0, 5.0, 5.0, 5.0, 0.0) == 1.0
+        assert _axis_overlap_share(5.0, 5.0, 6.0, 7.0, 0.5) == 0.0
+        assert _axis_overlap_share(5.0, 5.0, 5.5, 7.0, 0.5) == 1.0
 
 
-class TestExpectedSkipRate:
-    """Tests for _expected_skip_rate, the closed form of the sampled skip rate."""
+class TestWeightedSkipRate:
+    """Tests for _weighted_skip_rate, the closed form of the spec's skip rate."""
 
     def test_boxes_covering_the_extent_skip_nothing(self):
         extent = {"xmin": 0.0, "ymin": 0.0, "xmax": 100.0, "ymax": 100.0}
         rg_bboxes = [{"row_group_id": i, **extent} for i in range(2)]
-        assert _expected_skip_rate(rg_bboxes, extent, 0.1) == 0.0
+        assert _weighted_skip_rate(rg_bboxes, query_fraction=0.1) == 0.0
 
     def test_disjoint_strips_skip_most(self):
-        """Ten disjoint strips across a 10% window: each is hit with P = 20/90."""
+        """Ten disjoint strips, window 10% of the strip it lands in.
+
+        A window from strip i (width 10, so half-window 0.5) overlaps the own
+        strip always and a neighbour when the centre is within 0.5 of the
+        shared edge: 0.5/10 per adjacent side.
+        """
         rg_bboxes = [
             {"row_group_id": i, "xmin": i * 10.0, "ymin": 0.0, "xmax": (i + 1) * 10.0, "ymax": 10.0}
             for i in range(10)
         ]
-        extent = _compute_data_extent(rg_bboxes)
-        # x: interior strips 20/90, the two edge strips 10/90; y is degenerate (P=1)
-        expected_hit = (8 * 20 / 90 + 2 * 10 / 90) / 10
-        assert _expected_skip_rate(rg_bboxes, extent, 0.1) == pytest.approx(1 - expected_hit)
+        neighbour = 0.5 / 10
+        sides = 2 * 9  # each interior edge counts once from each side
+        expected_read = (10 + sides * neighbour) / (10 * 10)
+        assert _weighted_skip_rate(rg_bboxes, query_fraction=0.1) == pytest.approx(
+            1 - expected_read
+        )
 
     def test_single_box_equal_to_the_extent(self):
         extent = {"xmin": 0.0, "ymin": 0.0, "xmax": 10.0, "ymax": 10.0}
-        assert _expected_skip_rate([{"row_group_id": 0, **extent}], extent, 0.5) == 0.0
+        assert _weighted_skip_rate([{"row_group_id": 0, **extent}], query_fraction=0.5) == 0.0
 
 
 class TestCheckSpatialPushdownReadiness:
@@ -138,9 +145,8 @@ class TestCheckSpatialPushdownReadinessUnit:
             {"row_group_id": i, "xmin": i * 10.0, "ymin": 0.0, "xmax": (i + 1) * 10.0, "ymax": 10.0}
             for i in range(10)
         ]
-        extent = _compute_data_extent(mock_bboxes)
         # With 10 disjoint RGs and a 10% query, expect a high skip rate
-        assert _expected_skip_rate(mock_bboxes, extent, 0.1) >= 0.5
+        assert _weighted_skip_rate(mock_bboxes, query_fraction=0.1) >= 0.5
 
     def test_poorly_sorted_data_low_skip_rate(self):
         """Poorly sorted data (all overlapping RGs) should have low skip rate."""
@@ -148,6 +154,5 @@ class TestCheckSpatialPushdownReadinessUnit:
             {"row_group_id": i, "xmin": 0.0, "ymin": 0.0, "xmax": 100.0, "ymax": 100.0}
             for i in range(10)
         ]
-        extent = _compute_data_extent(mock_bboxes)
         # Any query overlapping anything will hit all 10 RGs
-        assert _expected_skip_rate(mock_bboxes, extent, 0.1) == 0.0
+        assert _weighted_skip_rate(mock_bboxes, query_fraction=0.1) == 0.0

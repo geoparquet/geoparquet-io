@@ -1451,6 +1451,34 @@ def aggregate_native_geo_stats(chunks: list[dict]) -> dict:
     return stats
 
 
+def get_per_row_group_weights(parquet_file: str, con=None) -> dict[int, dict]:
+    """
+    Each row group's row count and compressed bytes, keyed by row_group_id.
+
+    The spatial-order metric weighs query placement by rows and the skip rate
+    by compressed bytes, and the Portolan spec's 5 MB size floor is the sum of
+    the row groups' compressed bytes — footer-only numbers, so a remote file
+    measures the same as a local one.
+    """
+    metadata_path = _metadata_path(parquet_file)
+    # parquet_metadata() only: no spatial extension, which is most of a connection's cost.
+    connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
+    try:
+        result = connection.execute(f"""
+            SELECT
+                row_group_id,
+                MAX(row_group_num_rows) AS rows,
+                SUM(total_compressed_size) AS compressed_bytes
+            FROM parquet_metadata({sql_path(metadata_path)})
+            GROUP BY row_group_id
+            ORDER BY row_group_id
+        """).fetchall()
+        return {row[0]: {"rows": float(row[1] or 0), "bytes": float(row[2] or 0)} for row in result}
+    finally:
+        if should_close:
+            connection.close()
+
+
 def get_per_row_group_native_geo_stats(
     parquet_file: str, geometry_column: str | None = None, con=None
 ) -> list[dict]:

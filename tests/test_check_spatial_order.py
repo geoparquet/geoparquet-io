@@ -81,8 +81,11 @@ class TestCheckSpatialOrder:
 
         assert pq.ParquetFile(unsorted_test_file).metadata.num_row_groups >= 3
 
-    def test_poorly_ordered_file(self, unsorted_test_file):
+    def test_poorly_ordered_file(self, unsorted_test_file, monkeypatch):
         """The unsorted fixture must actually fail the spatial-order check."""
+        import geoparquet_io.core.check_spatial_order as mod
+
+        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
         result = check_spatial_order(
             unsorted_test_file,
             random_sample_size=50,
@@ -93,8 +96,6 @@ class TestCheckSpatialOrder:
         assert isinstance(result, dict)
         # The fixture carries a bbox column, so the fast path is the one under test.
         assert result["method"] == "bbox_stats"
-        # Bbox-stats method: passed=False when ratio >= 0.3
-        assert result["ratio"] >= 0.3
         assert result["passed"] is False
         assert result["fix_available"] is True
         assert len(result["issues"]) > 0
@@ -220,8 +221,11 @@ class TestCheckSpatialOrderBboxStats:
         assert isinstance(result, dict)
         assert result["method"] == "bbox_stats"
 
-    def test_single_row_group_verdict_is_withheld(self, places_test_file):
+    def test_single_row_group_verdict_is_withheld(self, places_test_file, monkeypatch):
         """One row group is below the floor: no verdict, no issue, no fix offered."""
+        import geoparquet_io.core.check_spatial_order as mod
+
+        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
         result = check_spatial_order_bbox_stats(
             places_test_file, verbose=False, return_results=True, quiet=False
         )
@@ -231,8 +235,11 @@ class TestCheckSpatialOrderBboxStats:
         assert result["fix_available"] is False
         assert any("not judged below 8 row groups" in w for w in result["warnings"])
 
-    def test_issues_and_recommendations_when_failed(self, unsorted_test_file):
+    def test_issues_and_recommendations_when_failed(self, unsorted_test_file, monkeypatch):
         """Test that failing check includes proper issues and recommendations."""
+        import geoparquet_io.core.check_spatial_order as mod
+
+        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
         result = check_spatial_order_bbox_stats(
             unsorted_test_file, verbose=False, return_results=True, quiet=False
         )
@@ -502,9 +509,9 @@ class TestSpatialLocalitySecondaryCheck:
         This used to assert the opposite: the check was gated on >= 3 row groups,
         so a two-group file whose boxes overlap at all was reported "Poor spatial
         ordering (overlap ratio: 1.00)" with no metrics computed. These two boxes
-        prune exactly as well as two row groups allow (efficiency 1.0), but two
-        row groups are below the verdict floor, so the verdict is withheld
-        rather than the pass the first version of this fix printed.
+        prune nearly as well as two row groups allow, but two row groups are
+        below the verdict floor, so the verdict is withheld rather than the
+        pass the first version of this fix printed.
         """
         from geoparquet_io.core.check_spatial_order import (
             _check_spatial_order_from_row_group_bboxes,
@@ -525,7 +532,7 @@ class TestSpatialLocalitySecondaryCheck:
 
         assert result["ratio"] == 1.0, "Both groups overlap - kept as a statistic"
         assert result["judged"] is False
-        assert result["skip_rate_efficiency"] == pytest.approx(1.0)
+        assert result["skip_rate_efficiency"] == pytest.approx(0.734, abs=0.001)
         assert result["estimated_skip_rate"] is not None
         assert result["avg_bbox_area_ratio"] is not None
 

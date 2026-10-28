@@ -644,9 +644,15 @@ class TestHilbertDetectionAndWarnings:
         assert result["fix_available"] is False
         assert result["issues"] == []
 
-    def test_spatial_check_fails_for_non_hilbert_files(self, places_test_file, temp_output_dir):
+    def test_spatial_check_fails_for_non_hilbert_files(
+        self, places_test_file, temp_output_dir, monkeypatch
+    ):
         """Test that randomly shuffled data gets spatial warnings."""
         import random
+
+        import geoparquet_io.core.check_spatial_order as mod
+
+        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
 
         import pyarrow.parquet as pq
 

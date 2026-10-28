@@ -1,13 +1,17 @@
 {
  "_comment": [
-  "Abstract test vectors for the pruning-efficiency metric in specs/portolan/formats.md (GeoParquet, Pruning efficiency).",
+  "Abstract test vectors for the pruning-efficiency metric in specs/portolan/formats.md (Geospatial Parquet, Pruning efficiency).",
   "PORTO-FMT-054: a validator MUST reproduce every expected value here. rashid and geoparquet-io vendor this file verbatim.",
-  "Boxes are [xmin, ymin, xmax, ymax]; query fraction 0.10; bar 0.70. Values are rounded to six decimals.",
-  "efficiency is null when the reference skip rate is zero (n = 1, or an extent with no width and no height).",
+  "Boxes are [xmin, ymin, xmax, ymax]. The window centre falls in box i with probability rows_i/N, uniform in the box,",
+  "and the window spans 10% of each dimension of that box. The skip rate weighs each box by its share of the bytes.",
+  "'rows' and 'sizes' are per-box row and byte counts; a layout without them is uniform (every box 1 and 1).",
+  "Values are rounded to six decimals; the bar is 0.70.",
+  "efficiency is null when the reference skip rate is zero (n = 1, or an extent that is a single point).",
   "area_sum is null when the extent has no area (0/0), never 0.0. below_bar is null wherever efficiency is null.",
   "'layouts' score a set of boxes directly. 'rows' hold per-row boxes in file order, null for a row without a bbox covering;",
   "they are split into ten chunks by floor(k*N/10) <= i < floor((k+1)*N/10), a null row does not extend its chunk's box,",
-  "a chunk with no boxed rows contributes no box, and n is the number of chunks that carry a box (expected_chunks lists them)."
+  "a chunk with no boxed rows contributes no box, each chunk weighs its count of boxed rows (its bytes are its rows),",
+  "and n is the number of chunks that carry a box (expected_chunks lists them)."
  ],
  "layouts": {
   "uniform-hilbert-n13": {
@@ -93,9 +97,9 @@
    ],
    "expected": {
     "count": 13,
-    "achieved": 0.823114,
-    "achievable": 0.87037,
-    "efficiency": 0.945705,
+    "achieved": 0.857625,
+    "achievable": 0.911095,
+    "efficiency": 0.941313,
     "area_sum": 1.45309,
     "below_bar": false
    }
@@ -135,9 +139,9 @@
    ],
    "expected": {
     "count": 5,
-    "achieved": 0.544444,
-    "achievable": 0.740741,
-    "efficiency": 0.735,
+    "achieved": 0.583429,
+    "achievable": 0.7774,
+    "efficiency": 0.750487,
     "area_sum": 1.75,
     "below_bar": false
    }
@@ -195,8 +199,8 @@
    ],
    "expected": {
     "count": 8,
-    "achieved": 0.818416,
-    "achievable": 0.818416,
+    "achieved": 0.858047,
+    "achievable": 0.858047,
     "efficiency": 1.0,
     "area_sum": 1.0,
     "below_bar": false
@@ -256,7 +260,7 @@
    "expected": {
     "count": 8,
     "achieved": 0.0,
-    "achievable": 0.818416,
+    "achievable": 0.858047,
     "efficiency": 0.0,
     "area_sum": 8.0,
     "below_bar": true
@@ -345,9 +349,9 @@
    ],
    "expected": {
     "count": 13,
-    "achieved": 0.930749,
-    "achievable": 0.87037,
-    "efficiency": 1.0,
+    "achieved": 0.836008,
+    "achievable": 0.911095,
+    "efficiency": 0.917587,
     "area_sum": 0.461235,
     "below_bar": false
    }
@@ -375,8 +379,8 @@
    ],
    "expected": {
     "count": 3,
-    "achieved": 0.691358,
-    "achievable": 0.609053,
+    "achieved": 0.643889,
+    "achievable": 0.638333,
     "efficiency": 1.0,
     "area_sum": 0.75,
     "below_bar": false
@@ -435,8 +439,8 @@
    ],
    "expected": {
     "count": 8,
-    "achieved": 0.777778,
-    "achievable": 0.555556,
+    "achieved": 0.864062,
+    "achievable": 0.601562,
     "efficiency": 1.0,
     "area_sum": null,
     "below_bar": false
@@ -458,6 +462,442 @@
     "efficiency": null,
     "area_sum": 1.0,
     "below_bar": null
+   }
+  },
+  "outlier-sorted-n20": {
+   "boxes": [
+    [
+     0.0,
+     0.0,
+     2.0,
+     2.5
+    ],
+    [
+     2.0,
+     0.0,
+     4.0,
+     2.5
+    ],
+    [
+     4.0,
+     0.0,
+     6.0,
+     2.5
+    ],
+    [
+     6.0,
+     0.0,
+     8.0,
+     2.5
+    ],
+    [
+     8.0,
+     0.0,
+     10.0,
+     2.5
+    ],
+    [
+     0.0,
+     2.5,
+     2.0,
+     5.0
+    ],
+    [
+     2.0,
+     2.5,
+     4.0,
+     5.0
+    ],
+    [
+     4.0,
+     2.5,
+     6.0,
+     5.0
+    ],
+    [
+     6.0,
+     2.5,
+     8.0,
+     5.0
+    ],
+    [
+     8.0,
+     2.5,
+     10.0,
+     5.0
+    ],
+    [
+     0.0,
+     5.0,
+     2.0,
+     7.5
+    ],
+    [
+     2.0,
+     5.0,
+     4.0,
+     7.5
+    ],
+    [
+     4.0,
+     5.0,
+     6.0,
+     7.5
+    ],
+    [
+     6.0,
+     5.0,
+     8.0,
+     7.5
+    ],
+    [
+     8.0,
+     5.0,
+     10.0,
+     7.5
+    ],
+    [
+     0.0,
+     7.5,
+     2.0,
+     10.0
+    ],
+    [
+     2.0,
+     7.5,
+     4.0,
+     10.0
+    ],
+    [
+     4.0,
+     7.5,
+     6.0,
+     10.0
+    ],
+    [
+     6.0,
+     7.5,
+     8.0,
+     10.0
+    ],
+    [
+     8.0,
+     7.5,
+     100.0,
+     100.0
+    ]
+   ],
+   "expected": {
+    "count": 20,
+    "achieved": 0.942161,
+    "achievable": 0.94195,
+    "efficiency": 1.0,
+    "area_sum": 0.8605,
+    "below_bar": false
+   }
+  },
+  "outlier-shuffled-n20": {
+   "boxes": [
+    [
+     0.374957,
+     0.225629,
+     100.0,
+     100.0
+    ],
+    [
+     0.040936,
+     0.002333,
+     9.577312,
+     9.931027
+    ],
+    [
+     0.279371,
+     0.142429,
+     9.880381,
+     9.803059
+    ],
+    [
+     0.039325,
+     0.194829,
+     9.177211,
+     9.898715
+    ],
+    [
+     0.18082,
+     0.153461,
+     9.850832,
+     9.824405
+    ],
+    [
+     0.010689,
+     0.033143,
+     9.72623,
+     9.847291
+    ],
+    [
+     0.124692,
+     0.017414,
+     9.781257,
+     9.987925
+    ],
+    [
+     0.482681,
+     0.218105,
+     9.762962,
+     9.964751
+    ],
+    [
+     0.001787,
+     0.217874,
+     9.722411,
+     9.698587
+    ],
+    [
+     0.028707,
+     0.037716,
+     9.975298,
+     9.576896
+    ],
+    [
+     0.338637,
+     0.403619,
+     9.878238,
+     9.924487
+    ],
+    [
+     0.058766,
+     0.533745,
+     9.966204,
+     9.755466
+    ],
+    [
+     0.233753,
+     0.368331,
+     8.382043,
+     9.961242
+    ],
+    [
+     0.01791,
+     0.11496,
+     9.929546,
+     9.409206
+    ],
+    [
+     0.063494,
+     0.269025,
+     9.651408,
+     9.790134
+    ],
+    [
+     0.209185,
+     0.012991,
+     9.639992,
+     9.778657
+    ],
+    [
+     1.01638,
+     0.339316,
+     9.838328,
+     9.080039
+    ],
+    [
+     0.133083,
+     0.026951,
+     9.844683,
+     9.638642
+    ],
+    [
+     0.114791,
+     0.066068,
+     9.517686,
+     9.817126
+    ],
+    [
+     0.062107,
+     0.141304,
+     9.749956,
+     9.807845
+    ]
+   ],
+   "expected": {
+    "count": 20,
+    "achieved": 0.054403,
+    "achievable": 0.94195,
+    "efficiency": 0.057756,
+    "area_sum": 1.167091,
+    "below_bar": true
+   }
+  },
+  "whole-extent-box-uniform-bytes-n8": {
+   "boxes": [
+    [
+     0.0,
+     0.0,
+     0.3333333333333333,
+     0.3333333333333333
+    ],
+    [
+     0.3333333333333333,
+     0.0,
+     0.6666666666666666,
+     0.3333333333333333
+    ],
+    [
+     0.6666666666666666,
+     0.0,
+     1.0,
+     0.3333333333333333
+    ],
+    [
+     0.0,
+     0.3333333333333333,
+     0.3333333333333333,
+     0.6666666666666666
+    ],
+    [
+     0.3333333333333333,
+     0.3333333333333333,
+     0.6666666666666666,
+     0.6666666666666666
+    ],
+    [
+     0.6666666666666666,
+     0.3333333333333333,
+     1.0,
+     0.6666666666666666
+    ],
+    [
+     0.0,
+     0.6666666666666666,
+     1.0,
+     1.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0,
+     1.0
+    ]
+   ],
+   "expected": {
+    "count": 8,
+    "achieved": 0.729792,
+    "achievable": 0.858047,
+    "efficiency": 0.850527,
+    "area_sum": 2.0,
+    "below_bar": false
+   }
+  },
+  "whole-extent-box-heavy-bytes-n8": {
+   "boxes": [
+    [
+     0.0,
+     0.0,
+     0.3333333333333333,
+     0.3333333333333333
+    ],
+    [
+     0.3333333333333333,
+     0.0,
+     0.6666666666666666,
+     0.3333333333333333
+    ],
+    [
+     0.6666666666666666,
+     0.0,
+     1.0,
+     0.3333333333333333
+    ],
+    [
+     0.0,
+     0.3333333333333333,
+     0.3333333333333333,
+     0.6666666666666666
+    ],
+    [
+     0.3333333333333333,
+     0.3333333333333333,
+     0.6666666666666666,
+     0.6666666666666666
+    ],
+    [
+     0.6666666666666666,
+     0.3333333333333333,
+     1.0,
+     0.6666666666666666
+    ],
+    [
+     0.0,
+     0.6666666666666666,
+     1.0,
+     1.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0,
+     1.0
+    ]
+   ],
+   "sizes": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    93.0
+   ],
+   "expected": {
+    "count": 8,
+    "achieved": 0.058383,
+    "achievable": 0.858047,
+    "efficiency": 0.068042,
+    "area_sum": 2.0,
+    "below_bar": true
+   }
+  },
+  "crowded-tile-n4": {
+   "boxes": [
+    [
+     0.0,
+     0.0,
+     0.5,
+     0.5
+    ],
+    [
+     0.5,
+     0.0,
+     1.0,
+     0.5
+    ],
+    [
+     0.0,
+     0.5,
+     0.5,
+     1.0
+    ],
+    [
+     0.5,
+     0.5,
+     1.0,
+     1.0
+    ]
+   ],
+   "rows": [
+    97.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "expected": {
+    "count": 4,
+    "achieved": 0.056791,
+    "achievable": 0.724375,
+    "efficiency": 0.0784,
+    "area_sum": 1.0,
+    "below_bar": true
    }
   }
  },
@@ -633,11 +1073,21 @@
      1.0
     ]
    ],
+   "chunk_rows": [
+    2.0,
+    2.0,
+    3.0,
+    2.0,
+    3.0,
+    2.0,
+    2.0,
+    3.0
+   ],
    "expected": {
     "count": 8,
-    "achieved": 0.803744,
-    "achievable": 0.818416,
-    "efficiency": 0.982073,
+    "achieved": 0.862604,
+    "achievable": 0.858047,
+    "efficiency": 1.0,
     "area_sum": 0.826087,
     "below_bar": false
    }
@@ -817,10 +1267,22 @@
      1.0
     ]
    ],
+   "chunk_rows": [
+    2.0,
+    1.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    1.0
+   ],
    "expected": {
     "count": 10,
-    "achieved": 0.866667,
-    "achievable": 0.845267,
+    "achieved": 0.895062,
+    "achievable": 0.8855,
     "efficiency": 1.0,
     "area_sum": 0.444444,
     "below_bar": false

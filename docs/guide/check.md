@@ -155,16 +155,28 @@ Checks if data is spatially ordered. Spatially ordered data improves:
 
 **Method Selection:**
 
-- **GeoParquet 2.0+ files** (with bbox column): Uses fast bbox-stats method by analyzing row group metadata (~10-100x faster)
-- **GeoParquet 1.x files** (no bbox column): Falls back to sampling method which analyzes actual geometry data
+- **Files with per-row-group bbox statistics** (a covering bbox column, or native GeoParquet 2.0 statistics): the footer-based pruning method, no data read
+- **Files with neither**: falls back to a sampling method which analyzes actual geometry data
 
 !!! tip "For faster spatial order checks"
-    Add a bbox column to your file with `gpio add bbox` to enable the fast bbox-stats method.
+    Add a bbox column to your file with `gpio add bbox` to enable the fast footer-based method.
 
 **How it works:**
 
-- **Bbox-stats method**: Checks if consecutive row groups have overlapping bounding boxes. Non-overlapping row groups indicate good spatial ordering. Passes if < 30% of row group pairs overlap.
-- **Sampling method**: Compares average distance between consecutive features vs random feature pairs. Lower ratio indicates better spatial clustering. Passes if ratio < 0.5.
+- **Footer method**: computes the expected share of the file's bytes a spatial
+  query window skips, judged against an ideal tiling of the extent into the
+  same number of row groups. The window follows the data (its centre falls in
+  a row group with probability proportional to the group's rows, and spans 10%
+  of each dimension of that group's box), and each group weighs its compressed
+  bytes. The definition and its thresholds are the
+  [Portolan spec's](https://github.com/portolan-sdi/portolan-spec/pull/188):
+  pass at efficiency 0.70 or more, judged from eight row groups up; below
+  eight, only a clear failure (efficiency under 0.25) is reported as one. A
+  file whose row groups hold under 5 MB of compressed bytes is not judged at
+  all — at that size, skipping parts of the file saves a reader almost
+  nothing — and the check says so instead of printing a pass. Nothing on the
+  CLI or API overrides the thresholds.
+- **Sampling method**: Compares average distance between consecutive features vs random feature pairs. Lower ratio indicates better spatial clustering. Passes if ratio < 0.5. This measures feature adjacency, not row-group pruning, and the output names the method.
 
 The sampling method reads WKB, native Parquet GEOMETRY and GeoArrow coordinate
 struct columns. NULL, zero-length and unparsable values are skipped, and the
