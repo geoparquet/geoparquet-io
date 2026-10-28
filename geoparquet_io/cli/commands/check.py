@@ -1015,8 +1015,10 @@ def _echo_spatial_order(result: dict) -> None:
     read = result.get("estimated_skip_rate")
     cost = "" if read is None else f"a typical query reads {1.0 - read:.0%} of the bytes, "
     if spatial_verdict_withheld(result):
+        # Information, not a warning: the check found no failure, it only
+        # declines to certify one way or the other.
         for line in result.get("warnings") or ["Spatial ordering not judged"]:
-            click.echo(click.style(f"{WARNING_GLYPH}  {line}", fg="cyan"))
+            click.echo(click.style(f"ℹ️  {line}", fg="cyan"))
         if result.get("num_row_groups"):
             click.echo(f"Row groups: {result['num_row_groups']}")
             click.echo(f"{cost.capitalize()}(efficiency {efficiency_text})")
@@ -1182,14 +1184,9 @@ def check_spatial(
 
             if fix:
                 if not result.get("fix_available", False):
-                    if spatial_verdict_withheld(result):
-                        if show_output:
-                            reason = (result.get("warnings") or ["Spatial ordering not judged"])[0]
-                            click.echo(f"\nNo fix applied - {reason}")
-                    else:
-                        runner.no_fix(
-                            file_path, result, "already spatially ordered!", show=show_output
-                        )
+                    # Only a judged pass gets here: a withheld verdict leaves
+                    # the ordering unknown, so its fix proceeds with the sort.
+                    runner.no_fix(file_path, result, "already spatially ordered!", show=show_output)
                     continue
 
                 if show_output:

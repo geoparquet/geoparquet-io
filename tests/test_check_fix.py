@@ -216,11 +216,13 @@ class TestCheckFixSpatial:
         )
 
         assert result.exit_code == 0
-        # The places fixture has one row group, so the verdict is withheld and
-        # the fix declines: nothing was judged, so nothing is rewritten (#755).
+        # The places fixture sits under the 5 MB floor, so the verdict is
+        # withheld — which is not "already ordered", so the requested fix
+        # still sorts into the named output (#755, #1098).
         assert "Spatial ordering not judged" in result.output
         assert "No fix needed" not in result.output, "a withheld verdict is not a pass"
-        assert not os.path.exists(fixed_file)
+        assert "Applying Hilbert spatial ordering" in result.output
+        assert os.path.exists(fixed_file)
 
 
 class TestCheckFixAll:

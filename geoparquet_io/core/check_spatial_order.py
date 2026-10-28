@@ -447,7 +447,9 @@ def _check_spatial_order_from_row_group_bboxes(
             "judged": judged,
             "num_row_groups": len(finite_bboxes),
             "file_bytes": weights["file_bytes"],
-            "fix_available": judged and not passed,
+            # Only a judged pass says the file is already ordered; a withheld
+            # verdict leaves the ordering unknown, so a requested fix sorts.
+            "fix_available": not (judged and passed),
             "estimated_skip_rate": avg_skip_rate,
             "ideal_skip_rate": ideal_skip_rate,
             "skip_rate_efficiency": efficiency,

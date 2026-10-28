@@ -175,7 +175,9 @@ Checks if data is spatially ordered. Spatially ordered data improves:
   file whose row groups hold under 5 MB of compressed bytes is not judged at
   all — at that size, skipping parts of the file saves a reader almost
   nothing — and the check says so instead of printing a pass. Nothing on the
-  CLI or API overrides the thresholds.
+  CLI or API overrides the thresholds. A requested `--fix` still sorts a file
+  whose verdict was withheld — not judged is not known-ordered — and only a
+  judged pass skips the sort.
 - **Sampling method**: Compares average distance between consecutive features vs random feature pairs. Lower ratio indicates better spatial clustering. Passes if ratio < 0.5. This measures feature adjacency, not row-group pruning, and the output names the method.
 
 The sampling method reads WKB, native Parquet GEOMETRY and GeoArrow coordinate

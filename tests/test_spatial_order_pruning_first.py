@@ -236,7 +236,7 @@ class TestSharedDefinitionCrossChecks:
         assert r["bbox_area_sum"] is None, "0/0 is undefined, not vanishingly tight"
         assert r["estimated_skip_rate"] == 0.0 and r["ideal_skip_rate"] == 0.0
         assert any("not judged" in w for w in r["warnings"])
-        assert r["fix_available"] is False
+        assert r["fix_available"] is True, "unjudged is not known-ordered; a requested fix sorts"
 
 
 VECTORS = json.loads(
@@ -543,7 +543,7 @@ class TestVerdictIsWithheldBelowTheFloor:
         assert SPATIAL_ORDER_OBVIOUS_FAIL_EFFICIENCY < eff, "fixture must sit between the bars"
         assert r["judged"] is False, f"n={n} is below the floor and must not be judged"
         assert r["passed"] is True, "no failure found"
-        assert r["fix_available"] is False
+        assert r["fix_available"] is True, "unjudged is not known-ordered; a requested fix sorts"
         assert r["issues"] == []
 
     @pytest.mark.parametrize("n", [3, FLOOR - 1])
@@ -703,7 +703,7 @@ class TestSizeFloor:
 
         assert r["judged"] is False and r["passed"] is True
         assert any("5 MB floor" in w for w in r["warnings"])
-        assert r["fix_available"] is False
+        assert r["fix_available"] is True, "unjudged is not known-ordered; a requested fix sorts"
 
     def test_the_floor_reads_the_footer_compressed_bytes(self, tmp_path, monkeypatch):
         path = _write_bbox_file(tmp_path / "boundary.parquet", 4000, 40, shuffle_seed=0)
@@ -829,7 +829,10 @@ class TestCliWithheldVerdict:
         assert r.exit_code == 0, r.output
         assert "already spatially ordered" not in r.output
         assert "not judged" in r.output
-        assert not out.exists(), "nothing was judged, so nothing was rewritten"
+        # Unjudged is not known-ordered: the requested fix still sorts, so
+        # the named output exists (#1098, and the --fix-output contract).
+        assert "Applying Hilbert spatial ordering" in r.output
+        assert out.exists()
 
     def test_fix_on_a_judged_sorted_file_says_no_fix_needed(self, tmp_path):
         path = _write_bbox_file(tmp_path / "sorted.parquet", 4000, 40)
