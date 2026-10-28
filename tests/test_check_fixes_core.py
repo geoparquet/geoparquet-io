@@ -616,9 +616,10 @@ class TestHilbertDetectionAndWarnings:
         """A Hilbert-sorted file in one row group is not failed: the verdict is withheld.
 
         This used to assert a pass. One row group is below the eight-row-group
-        floor of the footer check (#755), so the check reports the numbers,
+        floor of the footer check (#755), so the check reports the numbers and
         withholds the verdict (``judged`` False, ``passed`` True: no failure
-        found) and offers no fix.
+        found). The fix stays available -- unjudged is not known-ordered -- but
+        the batch fix declines it (``_batch_sort_wanted``).
         """
         from geoparquet_io.core.check_spatial_order import check_spatial_order_bbox_stats
         from geoparquet_io.core.hilbert_order import hilbert_order
@@ -640,8 +641,11 @@ class TestHilbertDetectionAndWarnings:
             output_file, verbose=False, return_results=True, quiet=True
         )
 
+        from geoparquet_io.core.check_fixes import _batch_sort_wanted
+
         assert result["judged"] is False and result["passed"] is True
-        assert result["fix_available"] is False
+        assert result["fix_available"] is True, "unjudged is not known-ordered"
+        assert not _batch_sort_wanted(result), "check all --fix leaves it alone"
         assert result["issues"] == []
 
     def test_spatial_check_fails_for_non_hilbert_files(

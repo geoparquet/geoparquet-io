@@ -910,6 +910,33 @@ def struct_point(x, y):
     return struct.pack("<BI2d", 1, 1, x, y)
 
 
+class TestBatchFixLeavesUnjudgedSoundFilesAlone:
+    """``check all --fix`` sorts only what it can defend rewriting.
+
+    An explicit ``check spatial --fix`` sorts on any verdict short of a judged
+    pass. The batch fix earns the rewrite: a judged failure, or a withheld
+    verdict whose measured efficiency sits under the bar. A withheld verdict
+    with unknown or passing efficiency leaves the file untouched.
+    """
+
+    def test_judged_failure_is_sorted(self):
+        from geoparquet_io.core.check_fixes import _batch_sort_wanted
+
+        assert _batch_sort_wanted({"judged": True, "passed": False, "fix_available": True})
+
+    def test_withheld_with_low_efficiency_is_sorted(self):
+        from geoparquet_io.core.check_fixes import _batch_sort_wanted
+
+        assert _batch_sort_wanted({"judged": False, "skip_rate_efficiency": 0.12})
+
+    def test_withheld_with_unknown_or_passing_efficiency_is_not(self):
+        from geoparquet_io.core.check_fixes import _batch_sort_wanted
+
+        assert not _batch_sort_wanted({"judged": False, "skip_rate_efficiency": None})
+        assert not _batch_sort_wanted({"judged": False})
+        assert not _batch_sort_wanted({"judged": False, "skip_rate_efficiency": 0.9})
+
+
 class TestFixKeepsTheFileJudgeable:
     """``--fix`` must not turn a judgeable file into an unjudgeable one (#1098)."""
 
