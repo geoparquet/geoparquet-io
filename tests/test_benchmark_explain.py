@@ -38,6 +38,33 @@ SAMPLE_PLAN_JSON = {
 }
 
 
+# DuckDB 2.0 nests the operator tree under "operator" (a list of roots), names
+# an operator by "type" and its output rows by "intermediate_rows", keeps
+# extra_info a dict, and reports row groups as fields of the scan itself.
+SAMPLE_PLAN_JSON_V2 = {
+    "query": {"sql": "SELECT ...", "total_time": 0.0012},
+    "operator": [
+        {
+            "type": "PROJECTION",
+            "timing": 0.0005,
+            "intermediate_rows": 100,
+            "extra_info": {},
+            "children": [
+                {
+                    "type": "TABLE_SCAN",
+                    "timing": 0.001,
+                    "intermediate_rows": 100,
+                    "extra_info": {"Function": "READ_PARQUET", "Filters": "id>10"},
+                    "row_groups_scanned": 1,
+                    "total_row_groups_to_scan": 3,
+                    "children": [],
+                }
+            ],
+        }
+    ],
+}
+
+
 class TestParseQueryPlan:
     """Tests for parsing DuckDB EXPLAIN ANALYZE output."""
 
@@ -142,6 +169,61 @@ class TestParseQueryPlan:
         assert result["operators"][1]["depth"] == 1
         assert result["operators"][2]["name"] == "PARQUET_SCAN"
         assert result["operators"][2]["depth"] == 2
+
+
+class TestParseQueryPlanDuckDB2:
+    """The DuckDB 2.0 profile layout parses to the same result shape."""
+
+    def test_operators_come_from_the_operator_tree(self):
+        result = parse_query_plan(SAMPLE_PLAN_JSON_V2)
+        assert [op["name"] for op in result["operators"]] == ["PROJECTION", "TABLE_SCAN"]
+        assert [op["depth"] for op in result["operators"]] == [0, 1]
+
+    def test_timing_and_rows_are_read(self):
+        scan = parse_query_plan(SAMPLE_PLAN_JSON_V2)["operators"][1]
+        assert scan["timing"] == 0.001
+        assert scan["cardinality"] == 100
+        assert parse_query_plan(SAMPLE_PLAN_JSON_V2)["total_time"] == pytest.approx(0.0015)
+
+    def test_filter_pushdown_is_detected(self):
+        assert parse_query_plan(SAMPLE_PLAN_JSON_V2)["has_filter_pushdown"] is True
+
+    def test_row_group_skip_is_read_from_the_scan_fields(self):
+        assert parse_query_plan(SAMPLE_PLAN_JSON_V2)["row_groups_skipped"] is True
+
+    def test_scanning_every_row_group_is_no_skip(self):
+        plan = json.loads(json.dumps(SAMPLE_PLAN_JSON_V2))
+        plan["operator"][0]["children"][0]["row_groups_scanned"] = 3
+        assert parse_query_plan(plan)["row_groups_skipped"] is False
+
+
+class TestExplainAnalyzeReadsTheRealPlan:
+    """Against the installed DuckDB: the scan is found with its rows and time.
+
+    A layout change in DuckDB's profile (2.0 moved the tree under "operator")
+    once parsed to a single UNKNOWN node with no timing, which the shape-only
+    tests above still accepted.
+    """
+
+    def test_the_scan_reports_rows_and_time(self):
+        result = explain_analyze(file_path=str(PARQUET_FILE))
+        rows = pq_rows(PARQUET_FILE)
+        assert any(op["cardinality"] == rows for op in result["operators"]), result["operators"]
+        assert result["total_time"] > 0
+
+    def test_a_pushed_down_filter_is_detected(self):
+        result = explain_analyze(
+            file_path=str(PARQUET_FILE),
+            # A predicate neither optimizer can drop: 2.0 elides id > '0'.
+            query="SELECT * FROM read_parquet('{file}') WHERE id LIKE '%a%'",
+        )
+        assert result["has_filter_pushdown"] is True
+
+
+def pq_rows(path) -> int:
+    import pyarrow.parquet as pq
+
+    return pq.ParquetFile(path).metadata.num_rows
 
 
 class TestFormatExplainOutput:

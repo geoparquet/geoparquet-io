@@ -34,6 +34,7 @@ from geoparquet_io.core.crs_utils import (
 from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
+    fetch_one,
     get_duckdb_connection,
     quote_identifier,
     register_arrow,
@@ -305,7 +306,7 @@ def reproject_table(
             FROM {source_table}
         """
 
-        result = con.execute(query).arrow().read_all()
+        result = con.sql(query).arrow().read_all()
 
         # Update geo metadata with new CRS
         if table.schema.metadata:
@@ -581,7 +582,7 @@ def reproject_impl(
         log(f"Target CRS: {target_crs}")
 
         # Get feature count
-        count = con.execute(f"SELECT COUNT(*) FROM {sql_path(input_url)}").fetchone()[0]
+        count = fetch_one(con.execute(f"SELECT COUNT(*) FROM {sql_path(input_url)}"))[0]
         log(f"Features: {count:,}")
 
         # Check for existing bbox column to exclude (will be regenerated)

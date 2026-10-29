@@ -27,6 +27,7 @@ import shapely
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.duckdb_utils import fetch_one
 from tests.conftest import get_geo_metadata
 
 BBOX_COVERING = {
@@ -614,9 +615,11 @@ def _geo_kv_entries(path) -> list[dict]:
 def _geometry_logical_type(path, column: str = "geometry") -> str | None:
     con = duckdb.connect()
     try:
-        row = con.execute(
-            "SELECT logical_type FROM parquet_schema(?) WHERE name = ?", [str(path), column]
-        ).fetchone()
+        row = fetch_one(
+            con.execute(
+                "SELECT logical_type FROM parquet_schema(?) WHERE name = ?", [str(path), column]
+            )
+        )
     finally:
         con.close()
     return row[0] if row else None

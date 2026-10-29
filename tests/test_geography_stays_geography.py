@@ -31,7 +31,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 from tests.native_geo_probes import (
     conus_wkb,
     geo_block,
@@ -336,9 +336,11 @@ def test_duckdb_still_reads_the_output(native_geography, tmp_path):
 
     con = get_duckdb_connection(load_spatial=True)
     try:
-        count, area_ok = con.execute(
-            f"SELECT count(*), bool_and(ST_Area(geometry) > 0) FROM {sql_path(str(out))}"
-        ).fetchone()
+        count, area_ok = fetch_one(
+            con.execute(
+                f"SELECT count(*), bool_and(ST_Area(geometry) > 0) FROM {sql_path(str(out))}"
+            )
+        )
     finally:
         con.close()
     assert (count, area_ok) == (200, True)

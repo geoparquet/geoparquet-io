@@ -315,7 +315,7 @@ def _wkb_source(path, wkt: str, crs) -> str:
     """A minimal GeoParquet 1.1 WKB source declaring ``crs`` (omitted when None)."""
     con = get_duckdb_connection(load_spatial=True)
     table = (
-        con.execute(f"SELECT 1 AS id, ST_AsWKB(ST_GeomFromText('{wkt}')) AS geometry")
+        con.sql(f"SELECT 1 AS id, ST_AsWKB(ST_GeomFromText('{wkt}')) AS geometry")
         .arrow()
         .read_all()
     )

@@ -31,13 +31,13 @@ import textwrap
 import pyarrow as pa
 import pytest
 
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 
 BOWTIE_WKT = "POLYGON((0 0, 1 1, 1 0, 0 1, 0 0))"
 
 
 def _wkb(con, wkt: str) -> bytes:
-    return bytes(con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()[0])
+    return bytes(fetch_one(con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))"))[0])
 
 
 @pytest.fixture
@@ -170,7 +170,7 @@ class TestRepairSingleScan:
         assert geoms[3] == valid
         # The invalid row was repaired in place and is now valid.
         assert geoms[1] != invalid
-        ok = con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [geoms[1]]).fetchone()[0]
+        ok = fetch_one(con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [geoms[1]]))[0]
         assert ok is True
         # Encoding and column order survive.
         assert repaired.schema.field("geometry").type == pa.binary()
@@ -459,7 +459,7 @@ class TestRepairEdgeCases:
         assert repaired.schema == table.schema
         fixed = repaired.column("geometry").to_pylist()
         assert fixed[0] == valid
-        assert con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [fixed[1]]).fetchone()[0]
+        assert fetch_one(con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [fixed[1]]))[0]
 
     def test_no_repaired_claim_when_patching_fails(self, con, caplog, monkeypatch):
         """A patch that cannot be applied raises; it never logs "Repaired" and returns 0."""
@@ -535,7 +535,7 @@ def test_repair_past_2_gib_patches_without_combining(con, caplog):
     chunks = repaired.column("geometry").chunks
     assert all(c.buffers()[2].address == big.buffers()[2].address for c in chunks[:11])
     last = chunks[-1].to_pylist()[-1]
-    assert con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [last]).fetchone()[0]
+    assert fetch_one(con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [last]))[0]
 
 
 @pytest.mark.slow
@@ -575,7 +575,7 @@ def test_repair_geoarrow_wkb_extension_column(con, caplog):
     assert repaired.schema == table.schema
     fixed = repaired.column("geometry").chunk(0).storage.to_pylist()
     assert fixed[0] == valid
-    assert con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [fixed[1]]).fetchone()[0]
+    assert fetch_one(con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [fixed[1]]))[0]
 
 
 def test_bbox_of_unreadable_wkb_is_null(con):
@@ -627,7 +627,7 @@ def test_repair_halves_a_chunk_whose_patch_overflows(con, monkeypatch):
     column = repaired.column("geometry")
     assert column.num_chunks == 3
     assert column.to_pylist()[0] == column.to_pylist()[2] == valid
-    assert con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [column[1].as_py()]).fetchone()[0]
+    assert fetch_one(con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [column[1].as_py()]))[0]
 
 
 def test_registered_dictionary_geometry_reads_flat(con):

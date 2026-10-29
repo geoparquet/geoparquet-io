@@ -46,6 +46,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.core.duckdb_utils import (
+    fetch_one,
     get_duckdb_connection,
     spill_directory,
     spill_space_hint,
@@ -70,7 +71,7 @@ def _force_spill(con) -> None:
 
 
 def _temp_directory(con) -> str:
-    return con.execute("SELECT current_setting('temp_directory')").fetchone()[0]
+    return fetch_one(con.execute("SELECT current_setting('temp_directory')"))[0]
 
 
 #: Rows in the fixture below: ~300MB of payload, so a sort of it cannot fit in
@@ -169,8 +170,8 @@ class TestConnectionDefaults:
         try:
             assert _temp_directory(configured) != ".tmp"  # spill dir was set
             assert (
-                configured.execute("SELECT current_setting('memory_limit')").fetchone()[0]
-                == bare.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+                fetch_one(configured.execute("SELECT current_setting('memory_limit')"))[0]
+                == fetch_one(bare.execute("SELECT current_setting('memory_limit')"))[0]
             )
         finally:
             configured.close()
@@ -186,9 +187,9 @@ class TestConnectionDefaults:
         """
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
         try:
-            assert int(con.execute("SELECT current_setting('threads')").fetchone()[0]) > 0
+            assert int(fetch_one(con.execute("SELECT current_setting('threads')"))[0]) > 0
             assert (
-                con.execute("SELECT current_setting('preserve_insertion_order')").fetchone()[0]
+                fetch_one(con.execute("SELECT current_setting('preserve_insertion_order')"))[0]
                 is True
             )
         finally:
@@ -204,7 +205,8 @@ class TestSpillsActuallyLandThere:
         try:
             _force_spill(con)
             assert spill_dir.is_dir()
-            assert list(spill_dir.glob("duckdb_temp_storage*"))
+            # duckdb_temp_storage_* on 1.5; 2.0 adds the pid (duckdb_temp_<pid>_0_storage_*).
+            assert list(spill_dir.glob("duckdb_temp_*storage*"))
         finally:
             con.close()
         # DuckDB removes a temp directory it created itself -- when the query
@@ -224,7 +226,7 @@ class TestSpillsActuallyLandThere:
             con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
             try:
                 _force_spill(con)
-                assert con.execute("SELECT count(*) FROM spilled").fetchone()[0] == SPILL_ROWS
+                assert fetch_one(con.execute("SELECT count(*) FROM spilled"))[0] == SPILL_ROWS
             except BaseException as exc:  # pragma: no cover - only on regression
                 errors.append(exc)
             finally:
@@ -441,7 +443,7 @@ class TestOrphanedSpillDirectoriesAreReaped:
             load_spatial=False, load_httpfs=False, temp_directory=spill_directory(tmp_path)
         )
         try:
-            assert con.execute("SELECT 1").fetchone()[0] == 1
+            assert fetch_one(con.execute("SELECT 1"))[0] == 1
         finally:
             con.close()
         assert leaf.is_dir()

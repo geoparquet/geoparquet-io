@@ -4,6 +4,7 @@ import os
 
 import pytest
 
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import FileNotFoundGeoParquetError, InvalidParameterError
 from geoparquet_io.core.file_utils import safe_file_url
 from geoparquet_io.core.remote import is_remote_url, needs_httpfs, resolve_s3_config
@@ -131,7 +132,7 @@ class TestRemoteFileReading:
         import duckdb
 
         con = duckdb.connect()
-        result = con.execute(f"SELECT COUNT(*) FROM '{self.HTTPS_URL}'").fetchone()
+        result = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{self.HTTPS_URL}'"))
         assert result[0] == 3145  # Known row count for USA.parquet
 
     def test_duckdb_spatial_query_https(self):
@@ -173,7 +174,7 @@ class TestS3FileReading:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=True)
         # Set S3 region for this specific bucket (was relocated from us-west-2 to us-east-2)
         con.execute("SET s3_region = 'us-east-2';")
-        result = con.execute(f"SELECT COUNT(*) FROM '{self.S3_URL}'").fetchone()
+        result = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{self.S3_URL}'"))
         assert result[0] > 0  # Should have rows
 
     def test_metadata_s3(self):
@@ -195,7 +196,7 @@ class TestGetDuckDBConnection:
 
         con = get_duckdb_connection()
         # Should have spatial extension loaded
-        result = con.execute("SELECT ST_AsText(ST_Point(0, 0))").fetchone()
+        result = fetch_one(con.execute("SELECT ST_AsText(ST_Point(0, 0))"))
         assert result is not None
         con.close()
 
@@ -216,7 +217,7 @@ class TestGetDuckDBConnection:
         con = get_duckdb_connection(load_spatial=False)
         # Spatial functions should not work (ST_Point is core in 1.5+, but ST_Buffer requires spatial)
         with pytest.raises(duckdb.CatalogException):
-            con.execute("SELECT ST_Buffer(ST_Point(0, 0), 1.0)").fetchone()
+            fetch_one(con.execute("SELECT ST_Buffer(ST_Point(0, 0), 1.0)"))
         con.close()
 
 

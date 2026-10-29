@@ -199,7 +199,7 @@ def test_table_aggregate_h3_api():
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial; SET geometry_always_xy = true")
     tbl = (
-        con.execute(
+        con.sql(
             """
             SELECT ST_AsWKB(ST_Point(lon, lat)) AS geometry, crop, area FROM (VALUES
                 (10.0, 50.0, 'wheat', 4.0),

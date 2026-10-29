@@ -18,7 +18,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core import parquet_footer
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 from geoparquet_io.core.parquet_footer import (
     _LIST,
     FooterPatchRaced,
@@ -177,9 +177,9 @@ class TestTheDataIsNeverTouched:
         conn = get_duckdb_connection(load_spatial=False)
         try:
             query = f"SELECT count(*), sum(id) FROM '{geo_file.as_posix()}'"
-            before = conn.execute(query).fetchone()
+            before = fetch_one(conn.execute(query))
             patch_footer_kv(str(geo_file), {"geo": GEO, "note": "x"})
-            assert conn.execute(query).fetchone() == before
+            assert fetch_one(conn.execute(query)) == before
         finally:
             conn.close()
 

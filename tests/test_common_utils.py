@@ -14,7 +14,7 @@ from geoparquet_io.core.crs_utils import (
     is_geographic_crs,
     parse_crs_string_to_projjson,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import (
     has_glob_pattern,
@@ -392,7 +392,7 @@ class TestGetDuckdbConnection:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=True)
         assert con is not None
         # Execute a simple query to verify connection works
-        result = con.execute("SELECT 1").fetchone()
+        result = fetch_one(con.execute("SELECT 1"))
         assert result[0] == 1
         con.close()
 

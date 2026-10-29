@@ -36,6 +36,7 @@ import geoparquet_io as gpio
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.add.geometry_metrics import AREA_COLUMN
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from tests.conftest import skip_if_grid_unavailable
 
 TM_PROJ4 = (
     "+proj=tmerc +lat_0=36 +lon_0=139.833333 +k=0.9999 +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs"
@@ -202,6 +203,7 @@ def test_convert_reproject_summary_names_an_uncoded_crs84_body_ogc_crs84(tmp_pat
 @pytest.mark.parametrize("grid", [("h3", "--resolution", "7"), ("a5", "--resolution", "10")])
 def test_process_aggregate_unresolvable_is_a_clean_error(grid, tmp_path):
     """An unusable CRS prints one ``Error:`` line, like every other command, not a traceback."""
+    skip_if_grid_unavailable(grid[0])
     src = tmp_path / "garbage.parquet"
     _write_geo_block(src, TM_SQUARE, {"type": "ProjectedCRS", "name": "not a real crs"})
     args = ["process", "aggregate", grid[0], str(src), str(tmp_path / "o.parquet"), *grid[1:]]

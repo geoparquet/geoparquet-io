@@ -45,7 +45,7 @@ from geoparquet_io.core.duckdb_metadata import (
     get_per_row_group_bbox_stats,
     get_per_row_group_native_geo_stats,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, quote_identifier
 from geoparquet_io.core.stream_io import _wrap_query_with_wkb_conversion
 from tests.conftest import skip_if_geography_unavailable
 
@@ -102,9 +102,7 @@ def _wkb_fixture(tmp_path, column_name: str, filename: str, wkts: list[str]) -> 
     values_sql = ", ".join(
         f"({i + 1}, ST_AsWKB(ST_GeomFromText('{w}')))" for i, w in enumerate(wkts)
     )
-    table = (
-        con.execute(f"SELECT * FROM (VALUES {values_sql}) AS t(id, {quoted})").arrow().read_all()
-    )
+    table = con.sql(f"SELECT * FROM (VALUES {values_sql}) AS t(id, {quoted})").arrow().read_all()
     con.close()
     return _write_geoparquet(table, column_name, ["Polygon"], str(tmp_path / filename))
 
@@ -117,9 +115,7 @@ def _points_fixture(tmp_path, column_name: str, filename: str, count: int = 10) 
     values_sql = ", ".join(
         f"({i + 1}, ST_AsWKB(ST_GeomFromText('POINT ({i} {i})')))" for i in range(count)
     )
-    table = (
-        con.execute(f"SELECT * FROM (VALUES {values_sql}) AS t(id, {quoted})").arrow().read_all()
-    )
+    table = con.sql(f"SELECT * FROM (VALUES {values_sql}) AS t(id, {quoted})").arrow().read_all()
     con.close()
     return _write_geoparquet(
         table,
@@ -176,7 +172,7 @@ class TestQuoteIdentifierContract:
         con = duckdb.connect()
         try:
             quoted = quote_identifier(column_name)
-            name = con.execute(f"SELECT 1 AS {quoted}").arrow().read_all().column_names[0]
+            name = con.sql(f"SELECT 1 AS {quoted}").arrow().read_all().column_names[0]
             assert name == column_name
         finally:
             con.close()
@@ -214,10 +210,10 @@ class TestStreamIoWkbConversionQuoting:
             )
 
             wrapped = _wrap_query_with_wkb_conversion("SELECT * FROM t", column_name)
-            row = con.execute(wrapped).fetchone()
+            row = fetch_one(con.execute(wrapped))
 
             assert row[0] == 1
-            wkt = con.execute("SELECT ST_AsText(ST_GeomFromWKB(?))", [row[1]]).fetchone()[0]
+            wkt = fetch_one(con.execute("SELECT ST_AsText(ST_GeomFromWKB(?))", [row[1]]))[0]
             assert wkt == "POINT (1 2)"
         finally:
             con.close()
@@ -232,7 +228,7 @@ class TestStreamIoWkbConversionQuoting:
             )
 
             wrapped = _wrap_query_with_wkb_conversion("SELECT * FROM t", INJECTION_COL)
-            columns = con.execute(wrapped).arrow().read_all().column_names
+            columns = con.sql(wrapped).arrow().read_all().column_names
 
             # The hostile name itself contains "pwned", so a substring check
             # would be vacuous: the proof is that the schema gained no EXTRA
@@ -404,7 +400,7 @@ class TestDuckdbMetadataSiblingLiteralEscaping:
                 (2, {{'xmin': 2.0, 'ymin': 2.0, 'xmax': 3.0, 'ymax': 3.0}})
             ) AS t(id, {quoted})
         """
-        table = con.execute(query).arrow().read_all()
+        table = con.sql(query).arrow().read_all()
         con.close()
         path = str(tmp_path / "bbox_col_quote.parquet")
         pq.write_table(table, path)
@@ -419,7 +415,7 @@ class TestDuckdbMetadataSiblingLiteralEscaping:
         col = "va'l"
         con = duckdb.connect()
         quoted = quote_identifier(col)
-        table = con.execute(f"SELECT 1 AS id, 2 AS {quoted}").arrow().read_all()
+        table = con.sql(f"SELECT 1 AS id, 2 AS {quoted}").arrow().read_all()
         con.close()
         path = str(tmp_path / "compression_col_quote.parquet")
         pq.write_table(table, path)
@@ -449,7 +445,7 @@ class TestApiTableAddBboxQuoting:
         con.execute("INSTALL spatial; LOAD spatial;")
         quoted = quote_identifier(column_name)
         arrow_table = (
-            con.execute(
+            con.sql(
                 f"""
                 SELECT * FROM (VALUES
                     (1, ST_AsWKB(ST_GeomFromText('POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))'))),
@@ -500,7 +496,7 @@ class TestAddBboxStreamingQuoting:
             for i, w in enumerate(POLYGON_WKTS)
         )
         cols = f"id, {quoted}" + (f", {quoted_bbox}" if with_stale_bbox else "")
-        table = con.execute(f"SELECT * FROM (VALUES {rows}) AS t({cols})").arrow().read_all()
+        table = con.sql(f"SELECT * FROM (VALUES {rows}) AS t({cols})").arrow().read_all()
         con.close()
         return _write_geoparquet(
             table,
@@ -697,9 +693,7 @@ class TestExtractSpatialFilterQuoting:
             f"({i + 1}, ST_AsWKB(ST_GeomFromText('POINT ({i} {i})')))" for i in range(10)
         )
         table = (
-            con.execute(f"SELECT * FROM (VALUES {values_sql}) AS t(id, geometry)")
-            .arrow()
-            .read_all()
+            con.sql(f"SELECT * FROM (VALUES {values_sql}) AS t(id, geometry)").arrow().read_all()
         )
         con.close()
 

@@ -21,7 +21,7 @@ from geoparquet_io.core.admin_datasets import (
     get_cached_path,
     get_or_cache_dataset,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 
 TEST_DATA_DIR = Path(__file__).parent / "data"
 
@@ -639,18 +639,20 @@ class TestOvertureAdminDataset:
         assert countries == ["CA", "US"]
 
         pt = "ST_GeomFromText('POINT(0.5 0.5)')"
-        n_land = con.execute(
-            f"SELECT count(*) FROM land WHERE ST_Intersects(geometry, {pt})"
-        ).fetchone()[0]
+        n_land = fetch_one(
+            con.execute(f"SELECT count(*) FROM land WHERE ST_Intersects(geometry, {pt})")
+        )[0]
         assert n_land == 1, "land-only cache must match each feature exactly once"
 
         # Sanity: against the unfiltered source the point matches both polygons.
-        n_all = con.execute(
-            f"""
+        n_all = fetch_one(
+            con.execute(
+                f"""
             SELECT count(*) FROM read_parquet('{src}')
             WHERE subtype='country' AND ST_Intersects(geometry, {pt})
             """
-        ).fetchone()[0]
+            )
+        )[0]
         assert n_all == 2
 
 
@@ -1480,7 +1482,7 @@ class TestDownloadToCache:
 
         con = get_duckdb_connection(load_spatial=True)
         try:
-            count = con.execute(f"SELECT COUNT(*) FROM {sql_path(str(cache_path))}").fetchone()[0]
+            count = fetch_one(con.execute(f"SELECT COUNT(*) FROM {sql_path(str(cache_path))}"))[0]
         finally:
             con.close()
         assert count > 0
@@ -1681,7 +1683,7 @@ class TestPerLevelJoinRowCountGuardEndToEnd:
         )
 
         con = duckdb.connect()
-        assert con.execute(f"SELECT COUNT(*) FROM '{out}'").fetchone()[0] == 2
+        assert fetch_one(con.execute(f"SELECT COUNT(*) FROM '{out}'"))[0] == 2
         # Other warnings (e.g. bbox-optimization advice) may fire; the row-count
         # guard itself must stay silent.
         assert [m for m in messages if "Admin join" in m] == []
@@ -1725,7 +1727,7 @@ class TestPerLevelJoinRowCountGuardEndToEnd:
 
         con = duckdb.connect()
         # Duplicated: 1 input point matched 2 polygons, the other matched 1.
-        assert con.execute(f"SELECT COUNT(*) FROM '{out}'").fetchone()[0] == 3
+        assert fetch_one(con.execute(f"SELECT COUNT(*) FROM '{out}'"))[0] == 3
         guard_messages = [m for m in messages if "Admin join" in m]
         assert len(guard_messages) == 1
         assert "duplicated" in guard_messages[0]

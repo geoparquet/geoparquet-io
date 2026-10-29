@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
+    fetch_one,
     quote_identifier,
     register_arrow,
     sql_path,
@@ -523,7 +524,8 @@ def count_geometry_presence(
     """Count rows, NULL, zero-length and unparsable values over the sampled rows."""
     q = read.quoted
     empty, bad = read.empty_sql, read.unparsable_sql
-    row = con.execute(f"""
+    row = fetch_one(
+        con.execute(f"""
         SELECT COUNT(*),
                COUNT(*) FILTER (WHERE {q} IS NULL),
                COUNT(*) FILTER (WHERE {empty}),
@@ -535,5 +537,6 @@ def count_geometry_presence(
             FROM read_parquet({sql_path(raw_url)}, file_row_number = true)
             {limit_clause}
         )
-    """).fetchone()
+    """)
+    )
     return GeometryPresence(*row) if row else GeometryPresence(0, 0, 0, None)

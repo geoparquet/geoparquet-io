@@ -20,7 +20,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 
 BUILDINGS = os.path.join(os.path.dirname(__file__), "data", "buildings_test.parquet")
 
@@ -75,7 +75,7 @@ def test_wrapper_covers_sql_executemany_and_context_manager(tmp_path, monkeypatc
         con.execute("CREATE TABLE t (a INTEGER)")
         con.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
         # __getattr__ delegation: fetchone is not wrapped explicitly
-        assert con.execute("SELECT count(*) FROM t").fetchone() == (2,)
+        assert fetch_one(con.execute("SELECT count(*) FROM t")) == (2,)
 
     assert len(_profiles(tmp_path)) >= 2
 
@@ -137,15 +137,20 @@ def test_unset_or_blank_env_leaves_profiling_off(tmp_path, monkeypatch, value):
     con = _connection()
     assert type(con) is duckdb.DuckDBPyConnection
     con.execute("SELECT 1").fetchall()
-    assert con.execute("SELECT current_setting('enable_profiling')").fetchone() == (None,)
+    assert fetch_one(con.execute("SELECT current_setting('enable_profiling')")) == (None,)
 
 
 def _profile_files(directory):
     return sorted(n for n in os.listdir(directory) if n.endswith(".json"))
 
 
+def _query_name(profile):
+    """The profiled SQL: ``query_name`` on DuckDB 1.x, ``query.sql`` on 2.0."""
+    return profile.get("query_name") or (profile.get("query") or {}).get("sql")
+
+
 def _query_names(directory):
-    return [profile.get("query_name") for profile in _profiles(directory)]
+    return [_query_name(profile) for profile in _profiles(directory)]
 
 
 def test_sql_and_executemany_each_write_one_named_profile(tmp_path, monkeypatch):
@@ -176,7 +181,9 @@ def test_fetchone_profile_is_written_only_once_the_result_is_exhausted(tmp_path,
     monkeypatch.setenv("GPIO_DUCKDB_PROFILE", str(tmp_path))
     con = _connection()
 
-    assert con.execute("SELECT 'fetched-once'").fetchone() == ("fetched-once",)
+    # A bare fetchone() on purpose (fetch_one would complete the result).
+    once = con.execute("SELECT 'fetched-once'")
+    assert once.fetchone() == ("fetched-once",)
     con.execute("SELECT 'next'").fetchall()
     assert _query_names(tmp_path) == ["SELECT 'next'"]
 
@@ -249,7 +256,7 @@ def test_directory_that_becomes_unusable_disables_profiling_once(tmp_path, monke
         assert con.sql("SELECT 4").fetchall() == [(4,)]
     warnings = [r for r in caplog.records if "GPIO_DUCKDB_PROFILE" in r.getMessage()]
     assert len(warnings) == 1
-    assert con.execute("SELECT current_setting('enable_profiling')").fetchone() == (None,)
+    assert fetch_one(con.execute("SELECT current_setting('enable_profiling')")) == (None,)
     # a cursor of a connection whose profiling is off is a plain cursor
     assert type(con.cursor()) is duckdb.DuckDBPyConnection
 

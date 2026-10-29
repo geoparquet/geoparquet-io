@@ -171,7 +171,7 @@ def add_s2_table(
         query = _build_s2_select_query(
             table, source_ref, geom_col, s2_column_name, level, geom_ref=geom_ref
         )
-        result = con.execute(query).arrow().read_all()
+        result = con.sql(query).arrow().read_all()
 
         # Preserve metadata
         if table.schema.metadata:

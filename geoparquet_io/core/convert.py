@@ -29,6 +29,7 @@ from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
     _get_query_columns,
     _install_and_load_extension,
+    fetch_one,
     free_column_name,
     get_duckdb_connection,
     quote_identifier,
@@ -219,9 +220,9 @@ def _parquet_geometry_expr(con, source: str, geom_column: str) -> tuple[str, boo
     so the column has to be asked which shape it has before either is wrapped.
     """
     quoted = quote_identifier(geom_column)
-    (column_type,) = con.execute(
-        f"SELECT column_type FROM (DESCRIBE SELECT {quoted} FROM {source})"
-    ).fetchone()
+    (column_type,) = fetch_one(
+        con.execute(f"SELECT column_type FROM (DESCRIBE SELECT {quoted} FROM {source})")
+    )
     if column_type.upper().startswith("GEOMETRY"):
         return quoted, True
     return f"ST_GeomFromWKB({quoted})", False
@@ -365,9 +366,9 @@ def _st_read_layer_meta(con, input_path: str, layer: str | None) -> tuple[str, l
     makes the collision recoverable at all: it is the only way to learn the
     column names of a file whose names the binder refuses.
     """
-    row = con.execute(
-        f"SELECT driver_short_name, layers FROM ST_Read_Meta({sql_path(input_path)})"
-    ).fetchone()
+    row = fetch_one(
+        con.execute(f"SELECT driver_short_name, layers FROM ST_Read_Meta({sql_path(input_path)})")
+    )
     if not row or not row[1]:
         return None
     driver, layers = row[0], row[1]
@@ -733,7 +734,7 @@ def _calculate_bounds(
                 MAX(ST_YMax({quoted_geom})) as ymax
             FROM {table_expr}
         """
-    bounds_result = con.execute(bounds_query).fetchone()
+    bounds_result = fetch_one(con.execute(bounds_query))
 
     if not bounds_result or any(v is None for v in bounds_result):
         return None
@@ -928,9 +929,11 @@ def _try_detect_wkt_column(con, csv_read, col_names_lower):
             actual_col = col_names_lower[candidate]
             try:
                 # Validate by trying to parse sample row
-                sample = con.execute(
-                    f"SELECT {actual_col} FROM {csv_read} WHERE {actual_col} IS NOT NULL LIMIT 1"
-                ).fetchone()
+                sample = fetch_one(
+                    con.execute(
+                        f"SELECT {actual_col} FROM {csv_read} WHERE {actual_col} IS NOT NULL LIMIT 1"
+                    )
+                )
                 if sample and sample[0]:
                     # Validate WKT by parsing it — execute without fetchone to avoid
                     # DuckDB 1.5+ GEOMETRY serialization error
@@ -1303,7 +1306,7 @@ def _validate_latlon_ranges(con, csv_read, lat_col, lon_col, verbose):
     """
 
     try:
-        result = con.execute(query).fetchone()
+        result = fetch_one(con.execute(query))
         min_lat, max_lat, min_lon, max_lon, null_count = result
 
         if null_count > 0:
@@ -1331,9 +1334,9 @@ def _validate_latlon_ranges(con, csv_read, lat_col, lon_col, verbose):
 def _check_null_wkt_rows(con, csv_read, wkt_col):
     """Check and warn about NULL WKT values."""
     quoted_wkt = quote_identifier(wkt_col)
-    null_count = con.execute(
-        f"SELECT COUNT(*) FILTER ({quoted_wkt} IS NULL) FROM {csv_read}"
-    ).fetchone()[0]
+    null_count = fetch_one(
+        con.execute(f"SELECT COUNT(*) FILTER ({quoted_wkt} IS NULL) FROM {csv_read}")
+    )[0]
 
     if null_count > 0:
         warn(
@@ -1357,10 +1360,12 @@ def _check_invalid_wkt_rows(con, csv_read, wkt_col):
     quoted_wkt = quote_identifier(wkt_col)
     try:
         # Use TRY() to catch WKT parse errors — returns NULL for invalid WKT
-        invalid_count = con.execute(
-            f"SELECT COUNT(*) FROM {csv_read} "
-            f"WHERE {quoted_wkt} IS NOT NULL AND TRY(ST_GeomFromText({quoted_wkt})) IS NULL"
-        ).fetchone()[0]
+        invalid_count = fetch_one(
+            con.execute(
+                f"SELECT COUNT(*) FROM {csv_read} "
+                f"WHERE {quoted_wkt} IS NOT NULL AND TRY(ST_GeomFromText({quoted_wkt})) IS NULL"
+            )
+        )[0]
 
         if invalid_count > 0:
             warn(f"⚠️  Warning: {invalid_count} rows have invalid WKT and will be skipped")
@@ -1389,10 +1394,12 @@ def _validate_wkt_strict(con, csv_read, wkt_col):
     quoted_wkt = quote_identifier(wkt_col)
     try:
         # Use ::VARCHAR cast to avoid DuckDB 1.5+ GEOMETRY serialization error
-        con.execute(
-            f"SELECT ST_GeomFromText({quoted_wkt})::VARCHAR FROM {csv_read} "
-            f"WHERE {quoted_wkt} IS NOT NULL LIMIT 1"
-        ).fetchone()
+        fetch_one(
+            con.execute(
+                f"SELECT ST_GeomFromText({quoted_wkt})::VARCHAR FROM {csv_read} "
+                f"WHERE {quoted_wkt} IS NOT NULL LIMIT 1"
+            )
+        )
     except Exception as e:
         raise GeometryError(
             f"Invalid WKT in column '{wkt_col}': {str(e)}. "
@@ -1404,11 +1411,13 @@ def _warn_if_projected_crs(con, csv_read, wkt_col):
     """Warn if coordinates suggest projected CRS instead of WGS84."""
     quoted_wkt = quote_identifier(wkt_col)
     try:
-        result = con.execute(
-            f"SELECT MAX(ABS(ST_XMax(ST_GeomFromText({quoted_wkt})))) as max_x, "
-            f"MAX(ABS(ST_YMax(ST_GeomFromText({quoted_wkt})))) as max_y "
-            f"FROM {csv_read} WHERE {quoted_wkt} IS NOT NULL LIMIT 1000"
-        ).fetchone()
+        result = fetch_one(
+            con.execute(
+                f"SELECT MAX(ABS(ST_XMax(ST_GeomFromText({quoted_wkt})))) as max_x, "
+                f"MAX(ABS(ST_YMax(ST_GeomFromText({quoted_wkt})))) as max_y "
+                f"FROM {csv_read} WHERE {quoted_wkt} IS NOT NULL LIMIT 1000"
+            )
+        )
 
         if result and result[0] is not None:
             max_x, max_y = result
@@ -1625,7 +1634,7 @@ def _calculate_csv_bounds(con, geom_info, verbose):
     """
 
     try:
-        bounds_result = con.execute(bounds_query).fetchone()
+        bounds_result = fetch_one(con.execute(bounds_query))
     except Exception as e:
         raise GeoParquetError(str(e)) from e
 
@@ -2588,7 +2597,7 @@ def read_spatial_to_arrow(
             else:
                 # Spatial formats (GeoJSON, Shapefile, GeoPackage, etc.)
                 table_expr = _plain_st_read_expr(input_file, encoding, layer, con=con)
-            arrow_table = con.execute(f"SELECT * FROM {table_expr}").arrow().read_all()
+            arrow_table = con.sql(f"SELECT * FROM {table_expr}").arrow().read_all()
             if is_parquet:
                 arrow_table = _carry_input_kv_metadata(arrow_table, input_file, verbose)
             return arrow_table, None, None
@@ -2747,7 +2756,7 @@ def _tabular_geometry_to_arrow(
             WHERE {lat_col} IS NOT NULL AND {lon_col} IS NOT NULL
         """
 
-    result = con.execute(query)
+    result = con.sql(query)
     return result.arrow().read_all(), geometry_name
 
 
@@ -2827,7 +2836,7 @@ def _read_spatial_to_arrow(
     """
 
     try:
-        result = con.execute(query)
+        result = con.sql(query)
         return result.arrow().read_all()
     except duckdb.Error as e:
         # Curved geometries (CIRCULARSTRING..MULTISURFACE) cannot pass through
@@ -2908,12 +2917,12 @@ class _LinearizedRead:
         # spatial settings (axis order) would not carry over, but the raw
         # keep_wkb read does not consult them.
         self._cursor = self.con.cursor()
-        return self._cursor.execute(
+        return self._cursor.sql(
             "SELECT * FROM "
             + _build_st_read_expr(
                 self.input_file, self.layer, keep_wkb=True, open_options=self.open_options
             )
-        ).arrow(rows_per_batch=_LINEARIZE_BATCH_ROWS)
+        ).to_arrow_reader(batch_size=_LINEARIZE_BATCH_ROWS)
 
     def batches(self):
         """Yield the source's record batches with curved WKB stroked in place."""
@@ -2993,7 +3002,7 @@ def _read_spatial_linearized(
     geometry_expr = f"ST_GeomFromWKB({quoted_wkb})"
     if force_2d:
         geometry_expr = f"ST_Force2D({geometry_expr})"
-    result = con.execute(
+    result = con.sql(
         f"SELECT * EXCLUDE ({quoted_wkb}), "
         f"ST_AsWKB({geometry_expr}) AS geometry "
         f"FROM _gpio_linearized_src"

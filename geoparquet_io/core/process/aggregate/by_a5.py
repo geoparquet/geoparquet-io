@@ -29,7 +29,7 @@ A5_SCHEME = GridScheme(
     boundary_template=(
         "ST_MakePolygon(ST_MakeLine(list_transform("
         "list_append(a5_cell_to_boundary({cell}), a5_cell_to_boundary({cell})[1]), "
-        "p -> ST_Point(p[1], p[2]))))"
+        "lambda p: ST_Point(p[1], p[2]))))"
     ),
     latlng_template="a5_cell_to_lonlat({cell})",
     # a5_cell_to_lonlat returns [lon, lat].

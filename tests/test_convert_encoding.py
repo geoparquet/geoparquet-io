@@ -202,6 +202,8 @@ class TestFallbacksKeepTheEncoding:
             def execute(self, query):
                 raise duckdb.InvalidInputException(TestFallbacksKeepTheEncoding.CURVE_ERROR)
 
+            sql = execute
+
         calls = []
 
         def fake_linearized(con, input_file, layer, geom_column, max_angle_deg=None, **kwargs):

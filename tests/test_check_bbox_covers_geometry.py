@@ -20,7 +20,7 @@ from geoparquet_io.core.check_bbox_values import (
     check_bbox_covers_geometry,
 )
 from geoparquet_io.core.check_parquet_structure import check_bbox, check_metadata_and_bbox
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 
 #: A square whose envelope is exactly (0, 0, 10, 10) in float64.
 SQUARE = "POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))"
@@ -39,7 +39,7 @@ def _wkb_values(wkts):
         return [
             None
             if wkt is None
-            else con.execute("SELECT ST_AsWKB(ST_GeomFromText(?))", [wkt]).fetchone()[0]
+            else fetch_one(con.execute("SELECT ST_AsWKB(ST_GeomFromText(?))", [wkt]))[0]
             for wkt in wkts
         ]
     finally:
@@ -464,9 +464,11 @@ class TestNativeGeometry:
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
-        (column_type,) = con.execute(
-            f"SELECT column_type FROM (DESCRIBE SELECT geometry FROM '{native_geometry_file}')"
-        ).fetchone()
+        (column_type,) = fetch_one(
+            con.execute(
+                f"SELECT column_type FROM (DESCRIBE SELECT geometry FROM '{native_geometry_file}')"
+            )
+        )
         con.close()
         # Non-vacuity: this must exercise the native branch, not the WKB one.
         assert column_type.upper().startswith("GEOMETRY")

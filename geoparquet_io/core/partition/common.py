@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_metadata import get_row_count
 from geoparquet_io.core.duckdb_utils import (
+    fetch_one,
     fetch_rows,
     get_duckdb_connection,
     quote_identifier,
@@ -355,7 +356,7 @@ def analyze_partition_strategy(
 
     try:
         with readable_geoparquet(input_parquet):
-            result = con.execute(stats_query).fetchone()
+            result = fetch_one(con.execute(stats_query))
     finally:
         con.close()
 

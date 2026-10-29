@@ -21,6 +21,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import extract
+from geoparquet_io.core.duckdb_utils import fetch_one
 from tests.conftest import safe_unlink
 
 
@@ -569,7 +570,7 @@ def _filter_literal(sql: str) -> str:
     literal = sql.split("filter=", 1)[1].rsplit(")", 1)[0]
     con = duckdb.connect()
     try:
-        return con.execute(f"SELECT {literal}").fetchone()[0]
+        return fetch_one(con.execute(f"SELECT {literal}"))[0]
     finally:
         con.close()
 
@@ -1266,7 +1267,7 @@ def _extract_to(out: Path, *, table: pa.Table, with_geometry: bool, **kwargs) ->
         ("geom", "GEOMETRY" if with_geometry else "VARCHAR"),
     ]
     con = MagicMock()
-    con.execute.return_value.arrow.return_value.read_all.return_value = table
+    con.sql.return_value.arrow.return_value.read_all.return_value = table
     with (
         patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
         patch("geoparquet_io.core.extract_bigquery._schema_rows", return_value=schema_rows),
@@ -1586,7 +1587,7 @@ def _inner_googlesql(sql: str) -> str:
     literal = rest[start : i + 1]
     con = duckdb.connect()
     try:
-        return con.execute(f"SELECT {literal}").fetchone()[0]
+        return fetch_one(con.execute(f"SELECT {literal}"))[0]
     finally:
         con.close()
 
@@ -1779,6 +1780,7 @@ class TestViewFallsBackOnTheReadError:
 
         con = MagicMock()
         con.execute.side_effect = execute
+        con.sql.side_effect = execute  # the read goes through con.sql()
         with (
             patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
             patch(
@@ -1811,6 +1813,7 @@ class TestViewFallsBackOnTheReadError:
 
         con = MagicMock()
         con.execute.side_effect = duckdb.BinderException("Permission denied on relation")
+        con.sql.side_effect = con.execute.side_effect
         with (
             patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
             patch(
@@ -1885,6 +1888,19 @@ class TestViewPushesFiltersIntoTheQueryJob:
 
         with pytest.raises(ValidationError):
             self._view_sql(where="1=1) OR TRUE --")
+
+    @pytest.mark.parametrize("where", ["a = 1 -- x", "a = 1 /* x */ OR b = 2"])
+    def test_a_comment_is_refused_however_the_lexer_reports_it(self, where):
+        """1.5's tokenizer skips a comment; 2.0's emits it as a token. Both refuse."""
+        from geoparquet_io.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError, match="a comment"):
+            self._view_sql(where=where)
+
+    def test_a_comment_token_is_named(self):
+        from geoparquet_io.core.extract_bigquery import _where_portability_problem
+
+        assert _where_portability_problem("-- x", duckdb.token_type.comment) == "a comment"
 
     def test_the_table_path_still_filters_in_duckdb(self):
         """Unchanged behaviour for a physical table: no silent push-down."""
@@ -2032,6 +2048,7 @@ class TestShowSqlDuringTheViewRetry:
 
         con = MagicMock()
         con.execute.side_effect = execute
+        con.sql.side_effect = execute  # the read goes through con.sql()
         with (
             patch.object(bq, "BigQueryConnection") as mock_conn,
             patch.object(bq, "_schema_rows", return_value=self.SCHEMA),
@@ -2202,6 +2219,7 @@ class TestViewFallbackTellsTheUserAboutBilling:
 
         con = MagicMock()
         con.execute.side_effect = execute
+        con.sql.side_effect = execute  # the read goes through con.sql()
         with (
             patch.object(bq, "BigQueryConnection") as mock_conn,
             patch.object(bq, "_schema_rows", return_value=self.SCHEMA),
@@ -2214,7 +2232,8 @@ class TestViewFallbackTellsTheUserAboutBilling:
             )
 
         assert any("query job" in m and "billed" in m for m in printed), printed
-        issued = [str(c.args[0]) for c in con.execute.call_args_list]
+        calls = con.execute.call_args_list + con.sql.call_args_list
+        issued = [str(c.args[0]) for c in calls]
         job = next(q for q in issued if "bigquery_query(" in q)
         assert _inner_googlesql(job).startswith("SELECT `id`, `geom` FROM")
 
@@ -2328,6 +2347,7 @@ class TestSqlReplacesTheTableSource:
 
         con = MagicMock()
         con.execute.side_effect = execute
+        con.sql.side_effect = execute  # the read goes through con.sql()
         with (
             patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
             patch(
@@ -2374,7 +2394,7 @@ class TestSqlReplacesTheTableSource:
             return [("id", "VARCHAR")]
 
         con = MagicMock()
-        con.execute.return_value.arrow.return_value.read_all.return_value = pa.table(
+        con.sql.return_value.arrow.return_value.read_all.return_value = pa.table(
             {"id": pa.array(["a"])}
         )
         with (
@@ -2418,6 +2438,7 @@ class TestSqlReplacesTheTableSource:
 
         con = MagicMock()
         con.execute.side_effect = execute
+        con.sql.side_effect = execute  # the read goes through con.sql()
         with (
             patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
             patch(

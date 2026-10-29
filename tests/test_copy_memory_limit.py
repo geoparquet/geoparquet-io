@@ -31,6 +31,7 @@ from geoparquet_io.cli.main import cli
 from geoparquet_io.core import memory_limits
 from geoparquet_io.core.duckdb_utils import (
     _displayed_size_max,
+    fetch_one,
     get_duckdb_connection,
     restore_duckdb_settings,
     sql_path,
@@ -51,7 +52,7 @@ def _points_parquet(con, path: str, rows: int = 2000) -> str:
 
 
 def _setting(con, key):
-    return con.execute(f"SELECT current_setting('{key}')").fetchone()[0]
+    return fetch_one(con.execute(f"SELECT current_setting('{key}')"))[0]
 
 
 @pytest.fixture

@@ -27,6 +27,7 @@ from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     _wrap_query_with_blob_conversion,
+    fetch_one,
     get_duckdb_connection,
     sql_path,
 )
@@ -72,11 +73,13 @@ def _detect_native_geometry(
     """
     # The column name comes from the file's own `geo` metadata, so it is
     # untrusted input, not a constant: escape it like any other SQL literal.
-    result = conn.execute(f"""
+    result = fetch_one(
+        conn.execute(f"""
         SELECT logical_type
         FROM parquet_schema({sql_path(parquet_file)})
         WHERE name = '{_escape_sql_string(geometry_column)}'
-    """).fetchone()
+    """)
+    )
 
     if result and result[0]:
         logical_type = str(result[0])

@@ -21,6 +21,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.duckdb_utils import fetch_one
 
 FAST_PATH_MARKER = "using plain COPY TO"
 FIBOA_VALUE = '{"fiboa_version": "0.2.0"}'
@@ -99,10 +100,12 @@ def _actual_extent(path) -> tuple[float, float, float, float]:
 
     con = get_duckdb_connection(load_spatial=True)
     try:
-        return con.execute(
-            "SELECT MIN(ST_XMin(geometry)), MIN(ST_YMin(geometry)), "
-            f"MAX(ST_XMax(geometry)), MAX(ST_YMax(geometry)) FROM '{path}'"
-        ).fetchone()
+        return fetch_one(
+            con.execute(
+                "SELECT MIN(ST_XMin(geometry)), MIN(ST_YMin(geometry)), "
+                f"MAX(ST_XMax(geometry)), MAX(ST_YMax(geometry)) FROM '{path}'"
+            )
+        )
     finally:
         con.close()
 

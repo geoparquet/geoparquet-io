@@ -643,7 +643,7 @@ class TestNonGeometryColumnsNamedAsGeometry:
         for untouched in ("already_wkb", "not_geometry", "text_col"):
             assert f'ST_AsWKB("{untouched}")' not in query
 
-        result = con.execute(query).arrow().read_all()
+        result = con.sql(query).arrow().read_all()
         assert result.column("already_wkb").to_pylist() == [b"x"]
         assert result.column("not_geometry").to_pylist() == [42]
         assert result.column("text_col").to_pylist() == ["POINT(3 4)"]

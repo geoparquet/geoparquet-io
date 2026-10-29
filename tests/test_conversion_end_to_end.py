@@ -22,6 +22,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.check_parquet_structure import check_all
 from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.duckdb_utils import fetch_one
 from tests.conftest import (
     get_geoparquet_version,
     has_geoparquet_metadata,
@@ -102,7 +103,7 @@ def get_row_count(parquet_file):
     """Get row count from Parquet file using DuckDB."""
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
-    result = con.execute(f"SELECT COUNT(*) FROM read_parquet('{parquet_file}')").fetchone()
+    result = fetch_one(con.execute(f"SELECT COUNT(*) FROM read_parquet('{parquet_file}')"))
     con.close()
     return result[0]
 
@@ -374,9 +375,9 @@ class TestRowCountPreservation:
         # Get original row count
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
-        original_count = con.execute(
-            f"SELECT COUNT(*) FROM ST_Read('{gpkg_buildings}')"
-        ).fetchone()[0]
+        original_count = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM ST_Read('{gpkg_buildings}')")
+        )[0]
 
         convert_to_geoparquet(
             gpkg_buildings,
@@ -386,9 +387,9 @@ class TestRowCountPreservation:
         )
 
         # Verify row count
-        output_count = con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')"
-        ).fetchone()[0]
+        output_count = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')")
+        )[0]
         con.close()
 
         assert output_count == original_count
@@ -455,13 +456,15 @@ class TestGeometryIntegrity:
         con.execute("INSTALL spatial; LOAD spatial;")
 
         # Count invalid geometries
-        invalid_count = con.execute(
-            f"""
+        invalid_count = fetch_one(
+            con.execute(
+                f"""
             SELECT COUNT(*)
             FROM read_parquet('{temp_output_file}')
             WHERE NOT ST_IsValid(geometry)
         """
-        ).fetchone()[0]
+            )
+        )[0]
 
         con.close()
 

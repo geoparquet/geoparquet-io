@@ -189,7 +189,7 @@ class TestHilbertOrderTableEmptyGeometries:
         con.load_extension("spatial")
 
         arrow_table = (
-            con.execute("""
+            con.sql("""
             SELECT * FROM (VALUES
                 (1, ST_AsWKB(ST_GeomFromText('POINT(10 20)'))),
                 (2, ST_AsWKB(ST_GeomFromText('POINT EMPTY'))),
@@ -231,7 +231,7 @@ class TestHilbertOrderTableEmptyGeometries:
         con.load_extension("spatial")
 
         arrow_table = (
-            con.execute("""
+            con.sql("""
             SELECT * FROM (VALUES
                 (1, ST_AsWKB(ST_GeomFromText('POINT EMPTY'))),
                 (2, ST_AsWKB(ST_GeomFromText('LINESTRING EMPTY'))),
@@ -265,7 +265,7 @@ class TestHilbertOrderTableEmptyGeometries:
         con.load_extension("spatial")
 
         arrow_table = (
-            con.execute("""
+            con.sql("""
             SELECT * FROM (VALUES
                 (1, ST_AsWKB(ST_GeomFromText('POINT(10 20)'))),
                 (2, NULL),
@@ -298,7 +298,7 @@ class TestHilbertOrderTableEmptyGeometries:
         con.load_extension("spatial")
 
         arrow_table = (
-            con.execute("""
+            con.sql("""
             SELECT * FROM (VALUES
                 (1, ST_AsWKB(ST_GeomFromText('POINT(10 20)'))),
                 (2, ST_AsWKB(ST_GeomFromText('POINT EMPTY')))
@@ -340,7 +340,7 @@ class TestHilbertOrderCLIEmptyGeometries:
 
         # Create table with WKB geometries
         arrow_table = (
-            con.execute("""
+            con.sql("""
                 SELECT * FROM (VALUES
                     (1, ST_AsWKB(ST_GeomFromText('POINT(10 20)'))),
                     (2, ST_AsWKB(ST_GeomFromText('POINT EMPTY'))),
@@ -371,7 +371,7 @@ class TestHilbertOrderCLIEmptyGeometries:
 
         # Create table with empty/null WKB geometries
         arrow_table = (
-            con.execute("""
+            con.sql("""
                 SELECT * FROM (VALUES
                     (1, ST_AsWKB(ST_GeomFromText('POINT EMPTY'))),
                     (2, ST_AsWKB(ST_GeomFromText('LINESTRING EMPTY'))),

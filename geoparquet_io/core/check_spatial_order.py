@@ -22,6 +22,7 @@ from geoparquet_io.core.duckdb_metadata import (
 )
 from geoparquet_io.core.duckdb_utils import (
     disable_geoparquet_conversion,
+    fetch_one,
     get_duckdb_connection,
     is_interrupt,
     sql_path,
@@ -83,7 +84,7 @@ def _calculate_consecutive_avg(con, raw_url, read, row_limit, verbose):
     """
     if verbose:
         progress("Calculating average distance between consecutive features...")
-    result = con.execute(query).fetchone()
+    result = fetch_one(con.execute(query))
     avg = result[0] if result else None
     if verbose:
         debug(f"Average distance between consecutive features: {avg}")
@@ -108,7 +109,7 @@ def _calculate_random_avg(con, raw_url, read, row_limit, random_sample_size, ver
     """
     if verbose:
         progress(f"Calculating average distance between {random_sample_size} random pairs...")
-    result = con.execute(query).fetchone()
+    result = fetch_one(con.execute(query))
     avg = result[0] if result else None
     if verbose:
         debug(f"Average distance between random features: {avg}")
@@ -154,7 +155,7 @@ def _build_results_dict(ratio, consecutive_avg, random_avg):
 
 def _get_row_limit_clause(con, raw_url, limit_rows, verbose):
     """Determine row limit clause based on total rows."""
-    total_rows = con.execute(f"SELECT COUNT(*) FROM {sql_path(raw_url)}").fetchone()[0]
+    total_rows = fetch_one(con.execute(f"SELECT COUNT(*) FROM {sql_path(raw_url)}"))[0]
     if verbose:
         debug(f"Total rows in file: {total_rows:,}")
 

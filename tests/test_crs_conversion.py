@@ -32,6 +32,7 @@ from geoparquet_io.core.crs_utils import (
     extract_crs_from_parquet,
     is_default_crs,
 )
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.reproject import (
     _detect_crs_from_table,
     _detect_geometry_column_from_table,
@@ -859,21 +860,23 @@ class TestReprojectBboxPreservation:
         assert "bbox" in column_names, "bbox column should be preserved after reproject"
 
         # Verify bbox structure has xmin, ymin, xmax, ymax
-        bbox_struct = conn.execute(f'SELECT bbox FROM "{temp_output_file}" LIMIT 1').fetchone()[0]
+        bbox_struct = fetch_one(conn.execute(f'SELECT bbox FROM "{temp_output_file}" LIMIT 1'))[0]
         assert "xmin" in bbox_struct
         assert "ymin" in bbox_struct
         assert "xmax" in bbox_struct
         assert "ymax" in bbox_struct
 
         # Verify bbox values are in Web Mercator range (not WGS84)
-        bbox_stats = conn.execute(f"""
+        bbox_stats = fetch_one(
+            conn.execute(f"""
             SELECT
                 MIN(bbox.xmin) as min_x,
                 MAX(bbox.xmax) as max_x,
                 MIN(bbox.ymin) as min_y,
                 MAX(bbox.ymax) as max_y
             FROM "{temp_output_file}"
-        """).fetchone()
+        """)
+        )
 
         # Web Mercator coordinates are typically in meters, much larger than WGS84 degrees
         # WGS84: -180 to 180, Web Mercator: ~-20M to ~20M
@@ -930,5 +933,5 @@ class TestReprojectBboxPreservation:
         assert "bbox" in column_names, "bbox column should be preserved in streaming reproject"
 
         # Verify bbox has correct structure
-        bbox_struct = conn.execute(f'SELECT bbox FROM "{output_file}" LIMIT 1').fetchone()[0]
+        bbox_struct = fetch_one(conn.execute(f'SELECT bbox FROM "{output_file}" LIMIT 1'))[0]
         assert "xmin" in bbox_struct and "ymax" in bbox_struct

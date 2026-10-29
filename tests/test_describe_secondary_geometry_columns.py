@@ -36,7 +36,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import derive_geo_from_file
 from geoparquet_io.core.derive_geo_from_file import derive_secondary_geometry_info
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 from geoparquet_io.core.write_strategies import duckdb_kv
 
 
@@ -63,7 +63,7 @@ def _scans(monkeypatch) -> Counter:
 def _duckdb_rows(path) -> int:
     con = get_duckdb_connection(load_spatial=True)
     try:
-        return con.execute(f"SELECT count(*) FROM read_parquet({sql_path(str(path))})").fetchone()[
+        return fetch_one(con.execute(f"SELECT count(*) FROM read_parquet({sql_path(str(path))})"))[
             0
         ]
     finally:
@@ -89,9 +89,9 @@ def _write_two_geometry_file(path, rows: bool = True, geometry_types=None) -> No
     con.execute("INSTALL spatial; LOAD spatial;")
     points, polys = [], []
     for x, y in [(0, 0), (1, 1), (2, 2)]:
-        points.append(con.execute(f"SELECT ST_AsWKB(ST_Point({x}, {y}))").fetchone()[0])
+        points.append(fetch_one(con.execute(f"SELECT ST_AsWKB(ST_Point({x}, {y}))"))[0])
         wkt = f"POLYGON(({x - 0.5} {y - 0.5}, {x + 0.5} {y - 0.5}, {x + 0.5} {y + 0.5}, {x - 0.5} {y + 0.5}, {x - 0.5} {y - 0.5}))"
-        polys.append(con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()[0])
+        polys.append(fetch_one(con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))"))[0])
     con.close()
 
     if not rows:

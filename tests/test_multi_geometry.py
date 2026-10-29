@@ -778,7 +778,7 @@ class TestMultiGeometryDerivedStatsInvalidation:
             con.execute("INSTALL spatial; LOAD spatial;")
             con.register("t", table)
             shifted = (
-                con.execute(
+                con.sql(
                     """SELECT * REPLACE (
                        ST_AsWKB(ST_Translate(ST_GeomFromWKB(geometry), 10, 10)) AS geometry,
                        ST_AsWKB(ST_Translate(ST_GeomFromWKB(boundary), 10, 10)) AS boundary

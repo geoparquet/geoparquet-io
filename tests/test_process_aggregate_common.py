@@ -1,6 +1,7 @@
 import duckdb
 import pytest
 
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.process.aggregate.common import (
     MetricSpec,
@@ -114,6 +115,6 @@ def test_build_breakdown_select_counts_and_other():
     con = _crop_con()
     colmap = build_breakdown_column_names(["wheat", "corn"], reserved={"count_other"})
     select = build_breakdown_select("crop", colmap, has_other=True)
-    row = con.execute(f"SELECT {select} FROM features").fetchone()
+    row = fetch_one(con.execute(f"SELECT {select} FROM features"))
     # wheat=3, corn=2, other(rice+barley+null)=3
     assert row == (3, 2, 3)

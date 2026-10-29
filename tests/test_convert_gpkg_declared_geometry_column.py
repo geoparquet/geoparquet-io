@@ -70,7 +70,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.duckdb_utils import sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, sql_path
 
 LAYER = "CablewayLink"
 GEOM_COLUMN = "CENTRELINE_GEOMETRY"
@@ -88,9 +88,11 @@ def _write_layer(path: Path, layer: str, geom_column: str, rows: int) -> None:
     con = duckdb.connect()
     try:
         con.execute("INSTALL spatial; LOAD spatial;")
+        con.execute("SET geometry_always_xy = true")
+        # An explicit SRS: DuckDB 2.0 writes none for a CRS-less geometry.
         con.execute(
             f"COPY (SELECT i AS id, ST_Point(i * 0.1, i * 0.1) AS geom FROM range({rows}) t(i)) "
-            f"TO {sql_path(path)} (FORMAT GDAL, DRIVER 'GPKG', LAYER_NAME '{layer}', "
+            f"TO {sql_path(path)} (FORMAT GDAL, DRIVER 'GPKG', SRS 'EPSG:4326', LAYER_NAME '{layer}', "
             f"LAYER_CREATION_OPTIONS 'GEOMETRY_NAME={geom_column}')"
         )
     finally:
@@ -111,10 +113,12 @@ def _write_two_layer_gpkg(path: Path) -> None:
     con = sqlite3.connect(str(path))
     try:
         con.execute("ATTACH DATABASE ? AS donor", (str(donor),))
-        (ddl,) = con.execute(
-            "SELECT sql FROM donor.sqlite_master WHERE type = 'table' AND name = ?",
-            (LAYER,),
-        ).fetchone()
+        (ddl,) = fetch_one(
+            con.execute(
+                "SELECT sql FROM donor.sqlite_master WHERE type = 'table' AND name = ?",
+                (LAYER,),
+            )
+        )
         con.execute(ddl)
         con.execute(f'INSERT INTO "{LAYER}" SELECT * FROM donor."{LAYER}"')
         con.execute("INSERT INTO gpkg_contents SELECT * FROM donor.gpkg_contents")

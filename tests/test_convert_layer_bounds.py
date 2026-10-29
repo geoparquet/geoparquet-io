@@ -16,7 +16,7 @@ from geoparquet_io.core.convert import (
     _detect_spatial_geometry,
     convert_to_geoparquet,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 
 
 @pytest.fixture
@@ -48,11 +48,13 @@ class TestCalculateBoundsHonoursLayer:
 
     def test_bounds_match_the_layer_read(self, con, multilayer_gpkg):
         """Measured through ST_Read for that layer, not the file's first one."""
-        expected = con.execute(
-            "SELECT MIN(ST_XMin(geom)), MIN(ST_YMin(geom)), "
-            "MAX(ST_XMax(geom)), MAX(ST_YMax(geom)) "
-            f"FROM ST_Read('{multilayer_gpkg}', layer := 'roads')"
-        ).fetchone()
+        expected = fetch_one(
+            con.execute(
+                "SELECT MIN(ST_XMin(geom)), MIN(ST_YMin(geom)), "
+                "MAX(ST_XMax(geom)), MAX(ST_YMax(geom)) "
+                f"FROM ST_Read('{multilayer_gpkg}', layer := 'roads')"
+            )
+        )
 
         bounds = _calculate_bounds(con, multilayer_gpkg, "geom", False, layer="roads")
 

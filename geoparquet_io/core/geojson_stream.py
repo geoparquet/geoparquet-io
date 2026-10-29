@@ -43,6 +43,7 @@ from geoparquet_io.core.crs_utils import (
 )
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
+    fetch_one,
     quote_identifier,
     register_arrow,
     sql_path,
@@ -547,7 +548,7 @@ def _find_geometry_column(
     for col in columns:
         try:
             type_query = f"SELECT typeof({quote_identifier(col)}) FROM {source_ref} LIMIT 1"
-            type_result = con.execute(type_query).fetchone()
+            type_result = fetch_one(con.execute(type_query))
             if type_result and "GEOMETRY" in str(type_result[0]).upper():
                 return col
         except Exception:

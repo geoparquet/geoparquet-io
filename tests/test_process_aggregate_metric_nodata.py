@@ -11,6 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5
 from geoparquet_io.core.process.aggregate.common import (
@@ -138,7 +139,7 @@ def test_metric_nodata_verified_against_duckdb():
     con.execute("CREATE TABLE t AS SELECT * FROM (VALUES (1.0), (-999.0), (2.0)) v(height)")
     metrics = parse_metrics("avg:height,min:height")
     sql = build_metric_select(metrics, nodata_values=["-999"])
-    row = con.execute(f"SELECT COUNT(*) AS count, {sql} FROM t").fetchone()
+    row = fetch_one(con.execute(f"SELECT COUNT(*) AS count, {sql} FROM t"))
     assert row[0] == 3  # count unaffected
     assert row[1] == 1.5  # avg of 1.0, 2.0
     assert row[2] == 1.0  # min ignores -999
@@ -191,7 +192,7 @@ def test_nan_sentinel_double_column():
         nodata_values=parse_metric_nodata("nan"),
         column_types={"height": "DOUBLE"},
     )
-    row = con.execute(f"SELECT {sql} FROM t").fetchone()
+    row = fetch_one(con.execute(f"SELECT {sql} FROM t"))
     con.close()
     assert row[0] == 2.0  # avg of 1.0, 3.0
     assert row[1] == 4.0
@@ -207,7 +208,7 @@ def test_nan_sentinel_real_column():
         nodata_values=parse_metric_nodata("nan"),
         column_types={"height": "FLOAT"},
     )
-    row = con.execute(f"SELECT {sql} FROM t").fetchone()
+    row = fetch_one(con.execute(f"SELECT {sql} FROM t"))
     con.close()
     assert row[0] == 3.0
 
@@ -217,7 +218,7 @@ def test_nan_sentinel_without_type_info_still_matches():
     con = duckdb.connect()
     con.execute("CREATE TABLE t AS SELECT * FROM (VALUES (2.0::REAL), ('NaN'::REAL)) v(height)")
     sql = build_metric_select(parse_metrics("avg:height"), nodata_values=["nan"])
-    row = con.execute(f"SELECT {sql} FROM t").fetchone()
+    row = fetch_one(con.execute(f"SELECT {sql} FROM t"))
     con.close()
     assert row[0] == 2.0
 
@@ -235,7 +236,7 @@ def test_real_column_scientific_sentinel_cast_to_real():
         column_types={"height": "FLOAT"},
     )
     assert "CAST(-3.4028235e+38 AS REAL)" in sql
-    row = con.execute(f"SELECT {sql} FROM t").fetchone()
+    row = fetch_one(con.execute(f"SELECT {sql} FROM t"))
     con.close()
     assert row[0] == 2.0  # sentinel excluded; avg of 1.0, 3.0
 
@@ -252,7 +253,7 @@ def test_real_column_decimal_sentinel_multiple():
         nodata_values=["-999.9", "-9999"],
         column_types={"height": "FLOAT"},
     )
-    row = con.execute(f"SELECT {sql} FROM t").fetchone()
+    row = fetch_one(con.execute(f"SELECT {sql} FROM t"))
     con.close()
     assert row[0] == 2.0
 
@@ -265,7 +266,7 @@ def test_integer_column_with_int_sentinel():
         nodata_values=["-999"],
         column_types={"height": "INTEGER"},
     )
-    row = con.execute(f"SELECT {sql} FROM t").fetchone()
+    row = fetch_one(con.execute(f"SELECT {sql} FROM t"))
     con.close()
     assert row[0] == 4
     assert row[1] == 2.0
@@ -278,10 +279,10 @@ def test_integer_column_with_float_sentinel():
     con.execute("CREATE TABLE t AS SELECT * FROM (VALUES (1), (-999), (-1000), (3)) v(height)")
     metrics = parse_metrics("sum:height")
     sql = build_metric_select(metrics, nodata_values=["-999.0"], column_types={"height": "INTEGER"})
-    assert con.execute(f"SELECT {sql} FROM t").fetchone()[0] == -996  # -999 nulled
+    assert fetch_one(con.execute(f"SELECT {sql} FROM t"))[0] == -996  # -999 nulled
     sql = build_metric_select(metrics, nodata_values=["-999.5"], column_types={"height": "INTEGER"})
     # Must NOT round to -1000 and null out a real value.
-    assert con.execute(f"SELECT {sql} FROM t").fetchone()[0] == -1995
+    assert fetch_one(con.execute(f"SELECT {sql} FROM t"))[0] == -1995
     con.close()
 
 
@@ -293,7 +294,7 @@ def test_all_sentinel_group_returns_null_not_zero():
         nodata_values=["-999"],
         column_types={"height": "DOUBLE"},
     )
-    row = con.execute(f"SELECT COUNT(*), {sql} FROM t").fetchone()
+    row = fetch_one(con.execute(f"SELECT COUNT(*), {sql} FROM t"))
     con.close()
     assert row[0] == 2  # count still counts sentinel rows
     assert row[1] is None  # SUM over all-NULL is NULL, not 0
@@ -444,7 +445,7 @@ def test_build_grid_query_real_column_sentinel_executes(metric):
         "none",
         metric_nodata="-3.4028235e+38",
     )
-    tbl = con.execute(sql).arrow().read_all()
+    tbl = con.sql(sql).arrow().read_all()
     con.close()
     assert tbl.num_rows == 1
     assert tbl.column("count")[0].as_py() == 3
@@ -470,7 +471,7 @@ def test_build_grid_query_breakdown_with_nodata():
         "none",
         metric_nodata="-999",
     )
-    tbl = con.execute(sql).arrow().read_all()
+    tbl = con.sql(sql).arrow().read_all()
     con.close()
     assert tbl.num_rows == 1
     assert tbl.column("count")[0].as_py() == 3  # sentinel row still counted
@@ -692,7 +693,7 @@ def test_table_aggregate_a5_metric_nodata():
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial; SET geometry_always_xy = true")
     tbl = (
-        con.execute(
+        con.sql(
             """
             SELECT ST_AsWKB(ST_Point(lon, lat)) AS geometry, height FROM (VALUES
                 (10.0, 50.0, 2.0), (10.001, 50.001, -999.0)

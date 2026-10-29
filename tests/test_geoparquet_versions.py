@@ -18,6 +18,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.geo_metadata import DEFAULT_GEOPARQUET_VERSION, GEOPARQUET_VERSIONS
 from geoparquet_io.core.validate import CheckStatus
 from tests.conftest import (
@@ -256,7 +257,7 @@ class TestWriteParquetGeoOnly:
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
-        result = con.execute(f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')").fetchone()
+        result = fetch_one(con.execute(f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')"))
         assert result[0] > 0
         con.close()
 
@@ -351,7 +352,7 @@ class TestVersionRoundTrip:
         # Read and count geometries
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
-        result = con.execute(f"SELECT COUNT(*) FROM read_parquet('{output1}')").fetchone()
+        result = fetch_one(con.execute(f"SELECT COUNT(*) FROM read_parquet('{output1}')"))
         con.close()
 
         assert result[0] > 0
@@ -371,7 +372,7 @@ class TestVersionRoundTrip:
         # Read and count geometries
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
-        result = con.execute(f"SELECT COUNT(*) FROM read_parquet('{output1}')").fetchone()
+        result = fetch_one(con.execute(f"SELECT COUNT(*) FROM read_parquet('{output1}')"))
         con.close()
 
         assert result[0] > 0
@@ -599,9 +600,9 @@ class TestCheckBboxFix:
         # Get original row count
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
-        original_count = con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{fields_geom_type_only_file}')"
-        ).fetchone()[0]
+        original_count = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM read_parquet('{fields_geom_type_only_file}')")
+        )[0]
 
         fix_bbox_removal(
             fields_geom_type_only_file,
@@ -611,9 +612,9 @@ class TestCheckBboxFix:
         )
 
         # Verify row count preserved
-        fixed_count = con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')"
-        ).fetchone()[0]
+        fixed_count = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')")
+        )[0]
         con.close()
 
         assert fixed_count == original_count
@@ -823,9 +824,9 @@ class TestConvertSkipsBbox:
         # Get original row count (exclude bbox column)
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
-        original_count = con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{fields_geom_type_only_file}')"
-        ).fetchone()[0]
+        original_count = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM read_parquet('{fields_geom_type_only_file}')")
+        )[0]
 
         convert_to_geoparquet(
             fields_geom_type_only_file,
@@ -835,9 +836,9 @@ class TestConvertSkipsBbox:
         )
 
         # Verify row count preserved
-        result_count = con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')"
-        ).fetchone()[0]
+        result_count = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')")
+        )[0]
         con.close()
 
         assert result_count == original_count
@@ -873,10 +874,10 @@ class TestComprehensiveRoundTrips:
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
 
-        count_v1_0 = con.execute(f"SELECT COUNT(*) FROM read_parquet('{v1_0_file}')").fetchone()[0]
-        count_roundtrip = con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{roundtrip_file}')"
-        ).fetchone()[0]
+        count_v1_0 = fetch_one(con.execute(f"SELECT COUNT(*) FROM read_parquet('{v1_0_file}')"))[0]
+        count_roundtrip = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM read_parquet('{roundtrip_file}')")
+        )[0]
 
         con.close()
 
@@ -984,7 +985,7 @@ class TestComprehensiveRoundTrips:
 
         counts = {}
         for i, (_version, file_path) in files.items():
-            count = con.execute(f"SELECT COUNT(*) FROM read_parquet('{file_path}')").fetchone()[0]
+            count = fetch_one(con.execute(f"SELECT COUNT(*) FROM read_parquet('{file_path}')"))[0]
             counts[i] = count
 
         con.close()

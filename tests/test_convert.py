@@ -38,7 +38,7 @@ from geoparquet_io.core.convert import (
     _suffixed_to_unique,
     convert_to_geoparquet,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 from geoparquet_io.core.geo_metadata import parse_geo_metadata
 from geoparquet_io.core.geometry_detection import (
     detect_parquet_geometry_column,
@@ -354,9 +354,9 @@ class TestConvertBestPractices:
 
         # Verify we can read the file
         con = duckdb.connect()
-        count = con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{best_practices_file}')"
-        ).fetchone()[0]
+        count = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM read_parquet('{best_practices_file}')")
+        )[0]
         assert count > 0
         con.close()
 
@@ -369,9 +369,9 @@ class TestConvertBestPractices:
 
         # Get actual geometry column name (DuckDB uses "geom" for shapefile conversion)
         geom_col = find_primary_geometry_column(best_practices_file)
-        result = con.execute(
-            f"SELECT ST_AsText(\"{geom_col}\") FROM '{best_practices_file}' LIMIT 1"
-        ).fetchone()
+        result = fetch_one(
+            con.execute(f"SELECT ST_AsText(\"{geom_col}\") FROM '{best_practices_file}' LIMIT 1")
+        )
         assert result is not None
         con.close()
 
@@ -457,7 +457,7 @@ class TestConvertEdgeCases:
         con.execute("INSTALL spatial;")
         con.execute("LOAD spatial;")
 
-        input_count = con.execute(f"SELECT COUNT(*) FROM ST_Read('{shapefile_input}')").fetchone()[
+        input_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM ST_Read('{shapefile_input}')"))[
             0
         ]
 
@@ -465,7 +465,7 @@ class TestConvertEdgeCases:
         convert_to_geoparquet(shapefile_input, temp_output_file)
 
         # Get row count from output using DuckDB
-        output_count = con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'").fetchone()[0]
+        output_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'"))[0]
 
         assert input_count == output_count, "Row count mismatch after conversion"
         con.close()
@@ -518,9 +518,9 @@ class TestConvertCSVCore:
         con = duckdb.connect()
         con.execute("INSTALL spatial;")
         con.execute("LOAD spatial;")
-        result = con.execute(
-            f"SELECT ST_AsText(geometry) FROM '{temp_output_file}' LIMIT 1"
-        ).fetchone()
+        result = fetch_one(
+            con.execute(f"SELECT ST_AsText(geometry) FROM '{temp_output_file}' LIMIT 1")
+        )
         assert result is not None
         con.close()
 
@@ -535,7 +535,7 @@ class TestConvertCSVCore:
         assert os.path.exists(temp_output_file)
         # Verify row count
         con = duckdb.connect()
-        count = con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'").fetchone()[0]
+        count = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'"))[0]
         assert count == 5
         con.close()
 
@@ -549,9 +549,9 @@ class TestConvertCSVCore:
         con = duckdb.connect()
         con.execute("INSTALL spatial;")
         con.execute("LOAD spatial;")
-        result = con.execute(
-            f"SELECT ST_GeometryType(geometry) FROM '{temp_output_file}' LIMIT 1"
-        ).fetchone()
+        result = fetch_one(
+            con.execute(f"SELECT ST_GeometryType(geometry) FROM '{temp_output_file}' LIMIT 1")
+        )
         assert "POINT" in result[0]
         con.close()
 
@@ -575,7 +575,7 @@ class TestConvertCSVCore:
         assert os.path.exists(temp_output_file)
         # Verify row count matches
         con = duckdb.connect()
-        count = con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'").fetchone()[0]
+        count = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'"))[0]
         assert count == 5
         con.close()
 
@@ -600,7 +600,7 @@ class TestConvertCSVCore:
         assert os.path.exists(temp_output_file)
         # Verify data was read correctly
         con = duckdb.connect()
-        count = con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'").fetchone()[0]
+        count = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'"))[0]
         assert count == 5
         con.close()
 
@@ -642,9 +642,11 @@ class TestConvertCSVCore:
         con = duckdb.connect()
         con.execute("INSTALL spatial;")
         con.execute("LOAD spatial;")
-        result = con.execute(
-            f"SELECT ST_GeometryType(geometry), ST_NPoints(geometry) FROM '{temp_output_file}'"
-        ).fetchone()
+        result = fetch_one(
+            con.execute(
+                f"SELECT ST_GeometryType(geometry), ST_NPoints(geometry) FROM '{temp_output_file}'"
+            )
+        )
         assert "POLYGON" in result[0]
         assert result[1] > 100_000  # Should have many vertices
         con.close()
@@ -679,9 +681,11 @@ class TestConvertCSVCore:
         con = duckdb.connect()
         con.execute("INSTALL spatial;")
         con.execute("LOAD spatial;")
-        result = con.execute(
-            f"SELECT ST_GeometryType(geometry), ST_NPoints(geometry) FROM '{temp_output_file}'"
-        ).fetchone()
+        result = fetch_one(
+            con.execute(
+                f"SELECT ST_GeometryType(geometry), ST_NPoints(geometry) FROM '{temp_output_file}'"
+            )
+        )
         assert "POLYGON" in result[0]
         assert result[1] > 100_000
         con.close()
@@ -711,9 +715,9 @@ class TestConvertCSVCore:
 
         con = duckdb.connect()
         try:
-            (payload,) = con.execute(
-                "SELECT json_serialize_sql(?)", [f"SELECT * FROM {expr}"]
-            ).fetchone()
+            (payload,) = fetch_one(
+                con.execute("SELECT json_serialize_sql(?)", [f"SELECT * FROM {expr}"])
+            )
         finally:
             con.close()
         assert '"error":true' not in payload.replace(" ", ""), payload
@@ -869,9 +873,11 @@ class TestConvertCSVValidation:
         # The fixture's 4 rows are: 2 valid POINTs, 1 unparsable, 1 empty WKT.
         # --skip-invalid drops what cannot be parsed; the row with no WKT at all
         # is kept, with NULL geometry, so its attributes are not lost (#655).
-        count, nulls = con.execute(
-            f"SELECT COUNT(*), COUNT(*) FILTER (WHERE geometry IS NULL) FROM '{temp_output_file}'"
-        ).fetchone()
+        count, nulls = fetch_one(
+            con.execute(
+                f"SELECT COUNT(*), COUNT(*) FILTER (WHERE geometry IS NULL) FROM '{temp_output_file}'"
+            )
+        )
         assert (count, nulls) == (3, 1)
         con.close()
 
@@ -1086,9 +1092,9 @@ class TestConvertCSVCLI:
             ORDER BY row_group_id
             """
         ).fetchall()
-        total_rows = con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')"
-        ).fetchone()[0]
+        total_rows = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')")
+        )[0]
         con.close()
 
         assert total_rows == 10000, f"Expected 10000 rows, got {total_rows}"
@@ -1112,9 +1118,9 @@ class TestConvertCSVCLI:
 
         # Verify the file is valid and can be read
         con = duckdb.connect()
-        row_count = con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')"
-        ).fetchone()[0]
+        row_count = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')")
+        )[0]
         con.close()
 
         assert row_count == 1445, f"Expected 1445 rows, got {row_count}"
@@ -1213,7 +1219,7 @@ class TestConvertNoGeometry:
 
         # Verify same row count
         con = duckdb.connect()
-        count = con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'").fetchone()[0]
+        count = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'"))[0]
         assert count == 5
 
         # Verify columns preserved (no extra geometry/bbox added)
@@ -1242,7 +1248,7 @@ class TestConvertNoGeometry:
 
         # Verify data preserved
         con = duckdb.connect()
-        count = con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'").fetchone()[0]
+        count = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'"))[0]
         assert count == 3
 
         cols = [
@@ -1392,7 +1398,7 @@ class TestCustomGeometryColumnName:
         convert_to_geoparquet(custom_geom_parquet, temp_output_file)
 
         con = duckdb.connect()
-        count = con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'").fetchone()[0]
+        count = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'"))[0]
         assert count == 2
         con.close()
 

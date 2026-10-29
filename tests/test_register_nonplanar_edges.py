@@ -28,6 +28,7 @@ import pytest
 
 import geoparquet_io as gpio
 from geoparquet_io.core.duckdb_utils import (
+    fetch_one,
     geoarrow_field_edges,
     get_duckdb_connection,
     planar_view,
@@ -95,10 +96,10 @@ def test_register_arrow_accepts_spherical_edges(carrier, table, rows):
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         registered = register_arrow(con, "t", source)
-        count = con.execute("SELECT count(ST_Area(geometry)) FROM t").fetchone()[0]
+        count = fetch_one(con.execute("SELECT count(ST_Area(geometry)) FROM t"))[0]
         assert count == source.num_rows
         assert registered.edges == {"geometry": "spherical"}
-        result = con.execute("SELECT * FROM t").arrow().read_all()
+        result = con.sql("SELECT * FROM t").arrow().read_all()
     finally:
         con.close()
     assert _edges(source) == "spherical", "the caller's table must not change"
@@ -118,7 +119,7 @@ def test_register_arrow_leaves_a_planar_table_alone(rows):
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         registered = register_arrow(con, "t", planar)
-        result = con.execute("SELECT * FROM t").arrow().read_all()
+        result = con.sql("SELECT * FROM t").arrow().read_all()
     finally:
         con.close()
     assert registered.edges == {}
@@ -218,9 +219,9 @@ def test_register_follows_the_type_not_the_geo_block(rows, type_edges, block_edg
     try:
         with pytest.raises(Exception, match="non-planar"):
             con.register("raw", arrow)
-            con.execute("SELECT count(geometry) FROM raw").fetchone()
+            fetch_one(con.execute("SELECT count(geometry) FROM raw"))
         registered = register_arrow(con, "t", arrow)
-        count = con.execute("SELECT count(ST_Area(geometry)) FROM t").fetchone()[0]
+        count = fetch_one(con.execute("SELECT count(ST_Area(geometry)) FROM t"))[0]
     finally:
         con.close()
     assert count == arrow.num_rows

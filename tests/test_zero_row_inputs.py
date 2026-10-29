@@ -24,6 +24,7 @@ from geoparquet_io.core.partition.common import (
     preview_partition,
     raise_if_no_rows,
 )
+from tests.conftest import skip_if_grid_unavailable
 
 # A bbox in the Southern Ocean: matches nothing in places_test.parquet.
 EMPTY_BBOX = "170,-80,171,-79"
@@ -98,6 +99,7 @@ class TestPartitionZeroRows:
         ids=["h3", "a5", "quadkey", "kdtree", "s2"],
     )
     def test_spatial_index_partitions_stop_cleanly(self, empty_geoparquet, tmp_path, args):
+        skip_if_grid_unavailable(args[0])
         out = tmp_path / "out"
         result = CliRunner().invoke(partition, [args[0], empty_geoparquet, str(out), *args[1:]])
         assert result.exit_code == 1, result.output
@@ -126,6 +128,7 @@ class TestPartitionZeroRows:
         h3/a5/quadkey stop in ``calculate_auto_resolution`` with its own wording;
         s2/kdtree reach the shared guard. Either way: exit 1, no traceback.
         """
+        skip_if_grid_unavailable(args[0])
         out = tmp_path / "out"
         result = CliRunner().invoke(partition, [args[0], empty_geoparquet, str(out), *args[1:]])
         assert result.exit_code == 1, result.output

@@ -27,6 +27,7 @@ from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
     _get_query_column_type,
     _strip_trailing_order_by,
+    fetch_one,
     quote_identifier,
 )
 from geoparquet_io.core.logging_config import debug, warn
@@ -1431,7 +1432,7 @@ def compute_bbox_via_sql(
                 MAX(ST_YMax({quoted_geom})) as ymax
             FROM ({query})
         """
-    result = con.execute(bbox_query).fetchone()
+    result = fetch_one(con.execute(bbox_query))
 
     if result and all(v is not None for v in result):
         return list(result)
@@ -1878,7 +1879,7 @@ def output_query_schema(con: duckdb.DuckDBPyConnection, query: str) -> pa.Schema
     fast path, duckdb-kv, disk-rewrite), which each need the same schema to ask
     the same question of a secondary column's covering.
     """
-    return con.execute(f"SELECT * FROM ({query}) LIMIT 0").arrow().schema
+    return con.sql(f"SELECT * FROM ({query}) LIMIT 0").arrow().schema
 
 
 def declare_carried_bbox_column(

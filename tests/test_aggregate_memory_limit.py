@@ -30,9 +30,11 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import memory_limits
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.process.aggregate import by_admin, grid_common
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_a5_table, aggregate_by_a5
 from geoparquet_io.core.process.overview import detect, rollup
+from tests.conftest import skip_if_grid_unavailable
 
 GIB = 1024**3
 
@@ -76,7 +78,7 @@ def cells_parquet(tmp_path, points_parquet):
 
 
 def _setting(con, key):
-    return con.execute(f"SELECT current_setting('{key}')").fetchone()[0]
+    return fetch_one(con.execute(f"SELECT current_setting('{key}')"))[0]
 
 
 def _duckdb_renders(value: str) -> str:
@@ -300,6 +302,7 @@ class TestThreadsAndOrdering:
 class TestTheCliFlag:
     @pytest.mark.parametrize("scheme", ["a5", "h3"])
     def test_grid_command_reports_the_limit(self, points_parquet, tmp_path, scheme):
+        skip_if_grid_unavailable(scheme)
         result = CliRunner().invoke(
             cli,
             [

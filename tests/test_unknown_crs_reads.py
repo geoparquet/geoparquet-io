@@ -35,6 +35,7 @@ from geoparquet_io.core.crs_utils import (
     source_crs_is_unknown,
     table_crs_is_unknown,
 )
+from geoparquet_io.core.duckdb_utils import fetch_one
 
 # Albers (EPSG:5070) sized metres. Read as lon/lat they are far out of range.
 PROJECTED = [(1500000.0 + i, 2000000.0 + i) for i in range(5)]
@@ -97,9 +98,11 @@ def _unknown_warnings(records) -> list[str]:
 def _first_xy(path):
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
-    row = con.execute(
-        f"SELECT ST_X(geometry), ST_Y(geometry) FROM read_parquet('{path}') ORDER BY id LIMIT 1"
-    ).fetchone()
+    row = fetch_one(
+        con.execute(
+            f"SELECT ST_X(geometry), ST_Y(geometry) FROM read_parquet('{path}') ORDER BY id LIMIT 1"
+        )
+    )
     con.close()
     return row
 

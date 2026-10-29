@@ -199,7 +199,7 @@ def _points_table():
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial; SET geometry_always_xy = true")
     return (
-        con.execute(
+        con.sql(
             """
         SELECT ST_AsWKB(ST_Point(lon, lat)) AS geometry, crop, area FROM (VALUES
             (10.0, 50.0, 'wheat', 4.0),
@@ -281,7 +281,7 @@ def test_aggregate_a5_table_tolerates_bad_wkb():
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial; SET geometry_always_xy = true")
     tbl = (
-        con.execute(
+        con.sql(
             """
             SELECT * FROM (VALUES
                 (ST_AsWKB(ST_Point(10.0, 50.0)), 'a'),

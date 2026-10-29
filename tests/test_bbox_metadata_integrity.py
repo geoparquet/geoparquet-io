@@ -23,7 +23,11 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata, add_bbox_metadata_table
-from geoparquet_io.core.duckdb_utils import _wrap_query_with_blob_conversion, get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import (
+    _wrap_query_with_blob_conversion,
+    fetch_one,
+    get_duckdb_connection,
+)
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.validate import validate_geoparquet
 
@@ -68,9 +72,11 @@ def _geometry_logical_type(path):
     """The Parquet *logical* type of the geometry column: None for plain WKB."""
     con = get_duckdb_connection(load_spatial=False)
     try:
-        row = con.execute(
-            f"SELECT logical_type FROM parquet_schema('{path}') WHERE name = 'geometry'"
-        ).fetchone()
+        row = fetch_one(
+            con.execute(
+                f"SELECT logical_type FROM parquet_schema('{path}') WHERE name = 'geometry'"
+            )
+        )
     finally:
         con.close()
     return str(row[0]) if row and row[0] else None
@@ -140,9 +146,11 @@ def _logical_type(path, column):
     """The Parquet *logical* type of one column: None for plain WKB."""
     con = get_duckdb_connection(load_spatial=False)
     try:
-        row = con.execute(
-            f"SELECT logical_type FROM parquet_schema('{path}') WHERE name = '{column}'"
-        ).fetchone()
+        row = fetch_one(
+            con.execute(
+                f"SELECT logical_type FROM parquet_schema('{path}') WHERE name = '{column}'"
+            )
+        )
     finally:
         con.close()
     return str(row[0]) if row and row[0] else None

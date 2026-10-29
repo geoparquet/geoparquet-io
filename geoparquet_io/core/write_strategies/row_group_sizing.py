@@ -63,7 +63,7 @@ def _resolve_row_group_rows(
     sample_query = _strip_trailing_order_by(query)
     try:
         sample = (
-            con.execute(f"SELECT * FROM ({sample_query}) LIMIT {_MB_ESTIMATE_SAMPLE_ROWS}")
+            con.sql(f"SELECT * FROM ({sample_query}) LIMIT {_MB_ESTIMATE_SAMPLE_ROWS}")
             .arrow()
             .read_all()
         )

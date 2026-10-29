@@ -11,6 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3
@@ -81,7 +82,7 @@ def test_read_grid_source_sql_bbox_mode(tmp_path):
         assert "geometry" not in cols
         assert "__pt" in cols
         # bbox center == the original point (symmetric box)
-        row = con.execute(f"SELECT ST_X(__pt), ST_Y(__pt) FROM ({sql}) LIMIT 1").fetchone()
+        row = fetch_one(con.execute(f"SELECT ST_X(__pt), ST_Y(__pt) FROM ({sql}) LIMIT 1"))
         assert row[0] == pytest.approx(10.0)
         assert row[1] == pytest.approx(50.0)
     finally:
@@ -124,7 +125,7 @@ def test_read_grid_source_sql_point_column_mode(tmp_path):
     try:
         sql = read_grid_source_sql(con, str(src), "geometry", bucket_point="anchor")
         assert 'EXCLUDE ("geometry")' in sql
-        row = con.execute(f"SELECT ST_X(__pt), ST_Y(__pt) FROM ({sql})").fetchone()
+        row = fetch_one(con.execute(f"SELECT ST_X(__pt), ST_Y(__pt) FROM ({sql})"))
         assert row == (10.0, 50.0)
     finally:
         con.close()
@@ -195,7 +196,7 @@ def test_table_bbox_mode_errors_when_no_bbox_column():
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial; SET geometry_always_xy = true")
     tbl = (
-        con.execute("SELECT ST_AsWKB(ST_Point(10.0, 50.0)) AS geometry, 1.0 AS height")
+        con.sql("SELECT ST_AsWKB(ST_Point(10.0, 50.0)) AS geometry, 1.0 AS height")
         .arrow()
         .read_all()
     )
@@ -213,7 +214,7 @@ def test_table_bbox_mode_autodetects_from_schema():
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial; SET geometry_always_xy = true")
     tbl = (
-        con.execute(
+        con.sql(
             "SELECT ST_AsWKB(ST_Point(10.0, 50.0)) AS geometry, "
             "{'xmin': 9.9, 'ymin': 49.9, 'xmax': 10.1, 'ymax': 50.1} AS bbox"
         )
@@ -445,7 +446,7 @@ def test_read_grid_source_sql_bbox_mode_with_where(tmp_path):
         sql = read_grid_source_sql(
             con, str(src), "geometry", where="height > 2", bucket_point="bbox", bbox_column="bbox"
         )
-        assert con.execute(f"SELECT count(*) FROM ({sql})").fetchone()[0] == 2
+        assert fetch_one(con.execute(f"SELECT count(*) FROM ({sql})"))[0] == 2
     finally:
         con.close()
 
@@ -713,7 +714,7 @@ def test_grid_source_sql_geometry_less_bbox_input(tmp_path):
         sql = read_grid_source_sql(
             con, str(src), "geometry", bucket_point="bbox", bbox_column="bbox"
         )
-        assert con.execute(f"SELECT count(*) FROM ({sql})").fetchone()[0] == len(POINTS)
+        assert fetch_one(con.execute(f"SELECT count(*) FROM ({sql})"))[0] == len(POINTS)
     finally:
         con.close()
 
@@ -808,7 +809,7 @@ def test_table_explicit_bbox_column_wrong_shape_errors():
     from geoparquet_io.core.process.aggregate.grid_common import _resolve_bbox_column_for_table
 
     con = duckdb.connect()
-    tbl = con.execute("SELECT 1.5 AS height").arrow().read_all()
+    tbl = con.sql("SELECT 1.5 AS height").arrow().read_all()
     con.close()
     with pytest.raises(InvalidParameterError, match="xmin"):
         _resolve_bbox_column_for_table(tbl, "height")
@@ -963,7 +964,7 @@ def test_build_grid_query_with_metric_and_breakdown(tmp_path):
     try:
         source_sql = read_grid_source_sql(con, str(src), "geometry")
         sql = build_grid_query(con, scheme, source_sql, 1, "cell", None, "height", 20, "polygon")
-        result = con.execute(sql).arrow().read_all()
+        result = con.sql(sql).arrow().read_all()
         assert "geometry" in result.column_names
         assert sum(result.column("count").to_pylist()) == len(POINTS)
     finally:
@@ -1070,7 +1071,7 @@ def test_table_aggregate_a5_bucket_point_bbox():
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial; SET geometry_always_xy = true")
     tbl = (
-        con.execute(
+        con.sql(
             """
             SELECT ST_AsWKB(ST_Point(lon, lat)) AS geometry,
                    {'xmin': lon - 0.001, 'ymin': lat - 0.001,

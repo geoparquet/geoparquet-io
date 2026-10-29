@@ -22,6 +22,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import sort
 from geoparquet_io.core import sort_by_column as sort_by_column_module
 from geoparquet_io.core import sort_quadkey as sort_quadkey_module
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.sort_by_column import sort_by_column, sort_by_column_table
 from geoparquet_io.core.sort_quadkey import sort_by_quadkey
@@ -41,8 +42,8 @@ class TestSortCommands:
 
         # Verify row count matches
         conn = duckdb.connect()
-        input_count = conn.execute(f'SELECT COUNT(*) FROM "{places_test_file}"').fetchone()[0]
-        output_count = conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"').fetchone()[0]
+        input_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{places_test_file}"'))[0]
+        output_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"'))[0]
         assert input_count == output_count
 
     def test_hilbert_sort_buildings(self, buildings_test_file, temp_output_file):
@@ -54,8 +55,8 @@ class TestSortCommands:
 
         # Verify row count matches
         conn = duckdb.connect()
-        input_count = conn.execute(f'SELECT COUNT(*) FROM "{buildings_test_file}"').fetchone()[0]
-        output_count = conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"').fetchone()[0]
+        input_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{buildings_test_file}"'))[0]
+        output_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"'))[0]
         assert input_count == output_count
 
     def test_hilbert_sort_with_verbose(self, places_test_file, temp_output_file):
@@ -191,8 +192,8 @@ class TestSortColumnCommands:
 
         # Verify row count matches
         conn = duckdb.connect()
-        input_count = conn.execute(f'SELECT COUNT(*) FROM "{places_test_file}"').fetchone()[0]
-        output_count = conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"').fetchone()[0]
+        input_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{places_test_file}"'))[0]
+        output_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"'))[0]
         assert input_count == output_count
         conn.close()
 

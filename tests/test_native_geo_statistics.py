@@ -40,7 +40,7 @@ from geoparquet_io.core.duckdb_metadata import (
     get_native_geo_statistics,
     get_per_row_group_native_geo_stats,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 # Far from the origin in every direction, so all-zero statistics cannot contain
@@ -223,10 +223,12 @@ def test_duckdb_reads_a_file_it_did_not_write():
 
     con = get_duckdb_connection()
     try:
-        bbox = con.execute(
-            "SELECT geo_bbox FROM parquet_metadata(?) WHERE path_in_schema = 'geometry'",
-            [str(fixture)],
-        ).fetchone()
+        bbox = fetch_one(
+            con.execute(
+                "SELECT geo_bbox FROM parquet_metadata(?) WHERE path_in_schema = 'geometry'",
+                [str(fixture)],
+            )
+        )
     finally:
         con.close()
 

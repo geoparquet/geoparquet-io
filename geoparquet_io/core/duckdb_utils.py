@@ -395,8 +395,31 @@ def disable_geoparquet_conversion(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("SET enable_geoparquet_conversion = false")
 
 
+def fetch_one(result):
+    """``result.fetchone()`` for an ``execute()`` result, leaving nothing open.
+
+    On DuckDB 2.0 a result stays open until a fetch returns no rows, and while
+    it is open ``sql()``, ``register()``, ``create_function()`` and any
+    relation read on the connection raise ``ResourceInUseException``. A single
+    ``fetchone()`` on a one-row query (a count, a ``LIMIT 1``, a setting) gets
+    its row and never sees the end, so it leaves exactly that open result.
+
+    After a row comes back, the rest is run to completion with ``complete()``,
+    not cancelled with ``abort()``: ``abort()`` fails an open transaction when
+    the statement may write, and a ``COPY`` or ``INSERT ... RETURNING`` read
+    for its first row must keep its effect. DuckDB 1.5 has neither method
+    (the next statement replaced the result there), so nothing is called.
+    """
+    row = result.fetchone()
+    if row is not None:
+        complete = getattr(result, "complete", None)
+        if complete is not None:
+            complete()
+    return row
+
+
 def _current_setting(con: duckdb.DuckDBPyConnection, key: str) -> object:
-    return con.execute(f"SELECT current_setting('{key}')").fetchone()[0]
+    return fetch_one(con.execute(f"SELECT current_setting('{key}')"))[0]
 
 
 def _set_setting(con: duckdb.DuckDBPyConnection, key: str, value: object) -> None:
@@ -1268,11 +1291,15 @@ class ProfiledConnection:
     What gets captured is decided by DuckDB, not by this wrapper: DuckDB
     writes a statement's profile only when its result is *fully consumed*
     (``fetchall()``, ``.arrow().read_all()``, a ``COPY``, a ``fetchone()``
-    read until it returns ``None``). A result read with a single
+    read until it returns ``None``). A result read with a single bare
     ``fetchone()``, or abandoned when the next statement runs, writes no
-    profile. DDL and ``SET`` write none either. So a command's profile
-    directory holds its result-draining queries — usually the heavy ones —
-    not every statement it ran.
+    profile. gpio reads single rows through :func:`fetch_one`, which on DuckDB
+    2.0 completes the result, so there those reads are profiled too. DDL and
+    ``SET`` write none either. So a command's profile directory holds its
+    result-draining queries — usually the heavy ones — not every statement it
+    ran. The profiled SQL is the file's ``query_name`` on DuckDB 1.x and its
+    ``query.sql`` on 2.0, which nests the rest under ``query``, ``operator``
+    and ``io``.
 
     A lazy relation from ``sql()`` executes when it is fetched, and DuckDB
     writes its profile to whichever file is current *then*: fetched straight
@@ -1620,7 +1647,7 @@ def get_duckdb_connection_for_s3(
     )
     try:
         # Lightweight test query - DuckDB handles glob patterns natively
-        con.execute(f"SELECT 1 FROM read_parquet({sql_path(path)}) LIMIT 1").fetchone()
+        fetch_one(con.execute(f"SELECT 1 FROM read_parquet({sql_path(path)}) LIMIT 1"))
         return con
     except Exception as e:
         con.close()
@@ -1688,7 +1715,7 @@ def _session_zone(con) -> datetime.tzinfo:
     """The connection's TimeZone setting as a tzinfo, UTC when Python cannot resolve it."""
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-    (name,) = con.execute("SELECT current_setting('TimeZone')").fetchone()
+    (name,) = fetch_one(con.execute("SELECT current_setting('TimeZone')"))
     try:
         return ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError):
@@ -1753,7 +1780,7 @@ def fetch_row(
     """The first row of ``query`` as :func:`fetch_rows` builds it, or None when it is empty."""
     rewritten, positions = _without_timestamptz(con, query, params, column_types)
     zone = _session_zone(con) if positions else None
-    row = con.execute(rewritten, params).fetchone()
+    row = fetch_one(con.execute(rewritten, params))
     if row is None:
         return None
     return _restore_zones([row], positions, zone)[0]
@@ -1900,8 +1927,8 @@ def _geoarrow_coord_exprs(quoted_geom: str, encoding: str) -> tuple:
     for _ in range(depth):
         flat = f"flatten({flat})"
 
-    x_arr = f"list_transform({flat}, p -> p.x)"
-    y_arr = f"list_transform({flat}, p -> p.y)"
+    x_arr = f"list_transform({flat}, lambda p: p.x)"
+    y_arr = f"list_transform({flat}, lambda p: p.y)"
     x_min = f"list_min({x_arr})"
     x_max = f"list_max({x_arr})"
     y_min = f"list_min({y_arr})"

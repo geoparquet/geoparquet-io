@@ -18,6 +18,7 @@ import pytest
 from geoparquet_io.core import duckdb_utils
 from geoparquet_io.core.duckdb_utils import (
     _s3_secret_sql,
+    fetch_one,
     get_active_s3_config,
     s3_config_scope,
     uses_aws_profile,
@@ -269,8 +270,14 @@ def fake_s3_endpoint():
 
 
 def _secret_string(con) -> str:
-    """The one secret on ``con``, as DuckDB prints it (the secret key is redacted)."""
-    rows = con.execute("SELECT secret_string FROM duckdb_secrets()").fetchall()
+    """The one secret gpio made on ``con``, as DuckDB prints it (key redacted).
+
+    DuckDB 2.0's aws extension also registers ``lazy`` default secrets when it
+    loads; they are DuckDB's, not gpio's, so they are left out of the count.
+    """
+    rows = con.execute(
+        "SELECT secret_string FROM duckdb_secrets() WHERE provider <> 'lazy'"
+    ).fetchall()
     assert len(rows) == 1, f"expected one secret, found {len(rows)}"
     return rows[0][0]
 
@@ -409,7 +416,7 @@ def test_anonymous_read_builds_no_secret_and_sends_no_signature(fake_s3_endpoint
     with s3_config_scope({"s3_endpoint": endpoint, "s3_use_ssl": False}):
         con = duckdb_utils.get_duckdb_connection(load_spatial=False, load_httpfs=True)
     try:
-        assert con.execute("SELECT count(*) FROM duckdb_secrets()").fetchone()[0] == 0
+        assert fetch_one(con.execute("SELECT count(*) FROM duckdb_secrets()"))[0] == 0
         _read_s3(con)
     finally:
         con.close()
@@ -448,7 +455,7 @@ class TestProfileOnlyAppliesToS3:
         with s3_config_scope({"profile": "prod"}):
             con = duckdb_utils.get_duckdb_connection(load_spatial=False, load_httpfs=True)
         try:
-            assert con.execute("SELECT count(*) FROM duckdb_secrets()").fetchone()[0] == 0
+            assert fetch_one(con.execute("SELECT count(*) FROM duckdb_secrets()"))[0] == 0
         finally:
             con.close()
 
@@ -541,7 +548,7 @@ class TestExportedProfileFollowsSdkPrecedence:
         with s3_config_scope(resolve_s3_config()):
             con = duckdb_utils.get_duckdb_connection(load_spatial=False, load_httpfs=True)
         try:
-            assert con.execute("SELECT count(*) FROM duckdb_secrets()").fetchone()[0] == 0
+            assert fetch_one(con.execute("SELECT count(*) FROM duckdb_secrets()"))[0] == 0
         finally:
             con.close()
 

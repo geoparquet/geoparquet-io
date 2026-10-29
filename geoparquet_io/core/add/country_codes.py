@@ -8,6 +8,7 @@ from geoparquet_io.core.duckdb_utils import (
     SPATIAL_JOIN_BBOX_PREFILTER,
     SPATIAL_JOIN_NATIVE,
     build_spatial_join_condition,
+    fetch_one,
     get_duckdb_connection,
     quote_identifier,
     spatial_join_strategy,
@@ -274,7 +275,7 @@ def _create_filtered_countries_table(
             debug("Creating temporary table with filtered countries...")
         con.execute(create_table_sql)
         if verbose:
-            count = con.execute(f"SELECT COUNT(*) FROM {countries_table}").fetchone()[0]
+            count = fetch_one(con.execute(f"SELECT COUNT(*) FROM {countries_table}"))[0]
             debug(f"Loaded {count} countries overlapping with input data")
 
 
@@ -445,7 +446,7 @@ def _print_output_stats(con, output_parquet):
         COUNT(DISTINCT "admin:country_code") as unique_countries{subdivision_selects}
     FROM {sql_path(output_path)};
     """
-    stats = con.execute(stats_query).fetchone()
+    stats = fetch_one(con.execute(stats_query))
     total, with_country, unique_countries = stats[0], stats[1], stats[2]
     with_subdivision, unique_subdivisions = (stats[3], stats[4]) if has_subdivision else (0, 0)
 
@@ -681,7 +682,7 @@ def add_country_codes(
     # handle keeps the input file open (breaks cleanup on Windows).
     with _create_duckdb_connection(using_default) as con:
         if not dry_run:
-            total_count = con.execute(f"SELECT COUNT(*) FROM {sql_path(input_path)}").fetchone()[0]
+            total_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM {sql_path(input_path)}"))[0]
             progress(f"Processing {total_count:,} input features...")
 
         countries_table = "filtered_countries"

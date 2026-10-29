@@ -352,10 +352,11 @@ Each profile is its own JSON file, named
 `gpio-profile-<time>-p<pid>-<token>-c<connection>-q<statement>.json`. The
 microsecond time, process ID and random token keep names distinct across
 processes (containers often all run as PID 1), and gpio never picks a name
-that is already on disk, so one query's file never overwrites another's. The
-`query_name` key in each file holds the SQL text and the operator tree below
-it carries per-operator timings, so you can see which query inside a command
-is slow.
+that is already on disk, so one query's file never overwrites another's. Each
+file holds the SQL text and an operator tree with per-operator timings, so you
+can see which query inside a command is slow. On DuckDB 1.5 the SQL is the
+`query_name` key and the tree hangs off `children`; DuckDB 2.0 moves the SQL to
+`query.sql` and the tree to `operator`.
 
 **Which statements get a profile.** DuckDB decides, and it writes a profile
 only when a statement's result is *fully consumed*: a `COPY ... TO` write, a
@@ -365,8 +366,9 @@ kinds of statement leave no file, which is why the statement numbers have
 gaps:
 
 - `SET`, `CREATE` and other statements DuckDB does not profile;
-- small lookups gpio reads with a single `fetchone()` (a row count, a bounding
-  box, a metadata probe), whose result is never exhausted;
+- on DuckDB 1.5, small lookups gpio reads as a single row (a row count, a
+  bounding box, a metadata probe), whose result is never exhausted. DuckDB 2.0
+  requires gpio to finish those results, so there they do get a profile;
 - a result abandoned when the next statement starts.
 
 A `gpio sort hilbert` run, for example, writes a single profile — for the

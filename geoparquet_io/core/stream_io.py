@@ -217,7 +217,7 @@ def _file_stream_metadata(con, source, path, schema, metadata) -> dict:
         # The remote schema adapter has no Arrow field types. This zero-row
         # result carries each CRS, and the file reader supplies the edges
         # DuckDB does not understand. No source geometry rows are materialized.
-        described = con.execute(f"SELECT * FROM {source} LIMIT 0").arrow().read_all()
+        described = con.sql(f"SELECT * FROM {source} LIMIT 0").arrow().read_all()
         for name, edges in collect_nonplanar_edges(path).items():
             described = apply_geoarrow_extension_type(described, name, edges=edges)
     return _stream_input_metadata(described.replace_schema_metadata(metadata))
@@ -416,7 +416,7 @@ def _write_stream_output(
     native_columns = native_geometry_types_from_query(con, query)
     stream_query = _wrap_query_with_wkb_conversion(query, list(native_columns))
 
-    result = con.execute(stream_query)
+    result = con.sql(stream_query)
     table = result.arrow().read_all()
 
     # Convert WKB binary to geoarrow extension type for streaming

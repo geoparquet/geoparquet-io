@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from geoparquet_io.core.duckdb_utils import (
+    fetch_one,
     fetch_row,
     load_community_extension,
     quote_identifier,
@@ -219,9 +220,11 @@ def _infer_out_geometry(con, relation: str, columns: dict[str, str]) -> str:
     if "centroid" in columns:
         return "both"
     geom_expr = geometry_to_geom_expr(con, relation, "geometry")
-    row = con.execute(
-        f"SELECT ST_GeometryType({geom_expr}) FROM {relation} WHERE geometry IS NOT NULL LIMIT 1"
-    ).fetchone()
+    row = fetch_one(
+        con.execute(
+            f"SELECT ST_GeometryType({geom_expr}) FROM {relation} WHERE geometry IS NOT NULL LIMIT 1"
+        )
+    )
     if row and str(row[0]).upper() == "POINT":
         return "centroid"
     return "polygon"
@@ -248,10 +251,12 @@ def _detect_grid_base_level(con, relation: str, scheme: str, cell_column: str) -
 
 def _detect_admin_base_level(con, relation: str, cell_column: str) -> str:
     qcol = quote_identifier(cell_column)
-    row = con.execute(
-        f"SELECT COUNT(*), COUNT(*) FILTER (WHERE {qcol} LIKE '%-%') FROM {relation} "
-        f"WHERE {qcol} IS NOT NULL AND {qcol} != 'unassigned'"
-    ).fetchone()
+    row = fetch_one(
+        con.execute(
+            f"SELECT COUNT(*), COUNT(*) FILTER (WHERE {qcol} LIKE '%-%') FROM {relation} "
+            f"WHERE {qcol} IS NOT NULL AND {qcol} != 'unassigned'"
+        )
+    )
     total, regions = row if row else (0, 0)
     if total == 0:
         raise InvalidParameterError(

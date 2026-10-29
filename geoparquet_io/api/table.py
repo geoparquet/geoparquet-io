@@ -27,7 +27,7 @@ from geoparquet_io.core.add.kdtree import (
 from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 from geoparquet_io.core.check_parquet_structure import CheckProfile
-from geoparquet_io.core.duckdb_utils import quote_identifier
+from geoparquet_io.core.duckdb_utils import fetch_one, quote_identifier
 from geoparquet_io.core.logging_config import warn
 from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE
 from geoparquet_io.core.wfs import DEFAULT_WFS_PAGE_SIZE
@@ -207,7 +207,7 @@ def _calculate_bounds_from_table(
             FROM input_table
             WHERE {quote_identifier(geometry_column)} IS NOT NULL
         """
-        result = con.execute(query).fetchone()
+        result = fetch_one(con.execute(query))
 
         if result and all(v is not None for v in result):
             return (result[0], result[1], result[2], result[3])
@@ -360,7 +360,7 @@ def read_partition(
                 if row[1] and row[1].upper() == "GEOMETRY":
                     query = _wrap_query_with_wkb_conversion(query, row[0], con=con)
 
-            arrow_table = con.execute(query).arrow().read_all()
+            arrow_table = con.sql(query).arrow().read_all()
         finally:
             con.close()
 

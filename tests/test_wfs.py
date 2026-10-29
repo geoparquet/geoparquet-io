@@ -17,6 +17,7 @@ import pytest
 
 # Module-level imports for WFS functions (avoids per-test imports)
 from geoparquet_io.core import wfs as wfs_module
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.wfs import (
     EmptyLayerError,
     LayerNotFoundError,
@@ -1894,7 +1895,7 @@ class TestGMLResponseParsing:
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
         con.register("features", table)
-        wkt = con.execute("SELECT ST_AsText(ST_GeomFromWKB(geometry)) FROM features").fetchone()[0]
+        wkt = fetch_one(con.execute("SELECT ST_AsText(ST_GeomFromWKB(geometry)) FROM features"))[0]
         con.close()
         assert wkt == "POINT (-122.4194 37.7749)"
 
@@ -3243,7 +3244,7 @@ class TestCRSValidation:
         # Create a table with valid WGS84 geometry
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
-            result = con.execute("""
+            result = con.sql("""
                 SELECT ST_AsWKB(ST_Point(-122.4, 37.8)) as geometry
             """).arrow()
             table = result.read_all()
@@ -3262,7 +3263,7 @@ class TestCRSValidation:
         # Create a table with EPSG:3035 coordinates (not WGS84)
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
-            result = con.execute("""
+            result = con.sql("""
                 SELECT ST_AsWKB(ST_Point(3900000, 3000000)) as geometry
             """).arrow()
             table = result.read_all()
@@ -3288,7 +3289,7 @@ class TestCRSValidation:
         # Real EPSG:22174 coordinates from IDECOR (Córdoba, Argentina)
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
-            result = con.execute("""
+            result = con.sql("""
                 SELECT ST_AsWKB(ST_Point(4527586.01, 6386852.32)) as geometry
             """).arrow()
             table = result.read_all()
@@ -3309,7 +3310,7 @@ class TestCRSValidation:
         # Projected (metric) coordinates returned for a non-4326 geographic request
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
-            result = con.execute("""
+            result = con.sql("""
                 SELECT ST_AsWKB(ST_Point(4527586.01, 6386852.32)) as geometry
             """).arrow()
             table = result.read_all()
@@ -3329,7 +3330,7 @@ class TestCRSValidation:
         # Degree-range coordinates returned for a projected request
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
-            result = con.execute("""
+            result = con.sql("""
                 SELECT ST_AsWKB(ST_Point(-62.7, -32.6)) as geometry
             """).arrow()
             table = result.read_all()
@@ -3349,7 +3350,7 @@ class TestCRSValidation:
         # Create a table with projected coordinates
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
-            result = con.execute("""
+            result = con.sql("""
                 SELECT ST_AsWKB(ST_Point(3900000, 3000000)) as geometry
             """).arrow()
             table = result.read_all()
@@ -3381,7 +3382,7 @@ class TestCRSValidation:
         # Create table with EPSG:3035 coordinates (Belgium area)
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
-            result = con.execute("""
+            result = con.sql("""
                 SELECT ST_AsWKB(ST_Point(3900000, 3000000)) as geometry
             """).arrow()
             table = result.read_all()
@@ -3400,12 +3401,14 @@ class TestCRSValidation:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
             con.register("data", reprojected)
-            result = con.execute("""
+            result = fetch_one(
+                con.execute("""
                 SELECT
                     ST_X(ST_GeomFromWKB(geometry)) as x,
                     ST_Y(ST_GeomFromWKB(geometry)) as y
                 FROM data
-            """).fetchone()
+            """)
+            )
             x, y = result
         finally:
             con.close()
@@ -3428,7 +3431,7 @@ class TestCRSValidation:
         # Create mock table with EPSG:3035 coordinates
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
-            result = con.execute("""
+            result = con.sql("""
                 SELECT ST_AsWKB(ST_Point(3900000, 3000000)) as geometry
             """).arrow()
             mock_table = result.read_all()
@@ -3462,12 +3465,14 @@ class TestCRSValidation:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
             con.register("data", result)
-            coords = con.execute("""
+            coords = fetch_one(
+                con.execute("""
                 SELECT
                     ST_X(ST_GeomFromWKB(geometry)) as x,
                     ST_Y(ST_GeomFromWKB(geometry)) as y
                 FROM data
-            """).fetchone()
+            """)
+            )
             x, y = coords
         finally:
             con.close()
@@ -3686,7 +3691,7 @@ class TestResolveCRSForOutput:
 
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
-            result = con.execute(f"SELECT ST_AsWKB(ST_Point({x}, {y})) as geometry").arrow()
+            result = con.sql(f"SELECT ST_AsWKB(ST_Point({x}, {y})) as geometry").arrow()
             return result.read_all()
         finally:
             con.close()
@@ -5628,7 +5633,7 @@ class TestServerCapDetection:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
             capped_table = (
-                con.execute("SELECT ST_AsWKB(ST_Point(0, 0)) AS geometry FROM range(10005)")
+                con.sql("SELECT ST_AsWKB(ST_Point(0, 0)) AS geometry FROM range(10005)")
                 .arrow()
                 .read_all()
             )

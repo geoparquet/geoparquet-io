@@ -19,6 +19,7 @@ import duckdb
 import pyarrow.parquet as pq
 import pytest
 
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME, aggregate_by_a5
 from geoparquet_io.core.process.aggregate.by_h3 import H3_SCHEME, aggregate_by_h3
 from geoparquet_io.core.process.aggregate.common import (
@@ -236,14 +237,16 @@ def test_ring_west_of_180_keeps_its_area_and_pinned_shape():
     )
     con = _spatial_connection()
     try:
-        wkt, area, raw_area = con.execute(
-            f"""
+        wkt, area, raw_area = fetch_one(
+            con.execute(
+                f"""
             SELECT ST_AsText(ST_ReducePrecision(ST_GeomFromWKB(geometry), 0.000001)),
                    ST_Area(ST_GeomFromWKB(geometry)),
                    ST_Area(ST_GeomFromText('{_RING_CASES["west_of_180"]}'))
             FROM ({sql})
             """
-        ).fetchone()
+            )
+        )
     finally:
         con.close()
     assert area == pytest.approx(raw_area), "the cut lost part of the cell"
@@ -348,7 +351,7 @@ def test_result_bbox_reads_an_arrow_table():
     con = _spatial_connection()
     try:
         result = (
-            con.execute(
+            con.sql(
                 """
             SELECT ST_AsWKB(ST_GeomFromText(w)) AS geometry FROM (VALUES
               ('POLYGON ((179 -17, 180 -17, 180 -16, 179 -16, 179 -17))'),
@@ -392,8 +395,9 @@ def _cell_report(parquet_file):
     try:
         geom = geometry_to_geom_expr(con, relation, "geometry")
         cells = f"SELECT {geom} AS g FROM {relation} WHERE geometry IS NOT NULL"
-        return con.execute(
-            f"""
+        return fetch_one(
+            con.execute(
+                f"""
             SELECT count(*),
                    count(*) FILTER (WHERE NOT ST_IsValid(g)),
                    count(*) FILTER (WHERE ST_XMin(g) < -180.0 OR ST_XMax(g) > 180.0),
@@ -402,7 +406,8 @@ def _cell_report(parquet_file):
                     FROM (SELECT UNNEST(ST_Dump(g)).geom AS p FROM ({cells})))
             FROM ({cells})
             """
-        ).fetchone()
+            )
+        )
     finally:
         con.close()
 
@@ -525,12 +530,14 @@ def test_out_geometry_both_keeps_one_frame(antimeridian_parquet, tmp_path):
     try:
         geom = geometry_to_geom_expr(con, relation, "geometry")
         centroid = geometry_to_geom_expr(con, relation, "centroid")
-        outside = con.execute(
-            f"""
+        outside = fetch_one(
+            con.execute(
+                f"""
             SELECT count(*) FROM {relation}
             WHERE geometry IS NOT NULL AND NOT ST_Intersects({geom}, {centroid})
             """
-        ).fetchone()[0]
+            )
+        )[0]
     finally:
         con.close()
     assert outside == 0, f"{outside} centroids fall outside their own cell polygon"

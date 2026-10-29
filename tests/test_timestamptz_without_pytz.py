@@ -15,7 +15,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import inspect_utils
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 from geoparquet_io.core.inspect import inspect_stats
 from geoparquet_io.core.inspect_utils import (
     _create_stats_table,
@@ -270,9 +270,9 @@ def test_aggregate_breakdown_values_timestamptz_without_pytz(temporal_file):
         assert set(top) == {TZ_MIN, TZ_MAX}
         assert has_other is True  # the NULL row is the third value
         # The kept values must still select their own rows when spelled as literals.
-        (matched,) = con.execute(
-            f"SELECT COUNT(*) FROM ({source}) WHERE ts_tz = {sql_literal(top[0])}"
-        ).fetchone()
+        (matched,) = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM ({source}) WHERE ts_tz = {sql_literal(top[0])}")
+        )
         assert matched == 1
     finally:
         con.close()
@@ -437,9 +437,11 @@ def test_breakdown_out_of_range_timestamptz_counts_its_rows_in_any_zone(edge_fil
         source = f"SELECT * FROM {sql_path(edge_file)}"
         top, _ = resolve_breakdown_values(con, source, column, limit=2)
         (out_of_range,) = [value for value in top if isinstance(value, str)]
-        (matched,) = con.execute(
-            f"SELECT COUNT(*) FROM ({source}) WHERE {column} = {sql_literal(out_of_range)}"
-        ).fetchone()
+        (matched,) = fetch_one(
+            con.execute(
+                f"SELECT COUNT(*) FROM ({source}) WHERE {column} = {sql_literal(out_of_range)}"
+            )
+        )
         assert matched == 1
     finally:
         con.close()

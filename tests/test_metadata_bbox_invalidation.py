@@ -28,6 +28,7 @@ import struct
 import duckdb
 import pytest
 
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.extract import extract
 from geoparquet_io.core.geo_metadata import strip_derived_stats
@@ -347,7 +348,7 @@ def _parquet_columns(path):
 def _row_count(path):
     con = duckdb.connect()
     try:
-        return con.execute(f"SELECT COUNT(*) FROM read_parquet('{path}')").fetchone()[0]
+        return fetch_one(con.execute(f"SELECT COUNT(*) FROM read_parquet('{path}')"))[0]
     finally:
         con.close()
 
@@ -357,9 +358,11 @@ def _read_x_range(path):
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
     try:
-        row = con.execute(
-            f"SELECT MIN(ST_X(geometry)), MAX(ST_X(geometry)) FROM read_parquet('{path}')"
-        ).fetchone()
+        row = fetch_one(
+            con.execute(
+                f"SELECT MIN(ST_X(geometry)), MAX(ST_X(geometry)) FROM read_parquet('{path}')"
+            )
+        )
     finally:
         con.close()
     return row[0], row[1]

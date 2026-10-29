@@ -39,7 +39,7 @@ def _write_wkb_with_orientation(path, wkts, orientation="counterclockwise"):
     """
     con = get_duckdb_connection(load_spatial=True)
     values = ", ".join(f"(ST_AsWKB(ST_GeomFromText('{w}')))" for w in wkts)
-    table = con.execute(f"SELECT * FROM (VALUES {values}) t(geometry)").arrow().read_all()
+    table = con.sql(f"SELECT * FROM (VALUES {values}) t(geometry)").arrow().read_all()
     con.close()
     geo = {
         "version": "1.1.0",

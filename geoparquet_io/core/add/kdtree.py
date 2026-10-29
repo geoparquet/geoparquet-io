@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
+    fetch_one,
     get_duckdb_connection,
     planar_view,
     quote_identifier,
@@ -186,9 +187,11 @@ def _centroid_sql(con, input_path, geom_col) -> str:
     does not bind (#1222). ``input_path`` is RAW, escaped here by ``sql_path``.
     """
     quoted = quote_identifier(geom_col)
-    (column_type,) = con.execute(
-        f"SELECT column_type FROM (DESCRIBE SELECT {quoted} FROM {sql_path(input_path)})"
-    ).fetchone()
+    (column_type,) = fetch_one(
+        con.execute(
+            f"SELECT column_type FROM (DESCRIBE SELECT {quoted} FROM {sql_path(input_path)})"
+        )
+    )
     if column_type.upper().startswith("GEOMETRY"):
         return f"ST_Centroid({quoted})"
     return f"ST_Centroid(ST_GeomFromWKB({quoted}))"
@@ -426,7 +429,7 @@ def add_kdtree_table(
                 temp_path, geom_col, kdtree_column_name, iterations, sample_size, con, verbose=False
             )
 
-            result = con.execute(query).arrow().read_all()
+            result = con.sql(query).arrow().read_all()
 
             # Preserve metadata
             if table.schema.metadata:
@@ -536,7 +539,7 @@ def add_kdtree_column(
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
 
-    total_count = con.execute(f"SELECT COUNT(*) FROM {sql_path(input_path)}").fetchone()[0]
+    total_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM {sql_path(input_path)}"))[0]
 
     # Auto-compute iterations if requested
     if iterations is None:
@@ -744,9 +747,9 @@ def _add_kdtree_streaming(
                 # Auto mode: size the tree from the row count, as the file path
                 # does. The byte size is only used for the report here -- a
                 # streaming input may be a URL with no size to stat.
-                total_count = con.execute(
-                    f"SELECT COUNT(*) FROM {sql_path(working_path)}"
-                ).fetchone()[0]
+                total_count = fetch_one(
+                    con.execute(f"SELECT COUNT(*) FROM {sql_path(working_path)}")
+                )[0]
                 iterations = resolve_auto_iterations(
                     total_count,
                     auto_target_rows,
