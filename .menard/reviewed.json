@@ -71,23 +71,9 @@
       "reviewed_by": "user"
     },
     {
-      "code_file": "geoparquet_io/core/hilbert_order.py",
-      "doc_target": "docs/guide/sort.md",
-      "reviewed_at": "2026-04-08T12:41:03.061078+00:00",
-      "code_commit_at_review": "7867f6b",
-      "reviewed_by": "user"
-    },
-    {
       "code_file": "geoparquet_io/api/ops.py",
       "doc_target": "docs/api/python-api.md#Standalone Functions",
       "reviewed_at": "2026-04-09T17:04:29.013106+00:00",
-      "code_commit_at_review": "b947445",
-      "reviewed_by": "Claude"
-    },
-    {
-      "code_file": "geoparquet_io/api/table.py",
-      "doc_target": "docs/api/python-api.md#Table Class",
-      "reviewed_at": "2026-04-09T17:04:29.112612+00:00",
       "code_commit_at_review": "b947445",
       "reviewed_by": "Claude"
     },
@@ -113,38 +99,10 @@
       "reviewed_by": "Claude"
     },
     {
-      "code_file": "geoparquet_io/core/benchmark.py",
-      "doc_target": "docs/cli/benchmark.md",
-      "reviewed_at": "2026-04-09T17:04:35.317566+00:00",
-      "code_commit_at_review": "c731280",
-      "reviewed_by": "Claude"
-    },
-    {
-      "code_file": "geoparquet_io/core/convert.py",
-      "doc_target": "docs/guide/convert.md",
-      "reviewed_at": "2026-04-09T17:04:35.421147+00:00",
-      "code_commit_at_review": "b947445",
-      "reviewed_by": "Claude"
-    },
-    {
-      "code_file": "geoparquet_io/core/extract.py",
-      "doc_target": "docs/guide/extract.md",
-      "reviewed_at": "2026-04-09T17:04:35.520997+00:00",
-      "code_commit_at_review": "b947445",
-      "reviewed_by": "Claude"
-    },
-    {
       "code_file": "geoparquet_io/core/inspect.py",
       "doc_target": "docs/guide/inspect.md",
       "reviewed_at": "2026-04-09T17:04:35.619122+00:00",
       "code_commit_at_review": "b947445",
-      "reviewed_by": "Claude"
-    },
-    {
-      "code_file": "geoparquet_io/core/validate.py",
-      "doc_target": "docs/guide/check.md",
-      "reviewed_at": "2026-04-09T17:04:35.724313+00:00",
-      "code_commit_at_review": "bd892e0",
       "reviewed_by": "Claude"
     },
     {
@@ -209,6 +167,48 @@
       "reviewed_at": "2026-09-26T15:14:20.377200+00:00",
       "code_commit_at_review": "86621e4",
       "reviewed_by": "claude"
+    },
+    {
+      "code_file": "geoparquet_io/api/table.py",
+      "doc_target": "docs/api/python-api.md#Table Class",
+      "reviewed_at": "2026-10-29T23:46:27.839388+00:00",
+      "code_commit_at_review": "f326bfc",
+      "reviewed_by": "claude-code (DuckDB 2.0 call-site migration, no doc-visible change)"
+    },
+    {
+      "code_file": "geoparquet_io/core/benchmark.py",
+      "doc_target": "docs/cli/benchmark.md",
+      "reviewed_at": "2026-10-29T23:46:27.946962+00:00",
+      "code_commit_at_review": "f326bfc",
+      "reviewed_by": "claude-code (DuckDB 2.0 call-site migration, no doc-visible change)"
+    },
+    {
+      "code_file": "geoparquet_io/core/convert.py",
+      "doc_target": "docs/guide/convert.md",
+      "reviewed_at": "2026-10-29T23:46:28.054558+00:00",
+      "code_commit_at_review": "f326bfc",
+      "reviewed_by": "claude-code (DuckDB 2.0 call-site migration, no doc-visible change)"
+    },
+    {
+      "code_file": "geoparquet_io/core/extract.py",
+      "doc_target": "docs/guide/extract.md",
+      "reviewed_at": "2026-10-29T23:46:28.162774+00:00",
+      "code_commit_at_review": "f326bfc",
+      "reviewed_by": "claude-code (DuckDB 2.0 call-site migration, no doc-visible change)"
+    },
+    {
+      "code_file": "geoparquet_io/core/hilbert_order.py",
+      "doc_target": "docs/guide/sort.md",
+      "reviewed_at": "2026-10-29T23:46:28.271021+00:00",
+      "code_commit_at_review": "f326bfc",
+      "reviewed_by": "claude-code (DuckDB 2.0 call-site migration, no doc-visible change)"
+    },
+    {
+      "code_file": "geoparquet_io/core/validate.py",
+      "doc_target": "docs/guide/check.md",
+      "reviewed_at": "2026-10-29T23:46:28.378693+00:00",
+      "code_commit_at_review": "f326bfc",
+      "reviewed_by": "claude-code (DuckDB 2.0 call-site migration, no doc-visible change)"
     }
   ]
 }
