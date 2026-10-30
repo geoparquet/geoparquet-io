@@ -273,7 +273,7 @@ def _output_schema(
     level_field = pa.field(OVERVIEW_LEVEL_COLUMN, pa.int32(), nullable=False)
     empty = _empty(data_schema.append(level_field))
 
-    geo_meta = sanitized_carried_geo(base_meta)
+    geo_meta = sanitized_carried_geo(base_meta, source=str(base_path))
     geometry_column = carried_geometry_column(geo_meta, data_schema.names)
     if geometry_column is not None:
         col_meta = geo_meta.get("columns", {}).get(geometry_column, {})

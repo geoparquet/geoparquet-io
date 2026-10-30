@@ -21,8 +21,10 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.geo_metadata import (
+    read_raw_geo,
     sanitize_geo_metadata,
     sanitized_carried_geo,
+    sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.geoarrow_compat import srid_crs_as_text
 from geoparquet_io.core.geometry_detection import (
@@ -538,12 +540,9 @@ def geoparquet_crs_is_null(parquet_file) -> bool:
     ``parquet_file`` must be a *raw* path/URL — ``get_geo_metadata`` SQL-escapes
     it internally, so passing an already-escaped URL double-escapes it.
     """
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
-
-    # `get_geo_metadata` is the read-only reader and hands the block back as the
-    # file really holds it; the reproject paths that ask this question then act
-    # on the answer, so the malformed parts get dropped here (#887).
-    geo_meta = sanitize_geo_metadata(get_geo_metadata(str(parquet_file)), source=str(parquet_file))
+    # The reproject paths that ask this question act on the answer, so the
+    # block is read through the sanitized carried decoder (#887).
+    geo_meta = sanitized_carried_geo_of_file(parquet_file)
     if not geo_meta:
         return False
     primary_col = _primary_column_of_file(geo_meta, parquet_file)
@@ -887,14 +886,12 @@ def _crs_from_geo_block(
     schema. ``stated`` is True when the block's entry has a ``crs`` key at all,
     so the caller knows whether a ``srid:0`` type is the only word on it.
 
-    A write-path reader, so a malformed carried block goes through
-    :func:`sanitize_geo_metadata` rather than being indexed as-is (#887).
+    A write-path reader, so a malformed carried block goes through the
+    sanitized carried decoder rather than being indexed as-is (#887).
     ``get_geo_metadata`` itself stays unsanitized -- ``gpio check`` reads through
     it and has to see the file as it really is.
     """
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
-
-    geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file), source=str(parquet_file))
+    geo_meta = sanitized_carried_geo_of_file(parquet_file)
     if not geo_meta:
         return None, None, False
     columns = geo_meta.get("columns", {})
@@ -1042,10 +1039,12 @@ def unknown_crs_reason(parquet_file, geometry_column: str | None = None) -> str 
     (#1277 review). Returns one of the ``UNKNOWN_BY_*`` phrases.
     ``parquet_file`` is a RAW path (#718).
     """
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+    from geoparquet_io.core.duckdb_metadata import get_kv_metadata
 
-    raw_geo = get_geo_metadata(parquet_file)
-    geo_meta = sanitize_geo_metadata(raw_geo, source=str(parquet_file)) or {}
+    # The raw entry is asked too: an empty crs reads as null once sanitized.
+    kv = get_kv_metadata(str(parquet_file))
+    raw_geo = read_raw_geo(kv).value
+    geo_meta = sanitized_carried_geo(kv, source=str(parquet_file))
     columns = geo_meta.get("columns") or {}
     col = geometry_column if geometry_column in columns else None
     if col is None and columns:

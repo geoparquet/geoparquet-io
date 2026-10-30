@@ -32,7 +32,6 @@ from geoparquet_io.core.geo_metadata import (
     carried_geometry_column,
     carried_version,
     prune_geo_metadata_to_columns,
-    read_raw_geo,
     sanitized_carried_geo,
 )
 from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
@@ -224,12 +223,7 @@ def find_geometry_column_from_metadata(metadata: dict | None) -> str | None:
         Geometry column name or None if the block does not name a usable one
     """
 
-    if not metadata or b"geo" not in metadata:
-        return None
-    geo_meta = read_raw_geo(metadata).value
-    if not isinstance(geo_meta, dict):
-        return None
-    return carried_column_name(geo_meta.get("primary_column"))
+    return carried_column_name(sanitized_carried_geo(metadata).get("primary_column"))
 
 
 def find_geometry_column_from_table(table: pa.Table) -> str | None:
@@ -541,31 +535,25 @@ def extract_crs_from_table(
 
     # Fall back to geo metadata
     if table.schema.metadata and b"geo" in table.schema.metadata:
-        try:
-            from geoparquet_io.core.crs_utils import crs_is_explicitly_null, warn_null_crs_once
+        from geoparquet_io.core.crs_utils import crs_is_explicitly_null, warn_null_crs_once
 
-            geo_bytes = table.schema.metadata[b"geo"]
-            # `Table.write()` resolves the CRS through here before it builds any
-            # metadata, so this reader sees a malformed carried block first and
-            # has to survive it too (#771).
-            geo_meta = sanitized_carried_geo(table.schema.metadata)
-            if isinstance(geo_meta, dict):
-                columns = geo_meta.get("columns", {})
-                # The literal `"geometry"` default named a column that does not
-                # exist on a file whose column is `geom`, and reported its CRS
-                # as absent (#887 review). Ask the table's schema instead — the
-                # shared recovery #960 shared out (#968).
-                geom_col_name = geometry_column or carried_geometry_column(
-                    geo_meta, table.column_names
+        geo_bytes = table.schema.metadata[b"geo"]
+        # `Table.write()` resolves the CRS through here before it builds any
+        # metadata, so this reader sees a malformed carried block first and
+        # has to survive it too (#771).
+        geo_meta = sanitized_carried_geo(table.schema.metadata)
+        columns = geo_meta.get("columns", {})
+        # The literal `"geometry"` default named a column that does not
+        # exist on a file whose column is `geom`, and reported its CRS
+        # as absent (#887 review). Ask the table's schema instead — the
+        # shared recovery #960 shared out (#968).
+        geom_col_name = geometry_column or carried_geometry_column(geo_meta, table.column_names)
+        if geom_col_name in columns:
+            if crs_is_explicitly_null(columns[geom_col_name]):
+                warn_null_crs_once(
+                    f"table:{hashlib.sha1(geo_bytes, usedforsecurity=False).hexdigest()}"
                 )
-                if geom_col_name in columns:
-                    if crs_is_explicitly_null(columns[geom_col_name]):
-                        warn_null_crs_once(
-                            f"table:{hashlib.sha1(geo_bytes, usedforsecurity=False).hexdigest()}"
-                        )
-                    return columns[geom_col_name].get("crs")
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
+            return columns[geom_col_name].get("crs")
 
     # Last resort: a GeoArrow field whose extension type nothing registered, so
     # the CRS is still in `ARROW:extension:metadata`. Reached only when the file
@@ -590,33 +578,25 @@ def extract_version_from_metadata(metadata: dict | None) -> str | None:
         Version string suitable for --geoparquet-version (e.g., "1.1", "2.0")
         or None if no version detected
     """
-    if not metadata or b"geo" not in metadata:
+    # A truthiness guard let `2`, `2.0`, `["2.0"]` and `true` through to
+    # `.split`, and the old `except` named only the two decoder errors, so
+    # the `AttributeError` passed straight out of `gpio sort hilbert` as a
+    # traceback (#979).
+    version = carried_version(sanitized_carried_geo(metadata).get("version"))
+    if not version:
         return None
-
-    try:
-        geo_meta = sanitized_carried_geo(metadata)
-        if isinstance(geo_meta, dict):
-            # A truthiness guard let `2`, `2.0`, `["2.0"]` and `true` through to
-            # `.split`, and the `except` below names the two decoder errors
-            # specifically, so the `AttributeError` passed straight through it
-            # and out of `gpio sort hilbert` as a traceback (#979).
-            version = carried_version(geo_meta.get("version"))
-            if version:
-                parts = version.split(".")
-                if len(parts) >= 2:
-                    major = parts[0]
-                    # Upgrade all 1.x versions to 1.1 (backwards compatible)
-                    if major == "1":
-                        return "1.1"
-                    # Flatten any 2.x to "2.0" — the highest 2.x this writer
-                    # knows — so this path agrees with its file-based twin,
-                    # resolve_geoparquet_version_from_file (common.py).
-                    if major == "2":
-                        return "2.0"
-                    return f"{major}.{parts[1]}"
+    parts = version.split(".")
+    if len(parts) < 2:
         return None
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
+    major = parts[0]
+    # Upgrade all 1.x versions to 1.1 (backwards compatible)
+    if major == "1":
+        return "1.1"
+    # Flatten any 2.x to "2.0" — the highest 2.x this writer knows — so this
+    # path agrees with its file-based twin, resolve_geoparquet_version_from_file.
+    if major == "2":
+        return "2.0"
+    return f"{major}.{parts[1]}"
 
 
 def has_geoarrow_extension_in_table(table: pa.Table) -> bool:

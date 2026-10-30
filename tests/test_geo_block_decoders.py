@@ -11,17 +11,16 @@
   and reads as absent (``{}``); a non-object top level and non-object
   ``columns`` entries are sanitized to the documented shapes.
 
-The table below pins both across key spelling x value encoding x payload, and
-the guard at the bottom proves nothing outside the owner calls ``json.loads`` on
-a ``geo`` value.
+The table below pins both across key spelling x value encoding x payload. That
+nothing outside the owner calls ``json.loads`` on a ``geo`` value is the
+``G1.geo_parse`` owner guard's job (pinned at zero); the last test here checks
+that arm sees each spelling the old sites used.
 """
 
 from __future__ import annotations
 
-import ast
 import json
 import logging
-from pathlib import Path
 
 import pytest
 
@@ -159,96 +158,16 @@ def test_undecodable_warning_names_its_source(caplog):
 
 
 # ---------------------------------------------------------------------------
-# Guard: no raw `geo` decode outside the owner
+# The G1.geo_parse arm (tests/test_owner_guards.py) sees every spelling
 # ---------------------------------------------------------------------------
 
-PACKAGE = Path(__file__).resolve().parents[1] / "geoparquet_io"
-OWNER = PACKAGE / "core" / "geo_metadata.py"
 
+def test_the_owner_guard_sees_each_spelling_of_a_raw_decode(tmp_path):
+    """The tree-wide zero is pinned by ``G1.geo_parse`` (EXPECTED_COUNTS = 0); this
+    plants the spellings the #1367 sites used and checks that arm catches each."""
+    from tests.test_owner_guards import _plant, arm_hits
 
-def _is_json_loads(node: ast.Call) -> bool:
-    func = node.func
-    if isinstance(func, ast.Attribute) and func.attr == "loads":
-        return isinstance(func.value, ast.Name) and func.value.id == "json"
-    return isinstance(func, ast.Name) and func.id == "loads"
-
-
-def _mentions_geo(node: ast.AST) -> bool:
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Constant) and sub.value in ("geo", b"geo"):
-            return True
-        # The key named inside SQL: `... WHERE key = 'geo'`.
-        if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and "'geo'" in sub.value:
-            return True
-        if isinstance(sub, ast.Name) and "geo" in sub.id.lower().split("_"):
-            return True
-        if isinstance(sub, ast.Attribute) and "geo" in sub.attr.lower().split("_"):
-            return True
-    return False
-
-
-def _calls_by_scope(tree: ast.Module):
-    """Each call paired with its innermost enclosing function (or the module)."""
-    scopes: dict[ast.AST, list[ast.Call]] = {}
-
-    def visit(node: ast.AST, scope: ast.AST) -> None:
-        for child in ast.iter_child_nodes(node):
-            inner = child if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else scope
-            if isinstance(child, ast.Call):
-                scopes.setdefault(scope, []).append(child)
-            visit(child, inner)
-
-    visit(tree, tree)
-    return scopes.items()
-
-
-def _bindings(func: ast.AST) -> dict[str, list[ast.AST]]:
-    out: dict[str, list[ast.AST]] = {}
-    for sub in ast.walk(func):
-        if isinstance(sub, ast.Assign):
-            for target in sub.targets:
-                if isinstance(target, ast.Name):
-                    out.setdefault(target.id, []).append(sub.value)
-    return out
-
-
-def _geo_bound(node: ast.AST, bindings: dict, depth: int = 2) -> bool:
-    if _mentions_geo(node):
-        return True
-    if depth == 0:
-        return False
-    return any(
-        isinstance(sub, ast.Name)
-        and any(_geo_bound(v, bindings, depth - 1) for v in bindings.get(sub.id, []))
-        for sub in ast.walk(node)
-    )
-
-
-def raw_geo_decodes(root: Path = PACKAGE) -> list[str]:
-    """``json.loads`` whose argument mentions ``geo`` (by key, name, attribute or
-    a variable assigned from one, up to two assignments back), outside the owner."""
-    hits = []
-    for path in sorted(root.rglob("*.py")):
-        if path == OWNER:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for scope, calls in _calls_by_scope(tree):
-            bindings = _bindings(scope)
-            for node in calls:
-                if _is_json_loads(node) and any(_geo_bound(a, bindings) for a in node.args):
-                    hits.append(f"{path.relative_to(root.parent)}:{node.lineno}")
-    return sorted(set(hits))
-
-
-def test_no_raw_geo_decode_outside_the_owner():
-    assert raw_geo_decodes() == []
-
-
-def test_the_guard_sees_a_planted_raw_decode(tmp_path):
-    """The guard is not vacuous: each spelling of the defect it pins is caught."""
-    pkg = tmp_path / "geoparquet_io"
-    pkg.mkdir()
-    (pkg / "planted.py").write_text(
+    source = (
         "import json\n"
         "def a(md):\n    return json.loads(md[b'geo'])\n"
         "def b(md):\n    raw = md.get('geo')\n    text = raw.decode()\n    return json.loads(text)\n"
@@ -257,9 +176,5 @@ def test_the_guard_sees_a_planted_raw_decode(tmp_path):
         "def e(con):\n    row = con.execute(\"SELECT value WHERE key = 'geo'\").fetchone()\n"
         "    text = row[0].decode()\n    return json.loads(text)\n"
     )
-    assert set(raw_geo_decodes(pkg)) == {
-        "geoparquet_io/planted.py:3",
-        "geoparquet_io/planted.py:7",
-        "geoparquet_io/planted.py:9",
-        "geoparquet_io/planted.py:15",
-    }
+    repo = _plant(tmp_path, "geo_parse", source)
+    assert sorted(hit.name for hit in arm_hits(repo, "geo_parse")) == ["a", "b", "c", "e"]

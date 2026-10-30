@@ -1131,8 +1131,8 @@ class Table:
         """
         from geoparquet_io.core.geo_metadata import carried_version, read_raw_geo
 
-        geo_meta = read_raw_geo(self._table.schema.metadata).value
-        if not isinstance(geo_meta, dict):
+        geo_meta = read_raw_geo(self._table.schema.metadata).block
+        if geo_meta is None:
             return None
         return carried_version(geo_meta.get("version"))
 
@@ -2983,7 +2983,6 @@ class Table:
             >>> print(meta['crs'])
             {'id': {'authority': 'EPSG', 'code': 4326}}
         """
-        import json
 
         result = {
             "rows": self.num_rows,
@@ -3006,37 +3005,33 @@ class Table:
         from geoparquet_io.core.geo_metadata import read_raw_geo
 
         schema_metadata = self._table.schema.metadata
-        if schema_metadata and b"geo" in schema_metadata:
-            try:
-                geo_meta = read_raw_geo(schema_metadata).value
-                # A read-only reader, the Python API's `gpio inspect meta`:
-                # `geo_metadata` is documented as the file's full `geo` block,
-                # so it is handed back exactly as the file holds it and is NOT
-                # sanitized -- the same line #883 drew around the raw reader
-                # (`read_raw_geo`) and `check`. Only the derived keys below
-                # need guarding: they indexed the raw block and crashed on a
-                # `columns` that is not an object, or an entry that is not one
-                # (#947).
-                result["geo_metadata"] = geo_meta
+        raw_geo = read_raw_geo(schema_metadata)
+        if raw_geo.present:
+            # A read-only reader, the Python API's `gpio inspect meta`:
+            # `geo_metadata` is documented as the file's full `geo` block, so it
+            # is handed back exactly as the file holds it and is NOT sanitized --
+            # the same line #883 drew around the raw reader (`read_raw_geo`) and
+            # `check`. Undecodable reads as None. Only the derived keys below
+            # need guarding: they indexed the raw block and crashed on a
+            # `columns` that is not an object, or an entry that is not one (#947).
+            result["geo_metadata"] = raw_geo.value
 
-                # Extract geometry_types from geo metadata
-                columns_meta = geo_meta.get("columns") if isinstance(geo_meta, dict) else None
-                col_meta = (
-                    columns_meta.get(self._geometry_column)
-                    if isinstance(columns_meta, dict) and self._geometry_column
-                    else None
-                )
-                if isinstance(col_meta, dict):
-                    result["geometry_types"] = col_meta.get("geometry_types")
-                    result["edges"] = col_meta.get("edges")
-                    result["orientation"] = col_meta.get("orientation")
+            # Extract geometry_types from geo metadata
+            columns_meta = raw_geo.block.get("columns") if raw_geo.block else None
+            col_meta = (
+                columns_meta.get(self._geometry_column)
+                if isinstance(columns_meta, dict) and self._geometry_column
+                else None
+            )
+            if isinstance(col_meta, dict):
+                result["geometry_types"] = col_meta.get("geometry_types")
+                result["edges"] = col_meta.get("edges")
+                result["orientation"] = col_meta.get("orientation")
 
-                    # Check for covering/bbox info
-                    covering = col_meta.get("covering")
-                    if covering:
-                        result["covering"] = covering
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                result["geo_metadata"] = None
+                # Check for covering/bbox info
+                covering = col_meta.get("covering")
+                if covering:
+                    result["covering"] = covering
 
         # Optionally include raw Parquet schema metadata
         if include_parquet_metadata and schema_metadata:

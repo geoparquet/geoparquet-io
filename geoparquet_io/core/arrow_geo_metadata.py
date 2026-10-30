@@ -77,7 +77,6 @@ def _detect_version_from_table(table, verbose: bool = False) -> str | None:
     Returns:
         Version string (e.g., "1.1", "2.0", "parquet-geo-only") or None if not detected
     """
-    import json
 
     # Check for native geoarrow extension types (indicates v2.0 or parquet-geo-only).
     # `is_geoarrow_extension_field` reads the field, not just the type, so a
@@ -104,29 +103,23 @@ def _detect_version_from_table(table, verbose: bool = False) -> str | None:
             return "parquet-geo-only"
         return None
 
-    try:
-        geo_meta = sanitized_carried_geo(metadata)
-        if isinstance(geo_meta, dict):
-            # Guarded, not truthiness-checked: a non-string version crashed
-            # `.split` here on the write path too -- `write_geoparquet_table`
-            # resolves auto-mode through this function (#979).
-            version = carried_version(geo_meta.get("version"))
-            if version:
-                parts = version.split(".")
-                if len(parts) >= 2:
-                    major = parts[0]
-                    if major == "2":
-                        if verbose:
-                            debug("Detected GeoParquet version 2.0 from table metadata")
-                        return "2.0"
-                    # Upgrade all 1.x versions to 1.1 (backwards compatible)
-                    if major == "1":
-                        if verbose:
-                            debug("Detected GeoParquet version 1.x from table metadata")
-                        return "1.1"
+    # Guarded, not truthiness-checked: a non-string version crashed `.split`
+    # here on the write path too -- `write_geoparquet_table` resolves auto-mode
+    # through this function (#979).
+    version = carried_version(sanitized_carried_geo(metadata).get("version"))
+    parts = version.split(".") if version else []
+    if len(parts) < 2:
         return None
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
+    if parts[0] == "2":
+        if verbose:
+            debug("Detected GeoParquet version 2.0 from table metadata")
+        return "2.0"
+    # Upgrade all 1.x versions to 1.1 (backwards compatible)
+    if parts[0] == "1":
+        if verbose:
+            debug("Detected GeoParquet version 1.x from table metadata")
+        return "1.1"
+    return None
 
 
 def _table_bbox_struct_ok(table, column_name: str) -> bool:

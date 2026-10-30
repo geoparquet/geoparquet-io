@@ -513,9 +513,6 @@ def get_geo_metadata(parquet_file: str, con=None) -> dict | None:
     except duckdb.IOException as e:
         # File not found, permission denied, or other I/O error
         raise GeoParquetError(f"Cannot read file: {parquet_file}\n{str(e)}") from e
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        # Same answer as the PyArrow fast path: unparsable bytes = no metadata.
-        return None
     finally:
         if should_close:
             connection.close()

@@ -162,25 +162,18 @@ def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
 
 
 def _block_edges(original_metadata: dict | None) -> dict[str, object]:
-    """Map geometry column -> the ``edges`` value its ``geo`` block states, as written.
+    """Map geometry column -> the ``edges`` value its carried ``geo`` block states.
 
     A column whose block has no ``edges`` key is left out: it says nothing.
-    An unreadable block reads as empty.
+    An unreadable block reads as empty (the sanitized carried decoder warns).
     """
-    if not original_metadata:
-        return {}
-    geo_data = original_metadata.get("geo") or original_metadata.get(b"geo")
-    if not geo_data:
-        return {}
-    try:
-        geo_meta = read_raw_geo({"geo": geo_data}).value
-        return {
-            name: col_meta["edges"]
-            for name, col_meta in (geo_meta.get("columns") or {}).items()
-            if isinstance(col_meta, dict) and "edges" in col_meta
-        }
-    except Exception:
-        return {}
+    return {
+        name: col_meta["edges"]
+        for name, col_meta in (
+            sanitized_carried_geo(original_metadata).get("columns") or {}
+        ).items()
+        if "edges" in col_meta
+    }
 
 
 def _collect_nonplanar_edges_from_metadata(original_metadata: dict | None) -> dict[str, str]:

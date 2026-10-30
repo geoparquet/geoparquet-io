@@ -60,6 +60,7 @@ from geoparquet_io.core.geo_metadata import (
     GEOGRAPHY_EDGE_ALGORITHMS,
     covering_lacks_bbox,
     is_covering_path,
+    read_raw_geo,
 )
 from geoparquet_io.core.geometry_detection import (
     GeometryPresence,
@@ -4183,7 +4184,6 @@ def validate_geoparquet(
     """
     from geoparquet_io.core.duckdb_metadata import (
         detect_geometry_columns,
-        get_geo_metadata,
         get_kv_metadata,
         get_schema_info,
     )
@@ -4242,8 +4242,11 @@ def validate_geoparquet(
     try:
         kv_metadata = get_kv_metadata(parquet_file)
         # The dict above collapses a repeated key, so count the raw entries.
-        geo_entry_count = _geo_entry_count(parquet_file) if b"geo" in kv_metadata else None
-        geo_meta = get_geo_metadata(parquet_file)
+        # The raw diagnostic decoder: what the key literally holds, and why
+        # it could not be decoded when it could not.
+        raw_geo = read_raw_geo(kv_metadata)
+        geo_entry_count = _geo_entry_count(parquet_file) if raw_geo.present else None
+        geo_meta = raw_geo.value
         schema_info = get_schema_info(parquet_file)
         geo_columns = detect_geometry_columns(parquet_file)
     except (GeoParquetError, UnicodeDecodeError, ValueError) as e:
@@ -4272,12 +4275,13 @@ def validate_geoparquet(
     # ANY mode; without this, auto-detect classifies the file as plain
     # parquet-geo-only and a corrupt file passes validation — and valid-JSON
     # non-object values (list, string, number) would crash downstream checks.
-    if not isinstance(geo_meta, dict) and kv_metadata and b"geo" in kv_metadata:
+    if raw_geo.present and raw_geo.block is None:
         result.checks.append(
             ValidationCheck(
                 name="geo_metadata_parse",
                 status=CheckStatus.FAILED,
                 message="'geo' metadata key exists but is not a valid JSON object",
+                details=raw_geo.error,
                 category="core_metadata",
             )
         )

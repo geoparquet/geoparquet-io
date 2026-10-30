@@ -75,20 +75,6 @@ class ReprojectResult:
     feature_count: int
 
 
-def _carried_geo(metadata) -> dict:
-    """The carried ``geo`` block on ``metadata``, sanitized, or ``{}``.
-
-    ``reproject`` is a write path: the column name it reads is quoted into SQL
-    and the CRS it reads decides the transform, so the block it indexes goes
-    through the same shape check every other write-path reader uses (#887).
-    Without it a ``primary_column: 123`` reached ``quote_identifier`` as a bare
-    ``TypeError`` and a string-, list- or null-shaped block crashed the CRS
-    lookups with a bare ``AttributeError``.
-    """
-
-    return sanitized_carried_geo(metadata)
-
-
 def _detect_geometry_column_from_table(table: pa.Table) -> str:
     """Detect geometry column from table metadata.
 
@@ -104,7 +90,7 @@ def _detect_geometry_column_from_table(table: pa.Table) -> str:
     # able to repair it from a single column; `carried_geometry_column` then
     # asks the schema, because falling back to the literal "geometry" would
     # name a column the table may not have (#887 review).
-    geo_meta = _carried_geo(table.schema.metadata)
+    geo_meta = sanitized_carried_geo(table.schema.metadata)
     return carried_geometry_column(geo_meta, table.schema.names) or "geometry"
 
 
@@ -125,7 +111,7 @@ def _detect_crs_from_table(table: pa.Table, geom_col: str) -> str:
 
 def _table_geo_column_meta(table: pa.Table, geom_col: str) -> dict:
     """Return the geo-metadata dict for ``geom_col``, or ``{}`` if unavailable."""
-    columns = _carried_geo(table.schema.metadata).get("columns", {})
+    columns = sanitized_carried_geo(table.schema.metadata).get("columns", {})
     entry = columns.get(geom_col) if isinstance(columns, dict) else None
     return entry if isinstance(entry, dict) else {}
 
@@ -195,7 +181,7 @@ def _retarget_carried_geo(metadata: dict, geom_col: str, target_crs: str, con) -
     cleaned one, and ``apply_target_crs_to_geo_meta`` -- which indexes
     ``columns`` -- is never handed a list-, string- or null-shaped block (#887).
     """
-    geo_meta = _carried_geo(metadata)
+    geo_meta = sanitized_carried_geo(metadata)
     if not geo_meta:
         debug("Could not update CRS in geo metadata, leaving as-is")
         return False
@@ -438,7 +424,7 @@ def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, 
     metadata.update(
         (k, v) for k, v in (parquet_file.metadata.metadata or {}).items() if k != b"ARROW:schema"
     )
-    geo_meta = _carried_geo(metadata)
+    geo_meta = sanitized_carried_geo(metadata, source=str(raw_path))
     for col in geo_meta.get("columns", {}).values():
         if entry_crs_is_unknown(col):
             col.pop("crs", None)

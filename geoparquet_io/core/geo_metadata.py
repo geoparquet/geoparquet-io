@@ -566,6 +566,21 @@ def sanitized_carried_geo(metadata, source: str | None = None) -> dict:
     return cleaned if isinstance(cleaned, dict) else {}
 
 
+def sanitized_carried_geo_of_file(parquet_file, con=None) -> dict:
+    """:func:`sanitized_carried_geo` of a Parquet file's footer, warning with its path.
+
+    The file-level form of the sanitized carried decoder, for the write paths
+    that start from a path: the footer's KV metadata (PyArrow locally, DuckDB
+    remotely or on ``con``) decoded and sanitized in one call, so a truncated
+    or non-UTF-8 ``geo`` value warns and reads as absent here too (approved
+    change 6 of #1367) and the warning names the file (#957). ``parquet_file``
+    is a RAW path/URL (#718).
+    """
+    from geoparquet_io.core.duckdb_metadata import get_kv_metadata
+
+    return sanitized_carried_geo(get_kv_metadata(str(parquet_file), con), source=str(parquet_file))
+
+
 @dataclass(frozen=True)
 class RawGeo:
     """What a ``geo`` key literally holds, as :func:`read_raw_geo` reports it.
@@ -596,7 +611,9 @@ def read_raw_geo(metadata) -> RawGeo:
     or str keys. Never raises: an undecodable value (bad UTF-8, bad JSON) comes
     back with ``error`` set instead of a decoder traceback.
 
-    A write path must not use this: it would carry a malformed block forward.
+    A write path must not use it on a carried *input* block -- it would carry
+    a malformed block forward. Re-reading gpio's own just-built block (the
+    footer patch, ``_rewrite_geo_metadata``) is the exception: gpio wrote it.
     """
     present, raw = _geo_key_value(metadata)
     if not present:
@@ -632,27 +649,6 @@ def _article(type_name: str) -> str:
 
 # =============================================================================
 # Metadata Parsing Functions
-# =============================================================================
-
-
-def _parse_existing_geo_metadata(original_metadata: dict | None) -> dict | None:
-    """
-    Parse existing geo metadata from original parquet metadata.
-
-    This is a write-path reader: what it returns is indexed into while building
-    the output block, so it goes through :func:`sanitize_geo_metadata` (#771).
-
-    Args:
-        original_metadata: Original parquet file metadata dict
-
-    Returns:
-        Parsed geo metadata dict, or None if not present or not usable
-    """
-    return sanitized_carried_geo(original_metadata) or None
-
-
-# =============================================================================
-# Metadata Initialization and Building
 # =============================================================================
 
 
@@ -1368,7 +1364,7 @@ def create_geo_metadata(
     Returns:
         Updated geo metadata dict
     """
-    geo_meta = _parse_existing_geo_metadata(original_metadata)
+    geo_meta = sanitized_carried_geo(original_metadata)
     geo_meta = _initialize_geo_metadata(geo_meta, geom_col, version=version)
 
     # Add encoding if not present (required by GeoParquet spec)
@@ -1505,17 +1501,21 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
     The single composer agreed for #1367 (concept 4). Its first caller is
     ``write_strategies.base.build_geo_metadata``; T3e moves the remaining
     hand-built blocks and gate compositions onto it and folds
-    :func:`create_geo_metadata` in. For now it wraps :func:`create_geo_metadata`
-    and today's gate chain, in this order:
+    :func:`create_geo_metadata` in, so each gate then runs once. For now it
+    wraps :func:`create_geo_metadata`, and the gates actually run in this order:
 
     1. covering build (the carried block, sanitized; ``bbox_column``; custom
-       coverings), with ``edges`` mapped by :func:`edges_for_version`, by
+       coverings; ``edges`` mapped by :func:`edges_for_version`), inside
        :func:`create_geo_metadata`;
-    2. :func:`strip_unsupported_covering` (no ``covering`` before 1.1);
-    3. :func:`strip_absent_covering` (no covering entry naming a column the
+    2. :func:`strip_unsupported_covering` (no ``covering`` before 1.1), inside
+       :func:`create_geo_metadata`;
+    3. :func:`strip_bboxless_covering` (no covering without a ``bbox`` member),
+       inside :func:`create_geo_metadata` unless ``defer_bboxless_gate``;
+    4. :func:`strip_absent_covering` (no covering entry naming a column the
        source does not have; skipped for a :class:`CarriedSource`);
-    4. :func:`strip_bboxless_covering` (no covering without a ``bbox`` member;
-       left to the caller with ``defer_bboxless_gate``).
+    5. :func:`strip_bboxless_covering` again, since step 4 can leave a covering
+       with no ``bbox`` member (skipped with ``defer_bboxless_gate``: the
+       caller gates after its bbox declare).
 
     ``source`` supplies the carried KV metadata and the output's column names:
     an Arrow table, a schema plus metadata, a DuckDB connection and query

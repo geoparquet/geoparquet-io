@@ -233,7 +233,7 @@ def _declare_computed_bbox(metadata, geometry_column: str, bbox_column_name: str
     if not metadata or b"geo" not in metadata:
         return metadata
     geo = sanitized_carried_geo(metadata)
-    columns = geo.get("columns") if isinstance(geo, dict) else None
+    columns = geo.get("columns")
     col_meta = columns.get(geometry_column) if isinstance(columns, dict) else None
     if not isinstance(col_meta, dict):
         return metadata
@@ -300,10 +300,7 @@ def _passthrough_version(metadata: dict | None, geoparquet_version: str | None) 
     if not metadata or b"geo" not in metadata:
         return None
 
-    geo_meta = sanitized_carried_geo(metadata)
-    if not isinstance(geo_meta, dict):
-        return None
-    version = geo_meta.get("version")
+    version = sanitized_carried_geo(metadata).get("version")
     if not isinstance(version, str):
         return None
     parts = version.split(".")

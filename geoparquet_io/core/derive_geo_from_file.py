@@ -288,8 +288,8 @@ def _with_primary_column(raw_geo: bytes, primary_column: str | None) -> dict | N
     ``primary_column``: naming a column the block has no entry for would make it
     invalid, and a block this cannot parse is not this repair's to rewrite.
     """
-    geo = read_raw_geo({b"geo": raw_geo}).value
-    if not isinstance(geo, dict) or not isinstance(geo.get("columns"), dict):
+    geo = read_raw_geo({b"geo": raw_geo}).block
+    if geo is None or not isinstance(geo.get("columns"), dict):
         return None
     if primary_column not in geo["columns"] or geo.get("primary_column") == primary_column:
         return None

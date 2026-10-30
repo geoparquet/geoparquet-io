@@ -1909,10 +1909,15 @@ def test_check_bbox_still_reads_the_version_of_a_well_formed_file(tmp_path):
 
 @pytest.mark.parametrize("bad", [123, ["geometry"], {"name": "geometry"}, None, ""])
 def test_find_geometry_column_from_metadata_never_returns_a_non_name(bad):
+    """It reads through the sanitized carried decoder (#1367), so a malformed
+    `primary_column` is dropped and, with one column declared, repaired to it
+    (`_repair_primary_column`); with two it says nothing and the schema decides."""
     from geoparquet_io.core.streaming import find_geometry_column_from_metadata
 
     reset_malformed_geo_warnings()
     block = {"version": "1.1.0", "primary_column": bad, "columns": {"geom": {"encoding": "WKB"}}}
+    assert find_geometry_column_from_metadata({b"geo": json.dumps(block).encode("utf-8")}) == "geom"
+    block["columns"]["other"] = {"encoding": "WKB"}
     assert find_geometry_column_from_metadata({b"geo": json.dumps(block).encode("utf-8")}) is None
 
 

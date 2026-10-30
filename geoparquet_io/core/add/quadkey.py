@@ -17,7 +17,7 @@ from geoparquet_io.core.crs_utils import (
     transform_geom_sql,
     warn_empty_crs_once,
 )
-from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadata
+from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     get_duckdb_connection,
@@ -29,7 +29,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
-from geoparquet_io.core.geo_metadata import sanitize_geo_metadata, sanitized_carried_geo
+from geoparquet_io.core.geo_metadata import sanitized_carried_geo, sanitized_carried_geo_of_file
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
@@ -165,7 +165,7 @@ def _validate_crs_for_quadkey(input_parquet: str, geom_col: str, verbose: bool) 
     """
 
     # Get CRS from GeoParquet metadata: sanitized, since the helper indexes it (#982)
-    geo_meta = sanitize_geo_metadata(get_geo_metadata(input_parquet), source=input_parquet)
+    geo_meta = sanitized_carried_geo_of_file(input_parquet)
     _validate_crs_from_geo_metadata(geo_meta, geom_col, verbose, source_description="file")
 
 

@@ -15,11 +15,11 @@ from geoparquet_io.core.geo_metadata import (
     _add_bbox_covering,
     _add_custom_covering,
     _initialize_geo_metadata,
-    _parse_existing_geo_metadata,
     compute_bbox_via_sql,
     compute_geometry_types_via_sql,
     create_geo_metadata,
     read_raw_geo,
+    sanitized_carried_geo,
 )
 
 # =============================================================================
@@ -110,11 +110,11 @@ class TestReadRawGeo:
 
 
 # =============================================================================
-# Tests for _parse_existing_geo_metadata()
+# Tests for sanitized_carried_geo() (the carried decoder create_geo_metadata reads with)
 # =============================================================================
 
 
-class TestParseExistingGeoMetadata:
+class TestSanitizedCarriedGeo:
     """Test parsing existing geo metadata from original metadata."""
 
     def test_parses_valid_metadata(self):
@@ -122,22 +122,22 @@ class TestParseExistingGeoMetadata:
         geo_dict = {"version": "1.0.0", "primary_column": "geom"}
         metadata = {b"geo": json.dumps(geo_dict).encode("utf-8")}
 
-        result = _parse_existing_geo_metadata(metadata)
+        result = sanitized_carried_geo(metadata)
 
         assert result is not None
         assert result["version"] == "1.0.0"
 
     def test_returns_none_for_none(self):
-        """Returns None for None input."""
-        assert _parse_existing_geo_metadata(None) is None
+        """Reads as absent for None input."""
+        assert sanitized_carried_geo(None) == {}
 
     def test_returns_none_for_missing_key(self):
         """Returns None for missing geo key."""
-        assert _parse_existing_geo_metadata({b"other": b"data"}) is None
+        assert sanitized_carried_geo({b"other": b"data"}) == {}
 
     def test_returns_none_for_invalid_json(self):
         """Returns None for invalid JSON."""
-        assert _parse_existing_geo_metadata({b"geo": b"invalid"}) is None
+        assert sanitized_carried_geo({b"geo": b"invalid"}) == {}
 
 
 # =============================================================================
