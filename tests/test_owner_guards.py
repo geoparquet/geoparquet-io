@@ -62,7 +62,7 @@ CHECK_OWNER_DEFS = REPO / "scripts" / "check_owner_defs.py"
 #: The pinned number of exemption entries per check (G1 per arm). Lower it with
 #: the commit that deletes a copy; raising it needs a reason in review.
 EXPECTED_COUNTS = {
-    "G1.tid251": 21,
+    "G1.tid251": 16,
     "G1.geo_parse": 17,
     "G1.set_memory_limit": 0,
     "G1.sql_escape": 1,

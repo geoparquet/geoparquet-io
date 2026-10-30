@@ -16,12 +16,11 @@ from typing import TYPE_CHECKING
 from geoparquet_io.core.arrow_geo_metadata import (
     _apply_geoparquet_metadata,
     _normalize_arrow_large_types,
-    _write_table_with_settings,
 )
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import _get_query_columns, _wrap_query_with_wkb_conversion
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
-from geoparquet_io.core.parquet_writer import apply_output_kv_metadata
+from geoparquet_io.core.parquet_writer import apply_output_kv_metadata, write_arrow_table
 from geoparquet_io.core.write_strategies.base import BaseWriteStrategy
 
 if TYPE_CHECKING:
@@ -113,7 +112,7 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
 
         table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
 
-        _write_table_with_settings(
+        write_arrow_table(
             table,
             output_path,
             compression=compression,
@@ -176,7 +175,7 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
         # under an explicit parquet-geo-only request (#773).
         table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
 
-        _write_table_with_settings(
+        write_arrow_table(
             table,
             output_path,
             compression=compression,

@@ -16,7 +16,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.compression import resolve_codec, resolve_process_compression_level
+from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.duckdb_utils import fetch_one, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
@@ -47,7 +47,7 @@ from geoparquet_io.core.process.overview.rollup import (
     build_level_sql,
     validate_level,
 )
-from geoparquet_io.core.write_funnels import write_geoparquet_table
+from geoparquet_io.core.write_funnels import write_geoparquet_table, write_plain_parquet_table
 
 
 def overview_output_path(
@@ -209,8 +209,13 @@ def _write_overview(
     geo_bbox: list[float] | None = None,
 ) -> None:
     if info.out_geometry == "none":
-        codec = resolve_codec(compression, compression_level, context="process")
-        pq.write_table(table, out_path, **codec.pyarrow_kwargs())
+        write_plain_parquet_table(
+            table,
+            out_path,
+            compression=compression,
+            compression_level=compression_level,
+            verbose=verbose,
+        )
         return
     write_geoparquet_table(
         table,

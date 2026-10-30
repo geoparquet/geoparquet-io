@@ -20,7 +20,10 @@ from geoparquet_io.cli.decorators import parse_row_group_options
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import memory_limits
 from geoparquet_io.core.duckdb_utils import fetch_one
-from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+from geoparquet_io.core.parquet_writer import (
+    align_to_writer_vector,
+    resolve_row_group_rows_for_table,
+)
 from geoparquet_io.core.sizing import (
     bytes_to_mb,
     format_memory_limit,
@@ -28,9 +31,6 @@ from geoparquet_io.core.sizing import (
     mb_to_bytes,
     normalize_size_string,
     parse_size_string,
-)
-from geoparquet_io.core.write_strategies.row_group_sizing import (
-    _resolve_row_group_rows_for_table,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -149,16 +149,15 @@ class _OneBytePerRow:
 
 
 def _writer_target_bytes(row_group_size_mb: float) -> set[int]:
-    """The byte target each row-group writer turns ``row_group_size_mb`` into.
+    """The writer vector the facade turns ``row_group_size_mb`` into.
 
-    Both writers divide their target by the table's bytes per row; at one byte
-    per row the row count they return *is* the target in bytes.
+    The one MB -> rows step (``parquet_writer``) divides the target by the
+    table's bytes per row and snaps to a whole writer vector; at one byte per
+    row the row count it returns is the target in bytes, snapped. The second
+    resolver ``write_strategies/row_group_sizing`` carried is gone (#1030).
     """
     table = _OneBytePerRow()
-    return {
-        resolve_row_group_rows_for_table(table, None, row_group_size_mb),
-        _resolve_row_group_rows_for_table(table, row_group_size_mb, None),
-    }
+    return {resolve_row_group_rows_for_table(table, None, row_group_size_mb)}
 
 
 @pytest.mark.parametrize(
@@ -166,14 +165,17 @@ def _writer_target_bytes(row_group_size_mb: float) -> set[int]:
     [("1MB", 10**6), ("1", 10**6), ("128MB", 128 * 10**6), ("1GB", 10**9), ("1GiB", 1024**3)],
 )
 def test_row_group_size_mb_reaches_the_writers_in_decimal_bytes(text, target):
-    """``--row-group-size-mb 1MB`` is a 1,000,000-byte target at both writers."""
-    assert _writer_target_bytes(parse_row_group_options(None, text)) == {target}
+    """``--row-group-size-mb 1MB`` is a 1,000,000-byte target, snapped to a writer vector."""
+    assert _writer_target_bytes(parse_row_group_options(None, text)) == {
+        align_to_writer_vector(target)
+    }
 
 
 def test_row_group_size_mb_and_min_size_agree_on_1gb():
     """``--row-group-size-mb 1GB`` targets the bytes ``--min-size 1GB`` selects on."""
     targets = _writer_target_bytes(parse_row_group_options(None, "1GB"))
-    assert targets == {parse_size_string("1GB")} == {10**9}
+    assert parse_size_string("1GB") == 10**9
+    assert targets == {align_to_writer_vector(10**9)}
 
 
 # --- --min-size reports the size it was given ----------------------------------

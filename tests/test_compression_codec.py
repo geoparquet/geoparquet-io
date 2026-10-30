@@ -954,9 +954,10 @@ def test_1026_bigquery_plain_branch_writes_to_a_remote_url(tmp_path, monkeypatch
     def fake_upload(local_path, remote_path, *args, **kwargs):
         uploaded[remote_path] = Path(local_path).read_bytes()
 
-    import geoparquet_io.core.extract_bigquery as bq
+    # The geometry-free branch stages and uploads through the plain-table funnel.
+    import geoparquet_io.core.write_funnels as funnels
 
-    monkeypatch.setattr(bq, "upload_if_remote", fake_upload, raising=False)
+    monkeypatch.setattr(funnels, "upload_if_remote", fake_upload)
     _bigquery_plain("s3://bucket/plain.parquet")
     assert list(uploaded) == ["s3://bucket/plain.parquet"]
     local = tmp_path / "landed.parquet"

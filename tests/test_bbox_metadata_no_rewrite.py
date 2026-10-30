@@ -158,15 +158,17 @@ def test_a_footer_it_cannot_patch_falls_back_to_the_rewrite(zstd15_file, monkeyp
         raise FooterPatchUnsupported("planted")
 
     monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
-    before = zstd15_file.stat().st_size
+    before = _data_section(zstd15_file)
 
     add_bbox_metadata(str(zstd15_file))
 
     geo = json.loads(pq.read_metadata(str(zstd15_file)).metadata[b"geo"])
     assert "covering" in geo["columns"]["geometry"], "the fallback did not write the key"
-    assert zstd15_file.stat().st_size > before, (
-        "the fallback is the rewrite, so this file is expected to come back inflated"
-    )
+    assert _data_section(zstd15_file) != before, "the fallback is the rewrite: pages re-encoded"
+    # The rewrite writes the facade's row groups, not the input's four of 5,000
+    # (approved change 3; it used the input's average rows per group).
+    md = pq.read_metadata(str(zstd15_file))
+    assert [md.row_group(i).num_rows for i in range(md.num_row_groups)] == [20_000]
 
 
 def test_the_fallback_on_a_native_file_writes_one_geo_entry(tmp_path, monkeypatch):

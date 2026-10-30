@@ -42,17 +42,18 @@ from geoparquet_io.core.geo_metadata import (
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name, native_wkb_type
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
-from geoparquet_io.core.parquet_writer import apply_output_kv_metadata, output_schema_metadata
+from geoparquet_io.core.parquet_writer import (
+    apply_output_kv_metadata,
+    output_schema_metadata,
+    resolve_row_group_rows_for_query,
+    resolve_row_group_rows_for_table,
+)
 from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 from geoparquet_io.core.write_strategies.arrow_streaming import to_geoarrow_column
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
     build_geo_metadata,
     native_geometry_crs,
-)
-from geoparquet_io.core.write_strategies.row_group_sizing import (
-    _resolve_row_group_rows,
-    _resolve_row_group_rows_for_table,
 )
 
 if TYPE_CHECKING:
@@ -144,8 +145,8 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         # DuckDB COPY TO sizes row groups by row count, so translate any MB target
         # into rows before it can take effect on this strategy (fixes #689 — both
         # sizing options were accepted and then ignored entirely).
-        resolved_row_group_rows = _resolve_row_group_rows(
-            con, query, row_group_size_mb, row_group_rows, verbose
+        resolved_row_group_rows = resolve_row_group_rows_for_query(
+            con, query, row_group_rows, row_group_size_mb, verbose
         )
 
         # Handle non-geo queries: write plain Parquet without geo metadata
@@ -316,8 +317,8 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 compression,
                 compression_level,
                 verbose,
-                _resolve_row_group_rows_for_table(
-                    table, row_group_size_mb, row_group_rows, verbose
+                resolve_row_group_rows_for_table(
+                    table, row_group_rows, row_group_size_mb, verbose=verbose
                 ),
             )
             return

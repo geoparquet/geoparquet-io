@@ -499,8 +499,11 @@
     "resolve_input_crs",
     "resolve_output_geoparquet_version",
     "resolve_row_group_rows",
+    "resolve_row_group_rows_for_query",
+    "resolve_row_group_rows_for_rewrite",
     "resolve_row_group_rows_for_table",
-    "without_geometry_dictionary"
+    "without_geometry_dictionary",
+    "write_arrow_table"
   ],
   "geoparquet_io.core.remote": [
     "get_remote_error_hint",
@@ -534,6 +537,7 @@
     "read_preserved_kv_metadata",
     "table_nonplanar_edges",
     "write_geoparquet_table",
-    "write_parquet_with_metadata"
+    "write_parquet_with_metadata",
+    "write_plain_parquet_table"
   ]
 }

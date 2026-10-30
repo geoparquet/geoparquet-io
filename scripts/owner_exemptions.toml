@@ -37,10 +37,6 @@ path = "geoparquet_io/core/arcgis.py"
 name = "pyarrow.parquet.ParquetWriter"
 reason = "paged ArcGIS stream writer; private write, T2c routes it through the facade"
 [[G1.tid251]]
-path = "geoparquet_io/core/arrow_geo_metadata.py"
-name = "pyarrow.parquet.write_table"
-reason = "_write_table_with_settings, a second funnel beside write_funnels; T2c routes it through the facade"
-[[G1.tid251]]
 path = "geoparquet_io/core/carto.py"
 name = "httpx"
 reason = "permanent: CARTO status probe streams one request with httpx.stream to read the status without the body; accepted by the T4a audit"
@@ -58,30 +54,14 @@ path = "geoparquet_io/core/duckdb_utils.py"
 name = "psutil"
 reason = "permanent: process-liveness check for stale DuckDB temp dirs, not a memory fact; optional import (#1330)"
 [[G1.tid251]]
-path = "geoparquet_io/core/extract_bigquery.py"
-name = "pyarrow.parquet.write_table"
-reason = "geometry-free BigQuery result written directly (#1335 class); T2c"
-[[G1.tid251]]
 path = "geoparquet_io/core/file_utils.py"
 name = "httpx"
 reason = "streams an HTTP source to disk chunk by chunk; T2e moves the download behind http_retry"
-[[G1.tid251]]
-path = "geoparquet_io/core/process/aggregate/by_admin.py"
-name = "pyarrow.parquet.write_table"
-reason = "geometry-free aggregate output bypasses the facade's row-group count (approved change 2); T2c"
-[[G1.tid251]]
-path = "geoparquet_io/core/process/aggregate/grid_common.py"
-name = "pyarrow.parquet.write_table"
-reason = "geometry-free aggregate output bypasses the facade's row-group count (approved change 2); T2c"
 [[G1.tid251]]
 path = "geoparquet_io/core/process/overview/overview_file.py"
 name = "pyarrow.parquet.ParquetWriter"
 count = 2
 reason = "overview writer (annotation + call); private write outside the facade, T2f"
-[[G1.tid251]]
-path = "geoparquet_io/core/process/overview/run.py"
-name = "pyarrow.parquet.write_table"
-reason = "geometry-free overview output bypasses the facade's row-group count (approved change 2); T2c"
 [[G1.tid251]]
 path = "geoparquet_io/core/process/simplify.py"
 name = "pyarrow.parquet.ParquetWriter"
@@ -423,6 +403,13 @@ reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 "pin_duckdb_settings" = ["geoparquet_io/core/duckdb_utils.py"]
 "format_memory_limit" = ["geoparquet_io/core/sizing.py"]
 "nudged_size" = ["geoparquet_io/core/sizing.py"]
+# The row-group policy (T2c): one resolver family, one MB -> rows measurement,
+# one vector snap. write_strategies/row_group_sizing.py carried a second
+# `_resolve_row_group_rows*` pair with its parameters swapped (#1030).
+"*resolve_row_group_rows*" = ["geoparquet_io/core/parquet_writer.py"]
+"*rows_for_*target*" = ["geoparquet_io/core/parquet_writer.py"]
+"estimate_row_size" = ["geoparquet_io/core/parquet_writer.py"]
+"align_to_writer_vector" = ["geoparquet_io/core/parquet_writer.py"]
 
 # Renamed copies no glob sees, by the family they belong to (the #1367
 # Copies rows and the T0b audit). Each is also an exemption below.

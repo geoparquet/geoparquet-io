@@ -1,7 +1,7 @@
-"""The row-group sizing arithmetic in ``core/arrow_geo_metadata.py``.
+"""The row-group sizing arithmetic of the Arrow-table write (``core/parquet_writer.py``).
 
-``_estimate_row_size`` has three answers -- pyarrow's buffer total, ``nbytes``,
-or a default -- and ``_write_table_with_settings`` turns a ``--row-group-size-mb``
+``estimate_row_size`` has three answers -- pyarrow's buffer total, ``nbytes``,
+or a default -- and ``write_arrow_table`` turns a ``--row-group-size-mb``
 into a row count with it. The fallbacks were never exercised: a real
 ``pyarrow.Table`` always has ``get_total_buffer_size``, so the ``nbytes`` and
 default branches only run for something that is not one. These pin them with
@@ -13,7 +13,7 @@ from __future__ import annotations
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.arrow_geo_metadata import _estimate_row_size, _write_table_with_settings
+from geoparquet_io.core.parquet_writer import estimate_row_size, write_arrow_table
 
 
 class _NbytesOnly:
@@ -59,23 +59,23 @@ class _Empty:
 
 def test_a_real_table_is_sized_from_its_buffers():
     table = pa.table({"a": pa.array([1, 2, 3, 4], type=pa.int64())})
-    assert _estimate_row_size(table) == table.get_total_buffer_size() // 4
+    assert estimate_row_size(table) == table.get_total_buffer_size() // 4
 
 
 def test_nbytes_is_the_fallback_when_there_is_no_buffer_total():
-    assert _estimate_row_size(_NbytesOnly()) == 100
+    assert estimate_row_size(_NbytesOnly()) == 100
 
 
 def test_a_failing_buffer_total_falls_through_to_nbytes():
-    assert _estimate_row_size(_BufferSizeRaises()) == 25
+    assert estimate_row_size(_BufferSizeRaises()) == 25
 
 
 def test_the_default_when_nothing_answers():
-    assert _estimate_row_size(_NothingAnswers()) == 100
+    assert estimate_row_size(_NothingAnswers()) == 100
 
 
 def test_zero_rows_does_not_divide_by_zero():
-    assert _estimate_row_size(_Empty()) == 700
+    assert estimate_row_size(_Empty()) == 700
 
 
 def test_row_group_size_mb_becomes_a_row_count(tmp_path):
@@ -83,7 +83,7 @@ def test_row_group_size_mb_becomes_a_row_count(tmp_path):
     table = pa.table({"a": pa.array(range(1000), type=pa.int64())})
     out = tmp_path / "sized.parquet"
 
-    _write_table_with_settings(
+    write_arrow_table(
         table,
         str(out),
         compression="ZSTD",
@@ -102,7 +102,7 @@ def test_a_small_row_group_size_mb_splits_the_table(tmp_path):
     table = pa.table({"a": pa.array(range(200_000), type=pa.int64())})
     out = tmp_path / "split.parquet"
 
-    _write_table_with_settings(
+    write_arrow_table(
         table,
         str(out),
         compression="ZSTD",

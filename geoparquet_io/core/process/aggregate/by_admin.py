@@ -5,9 +5,7 @@ from __future__ import annotations
 
 import gc
 
-import pyarrow.parquet as pq
-
-from geoparquet_io.core.compression import resolve_codec, resolve_process_compression_level
+from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
@@ -48,7 +46,7 @@ from geoparquet_io.core.process.aggregate.grid_common import (
     needed_source_columns,
     source_select_list,
 )
-from geoparquet_io.core.write_funnels import write_geoparquet_table
+from geoparquet_io.core.write_funnels import write_geoparquet_table, write_plain_parquet_table
 
 
 def _get_admin_ref(dataset, con, level: str) -> str:
@@ -371,9 +369,13 @@ def aggregate_by_admin(
         gc.collect()
 
     if out_geometry == "none":
-        # The codec through its owner even before this write is routed (T2c).
-        codec = resolve_codec(compression, compression_level, context="process")
-        pq.write_table(result, output_parquet, **codec.pyarrow_kwargs())
+        write_plain_parquet_table(
+            result,
+            output_parquet,
+            compression=compression,
+            compression_level=compression_level,
+            verbose=verbose,
+        )
     else:
         write_geoparquet_table(
             result,

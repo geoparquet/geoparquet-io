@@ -70,6 +70,11 @@ PATHS = CLI_PATHS + tuple(f"table_write_{s}" for s in STRATEGIES)
 
 #: Paths whose output has no geometry by request: no ``geo`` block to compare.
 GEOMETRY_FREE = {"aggregate_h3_none"}
+#: An aggregate is a derived table, not a rewrite of its input, so it carries
+#: the same file-level keys whichever geometry it is asked for (the lead's
+#: policy for #1367 T2c): the geometry-free output is held to the geometry
+#: branch's keys, not to the input's sidecar keys.
+SIDECAR_REFERENCE = {"aggregate_h3_none": "aggregate_h3_polygon"}
 
 _PASSTHROUGH = (
     "#1367: metadata-only rewrite keeps the input's SNAPPY pages and 10,000-row "
@@ -84,14 +89,6 @@ XFAIL = {
     ("add_bbox_metadata", "row_groups"): _PASSTHROUGH,
     ("check_bbox_fix", "level"): _PASSTHROUGH,
     ("add_bbox_metadata", "level"): _PASSTHROUGH,
-    ("aggregate_h3_none", "row_groups"): "#1030",
-    ("aggregate_h3_none", "sidecar_keys"): (
-        "#1367: the geometry-free aggregate branch writes with pq.write_table and "
-        "carries no input key (policy for a derived table to be decided in T3)"
-    ),
-    ("table_write_streaming", "row_groups"): (
-        "#1367: the streaming strategy keeps the input's 10,000-row batches as row groups"
-    ),
     ("convert_geoparquet", "epoch"): _EPOCH,
     **{(f"table_write_{s}", "epoch"): _EPOCH for s in STRATEGIES},
 }
@@ -128,6 +125,18 @@ def _run_cli(name: str, src: Path, out_dir: Path) -> Path:
         _invoke(
             "process", "aggregate", "h3", src, out, "--resolution", "15", "--out-geometry", "none"
         )
+    elif name == "aggregate_h3_polygon":
+        _invoke(
+            "process",
+            "aggregate",
+            "h3",
+            src,
+            out,
+            "--resolution",
+            "15",
+            "--out-geometry",
+            "polygon",
+        )
     elif name == "partition_h3":
         part = out_dir / "partition_h3"
         _invoke("partition", "h3", src, part, "--resolution", "1", "--skip-analysis")
@@ -152,7 +161,9 @@ def source(tmp_path_factory) -> Path:
 @pytest.fixture(scope="module")
 def outputs(source, tmp_path_factory) -> dict[str, Path]:
     out_dir = tmp_path_factory.mktemp("g7_out")
-    result = {name: _run_cli(name, source, out_dir) for name in CLI_PATHS}
+    result = {
+        name: _run_cli(name, source, out_dir) for name in (*CLI_PATHS, *SIDECAR_REFERENCE.values())
+    }
     for strategy in STRATEGIES:
         out = out_dir / f"table_write_{strategy}.parquet"
         gpio.read(str(source)).write(str(out), write_strategy=strategy)
@@ -321,6 +332,11 @@ def _cases():
 
 @pytest.mark.parametrize(("path", "invariant"), list(_cases()))
 def test_write_path_invariant(path, invariant, outputs, source, tmp_path):
+    if invariant == "sidecar_keys" and path in SIDECAR_REFERENCE:
+        reference = outputs[SIDECAR_REFERENCE[path]]
+        keys = set(footer_kv(outputs[path])) - {b"geo"}
+        assert keys == set(footer_kv(reference)) - {b"geo"}, sorted(keys)
+        return
     INVARIANTS[invariant](outputs[path], source, tmp_path)
 
 

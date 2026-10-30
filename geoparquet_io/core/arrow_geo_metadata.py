@@ -17,11 +17,8 @@ like -- are not re-exported, and nothing outside this module reached them).
 
 import json
 
-import pyarrow.parquet as pq
-
 from geoparquet_io.core.arrow_types import _rebuild_array_with_type
 from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
-from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
     _format_crs_display,
     apply_output_crs,
@@ -52,14 +49,10 @@ from geoparquet_io.core.geoarrow_encoding import (
     is_geoarrow_extension_field,
     is_wkb_extension_field,
 )
-from geoparquet_io.core.logging_config import debug, success
+from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.parquet_writer import (
     _CARRIED_SCHEMA_METADATA_KEYS_BYTES,
-    ParquetWriteSettings,
-    apply_output_kv_metadata,
-    estimate_row_size,
     output_schema_metadata,
-    resolve_row_group_rows_for_table,
 )
 from geoparquet_io.core.write_strategies.base import (
     merge_secondary_geometry_metadata,
@@ -1060,83 +1053,6 @@ def _build_geo_block(
     # declared, or the warning the gate just printed is a lie (#1172).
     geo_meta = strip_illegal_bbox_covering(geo_meta, table.schema)
     return strip_bboxless_covering(geo_meta, verbose)
-
-
-# The bytes-per-row estimate is the facade's now (`parquet_writer.estimate_row_size`):
-# it feeds the MB -> rows decision, and a second copy here was how two write
-# paths came to answer the same flag differently (#1021). Kept under its old
-# name for `common.py`'s compatibility shim until the shims go.
-_estimate_row_size = estimate_row_size
-
-
-def _write_table_with_settings(
-    table,
-    output_path: str,
-    compression: str,
-    compression_level: int | None,
-    row_group_rows: int | None,
-    row_group_size_mb: int | None,
-    geoparquet_version: str | None,
-    geometry_column: str,
-    verbose: bool = False,
-    extra_kv_metadata: dict[str, str] | None = None,
-) -> None:
-    """
-    Write Arrow table to Parquet with proper settings.
-
-    Uses pq.write_table directly since we've already applied all GeoParquet
-    metadata to the table. This preserves the metadata we set (including version,
-    geometry_types, CRS, etc.) without geoarrow overwriting it.
-
-    Args:
-        table: PyArrow Table to write
-        output_path: Output file path
-        compression: Compression type (ZSTD, GZIP, etc.)
-        compression_level: Compression level
-        row_group_rows: Exact number of rows per row group
-        row_group_size_mb: Target row group size in MB
-        geoparquet_version: GeoParquet version
-        geometry_column: Name of the geometry column
-        verbose: Whether to print verbose output
-        extra_kv_metadata: The caller's file-level keys. Passed again here so
-            this last pass does not drop a caller key named like a carried one
-    """
-    # The facade's row-group decision, including the MB -> rows sizing. Calling
-    # it again after write_geoparquet_table already resolved is harmless and
-    # silent; the paths that reach here without resolving still land on the one
-    # number rather than pyarrow's own default (#1021).
-    rows_per_group = resolve_row_group_rows_for_table(table, row_group_rows, row_group_size_mb)
-
-    # Use central configuration for write settings
-    settings = ParquetWriteSettings(
-        compression=compression,
-        compression_level=compression_level,
-        row_group_rows=row_group_rows,
-        row_group_size_mb=row_group_size_mb,
-    )
-    write_kwargs = settings.get_pyarrow_kwargs(
-        calculated_row_group_size=rows_per_group,
-        schema=table.schema,
-        geometry_columns=[geometry_column],
-    )
-
-    if verbose:
-        codec = resolve_codec(compression, compression_level, context="write")
-        debug(f"Writing with {codec.description} compression")
-        if rows_per_group:
-            debug(f"Row group size: {rows_per_group:,} rows")
-
-    # The facade has the last word on the file-level keys, here at the one
-    # place every Arrow-table write reaches: the table funnel and the helpers
-    # that call this directly never pass through a strategy (#1268).
-    table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
-
-    # Use pq.write_table for all versions - we've already applied all metadata
-    # Using geoarrow's write_geoparquet_table would overwrite our carefully constructed metadata
-    pq.write_table(table, output_path, **write_kwargs)
-
-    if verbose:
-        success(f"Wrote {table.num_rows:,} rows to {output_path}")
 
 
 def _normalize_arrow_large_types(table):

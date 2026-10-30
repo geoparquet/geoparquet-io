@@ -15,11 +15,10 @@ from dataclasses import dataclass
 
 import duckdb
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import _detect_bbox_column_from_table
 from geoparquet_io.core.bbox_structure import check_bbox_structure
-from geoparquet_io.core.compression import resolve_codec, resolve_process_compression_level
+from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.crs_utils import (
     crs_transform_sql_expr,
     extract_crs_from_parquet,
@@ -61,7 +60,7 @@ from geoparquet_io.core.process.aggregate.common import (
     validate_metric_nodata,
 )
 from geoparquet_io.core.remote import needs_httpfs
-from geoparquet_io.core.write_funnels import write_geoparquet_table
+from geoparquet_io.core.write_funnels import write_geoparquet_table, write_plain_parquet_table
 
 
 @dataclass(frozen=True)
@@ -984,9 +983,13 @@ def aggregate_grid_file(
         )
 
     if out_geometry == "none":
-        # The codec through its owner even before this write is routed (T2c).
-        codec = resolve_codec(compression, compression_level, context="process")
-        pq.write_table(result, output_parquet, **codec.pyarrow_kwargs())
+        write_plain_parquet_table(
+            result,
+            output_parquet,
+            compression=compression,
+            compression_level=compression_level,
+            verbose=verbose,
+        )
     else:
         write_geoparquet_table(
             result,

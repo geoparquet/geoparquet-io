@@ -360,12 +360,6 @@ _EXEMPT = {
     ("api/ops.py", "_file_round_trip"): "scratch copy of the input table",
     ("api/ops.py", "_table_to_temp_parquet_and_convert"): "scratch copy of the input table",
     ("benchmarks/operations.py", "_run_write"): "measures a plain pyarrow write",
-    ("core/extract_bigquery.py", "_execute_bigquery_extraction"): (
-        "the no-geography branch, BigQuery said there is no geometry"
-    ),
-    ("core/process/aggregate/by_admin.py", "aggregate_by_admin"): "out_geometry none",
-    ("core/process/aggregate/grid_common.py", "aggregate_grid_file"): "out_geometry none",
-    ("core/process/overview/run.py", "_write_overview"): "out_geometry none",
     ("core/write_strategies/arrow_streaming.py", "_write_all_batches"): (
         "takes writer_kwargs from write_from_query, which asks the facade"
     ),

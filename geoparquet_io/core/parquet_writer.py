@@ -63,7 +63,7 @@ from __future__ import annotations
 import math
 from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast, overload
 
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
@@ -71,15 +71,16 @@ from geoparquet_io.core.crs_utils import (
     extract_crs_from_parquet,
     source_crs_is_unknown,
 )
-from geoparquet_io.core.duckdb_utils import build_kv_metadata_clause
+from geoparquet_io.core.duckdb_utils import _strip_trailing_order_by, build_kv_metadata_clause
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.geo_metadata import OVERVIEWS_KEY, sanitized_carried_geo
 from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
-from geoparquet_io.core.logging_config import debug, info
+from geoparquet_io.core.logging_config import debug, info, success
 from geoparquet_io.core.sizing import mb_to_bytes
 from geoparquet_io.core.streaming import extract_version_from_metadata
 
 if TYPE_CHECKING:
+    import duckdb
     import pyarrow as pa
 
 # The unit DuckDB's Parquet writer emits row groups in.
@@ -170,6 +171,24 @@ def align_to_writer_vector(rows: int, band_top: int = SPATIAL_BAND_TOP_ROWS) -> 
 DEFAULT_ROW_GROUP_ROWS = align_to_writer_vector(SPATIAL_BAND_TOP_ROWS)  # 49,152
 
 
+@overload
+def resolve_row_group_rows(
+    row_group_rows: None,
+    row_group_size_mb: None,
+    param_name: str = ...,
+    mb_param_name: str = ...,
+) -> int: ...
+
+
+@overload
+def resolve_row_group_rows(
+    row_group_rows: int | None,
+    row_group_size_mb: float | None,
+    param_name: str = ...,
+    mb_param_name: str = ...,
+) -> int | None: ...
+
+
 def resolve_row_group_rows(
     row_group_rows: int | None,
     row_group_size_mb: float | None,
@@ -177,6 +196,13 @@ def resolve_row_group_rows(
     mb_param_name: str = "--row-group-size-mb",
 ) -> int | None:
     """Decide how many rows a row group gets. The facade's first decision.
+
+    This is the one place a row-group count is decided: an explicit row count,
+    else an explicit MB target (measured from the data by
+    :func:`resolve_row_group_rows_for_table` or
+    :func:`resolve_row_group_rows_for_query`, which call this first), else
+    :data:`DEFAULT_ROW_GROUP_ROWS`. A write path never picks a number of its
+    own, and never leaves the choice to whichever writer it reaches.
 
     An explicit row count wins, and an explicit ``--row-group-size-mb`` target
     is left alone (it sizes groups by bytes, and forcing a row count here would
@@ -251,6 +277,13 @@ def estimate_row_size(table) -> int:
     ``nbytes``, then 100 bytes for a table-like object that answers neither.
     The floor is 1: a zero would make the division below a ``ZeroDivisionError``
     rather than a big row group.
+
+    A top-level ``large_string``/``large_binary``/``large_list`` column is
+    counted at 32-bit offsets. DuckDB hands its results back in the large
+    types and pyarrow reads a file in the small ones, so the same rows weighed
+    12 bytes more per row through ``gpio convert`` (a DuckDB sample) than
+    through ``Table.write`` (a pyarrow table) with three variable-width
+    columns, and one ``--row-group-size-mb`` landed on different groups (#1215).
     """
     default_row_size = 100
     num_rows = max(1, table.num_rows)
@@ -260,11 +293,60 @@ def estimate_row_size(table) -> int:
             value = getattr(table, accessor)
             total_bytes = value() if callable(value) else value
             if total_bytes > 0:
-                return max(1, total_bytes // num_rows)
+                return max(1, total_bytes // num_rows - _large_offset_surplus(table))
         except Exception:
             continue
 
     return default_row_size
+
+
+def _large_offset_surplus(table) -> int:
+    """Bytes per row a table's 64-bit offsets add over the 32-bit ones."""
+    import pyarrow as pa
+
+    schema = getattr(table, "schema", None)
+    if not isinstance(schema, pa.Schema):
+        return 0
+    large = 0
+    for field in schema:
+        arrow_type = field.type
+        while isinstance(arrow_type, pa.BaseExtensionType):
+            arrow_type = arrow_type.storage_type
+        if (
+            pa.types.is_large_string(arrow_type)
+            or pa.types.is_large_binary(arrow_type)
+            or pa.types.is_large_list(arrow_type)
+        ):
+            large += 1
+    return 4 * large
+
+
+#: Rows sampled from a query to measure bytes per row for an MB target. Large
+#: enough to be representative, small enough to stay cheap.
+_MB_ESTIMATE_SAMPLE_ROWS = 20_000
+
+
+def _rows_for_byte_target(sample, row_group_size_mb: float, verbose: bool = False) -> int:
+    """Turn an MB target into a row count from ``sample``'s bytes per row.
+
+    The count is snapped to a whole writer vector the way an explicit row count
+    is (:func:`align_to_writer_vector`), so every writer lands on the same
+    groups: DuckDB's ``COPY`` rounds a request up to a whole vector by itself,
+    and pyarrow honours one exactly, and they used to answer one MB target with
+    two different files (#1215). It floors at one vector: a target below what
+    one vector of these rows weighs (``1KB`` against 110-byte rows) would size
+    groups of a handful of rows -- 8,572 seven-row groups from 60,000 rows --
+    which no reader wants and DuckDB's ``COPY`` would not write anyway.
+    """
+    bytes_per_row = estimate_row_size(sample)
+    rows = max(WRITER_VECTOR_ROWS, int(mb_to_bytes(row_group_size_mb) // bytes_per_row))
+    rows = align_to_writer_vector(rows)
+    if verbose:
+        debug(
+            f"Resolved --row-group-size-mb {row_group_size_mb} to {rows:,} rows/group "
+            f"(~{bytes_per_row} bytes/row)"
+        )
+    return rows
 
 
 def resolve_row_group_rows_for_table(
@@ -272,7 +354,9 @@ def resolve_row_group_rows_for_table(
     row_group_rows: int | None,
     row_group_size_mb: float | None,
     param_name: str = "--row-group-size",
-) -> int | None:
+    mb_param_name: str = "--row-group-size-mb",
+    verbose: bool = False,
+) -> int:
     """:func:`resolve_row_group_rows`, with an MB target turned into rows.
 
     ``resolve_row_group_rows`` deliberately answers ``None`` for an explicit
@@ -284,23 +368,76 @@ def resolve_row_group_rows_for_table(
     where a row count goes, asking for 134,217,728 rows per group and writing
     one row group for the whole file (#1021).
 
-    ``None`` still comes back for an MB target against an empty table: there is
-    nothing to measure and no rows to group.
-
-    The row count floors at one writer vector. A target below what one vector
-    of this table weighs (``1KB`` against 110-byte rows) would otherwise size
-    groups of a handful of rows -- 8,572 seven-row groups from 60,000 rows --
-    which no reader wants and DuckDB's ``COPY`` would not write anyway (it
-    quantises every sub-vector request up to 2,048; see
-    :func:`resolve_row_group_rows`). The table's own row count still caps it.
+    The answer is always a whole writer vector (or the caller's own count). An
+    MB target against an empty table has nothing to measure and no rows to
+    group, so it gets the default. It is not capped at the table's row count:
+    a bigger group is still one group, and a capped count that is not a whole
+    vector would make the next resolve along the write announce a rounding
+    nobody asked for.
     """
-    resolved = resolve_row_group_rows(row_group_rows, row_group_size_mb, param_name)
-    if resolved is not None or not row_group_size_mb or table.num_rows <= 0:
+    resolved = resolve_row_group_rows(row_group_rows, row_group_size_mb, param_name, mb_param_name)
+    if resolved is not None:
         return resolved
+    if table.num_rows <= 0:
+        return DEFAULT_ROW_GROUP_ROWS
+    # resolve answers None only for an MB target, so there is one here.
+    return _rows_for_byte_target(table, cast(float, row_group_size_mb), verbose)
 
-    target_bytes = mb_to_bytes(row_group_size_mb)
-    rows = max(WRITER_VECTOR_ROWS, int(target_bytes // estimate_row_size(table)))
-    return min(rows, table.num_rows)
+
+def resolve_row_group_rows_for_query(
+    con: duckdb.DuckDBPyConnection,
+    query: str,
+    row_group_rows: int | None,
+    row_group_size_mb: float | None,
+    verbose: bool = False,
+) -> int:
+    """:func:`resolve_row_group_rows_for_table` for a write that has a query, not a table.
+
+    DuckDB's ``ROW_GROUP_SIZE`` is a row count (``ROW_GROUP_SIZE_BYTES`` needs
+    insertion order off, which would undo a spatial sort), so an MB target is
+    measured on a sample of the query's first rows. The sample drops a trailing
+    ``ORDER BY`` so the ``LIMIT`` streams instead of sorting (and, for a remote
+    input, re-reading) the whole source just to size row groups.
+
+    Every DuckDB write path asks here: the plain-``COPY`` fast path a 2.0 input
+    takes used to skip the measurement and write DuckDB's own 122,880-row
+    default for any MB target (#1215). A query that cannot be sampled, or that
+    returns no rows, gets the default.
+    """
+    resolved = resolve_row_group_rows(row_group_rows, row_group_size_mb)
+    if resolved is not None:
+        return resolved
+    sample_query = _strip_trailing_order_by(query)
+    try:
+        sample = (
+            con.sql(f"SELECT * FROM ({sample_query}) LIMIT {_MB_ESTIMATE_SAMPLE_ROWS}")
+            .arrow()
+            .read_all()
+        )
+    except Exception as exc:  # pragma: no cover - defensive, fall back to the default
+        debug(f"Could not sample rows for the --row-group-size-mb estimate: {exc}")
+        return DEFAULT_ROW_GROUP_ROWS
+    if sample.num_rows == 0:
+        return DEFAULT_ROW_GROUP_ROWS
+    # resolve answers None only for an MB target, so there is one here.
+    return _rows_for_byte_target(sample, cast(float, row_group_size_mb), verbose)
+
+
+def resolve_row_group_rows_for_rewrite(num_rows: int, input_row_groups: int) -> int:
+    """Rows per group for a rewrite that must not lose the input's row groups.
+
+    ``check --fix`` rewrites a file so gpio's own checks pass it next, and the
+    spatial-order check only judges a file with at least eight row groups. The
+    default alone turned a 12-group file of 60,000 rows into two groups, and a
+    file the check could fail into one it could not judge (#1098). So the
+    default applies whenever it already keeps the input's count; otherwise the
+    groups shrink to the largest whole writer vector that keeps it, never below
+    one vector (DuckDB's ``COPY`` writes no smaller group).
+    """
+    if input_row_groups <= 1 or math.ceil(num_rows / DEFAULT_ROW_GROUP_ROWS) >= input_row_groups:
+        return DEFAULT_ROW_GROUP_ROWS
+    per_group = num_rows // input_row_groups
+    return max(WRITER_VECTOR_ROWS, per_group // WRITER_VECTOR_ROWS * WRITER_VECTOR_ROWS)
 
 
 def _rounding_note(requested: int, landed: int) -> str:
@@ -572,7 +709,7 @@ def apply_output_kv_metadata(
 
     Applied at the top of each strategy's ``write_from_table``, before any
     early return can skip it, and again, with the same extras, by
-    ``_write_table_with_settings`` just before ``pq.write_table``, so the
+    ``write_arrow_table`` just before ``pq.write_table``, so the
     Arrow-table funnel and every helper that writes through it get the same
     answer.
     """
@@ -743,3 +880,80 @@ class ParquetWriteSettings:
         }
 
         return kwargs
+
+
+def write_arrow_table(
+    table: pa.Table,
+    output_path: str,
+    compression: str | None,
+    compression_level: int | None,
+    row_group_rows: int | None,
+    row_group_size_mb: float | None,
+    geoparquet_version: str | None,
+    geometry_column: str | None,
+    verbose: bool = False,
+    extra_kv_metadata: dict[str, str] | None = None,
+) -> None:
+    """Write an Arrow table as the facade says: the one final pyarrow table write.
+
+    Every Arrow-table write ends here -- ``write_funnels.write_geoparquet_table``
+    and its geometry-free sibling, and the ``in-memory`` strategy -- so the
+    row-group count (:func:`resolve_row_group_rows_for_table`), the codec and
+    level (``compression.resolve_codec``), the dictionary policy
+    (:func:`dictionary_columns`) and the file-level keys
+    (:func:`apply_output_kv_metadata`) are decided once. It moved here from
+    ``arrow_geo_metadata._write_table_with_settings``: a module that builds
+    ``geo`` blocks had become a second writer beside the funnels.
+
+    The table's ``geo`` block, when it has one, is the caller's: this writes
+    what it is given rather than letting geoarrow regenerate it.
+
+    Args:
+        table: PyArrow Table to write
+        output_path: Output file path
+        compression: Compression type (ZSTD, GZIP, etc.)
+        compression_level: Compression level
+        row_group_rows: Exact number of rows per row group
+        row_group_size_mb: Target row group size in MB
+        geoparquet_version: GeoParquet version
+        geometry_column: Name of the geometry column, or None for a table
+            with no geometry
+        verbose: Whether to print verbose output
+        extra_kv_metadata: The caller's file-level keys. Passed again here so
+            this last pass does not drop a caller key named like a carried one
+    """
+    # The facade's row-group decision, including the MB -> rows sizing. Calling
+    # it again after write_geoparquet_table already resolved is harmless and
+    # silent; the paths that reach here without resolving still land on the one
+    # number rather than pyarrow's own default (#1021).
+    rows_per_group = resolve_row_group_rows_for_table(table, row_group_rows, row_group_size_mb)
+
+    # Use central configuration for write settings
+    settings = ParquetWriteSettings(
+        compression=compression,
+        compression_level=compression_level,
+        row_group_rows=row_group_rows,
+        row_group_size_mb=row_group_size_mb,
+    )
+    write_kwargs = settings.get_pyarrow_kwargs(
+        calculated_row_group_size=rows_per_group,
+        schema=table.schema,
+        geometry_columns=[geometry_column] if geometry_column else (),
+    )
+
+    if verbose:
+        codec = resolve_codec(compression, compression_level, context="write")
+        debug(f"Writing with {codec.description} compression")
+        debug(f"Row group size: {rows_per_group:,} rows")
+
+    # The facade has the last word on the file-level keys, here at the one
+    # place every Arrow-table write reaches: the table funnel and the helpers
+    # that call this directly never pass through a strategy (#1268).
+    table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
+
+    import pyarrow.parquet as pq
+
+    pq.write_table(table, output_path, **write_kwargs)
+
+    if verbose:
+        success(f"Wrote {table.num_rows:,} rows to {output_path}")

@@ -51,7 +51,6 @@ from geoparquet_io.core.geo_metadata import (
 )
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.parquet_writer import (
-    DEFAULT_ROW_GROUP_ROWS,
     apply_output_kv_metadata,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
@@ -357,7 +356,7 @@ def write_overview_file(
     try:
         _check_level_schemas(files, levels)
         data_schema = _cast_plan(files, levels)
-        rows_per_group = resolve_row_group_rows(None, None) or DEFAULT_ROW_GROUP_ROWS
+        rows_per_group = resolve_row_group_rows(None, None)
         ends = _row_group_ends([pf.metadata.num_rows for pf in files], rows_per_group)
         schema = _output_schema(
             files, levels[-1].path, data_schema, _footer(levels, ends), geoparquet_version, verbose

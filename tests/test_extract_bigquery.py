@@ -1418,17 +1418,28 @@ class TestFacadeSizesAnMbTarget:
         assert rows is not None
         assert 1 <= rows < 20_000
 
-    def test_an_mb_target_never_exceeds_the_table(self):
-        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+    def test_an_mb_target_bigger_than_the_table_is_one_group_in_whole_vectors(self):
+        """Not capped at the table: one group either way, and a whole vector
+        keeps the next resolve along the write from announcing a rounding."""
+        from geoparquet_io.core.parquet_writer import (
+            WRITER_VECTOR_ROWS,
+            resolve_row_group_rows_for_table,
+        )
 
         table = _bq_result_table(100)
-        assert resolve_row_group_rows_for_table(table, None, 1024.0) == 100
+        rows = resolve_row_group_rows_for_table(table, None, 1024.0)
+        assert rows >= table.num_rows
+        assert rows % WRITER_VECTOR_ROWS == 0
 
-    def test_an_empty_table_keeps_the_mb_target_unsized(self):
-        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+    def test_an_empty_table_gets_the_default(self):
+        """Nothing to measure: a row count all the same, never None for a writer."""
+        from geoparquet_io.core.parquet_writer import (
+            DEFAULT_ROW_GROUP_ROWS,
+            resolve_row_group_rows_for_table,
+        )
 
         table = pa.table({"id": pa.array([], pa.int64())})
-        assert resolve_row_group_rows_for_table(table, None, 1.0) is None
+        assert resolve_row_group_rows_for_table(table, None, 1.0) == DEFAULT_ROW_GROUP_ROWS
 
     def test_an_explicit_row_count_wins_over_an_mb_target(self):
         from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
@@ -1445,11 +1456,14 @@ class TestFacadeSizesAnMbTarget:
         table = _bq_result_table(20_000)
         assert resolve_row_group_rows_for_table(table, None, 0.001) == WRITER_VECTOR_ROWS
 
-    def test_the_floor_still_caps_at_the_table(self):
-        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+    def test_the_floor_holds_on_a_small_table(self):
+        from geoparquet_io.core.parquet_writer import (
+            WRITER_VECTOR_ROWS,
+            resolve_row_group_rows_for_table,
+        )
 
         table = _bq_result_table(100)
-        assert resolve_row_group_rows_for_table(table, None, 0.001) == 100
+        assert resolve_row_group_rows_for_table(table, None, 0.001) == WRITER_VECTOR_ROWS
 
     @pytest.mark.parametrize("mb", [0.0, -1.0])
     def test_a_non_positive_mb_target_is_rejected(self, mb):

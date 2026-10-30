@@ -51,6 +51,7 @@ from geoparquet_io.core.geo_metadata import (
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
+from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_query
 from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
@@ -59,7 +60,6 @@ from geoparquet_io.core.write_strategies.base import (
     type_crs_for,
     wrap_query_with_secondary_crs,
 )
-from geoparquet_io.core.write_strategies.row_group_sizing import _resolve_row_group_rows
 
 
 def _wrap_query_with_crs(
@@ -251,8 +251,8 @@ class DuckDBKVStrategy(BaseWriteStrategy):
 
         # DuckDB COPY TO sizes row groups by row count, so translate any MB target
         # into rows before it can take effect on this strategy (fixes #547).
-        row_group_rows = _resolve_row_group_rows(
-            con, query, row_group_size_mb, row_group_rows, verbose
+        row_group_rows = resolve_row_group_rows_for_query(
+            con, query, row_group_rows, row_group_size_mb, verbose
         )
 
         # Handle non-geo queries: write plain Parquet without geo metadata

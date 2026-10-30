@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import duckdb
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
-from geoparquet_io.core.check_parquet_structure import get_compression_info, get_row_group_stats
+from geoparquet_io.core.check_parquet_structure import get_compression_info
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.compression import codec_from_footer
 from geoparquet_io.core.duckdb_metadata import get_schema_info, is_native_geo_column
@@ -45,7 +45,7 @@ from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, success, warn
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_footer import FooterPatchUnsupported, patch_footer_kv
-from geoparquet_io.core.parquet_writer import geoparquet_copy_options
+from geoparquet_io.core.parquet_writer import geoparquet_copy_options, resolve_row_group_rows
 from geoparquet_io.core.streaming import find_geometry_column_from_table
 
 if TYPE_CHECKING:
@@ -465,15 +465,17 @@ def _rewrite_with_geo(
     re-encodes every page, which is why it cannot preserve the compression
     level -- Parquet does not record it, so the file's codec comes back at the
     owner's default level for it (ZSTD 15; ``codec_from_footer``) -- and why it
-    re-chunks a file with uneven row groups. Everything
+    writes the facade's row groups (``resolve_row_group_rows``) rather than the
+    input's. Everything
     it does defend (the geometry column's physical type, #712; the quoting of
     preserved keys, #700 and #756) is a consequence of re-encoding that the
     footer patch does not have to think about.
     """
-    # Get original file properties
-    row_group_stats = get_row_group_stats(parquet_file)
+    # The row-group count is the facade's, like every other write's: the
+    # input's *average* rows per group re-chunked an uneven file into groups it
+    # never had, and a one-group input stayed one group (approved change 3).
     compression_info = get_compression_info(parquet_file, primary_col)
-    row_group_size = int(row_group_stats["avg_rows_per_group"])
+    row_group_size = resolve_row_group_rows(None, None)
     compression = compression_info[primary_col]
 
     # A destination that already exists (the input itself, in place) is
