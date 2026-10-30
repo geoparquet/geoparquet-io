@@ -351,7 +351,6 @@ def test_1014_explicit_4326_block_against_a_5070_logical_type_is_not_silent(tmp_
 SECRET = "SUPERSECRETKEY123"
 
 
-@pytest.mark.xfail(strict=True, reason="#1034")
 def test_1034_wfs_error_output_does_not_carry_the_api_key(tmp_path, monkeypatch):
     """Expected to fail: the ``Error:`` line repeats ``apikey=SUPERSECRETKEY123``.
 
