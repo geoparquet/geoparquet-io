@@ -69,6 +69,7 @@ import json
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -82,23 +83,24 @@ from geoparquet_io.cli.main import cli
 from geoparquet_io.core.add.a5 import add_a5_column, add_a5_table
 from geoparquet_io.core.add.h3 import add_h3_column, add_h3_table
 from geoparquet_io.core.add.quadkey import (
-    _lat_lon_to_quadkey,
     add_quadkey_column,
     add_quadkey_table,
 )
 from geoparquet_io.core.add.s2 import add_s2_column, add_s2_table
 from geoparquet_io.core.crs_utils import get_crs_display_name
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.index_ops import (
+    calculate_index_resolution,
+    get_index_spec,
+    lat_lon_to_quadkey,
+    validate_partition_resolutions,
+)
 from geoparquet_io.core.partition.auto_resolution import (
-    _calculate_a5_resolution,
-    _calculate_h3_resolution,
-    _calculate_quadkey_resolution,
     calculate_auto_resolution,
 )
 from geoparquet_io.core.partition.by_a5 import partition_by_a5
 from geoparquet_io.core.partition.by_h3 import partition_by_h3
 from geoparquet_io.core.partition.by_quadkey import (
-    _validate_resolutions,
     partition_by_quadkey,
 )
 from geoparquet_io.core.partition.by_s2 import partition_by_s2
@@ -227,7 +229,7 @@ A5 = IndexSpec(
     hive_prefix="a5_cell=",
     auto_hive_prefix="a5_cell=",
     auto_conflict_resolution=15,
-    calc=_calculate_a5_resolution,
+    calc=partial(calculate_index_resolution, get_index_spec("a5")),
     calc_expect=CalcExpect(
         # A5/S2: power-of-4 progression with 6 base cells.
         small=(0, 2),
@@ -261,7 +263,7 @@ H3 = IndexSpec(
     partition_col_kw="h3_column_name",
     auto_hive_prefix="h3_cell=",
     auto_conflict_resolution=5,
-    calc=_calculate_h3_resolution,
+    calc=partial(calculate_index_resolution, get_index_spec("h3")),
     calc_expect=CalcExpect(
         # H3: ~122 cells at res 0, ~7x more per level.
         small=(0, 2),
@@ -299,8 +301,7 @@ S2 = IndexSpec(
     partition_invalid_resolution=31,
     partition_invalid_match="must be between 0 and 30",
     hive_prefix="s2_cell=",
-    calc=_calculate_a5_resolution,  # S2 shares A5's math (6 base cells, x4)
-    calc_kwargs={"index_name": "S2"},
+    calc=partial(calculate_index_resolution, get_index_spec("s2")),
     calc_expect=CalcExpect(
         small=(0, 2),
         medium=(0, 2),
@@ -334,7 +335,7 @@ QUADKEY = IndexSpec(
     auto_conflict_match="(?i)cannot specify --resolution or --partition-resolution",
     auto_first_kwargs={"partition_resolution": None, "use_centroid": False},
     auto_manual_extra=lambda res: {"partition_resolution": res},
-    calc=_calculate_quadkey_resolution,
+    calc=partial(calculate_index_resolution, get_index_spec("quadkey")),
     calc_expect=CalcExpect(
         # Quadkey: 4^zoom tiles.
         small=(0, 3),
@@ -1080,26 +1081,26 @@ class TestAddS2Specific:
 
 
 class TestLatLonToQuadkey:
-    """Tests for _lat_lon_to_quadkey function."""
+    """Tests for lat_lon_to_quadkey function."""
 
     def test_known_location(self):
         """Test quadkey generation for a known location."""
         # San Francisco area at zoom level 10
-        quadkey = _lat_lon_to_quadkey(37.7749, -122.4194, 10)
+        quadkey = lat_lon_to_quadkey(37.7749, -122.4194, 10)
         assert isinstance(quadkey, str)
         assert len(quadkey) == 10
 
     def test_equator_prime_meridian(self):
         """Test quadkey at equator/prime meridian."""
-        quadkey = _lat_lon_to_quadkey(0.0, 0.0, 5)
+        quadkey = lat_lon_to_quadkey(0.0, 0.0, 5)
         assert isinstance(quadkey, str)
         assert len(quadkey) == 5
 
     def test_different_resolutions(self):
         """Test that higher resolution produces longer quadkeys."""
         lat, lon = 40.7128, -74.0060  # New York
-        qk_low = _lat_lon_to_quadkey(lat, lon, 5)
-        qk_high = _lat_lon_to_quadkey(lat, lon, 15)
+        qk_low = lat_lon_to_quadkey(lat, lon, 5)
+        qk_high = lat_lon_to_quadkey(lat, lon, 15)
         assert len(qk_low) == 5
         assert len(qk_high) == 15
         # Higher resolution should start with the lower resolution key
@@ -1166,7 +1167,7 @@ HOSTILE_QUADKEY_NAMES = ["weird name", 'has"quote', "quad-key", "SELECT"]
 def _expected_bbox_quadkeys(table, resolution):
     """Golden quadkeys computed in Python from the bbox struct midpoints."""
     return [
-        _lat_lon_to_quadkey(
+        lat_lon_to_quadkey(
             (b["ymin"] + b["ymax"]) / 2.0,
             (b["xmin"] + b["xmax"]) / 2.0,
             resolution,
@@ -1295,29 +1296,29 @@ class TestQuadkeyColumnNameQuoting:
 
 
 class TestValidateResolutions:
-    """Tests for quadkey's _validate_resolutions function."""
+    """Tests for quadkey's validate_partition_resolutions function."""
 
     def test_valid_resolutions(self):
         """Test with valid resolutions."""
         # Should not raise
-        _validate_resolutions(13, 9)
-        _validate_resolutions(23, 23)
-        _validate_resolutions(0, 0)
+        validate_partition_resolutions(13, 9)
+        validate_partition_resolutions(23, 23)
+        validate_partition_resolutions(0, 0)
 
     def test_resolution_out_of_range(self):
         """Test with resolution out of range."""
         with pytest.raises(InvalidParameterError):
-            _validate_resolutions(25, 9)
+            validate_partition_resolutions(25, 9)
 
     def test_partition_resolution_out_of_range(self):
         """Test with partition resolution out of range."""
         with pytest.raises(InvalidParameterError):
-            _validate_resolutions(13, 25)
+            validate_partition_resolutions(13, 25)
 
     def test_partition_resolution_exceeds_resolution(self):
         """Test with partition resolution exceeding column resolution."""
         with pytest.raises(InvalidParameterError):
-            _validate_resolutions(5, 10)
+            validate_partition_resolutions(5, 10)
 
 
 class TestCalculatePartitionStats:

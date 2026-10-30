@@ -386,67 +386,36 @@ def partition_h3(
         # Sub-partition all files over 100MB in a directory
         gpio partition h3 /data/partitions/ --min-size 100MB --resolution 4 --in-place
     """
-    with _activate_s3(ctx):
-        # Handle directory input with --min-size
-        if handle_directory_sub_partition(
-            input_parquet=input_parquet,
-            partition_type="h3",
-            min_size=min_size,
-            resolution=resolution,
-            preview=preview,
-            column_name=h3_name,
-            output_folder=output_folder,
-            in_place=in_place,
-            hive=hive,
-            overwrite=overwrite,
-            verbose=verbose,
-            force=force,
-            skip_analysis=skip_analysis,
-            compression=compression,
-            compression_level=compression_level,
-            auto=auto,
-            target_rows=target_rows,
-            max_partitions=max_partitions,
-        ):
-            return
-
-        # Existing single-file logic continues below...
-
-        # If preview mode, output_folder is not required
-        if not preview and not output_folder:
-            raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
-
-        # Validate mutual exclusivity of row group options and get MB value
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
-
-        # Convert flag to None if not explicitly set, so implementation can determine default
-        keep_h3_col = True if keep_h3_column else None
-
-        partition_by_h3_impl(
-            input_parquet,
-            output_folder,
-            h3_name,
-            resolution,
-            hive,
-            overwrite,
-            preview,
-            preview_limit,
-            verbose,
-            keep_h3_col,
-            force,
-            skip_analysis,
-            prefix,
-            None,
-            geoparquet_version,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_mb,
-            row_group_rows=row_group_size,
-            memory_limit=write_memory,
-            auto=auto,
-            target_rows=target_rows,
-            max_partitions=max_partitions,
-        )
+    return _partition_cell_index(
+        "h3",
+        partition_by_h3_impl,
+        ctx,
+        input_parquet,
+        output_folder,
+        h3_name,
+        resolution,
+        auto,
+        target_rows,
+        max_partitions,
+        keep_h3_column,
+        hive,
+        overwrite,
+        preview,
+        preview_limit,
+        force,
+        skip_analysis,
+        min_size,
+        in_place,
+        prefix,
+        compression,
+        compression_level,
+        row_group_size,
+        row_group_size_mb,
+        write_memory,
+        verbose,
+        geoparquet_version,
+        show_sql,
+    )
 
 
 @partition.command(name="s2", cls=SingleFileCommand)
@@ -561,65 +530,36 @@ def partition_s2(
         # Sub-partition all files over 100MB in a directory
         gpio partition s2 /data/partitions/ --min-size 100MB --level 10 --in-place
     """
-    with _activate_s3(ctx):
-        # Handle directory input with --min-size
-        if handle_directory_sub_partition(
-            input_parquet=input_parquet,
-            partition_type="s2",
-            min_size=min_size,
-            level=level,  # S2 uses "level" not "resolution"
-            preview=preview,
-            column_name=s2_name,
-            output_folder=output_folder,
-            in_place=in_place,
-            hive=hive,
-            overwrite=overwrite,
-            verbose=verbose,
-            force=force,
-            skip_analysis=skip_analysis,
-            compression=compression,
-            compression_level=compression_level,
-            auto=auto,
-            target_rows=target_rows,
-            max_partitions=max_partitions,
-        ):
-            return
-
-        # If preview mode, output_folder is not required
-        if not preview and not output_folder:
-            raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
-
-        # Validate mutual exclusivity of row group options and get MB value
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
-
-        # Convert flag to None if not explicitly set, so implementation can determine default
-        keep_s2_col = True if keep_s2_column else None
-
-        partition_by_s2_impl(
-            input_parquet,
-            output_folder,
-            s2_name,
-            level,
-            hive,
-            overwrite,
-            preview,
-            preview_limit,
-            verbose,
-            keep_s2_col,
-            force,
-            skip_analysis,
-            prefix,
-            None,
-            geoparquet_version,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_mb,
-            row_group_rows=row_group_size,
-            memory_limit=write_memory,
-            auto=auto,
-            target_rows=target_rows,
-            max_partitions=max_partitions,
-        )
+    return _partition_cell_index(
+        "s2",
+        partition_by_s2_impl,
+        ctx,
+        input_parquet,
+        output_folder,
+        s2_name,
+        level,
+        auto,
+        target_rows,
+        max_partitions,
+        keep_s2_column,
+        hive,
+        overwrite,
+        preview,
+        preview_limit,
+        force,
+        skip_analysis,
+        min_size,
+        in_place,
+        prefix,
+        compression,
+        compression_level,
+        row_group_size,
+        row_group_size_mb,
+        write_memory,
+        verbose,
+        geoparquet_version,
+        show_sql,
+    )
 
 
 @partition.command(name="a5", cls=SingleFileCommand)
@@ -730,65 +670,36 @@ def partition_a5(
         # Sub-partition all files over 100MB in a directory
         gpio partition a5 /data/partitions/ --min-size 100MB --resolution 10 --in-place
     """
-    with _activate_s3(ctx):
-        # Handle directory input with --min-size
-        if handle_directory_sub_partition(
-            input_parquet=input_parquet,
-            partition_type="a5",
-            min_size=min_size,
-            resolution=resolution,
-            preview=preview,
-            column_name=a5_name,
-            output_folder=output_folder,
-            in_place=in_place,
-            hive=hive,
-            overwrite=overwrite,
-            verbose=verbose,
-            force=force,
-            skip_analysis=skip_analysis,
-            compression=compression,
-            compression_level=compression_level,
-            auto=auto,
-            target_rows=target_rows,
-            max_partitions=max_partitions,
-        ):
-            return
-
-        # If preview mode, output_folder is not required
-        if not preview and not output_folder:
-            raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
-
-        # Validate mutual exclusivity of row group options and get MB value
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
-
-        # Convert flag to None if not explicitly set, so implementation can determine default
-        keep_a5_col = True if keep_a5_column else None
-
-        partition_by_a5_impl(
-            input_parquet,
-            output_folder,
-            a5_name,
-            resolution,
-            hive,
-            overwrite,
-            preview,
-            preview_limit,
-            verbose,
-            keep_a5_col,
-            force,
-            skip_analysis,
-            prefix,
-            None,
-            geoparquet_version,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_mb,
-            row_group_rows=row_group_size,
-            memory_limit=write_memory,
-            auto=auto,
-            target_rows=target_rows,
-            max_partitions=max_partitions,
-        )
+    return _partition_cell_index(
+        "a5",
+        partition_by_a5_impl,
+        ctx,
+        input_parquet,
+        output_folder,
+        a5_name,
+        resolution,
+        auto,
+        target_rows,
+        max_partitions,
+        keep_a5_column,
+        hive,
+        overwrite,
+        preview,
+        preview_limit,
+        force,
+        skip_analysis,
+        min_size,
+        in_place,
+        prefix,
+        compression,
+        compression_level,
+        row_group_size,
+        row_group_size_mb,
+        write_memory,
+        verbose,
+        geoparquet_version,
+        show_sql,
+    )
 
 
 @partition.command(name="kdtree", cls=SingleFileCommand)
@@ -1053,17 +964,85 @@ def partition_quadkey(
         # Sub-partition all files over 100MB in a directory
         gpio partition quadkey /data/partitions/ --min-size 100MB --auto --in-place
     """
+    return _partition_cell_index(
+        "quadkey",
+        partition_by_quadkey_impl,
+        ctx,
+        input_parquet,
+        output_folder,
+        quadkey_column,
+        resolution,
+        auto,
+        target_rows,
+        max_partitions,
+        keep_quadkey_column,
+        hive,
+        overwrite,
+        preview,
+        preview_limit,
+        force,
+        skip_analysis,
+        min_size,
+        in_place,
+        prefix,
+        compression,
+        compression_level,
+        row_group_size,
+        row_group_size_mb,
+        write_memory,
+        verbose,
+        geoparquet_version,
+        show_sql,
+        partition_resolution=partition_resolution,
+        use_centroid=use_centroid,
+    )
+
+
+def _partition_cell_index(
+    index_name,
+    implementation,
+    ctx,
+    input_parquet,
+    output_folder,
+    column_name,
+    resolution,
+    auto,
+    target_rows,
+    max_partitions,
+    keep_column,
+    hive,
+    overwrite,
+    preview,
+    preview_limit,
+    force,
+    skip_analysis,
+    min_size,
+    in_place,
+    prefix,
+    compression,
+    compression_level,
+    row_group_size,
+    row_group_size_mb,
+    write_memory,
+    verbose,
+    geoparquet_version,
+    show_sql,
+    partition_resolution=None,
+    use_centroid=False,
+):
+    resolution_key = "level" if index_name == "s2" else "resolution"
+    index_options = {resolution_key: resolution}
+    if index_name == "quadkey":
+        index_options.update(partition_resolution=partition_resolution, use_centroid=use_centroid)
     with _activate_s3(ctx):
         # Handle directory input with --min-size
         if handle_directory_sub_partition(
             input_parquet=input_parquet,
-            partition_type="quadkey",
+            partition_type=index_name,
             min_size=min_size,
-            resolution=resolution,
-            partition_resolution=partition_resolution,
-            use_centroid=use_centroid,
+            **index_options,
             preview=preview,
-            column_name=quadkey_column,
+            column_name=column_name,
             output_folder=output_folder,
             in_place=in_place,
             hive=hive,
@@ -1079,6 +1058,8 @@ def partition_quadkey(
         ):
             return
 
+        # Existing single-file logic continues below...
+
         # If preview mode, output_folder is not required
         if not preview and not output_folder:
             raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
@@ -1087,24 +1068,22 @@ def partition_quadkey(
         row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
         # Convert flag to None if not explicitly set, so implementation can determine default
-        keep_quadkey_col = True if keep_quadkey_column else None
+        keep_col = True if keep_column else None
 
-        partition_by_quadkey_impl(
+        implementation(
             input_parquet,
             output_folder,
-            quadkey_column_name=quadkey_column,
-            resolution=resolution,
-            partition_resolution=partition_resolution,
-            use_centroid=use_centroid,
+            **{f"{index_name}_column_name": column_name, f"keep_{index_name}_column": keep_col},
+            **index_options,
             hive=hive,
             overwrite=overwrite,
             preview=preview,
             preview_limit=preview_limit,
             verbose=verbose,
-            keep_quadkey_column=keep_quadkey_col,
             force=force,
             skip_analysis=skip_analysis,
             filename_prefix=prefix,
+            profile=None,
             geoparquet_version=geoparquet_version,
             compression=compression,
             compression_level=compression_level,

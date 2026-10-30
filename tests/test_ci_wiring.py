@@ -54,7 +54,7 @@ REQUIRED_CONTEXTS = ["all-checks", "pr-title"]
 # entry must NOT exist yet; the track that creates the file deletes its entry
 # here in the same commit. This list only shrinks, and ends empty.
 PENDING_CODEOWNERS_PATHS = {
-    "geoparquet_io/core/index_ops.py",  # created by T5
+    "geoparquet_io/core/edges.py",  # created by T3
 }
 
 CODEOWNER = "@nlebovits"

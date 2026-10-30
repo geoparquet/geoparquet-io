@@ -86,7 +86,7 @@ def partition_by_string(
         filename_prefix: Optional prefix for partition filenames
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write
-        compression: Compression codec (default: ZSTD)
+        compression: Compression codec (default: the compression owner's)
         compression_level: Compression level (default: 15)
         row_group_size_mb: Row group size in MB (mutually exclusive with row_group_rows)
         row_group_rows: Row group size in number of rows (mutually exclusive with row_group_size_mb)

@@ -12,15 +12,14 @@ the probe's fallback warning (#778) and the verbose index-name output.
 """
 
 import logging
+from functools import partial
 
 import pytest
 
 from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.index_ops import calculate_index_resolution, get_index_spec
 from geoparquet_io.core.logging_config import get_logger
 from geoparquet_io.core.partition.auto_resolution import (
-    _calculate_a5_resolution,
-    _calculate_h3_resolution,
-    _calculate_quadkey_resolution,
     _probe_extent_resolution,
     calculate_auto_resolution,
 )
@@ -197,7 +196,9 @@ class TestAutoResolutionMath:
         target_rows = 100
         # This should give us ~1000 partitions
 
-        resolution = _calculate_h3_resolution(total_rows, target_rows)
+        resolution = partial(calculate_index_resolution, get_index_spec("h3"))(
+            total_rows, target_rows
+        )
 
         # Verify result is close to expected
         expected_partitions = 122 * (7**resolution)
@@ -217,7 +218,9 @@ class TestAutoResolutionMath:
         target_rows = 100
         # This should give us ~1024 partitions
 
-        resolution = _calculate_quadkey_resolution(total_rows, target_rows)
+        resolution = partial(calculate_index_resolution, get_index_spec("quadkey"))(
+            total_rows, target_rows
+        )
 
         # Verify result is close to expected
         expected_partitions = 4**resolution
@@ -324,29 +327,27 @@ class TestVerboseOutput:
     def test_s2_verbose_output_uses_s2_name(self, caplog):
         """Verbose output should show 'S2' for S2 index type."""
         with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            _calculate_a5_resolution(
+            partial(calculate_index_resolution, get_index_spec("s2"))(
                 total_rows=100000,
                 target_rows_per_partition=1000,
                 verbose=True,
-                index_name="S2",
             )
         assert "S2 auto-resolution" in caplog.text
 
     def test_a5_verbose_output_uses_a5_name(self, caplog):
         """Verbose output should show 'A5' for A5 index type."""
         with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            _calculate_a5_resolution(
+            partial(calculate_index_resolution, get_index_spec("a5"))(
                 total_rows=100000,
                 target_rows_per_partition=1000,
                 verbose=True,
-                index_name="A5",
             )
         assert "A5 auto-resolution" in caplog.text
 
     def test_h3_verbose_output_uses_h3_name(self, caplog):
         """Verbose output should show 'H3' for H3 index type."""
         with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            _calculate_h3_resolution(
+            partial(calculate_index_resolution, get_index_spec("h3"))(
                 total_rows=100000,
                 target_rows_per_partition=1000,
                 verbose=True,
@@ -356,7 +357,7 @@ class TestVerboseOutput:
     def test_quadkey_verbose_output_uses_quadkey_name(self, caplog):
         """Verbose output should show 'Quadkey' for Quadkey index type."""
         with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            _calculate_quadkey_resolution(
+            partial(calculate_index_resolution, get_index_spec("quadkey"))(
                 total_rows=100000,
                 target_rows_per_partition=1000,
                 verbose=True,
@@ -460,11 +461,17 @@ class TestExtentAwareResolution:
         target_rows = 80  # ~100 target partitions
 
         if index_type in ("a5", "s2"):
-            global_res = _calculate_a5_resolution(total_rows, target_rows)
+            global_res = partial(calculate_index_resolution, get_index_spec("a5"))(
+                total_rows, target_rows
+            )
         elif index_type == "h3":
-            global_res = _calculate_h3_resolution(total_rows, target_rows)
+            global_res = partial(calculate_index_resolution, get_index_spec("h3"))(
+                total_rows, target_rows
+            )
         else:
-            global_res = _calculate_quadkey_resolution(total_rows, target_rows)
+            global_res = partial(calculate_index_resolution, get_index_spec("quadkey"))(
+                total_rows, target_rows
+            )
 
         extent_res = calculate_auto_resolution(
             input_parquet=clustered_file,
@@ -535,7 +542,7 @@ class TestExtentAwareResolution:
             target_rows_per_partition=80,
         )
         # Falls back to the pure-math global formula for the same row count.
-        expected = _calculate_a5_resolution(8000, 80)
+        expected = partial(calculate_index_resolution, get_index_spec("a5"))(8000, 80)
         assert res == expected
 
     def test_sampling_path_for_large_file(self, tmp_path):
@@ -583,6 +590,6 @@ class TestExtentAwareResolution:
         )
         # The probe finds no non-empty cells, so the global formula is used
         # instead of silently collapsing to the coarsest (min) resolution.
-        expected = _calculate_a5_resolution(8000, 80)
+        expected = partial(calculate_index_resolution, get_index_spec("a5"))(8000, 80)
         assert res == expected
         assert res > 0
