@@ -18,9 +18,11 @@ import os
 from typing import Any
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.bbox_structure import bbox_covering_column_for
+from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
@@ -124,6 +126,28 @@ def _first_wkb(values_iter) -> bytes | None:
     return next((v for v in values_iter if v is not None), None)
 
 
+def _first_wkb_of(column) -> bytes | None:
+    """The first non-null WKB value in an Arrow array or chunked array.
+
+    Scans chunk by chunk and locates the first valid row with an index kernel
+    over the validity bitmap, so a column whose first batches are all null
+    costs a bitmap read — not the materialized Python list per chunk that the
+    generator over ``to_pylist()`` cost (lazy or not, ``to_pylist`` builds the
+    whole list before the generator sees its first element), and not the
+    filtered copy of a chunk's non-null bytes that ``drop_null()`` builds just
+    to read one element.
+    """
+    chunks = column.chunks if isinstance(column, pa.ChunkedArray) else [column]
+    for chunk in chunks:
+        if not len(chunk):
+            continue
+        i = pc.index(pc.is_valid(chunk), True).as_py()
+        if i >= 0:
+            value: bytes = chunk[i].as_py()
+            return value
+    return None
+
+
 def _geometry_column_of(table: pa.Table, override: str | None) -> str:
     """Resolve the geometry column: override, carried primary, or 'geometry'."""
     name = override
@@ -169,7 +193,7 @@ def _with_wkb_storage(table: pa.Table, geom_col: str) -> pa.Table:
 
 
 def _simplify_values(
-    values: list,
+    column,
     tolerance: float,
     *,
     coverage: bool,
@@ -178,32 +202,67 @@ def _simplify_values(
     threads: int | None,
     forward=None,
     inverse=None,
-) -> tuple[list, int, list, Any, list]:
-    """Simplify a list of WKB values (``None`` passes through).
+) -> tuple[Any, int, Any, Any, Any]:
+    """Simplify one Arrow WKB array or chunked array (nulls pass through).
 
-    Returns the new WKB list, the count of geometries the operation
-    collapsed to empty, a per-row mask that is True where the output
-    geometry is empty (nulls are never marked), the simplified shapely
+    Returns the new WKB values as an object array, the count of geometries the
+    operation collapsed to empty, a per-row boolean mask that is True where the
+    output geometry is empty (nulls are never marked), the simplified shapely
     geometry array for the non-null rows, and those rows' positions — so
     callers fold stats and bounds without re-parsing the output WKB.
+
+    A chunked column is taken as-is: ``to_numpy`` and ``pc.is_valid`` fold it
+    chunk by chunk, so coverage mode never concatenates at the Arrow level —
+    on a ``binary`` column past 2 GiB of WKB that concat overflows the int32
+    offsets (ArrowInvalid), and below it it holds a second full copy of the
+    column (#1285 fixed the same hazard in ``hilbert_order``).
+
+    Everything per-row here is a numpy or Arrow kernel, never a Python loop.
+    These costs are flat per row, so on a file of many small geometries they,
+    not the Rust kernel, set the pace: in a 1M-building profile
+    ``coarsen._core`` was 7% of the time and the loops this replaced were most
+    of the rest (#1300). ``column`` is an Arrow (chunked) array rather than a
+    list for the same reason — the bytes objects still have to exist for
+    shapely, but the per-row Scalar boxing and the second list that
+    ``to_pylist`` plus a comprehension built are gone.
     """
     coarsen = require_coarsen()
     shapely = load_module("shapely")
 
     np = load_module("numpy")
 
-    idx = [i for i, v in enumerate(values) if v is not None]
-    if not idx:
-        return list(values), 0, [False] * len(values), np.empty(0, dtype=object), []
+    n_rows = len(column)
+    # pc.is_valid is the null mask, read from Arrow's validity bitmap rather
+    # than by testing a million values for None.
+    valid = pc.is_valid(column).to_numpy(zero_copy_only=False)
+    idx = np.flatnonzero(valid)
+    wkb_all = column.to_numpy(zero_copy_only=False)
+    if idx.size == 0:
+        return (
+            wkb_all,
+            0,
+            np.zeros(n_rows, dtype=bool),
+            np.empty(0, dtype=object),
+            idx,
+        )
     try:
-        geoms = shapely.from_wkb(np.array([values[i] for i in idx], dtype=object))
+        geoms = shapely.from_wkb(wkb_all[idx])
     except Exception as e:
         raise GeoParquetError(f"could not parse a WKB geometry in the input: {e}") from e
     if forward is not None:
         geoms = shapely.transform(geoms, forward)
+    out_wkb = None
     if coverage:
-        out = coarsen.coverage_simplify(
-            geoms, tolerance, simplify_boundary=simplify_boundary, threads=threads
+        out, out_wkb = _coverage_out(
+            coarsen,
+            shapely,
+            np,
+            geoms,
+            wkb_all[idx],
+            tolerance,
+            simplify_boundary=simplify_boundary,
+            threads=threads,
+            transformed=forward is not None or inverse is not None,
         )
     else:
         out = coarsen.simplify(geoms, tolerance, preserve_topology, threads=threads)
@@ -211,18 +270,63 @@ def _simplify_values(
         out = shapely.transform(out, inverse)
     out_empty = shapely.is_empty(out)
     collapsed = int(np.sum(out_empty)) - int(np.sum(shapely.is_empty(geoms)))
-    result: list = [None] * len(values)
-    empty_mask = [False] * len(values)
-    for i, wkb, is_empty in zip(idx, shapely.to_wkb(out), out_empty, strict=True):
-        result[i] = wkb
-        empty_mask[i] = bool(is_empty)
+    # Scatter by index instead of walking the rows: nulls keep their None and
+    # everything else takes its new WKB in one assignment.
+    result = np.full(n_rows, None, dtype=object)
+    result[idx] = shapely.to_wkb(out) if out_wkb is None else out_wkb
+    empty_mask = np.zeros(n_rows, dtype=bool)
+    empty_mask[idx] = out_empty
     return result, max(collapsed, 0), empty_mask, out, idx
 
 
-def _row_bounds(shapely, np, n_rows: int, geoms: Any, idx: list) -> Any:
+def _coverage_out(
+    coarsen,
+    shapely,
+    np,
+    geoms,
+    wkb_in,
+    tolerance: float,
+    *,
+    simplify_boundary: bool,
+    threads: int | None,
+    transformed: bool,
+) -> tuple[Any, Any]:
+    """Coverage-simplify ``geoms``, via coarsen's WKB kernel when it applies.
+
+    ``coarsen.simplify_wkb`` is the coverage kernel ``coverage_simplify``
+    wraps, taking and returning WKB directly: handing it the column's own
+    bytes skips the wrapper's ``to_wkb`` pass over the inputs, and its output
+    lands in the result column without a second serialization (#1223). It is
+    undocumented API and skippable by design: when a ``--simplify-crs``
+    transform rewrote the geometries (``transformed`` — the column's WKB is
+    no longer the kernel's input) or the installed coarsen does not export
+    the symbol, the wrapped kernel runs exactly as before.
+
+    Returns ``(out_geoms, out_wkb)``; ``out_wkb`` is None on the wrapped
+    path, where the caller serializes ``out_geoms`` itself. The non-polygonal
+    pre-check reproduces the wrapper's own refusal — same TypeError, same
+    message — because the kernel's is a differently-typed, differently-worded
+    ``ValueError`` (pinned in TestCoverageWkbShortcut).
+    """
+    simplify_wkb = getattr(coarsen, "simplify_wkb", None)
+    if transformed or simplify_wkb is None:
+        out = coarsen.coverage_simplify(
+            geoms, tolerance, simplify_boundary=simplify_boundary, threads=threads
+        )
+        return out, None
+    if not np.isin(shapely.get_type_id(geoms), (3, 6)).all():
+        raise TypeError("One of the Geometry inputs is of incorrect geometry type.")
+    out_wkb = np.array(
+        simplify_wkb(list(wkb_in), tolerance, simplify_boundary=simplify_boundary, threads=threads),
+        dtype=object,
+    )
+    return shapely.from_wkb(out_wkb), out_wkb
+
+
+def _row_bounds(shapely, np, n_rows: int, geoms: Any, idx: Any) -> Any:
     """Per-row ``(n, 4)`` bounds of the simplified geometries; NaN rows for nulls."""
     bounds = np.full((n_rows, 4), np.nan)
-    if idx:
+    if len(idx):
         bounds[idx] = shapely.bounds(geoms)
     return bounds
 
@@ -357,10 +461,10 @@ def simplify_table(
             .get(geom_col, {})
             .get("crs")
         )
-        sample = _first_wkb(v for chunk in column.chunks for v in chunk.to_pylist())
+        sample = _first_wkb_of(column)
         forward, inverse = _simplify_crs_transformers(simplify_crs, src_crs, sample)
 
-    def run(values: list) -> tuple[list, int, list, Any, list]:
+    def run(values) -> tuple[Any, int, Any, Any, Any]:
         return _simplify_values(
             values,
             tolerance,
@@ -375,7 +479,7 @@ def simplify_table(
     shapely = load_module("shapely")
     np = load_module("numpy")
     collapsed = 0
-    empty_flags: list[bool] = []
+    flag_parts: list = []
     bounds_parts: list = []
     if coverage:
         if table.num_rows > _COVERAGE_WARN_ROWS:
@@ -383,17 +487,19 @@ def simplify_table(
                 f"coverage simplification holds all {table.num_rows:,} geometries "
                 "in memory at once to preserve shared edges"
             )
-        new_values, collapsed, empty_flags, geoms, idx = run(column.to_pylist())
+        new_values, collapsed, flags, geoms, idx = run(column)
         chunks = [pa.array(new_values, type=column.type)]
-        bounds_parts.append(_row_bounds(shapely, np, len(empty_flags), geoms, idx))
+        flag_parts.append(flags)
+        bounds_parts.append(_row_bounds(shapely, np, len(flags), geoms, idx))
     else:
         chunks = []
         for chunk in column.chunks:
-            values, n, flags, geoms, idx = run(chunk.to_pylist())
+            values, n, flags, geoms, idx = run(chunk)
             collapsed += n
-            empty_flags.extend(flags)
+            flag_parts.append(flags)
             chunks.append(pa.array(values, type=column.type))
             bounds_parts.append(_row_bounds(shapely, np, len(flags), geoms, idx))
+    empty_flags = np.concatenate(flag_parts) if flag_parts else np.zeros(0, dtype=bool)
     if collapsed:
         warn(f"{collapsed} geometries collapsed to empty at tolerance {tolerance}")
     result = table.set_column(
@@ -402,11 +508,11 @@ def simplify_table(
         pa.chunked_array(chunks, type=column.type),
     )
     row_bounds = np.concatenate(bounds_parts) if bounds_parts else np.empty((0, 4))
-    if drop_empty and any(empty_flags):
-        keep = [not flag for flag in empty_flags]
+    if drop_empty and empty_flags.any():
+        keep = ~empty_flags
         result = result.filter(pa.array(keep))
-        row_bounds = row_bounds[np.array(keep)]
-        info(f"dropped {sum(empty_flags)} empty geometries")
+        row_bounds = row_bounds[keep]
+        info(f"dropped {int(empty_flags.sum())} empty geometries")
     result = _with_carried_edges(_with_stripped_geo(result, geom_col), geom_col, declared_edges)
     return _refresh_bbox_covering(result, geom_col, bounds=row_bounds)
 
@@ -454,11 +560,15 @@ def _accumulate_stats(shapely, np, geoms, row_bounds, types: set, bbox: list) ->
     """
     if len(geoms) == 0:
         return
-    has_z = shapely.has_z(geoms)
-    for type_id, z in zip(shapely.get_type_id(geoms), has_z, strict=True):
-        name = _TYPE_NAMES.get(int(type_id))
+    # The set can only ever hold the 16 (type code, has-Z) pairs _TYPE_NAMES
+    # covers, so fold to the distinct pairs in C and loop over those instead of
+    # over every geometry. A missing geometry types as -1, which gives a code
+    # below zero and no name, exactly as the per-row lookup did.
+    codes = shapely.get_type_id(geoms).astype("int64") * 2 + shapely.has_z(geoms)
+    for code in np.unique(codes):
+        name = _TYPE_NAMES.get(int(code) >> 1)
         if name:
-            types.add(f"{name} Z" if z else name)
+            types.add(f"{name} Z" if int(code) & 1 else name)
     bounds = row_bounds
     finite = np.isfinite(bounds[:, 0])
     if finite.any():
@@ -573,9 +683,8 @@ def _simplify_file_streaming(
         # geometry is null, so there genuinely is nothing to transform —
         # matching the in-memory path's whole-column scan.
         sample = _first_wkb(
-            v
+            _first_wkb_of(sample_batch.column(geom_col))
             for sample_batch in pf.iter_batches(batch_size=rows, columns=[geom_col])
-            for v in sample_batch.column(geom_col).to_pylist()
         )
         forward, inverse = _simplify_crs_transformers(simplify_crs, src_crs, sample)
     batches = pf.iter_batches(batch_size=rows)
@@ -609,7 +718,7 @@ def _simplify_file_streaming(
                         table = table.drop_columns(drop_columns)
                     table = table.replace_schema_metadata(schema.metadata)
                     values, n, empty_flags, geoms, idx = _simplify_values(
-                        table.column(geom_col).to_pylist(),
+                        table.column(geom_col),
                         tolerance,
                         coverage=False,
                         preserve_topology=preserve_topology,
@@ -625,13 +734,12 @@ def _simplify_file_streaming(
                         pa.chunked_array([pa.array(values, type=pa.binary())]),
                     )
                     row_bounds = _row_bounds(shapely, np, len(empty_flags), geoms, idx)
-                    if drop_empty and any(empty_flags):
-                        keep = [not flag for flag in empty_flags]
+                    if drop_empty and empty_flags.any():
+                        keep = ~empty_flags
                         table = table.filter(pa.array(keep))
-                        dropped += sum(empty_flags)
-                        keep_rows = np.array(keep)
-                        row_bounds = row_bounds[keep_rows]
-                        geoms = geoms[keep_rows[idx]]
+                        dropped += int(empty_flags.sum())
+                        row_bounds = row_bounds[keep]
+                        geoms = geoms[keep[idx]]
                     table = _refresh_bbox_covering(table, geom_col, bounds=row_bounds)
                     _accumulate_stats(shapely, np, geoms, row_bounds, types, bbox)
                     writer.write_table(table, row_group_size=rows)
@@ -737,6 +845,11 @@ def simplify_file(
     """
     if "://" not in input_parquet and not os.path.exists(input_parquet):
         raise FileNotFoundGeoParquetError(input_parquet)
+    # Resolved once, here, so every branch below -- streamed, in-memory, or
+    # routed through add geometry-metrics -- writes at the same level. The
+    # streaming writer would otherwise inherit pyarrow's default of 1 and the
+    # funnel the global 15, from one unset argument (#1299).
+    compression_level = resolve_process_compression_level(compression, compression_level)
     if refresh_metrics:
         _simplify_then_refresh_metrics(
             input_parquet,

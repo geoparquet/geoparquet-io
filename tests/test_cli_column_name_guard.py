@@ -98,10 +98,13 @@ REVIEWED_UNGUARDED = {
     # A skill lookup key on disk, never SQL; an unknown name already reports
     # cleanly.
     ("skills",): ["--name"],
-    # Pure-Arrow paths, no SQL anywhere. --geometry-column is resolved against
-    # the table's own schema first ("geometry column '   ' not found in table",
-    # core/process/simplify.py); the raster column names are Arrow field names
-    # the output table is *created* with (core/process/raster/).
+    # --geometry-column is resolved against the table's own schema first
+    # ("geometry column '   ' not found in table", core/process/simplify.py);
+    # the raster column names are Arrow field names the output table is
+    # *created* with (core/process/raster/). Polygonize's repair scan does run
+    # DuckDB SQL, but only the geometry column crosses into it, under the
+    # owner's quoting (core/geometry_repair.py) and a hard-coded "geometry"
+    # name -- --value-column never reaches SQL.
     ("process", "simplify"): ["--geometry-column"],
     ("process", "polygonize"): ["--value-column"],
     ("process", "contour"): ["--max-column", "--min-column"],

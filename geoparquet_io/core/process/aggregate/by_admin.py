@@ -7,6 +7,7 @@ import gc
 
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet
 from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
@@ -225,6 +226,7 @@ def aggregate_by_admin(
         memory_limit: DuckDB memory limit for the join and aggregation (e.g.
             ``"8GB"``). Default: half the process's memory ceiling.
     """
+    compression_level = resolve_process_compression_level(compression, compression_level)
     configure_verbose(verbose)
     if out_geometry not in VALID_OUT_GEOMETRY:
         raise InvalidParameterError(

@@ -680,7 +680,8 @@ def create_overview_file(
         output_dir: Directory for the per-level sibling files (default:
             beside the input).
         compression: Parquet compression codec (default ZSTD).
-        compression_level: Optional compression level.
+        compression_level: Optional compression level. Unset ZSTD resolves
+            to the process group's default of 9, not the funnel's 15.
         geoparquet_version: GeoParquet spec version to write.
         force: Overwrite an existing ``overview_out`` or sibling file.
         memory_limit: DuckDB memory limit for the rollups (e.g. "8GB").
@@ -760,7 +761,8 @@ def create_overviews(
             e.g. H3 ids stored as integers
         output_dir: Directory for overview files (default: beside the input)
         compression: Parquet compression codec (default: ZSTD)
-        compression_level: Optional compression level
+        compression_level: Optional compression level. Unset ZSTD resolves
+            to the process group's default of 9, not the funnel's 15
         geoparquet_version: GeoParquet version to write
         force: Overwrite existing overview output files
         verbose: Enable verbose output
@@ -3190,6 +3192,7 @@ def polygonize(
     nodata: float | None = None,
     use_mask: bool = True,
     verbose: bool = False,
+    repair_geometry: bool = True,
 ) -> pa.Table:
     """
     Polygonize a categorical raster band into a GeoParquet-ready table.
@@ -3205,6 +3208,15 @@ def polygonize(
         nodata: Nodata value to exclude (default: the raster's own tag)
         use_mask: Honor the raster's mask/nodata (default: True)
         verbose: Whether to print verbose output
+        repair_geometry: Repair the self-touching rings contourrs emits where a
+            region pinches to one pixel corner -- not OGC-valid, where
+            rasterio's and GDAL's equivalent output is (default: True, as in
+            every command that offers ``--repair-geometry``). Appended last:
+            ops signatures are positional-or-keyword, so inserting it
+            mid-signature would silently re-map existing positional calls.
+            The count is reported either way; the repair itself can cost
+            several times the polygonization, because the self-touching
+            polygons are the large sprawling regions.
 
     Returns:
         PyArrow Table with one feature per contiguous class region
@@ -3218,6 +3230,7 @@ def polygonize(
         value_column=value_column,
         nodata=nodata,
         use_mask=use_mask,
+        repair_geometry=repair_geometry,
         verbose=verbose,
     )
 

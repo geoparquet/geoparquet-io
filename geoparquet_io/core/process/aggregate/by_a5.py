@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pyarrow as pa
 
+from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.constants import DEFAULT_A5_COLUMN_NAME
 from geoparquet_io.core.process.aggregate.grid_common import (
     GridScheme,
@@ -65,6 +66,7 @@ def aggregate_by_a5(
     memory_limit: str | None = None,
 ) -> None:
     """Aggregate a GeoParquet file into A5 cells. Writes the output file."""
+    compression_level = resolve_process_compression_level(compression, compression_level)
     aggregate_grid_file(
         A5_SCHEME,
         input_parquet,
