@@ -28,7 +28,7 @@ from geoparquet_io.cli.decorators import (
 from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.crs_utils import transform_source_label
-from geoparquet_io.core.file_utils import validate_parquet_extension
+from geoparquet_io.core.file_utils import handle_output_overwrite, validate_parquet_extension
 from geoparquet_io.core.logging_config import configure_verbose
 from geoparquet_io.core.reproject import reproject as reproject_core
 
@@ -128,6 +128,7 @@ def convert(ctx):
 @convert.command(name="geoparquet", cls=SingleFileCommand)
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
+@overwrite_option
 @click.option(
     "--skip-hilbert",
     is_flag=True,
@@ -205,6 +206,7 @@ def convert_to_geoparquet_cmd(
     ctx,
     input_file,
     output_file,
+    overwrite,
     skip_hilbert,
     wkt_column,
     lat_column,
@@ -286,6 +288,9 @@ def convert_to_geoparquet_cmd(
                 force_2d=force_2d,
             )
         else:
+            # COPY replaces the output itself, so an existing one survives a
+            # conversion that fails before the write.
+            handle_output_overwrite(output_file, overwrite, input_file, remove=False)
             convert_to_geoparquet(
                 input_file,
                 output_file,

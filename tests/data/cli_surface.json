@@ -5024,6 +5024,22 @@
        "type": "path[exists=False,file_okay=True,dir_okay=True,writable=False,readable=True,resolve_path=False]"
       },
       {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "overwrite",
+       "nargs": 1,
+       "opts": [
+        "--overwrite"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
        "default": "True",
        "hidden": false,
        "is_flag": true,
