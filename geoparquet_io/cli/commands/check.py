@@ -145,6 +145,10 @@ class _VerifyCapture:
         return all_checks_result(self.structure, self.spatial, spec)
 
 
+#: Width the progress line is blanked to before an issue or the summary prints.
+PROGRESS_LINE_WIDTH = 80
+
+
 class MultiFileCheckRunner:
     """Helper for running checks on multiple files with progress tracking and summary."""
 
@@ -198,6 +202,16 @@ class MultiFileCheckRunner:
             msg += f", {self.failed} failed"
         click.echo(f"\r{msg}", nl=False)
 
+    @staticmethod
+    def _clear_progress_line() -> None:
+        """Blank the ``Checking files...`` line so the next message starts clean."""
+        click.echo("\r" + " " * PROGRESS_LINE_WIDTH + "\r", nl=False)
+
+    @property
+    def show_output(self) -> bool:
+        """Whether each check prints its own detail: verbose, or a single file."""
+        return self.verbose or not self.is_multi_file
+
     def _record_issue(self, file_path: str, verdict: Verdict, message: str, *, always=False):
         """Record an issue and print it if under the limit, labelled by its own verdict.
 
@@ -207,8 +221,7 @@ class MultiFileCheckRunner:
         level = "error" if verdict is Verdict.FAILURE else "warning"
         self.issues.append((file_path, level, message))
         if always or (not self.verbose and len(self.issues) <= self.max_issues_shown):
-            # Clear progress line and print issue
-            click.echo("\r" + " " * 80 + "\r", nl=False)
+            self._clear_progress_line()
             glyph, color = _CHECK_GLYPHS[max(verdict, Verdict.WARNING)]
             filename = Path(file_path).name
             click.echo(click.style(f"  {glyph} {level.upper()}: {filename} - {message}", fg=color))
@@ -339,7 +352,7 @@ class MultiFileCheckRunner:
             if not self.is_multi_file:
                 raise
             self.fix_failures.append((file_path, error_text(e)))
-            click.echo("\r" + " " * 80 + "\r", nl=False)
+            self._clear_progress_line()
             click.echo(
                 click.style(
                     f"  {FAILURE_GLYPH} {stage} failed: {Path(file_path).name} - {error_text(e)}",
@@ -424,7 +437,7 @@ class MultiFileCheckRunner:
             self._print_fix_summary()
 
     def _echo_could_not_run(self, file_path: str, line: str) -> None:
-        click.echo("\r" + " " * 80 + "\r", nl=False)
+        self._clear_progress_line()
         click.echo(click.style(f"  {FAILURE_GLYPH} {Path(file_path).name} - {line}", fg="red"))
 
     def errored(self, file_path: str) -> bool:
@@ -531,9 +544,8 @@ class MultiFileCheckRunner:
         if not self.is_multi_file:
             return
 
-        # Clear progress line
         if not self.verbose:
-            click.echo("\r" + " " * 80 + "\r", nl=False)
+            self._clear_progress_line()
 
         # Show remaining issues hint
         extra_issues = len(self.issues) - self.max_issues_shown
@@ -852,7 +864,7 @@ def check_all(
 
             # Run all checks and collect results
             # In non-verbose multi-file mode, suppress detailed output
-            show_output = runner.verbose or not runner.is_multi_file
+            show_output = runner.show_output
             quiet = not show_output
 
             def run_all_checks(file_path=file_path, show_output=show_output, quiet=quiet):
@@ -1107,7 +1119,7 @@ def check_spatial(
         for file_path in runner.files:
             runner.start_file(file_path)
 
-            show_output = runner.verbose or not runner.is_multi_file
+            show_output = runner.show_output
             quiet = not show_output
             result = runner.run_check(
                 file_path,
@@ -1216,7 +1228,7 @@ def check_compression_cmd(
         for file_path in runner.files:
             runner.start_file(file_path)
 
-            show_output = runner.verbose or not runner.is_multi_file
+            show_output = runner.show_output
             quiet = not show_output
             result = runner.run_check(
                 file_path,
@@ -1364,7 +1376,7 @@ def check_bbox_cmd(
         for file_path in runner.files:
             runner.start_file(file_path)
 
-            show_output = runner.verbose or not runner.is_multi_file
+            show_output = runner.show_output
             quiet = not show_output
             result = runner.run_check(
                 file_path,
@@ -1516,7 +1528,7 @@ def check_row_group_cmd(
         for file_path in runner.files:
             runner.start_file(file_path)
 
-            show_output = runner.verbose or not runner.is_multi_file
+            show_output = runner.show_output
             quiet = not show_output
             result = runner.run_check(
                 file_path,
@@ -1765,7 +1777,7 @@ def check_optimization_cmd(
         for file_path in runner.files:
             runner.start_file(file_path)
 
-            show_output = runner.verbose or not runner.is_multi_file
+            show_output = runner.show_output
             quiet = not show_output
 
             result = runner.run_check(
