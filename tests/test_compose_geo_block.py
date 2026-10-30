@@ -17,6 +17,7 @@ import pytest
 
 from geoparquet_io.core.geo_metadata import (
     ArrowTableSource,
+    CarriedSource,
     GeoBlockOptions,
     QuerySource,
     SchemaSource,
@@ -124,3 +125,37 @@ def test_never_mutates_the_source_metadata():
         ArrowTableSource(table), GeoBlockOptions(geometry_column="geometry", version="1.0.0")
     )
     assert table.schema.metadata[b"geo"] == before
+
+
+def test_carried_source_skips_the_absent_gate_and_can_defer_the_bboxless_one():
+    """The form ``write_strategies.base.build_geo_metadata`` composes with.
+
+    Its funnel already pruned the carried block, so there are no columns to ask;
+    and its callers declare a bbox column before the bboxless gate (#954), so an
+    h3-only covering must reach them intact.
+    """
+    carried = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "covering": {"h3": {"column": "h3"}}}},
+    }
+    metadata = {b"geo": json.dumps(carried).encode()}
+    deferred = compose_geo_block(
+        CarriedSource(metadata),
+        GeoBlockOptions(geometry_column="geometry", defer_bboxless_gate=True),
+    )
+    assert deferred["columns"]["geometry"]["covering"] == {"h3": {"column": "h3"}}
+    gated = compose_geo_block(CarriedSource(metadata), GeoBlockOptions(geometry_column="geometry"))
+    assert "covering" not in gated["columns"]["geometry"]
+
+
+def test_encoding_applies_only_when_the_carried_block_names_none():
+    fresh = compose_geo_block(
+        CarriedSource(None), GeoBlockOptions(geometry_column="geometry", encoding="point")
+    )
+    assert fresh["columns"]["geometry"]["encoding"] == "point"
+    table = _table()
+    kept = compose_geo_block(
+        ArrowTableSource(table), GeoBlockOptions(geometry_column="geometry", encoding="point")
+    )
+    assert kept["columns"]["geometry"]["encoding"] == "WKB"

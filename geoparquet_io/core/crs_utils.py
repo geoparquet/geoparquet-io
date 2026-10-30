@@ -21,7 +21,6 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.geo_metadata import (
-    decode_carried_geo,
     sanitize_geo_metadata,
     sanitized_carried_geo,
 )
@@ -849,7 +848,7 @@ def extract_crs_from_table(table, geometry_column: str | None = None):
     metadata = table.schema.metadata
     geo_meta = None
     if metadata and b"geo" in metadata:
-        geo_meta = sanitize_geo_metadata(decode_carried_geo(metadata[b"geo"]))
+        geo_meta = sanitized_carried_geo(metadata)
     if not isinstance(geo_meta, dict):
         geo_meta = {}
     columns = geo_meta.get("columns", {})

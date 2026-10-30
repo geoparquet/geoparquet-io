@@ -31,8 +31,8 @@ from geoparquet_io.core.geo_metadata import (
     carried_column_name,
     carried_geometry_column,
     carried_version,
-    decode_carried_geo,
     prune_geo_metadata_to_columns,
+    read_raw_geo,
     sanitized_carried_geo,
 )
 from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
@@ -226,7 +226,7 @@ def find_geometry_column_from_metadata(metadata: dict | None) -> str | None:
 
     if not metadata or b"geo" not in metadata:
         return None
-    geo_meta = decode_carried_geo(metadata[b"geo"])
+    geo_meta = read_raw_geo(metadata).value
     if not isinstance(geo_meta, dict):
         return None
     return carried_column_name(geo_meta.get("primary_column"))

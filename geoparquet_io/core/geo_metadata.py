@@ -305,7 +305,7 @@ def _decode_geo_json(raw) -> tuple[object, str | None, str]:
     return raw, None, ""
 
 
-def decode_carried_geo(raw, source: str | None = None):
+def _decode_carried_geo(raw, source: str | None = None):
     """Decode a raw carried ``geo`` value (bytes or str) to JSON, or None.
 
     The value-level first step of :func:`sanitized_carried_geo`, for a write
@@ -562,7 +562,7 @@ def sanitized_carried_geo(metadata, source: str | None = None) -> dict:
     present, raw = _geo_key_value(metadata)
     if not present:
         return {}
-    cleaned = sanitize_geo_metadata(decode_carried_geo(raw, source), source)
+    cleaned = sanitize_geo_metadata(_decode_carried_geo(raw, source), source)
     return cleaned if isinstance(cleaned, dict) else {}
 
 
@@ -648,9 +648,7 @@ def _parse_existing_geo_metadata(original_metadata: dict | None) -> dict | None:
     Returns:
         Parsed geo metadata dict, or None if not present or not usable
     """
-    if not original_metadata or b"geo" not in original_metadata:
-        return None
-    return sanitize_geo_metadata(decode_carried_geo(original_metadata[b"geo"]))
+    return sanitized_carried_geo(original_metadata) or None
 
 
 # =============================================================================
@@ -1343,8 +1341,10 @@ def create_geo_metadata(
     bbox_info: dict | None,
     custom_metadata: dict | None = None,
     verbose: bool = False,
-    version: str = "1.1.0",
+    version: str | None = "1.1.0",
     edges: str | None = None,
+    encoding: str = "WKB",
+    strip_bboxless: bool = True,
 ) -> dict:
     """
     Create or update GeoParquet metadata with spatial index covering information.
@@ -1361,6 +1361,9 @@ def create_geo_metadata(
         version: GeoParquet version string (e.g., "1.0.0", "1.1.0", "2.0.0")
         edges: Edge interpretation, "spherical" or "planar" (default None = planar).
                Use "spherical" for data from BigQuery or other S2-based sources.
+        encoding: The primary's ``encoding`` when the carried block names none.
+        strip_bboxless: Run :func:`strip_bboxless_covering` here. ``False`` for
+               a caller that declares a bbox column afterwards and gates then.
 
     Returns:
         Updated geo metadata dict
@@ -1370,7 +1373,7 @@ def create_geo_metadata(
 
     # Add encoding if not present (required by GeoParquet spec)
     if "encoding" not in geo_meta["columns"][geom_col]:
-        geo_meta["columns"][geom_col]["encoding"] = "WKB"
+        geo_meta["columns"][geom_col]["encoding"] = encoding
 
     # Add edges if specified (for spherical geometry from BigQuery, etc.)
     if edges:
@@ -1393,7 +1396,8 @@ def create_geo_metadata(
 
     # Applied after _add_bbox_covering, so a covering is only dropped when no
     # bbox column exists to give it the one member the spec defines (#954).
-    return strip_bboxless_covering(strip_unsupported_covering(geo_meta, version, verbose), verbose)
+    geo_meta = strip_unsupported_covering(geo_meta, version, verbose)
+    return strip_bboxless_covering(geo_meta, verbose) if strip_bboxless else geo_meta
 
 
 def edges_for_version(edges: str, geo_version: str) -> str:
@@ -1435,7 +1439,20 @@ class QuerySource:
     metadata: Mapping | None = None
 
 
-GeoBlockSource = ArrowTableSource | SchemaSource | QuerySource
+@dataclass(frozen=True)
+class CarriedSource:
+    """:func:`compose_geo_block` source: carried KV metadata, output columns not known.
+
+    For a write path whose funnel already pruned the carried block to the
+    output's columns (``write_parquet_with_metadata`` runs
+    :func:`prune_geo_metadata_to_columns` before any strategy sees it), so the
+    absent-covering gate has nothing to ask and is skipped.
+    """
+
+    metadata: Mapping | None = None
+
+
+GeoBlockSource = ArrowTableSource | SchemaSource | QuerySource | CarriedSource
 
 
 @dataclass(frozen=True)
@@ -1446,71 +1463,72 @@ class GeoBlockOptions:
     as the primary's ``covering.bbox`` (``None``: declare none; a carried one
     still passes the gates). ``custom_metadata`` holds a ``covering`` mapping
     (h3/s2/a5/quadkey entries) and/or top-level keys. ``version`` is the
-    metadata form ("1.0.0", "1.1.0", "2.0.0"); ``edges`` the primary's edges.
+    metadata form ("1.0.0", "1.1.0", "2.0.0"; ``None`` for a block that is
+    never written, parquet-geo-only); ``edges`` the primary's edges, made
+    representable in ``version``; ``encoding`` the primary's encoding when the
+    carried block names none.
+
+    ``defer_bboxless_gate`` leaves :func:`strip_bboxless_covering` to the
+    caller, for the DuckDB paths that declare a conventional bbox column after
+    composing (``declare_carried_bbox_column``) and gate after that, so an
+    index entry beside a real bbox column is not dropped first (#954).
     """
 
     geometry_column: str
     bbox_column: str | None = None
     custom_metadata: dict | None = None
-    version: str = "1.1.0"
+    version: str | None = "1.1.0"
     edges: str | None = None
+    encoding: str = "WKB"
+    defer_bboxless_gate: bool = False
     verbose: bool = False
 
 
-def _source_metadata_and_columns(source: GeoBlockSource) -> tuple[Mapping | None, list[str]]:
+def _source_metadata_and_columns(
+    source: GeoBlockSource,
+) -> tuple[Mapping | None, list[str] | None]:
+    """The carried metadata and the output's column names (``None``: not known)."""
     if isinstance(source, ArrowTableSource):
         return source.table.schema.metadata, list(source.table.column_names)
     if isinstance(source, SchemaSource):
         return source.metadata, list(source.schema.names)
     if isinstance(source, QuerySource):
         return source.metadata, list(query_schema(source.con, source.query).names)
+    if isinstance(source, CarriedSource):
+        return source.metadata, None
     raise TypeError(f"compose_geo_block: unsupported source {type(source).__name__}")
-
-
-def _edges_to_version(geo_meta: dict, version: str) -> dict:
-    """``geo_meta`` with every column's string ``edges`` made representable in ``version``."""
-    columns = geo_meta.get("columns")
-    if not isinstance(columns, dict):
-        return geo_meta
-    mapped = {
-        name: (
-            {**col, "edges": edges_for_version(col["edges"], version)}
-            if isinstance(col, dict) and isinstance(col.get("edges"), str)
-            else col
-        )
-        for name, col in columns.items()
-    }
-    return {**geo_meta, "columns": mapped}
 
 
 def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
     """Compose the ``geo`` block a write declares, running every gate in one order.
 
-    The stub of the single composer agreed for #1367 (concept 4): T3e makes it
-    the only composer, moving the hand-built blocks and the gate compositions
-    of the write paths onto it and folding :func:`create_geo_metadata` in.
-    Until then it is a wrapper over :func:`create_geo_metadata` and today's gate
-    chain, in this order:
+    The single composer agreed for #1367 (concept 4). Its first caller is
+    ``write_strategies.base.build_geo_metadata``; T3e moves the remaining
+    hand-built blocks and gate compositions onto it and folds
+    :func:`create_geo_metadata` in. For now it wraps :func:`create_geo_metadata`
+    and today's gate chain, in this order:
 
     1. covering build (the carried block, sanitized; ``bbox_column``; custom
-       coverings), by :func:`create_geo_metadata`;
+       coverings), with ``edges`` mapped by :func:`edges_for_version`, by
+       :func:`create_geo_metadata`;
     2. :func:`strip_unsupported_covering` (no ``covering`` before 1.1);
     3. :func:`strip_absent_covering` (no covering entry naming a column the
-       source does not have);
-    4. :func:`strip_bboxless_covering` (no covering without a ``bbox`` member);
-    5. edges for the version (:func:`edges_for_version` on every column).
+       source does not have; skipped for a :class:`CarriedSource`);
+    4. :func:`strip_bboxless_covering` (no covering without a ``bbox`` member;
+       left to the caller with ``defer_bboxless_gate``).
 
     ``source`` supplies the carried KV metadata and the output's column names:
-    an Arrow table, a schema plus metadata, or a DuckDB connection and query
-    (probed with :func:`~geoparquet_io.core.duckdb_utils.query_schema`). Never
-    mutates the source's metadata.
+    an Arrow table, a schema plus metadata, a DuckDB connection and query
+    (probed with :func:`~geoparquet_io.core.duckdb_utils.query_schema`), or the
+    carried metadata alone. Never mutates the source's metadata.
     """
     metadata, columns = _source_metadata_and_columns(source)
     bbox_info = {
         "has_bbox_column": options.bbox_column is not None,
         "bbox_column_name": options.bbox_column,
     }
-    # Steps 1, 2 and 4 (create_geo_metadata runs 2 then 4 itself).
+    edges = edges_for_version(options.edges, options.version) if options.edges else None
+    # Steps 1 and 2 (and 4 unless deferred).
     geo_meta = create_geo_metadata(
         dict(metadata) if metadata else None,
         options.geometry_column,
@@ -1518,12 +1536,18 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
         options.custom_metadata,
         options.verbose,
         version=options.version,
-        edges=options.edges,
+        edges=edges,
+        encoding=options.encoding,
+        strip_bboxless=not options.defer_bboxless_gate,
     )
+    if columns is None:
+        return geo_meta
     # Step 3, then 4 again: dropping an absent column's entry can leave a
     # covering with no bbox member.
-    geo_meta = strip_bboxless_covering(strip_absent_covering(geo_meta, columns), options.verbose)
-    return _edges_to_version(geo_meta, options.version)
+    geo_meta = strip_absent_covering(geo_meta, columns)
+    if options.defer_bboxless_gate:
+        return geo_meta
+    return strip_bboxless_covering(geo_meta, options.verbose)
 
 
 # =============================================================================

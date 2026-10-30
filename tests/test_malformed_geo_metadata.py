@@ -282,11 +282,13 @@ def test_strategy_base_reader_sanitizes(case, columns, _hint):
     ids=["bytes_key_bytes", "bytes_key_str", "bytes_key_dict", "str_key_str", "str_key_dict"],
 )
 def test_strategy_base_reader_sanitizes_every_key_shape(metadata):
-    """The shape check applies whichever way the ``geo`` key was handed over."""
-    from geoparquet_io.core.write_strategies.base import _parse_existing_geo_metadata
+    """The shape check applies whichever way the ``geo`` key was handed over.
 
+    The strategies' reader (``write_strategies.base._parse_existing_geo_metadata``)
+    was a second copy; it is ``sanitized_carried_geo`` now (#1367).
+    """
     reset_malformed_geo_warnings()
-    assert _parse_existing_geo_metadata(metadata) == {}
+    assert sanitized_carried_geo(metadata) == {}
 
 
 def test_sanitized_carried_geo_drops_an_unusable_block():
