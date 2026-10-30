@@ -26,14 +26,14 @@ if TYPE_CHECKING:
     import duckdb
 
 from geoparquet_io.core.duckdb_utils import (
+    _apply_memory_limit,
     _current_setting,
-    _displayed_size_max,
-    _set_setting,
     get_duckdb_connection,
     restore_duckdb_settings,
 )
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.sizing import (
+    displayed_size_max,
     format_memory_limit,
     normalize_size_string,
     parse_size_string,
@@ -262,13 +262,7 @@ def bound_open_connection(
     opened bounded (``_connection_limit``); threads only ever come down.
     """
     limit, threads = _connection_limit(memory_limit)
-    _set_setting(con, "memory_limit", limit)
-    if verbose:
-        debug(f"DuckDB memory limit: {limit}")
-    if threads is not None and threads < int(str(_current_setting(con, "threads"))):
-        _set_setting(con, "threads", threads)
-        if verbose:
-            debug(f"DuckDB threads: {threads} (for the memory limit)")
+    _apply_memory_limit(con, limit, threads, verbose)
 
 
 def _resolve_limit(con: duckdb.DuckDBPyConnection, memory_limit: str | None) -> str | None:
@@ -277,7 +271,7 @@ def _resolve_limit(con: duckdb.DuckDBPyConnection, memory_limit: str | None) -> 
     An explicit ``memory_limit`` always wins. Otherwise the default applies,
     unless the caller already set a stricter limit on their own connection.
 
-    The session is read through ``_displayed_size_max`` because
+    The session is read through ``displayed_size_max`` because
     ``current_setting`` truncates a size to one decimal: the default this very
     module SET when the connection was opened ("5.0GB") reads back as "4.6 GiB",
     4.94e9 bytes against the 5e9 asked for, and comparing that directly made
@@ -292,7 +286,7 @@ def _resolve_limit(con: duckdb.DuckDBPyConnection, memory_limit: str | None) -> 
     if default is None:
         return None
     display = str(_current_setting(con, "memory_limit"))
-    session = parse_size_string(_displayed_size_max(display) or display)
+    session = parse_size_string(displayed_size_max(display) or display)
     default_bytes = parse_size_string(default)
     if session is not None and default_bytes is not None and session < default_bytes:
         return None
@@ -323,18 +317,13 @@ def scoped_write_memory_limit(
     keys = dict.fromkeys(("memory_limit", "threads", *pinned))
     saved = {key: _current_setting(con, key) for key in keys}
     try:
-        effective = _resolve_limit(con, memory_limit)
-        if effective is not None:
-            con.execute(f"SET memory_limit = '{effective}'")
-            if verbose:
-                debug(f"DuckDB memory limit: {effective}")
-        limit_bytes = parse_size_string(str(_current_setting(con, "memory_limit")))
-        if limit_bytes and "threads" not in pinned:
-            threads = max(1, limit_bytes // _BYTES_PER_THREAD)
-            if threads < int(str(saved["threads"])):
-                con.execute(f"SET threads = {threads}")
-                if verbose:
-                    debug(f"DuckDB threads: {threads} (for the memory limit)")
+        _apply_memory_limit(con, _resolve_limit(con, memory_limit), None, verbose)
+        if "threads" not in pinned:
+            # The cap follows the limit now in force -- the one just SET, or a
+            # stricter one the caller had -- as DuckDB reports it.
+            limit_bytes = parse_size_string(str(_current_setting(con, "memory_limit")))
+            if limit_bytes:
+                _apply_memory_limit(con, None, max(1, limit_bytes // _BYTES_PER_THREAD), verbose)
         for key, value in pinned.items():
             rendered = str(value).lower() if isinstance(value, bool) else int(value)
             con.execute(f"SET {key} = {rendered}")

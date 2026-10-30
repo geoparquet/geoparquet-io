@@ -1196,7 +1196,7 @@ def handle_directory_sub_partition(
     _reject_single_file_only_options(partition_type, column_name, output_folder)
 
     from geoparquet_io.core.logging_config import info, progress, warn
-    from geoparquet_io.core.sizing import parse_size_string
+    from geoparquet_io.core.sizing import bytes_to_mb, parse_size_string
     from geoparquet_io.core.sub_partition import plan_sub_partition, sub_partition_directory
 
     try:
@@ -1214,7 +1214,7 @@ def handle_directory_sub_partition(
 
         progress(f"Would sub-partition {len(candidates)} file(s) by {partition_type}:")
         for candidate in candidates:
-            size_mb = candidate["size_bytes"] / (1024 * 1024)
+            size_mb = bytes_to_mb(candidate["size_bytes"])
             info(f"  {candidate['path']} ({size_mb:.1f}MB) -> {candidate['output_dir']}/")
         info("Preview only: no files were partitioned or removed.")
         return True

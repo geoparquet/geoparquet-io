@@ -2,8 +2,10 @@
 
 ``duckdb_utils.duckdb_capabilities()`` is the only place gpio reads the DuckDB
 version or probes for a version-dependent feature; every call site asks it.
-Tests that need another version use :func:`pretend_duckdb_version`, which goes
-through the documented ``duckdb_capabilities.cache_clear()`` hook.
+Tests that need another version use :func:`pretend_duckdb_version` (or
+:func:`pretend_duckdb_capabilities` for one field). Both patch the owner alone --
+the capabilities it caches -- and leave ``duckdb.__version__`` real, so a call site
+that reads the version for itself instead of asking the owner fails its test.
 """
 
 from __future__ import annotations
@@ -36,20 +38,37 @@ V2_FEATURES = ("is_v2", "core_geometry", "native_geojson_writer", "a5_from_query
 
 
 @contextmanager
-def pretend_duckdb_version(version: str) -> Iterator[DuckDBCapabilities]:
-    """Make the owner see ``version`` for the duration of the block.
+def _owner_reports(caps: DuckDBCapabilities) -> Iterator[DuckDBCapabilities]:
+    """Make ``duckdb_capabilities()`` return ``caps`` for the duration of the block.
 
-    Clears the cache after patching and again after restoring, so neither the
-    fake nor a stale real value leaks into another test.
+    Replaces what the owner caches (its ``_capabilities_for`` step) and nothing
+    else: ``duckdb.__version__`` stays the installed one. Clears the cache after
+    patching and again after restoring, so neither the fake nor a stale real
+    value leaks into another test.
     """
-    original = duckdb.__version__
-    duckdb.__version__ = version
+    original = duckdb_utils._capabilities_for
+    duckdb_utils._capabilities_for = lambda version, result_complete: caps
     duckdb_capabilities.cache_clear()
     try:
         yield duckdb_capabilities()
     finally:
-        duckdb.__version__ = original
+        duckdb_utils._capabilities_for = original
         duckdb_capabilities.cache_clear()
+
+
+@contextmanager
+def pretend_duckdb_version(version: str) -> Iterator[DuckDBCapabilities]:
+    """Make the owner report what ``version`` implies, for the duration of the block."""
+    implied = duckdb_utils._capabilities_for(version, duckdb_capabilities().result_complete)
+    with _owner_reports(implied) as caps:
+        yield caps
+
+
+@contextmanager
+def pretend_duckdb_capabilities(**fields: object) -> Iterator[DuckDBCapabilities]:
+    """The installed capabilities with ``fields`` replaced, e.g. ``native_geojson_writer=True``."""
+    with _owner_reports(dataclasses.replace(duckdb_capabilities(), **fields)) as caps:
+        yield caps
 
 
 # --- guard: no duckdb.__version__ read outside the owner ----------------------
@@ -149,6 +168,17 @@ def test_cache_clear_rereads_the_version():
     assert duckdb_capabilities().version == real.version
 
 
+def test_pretending_leaves_the_library_version_alone():
+    """Only the owner is patched, so a direct ``duckdb.__version__`` read is not fooled."""
+    real = duckdb.__version__
+    with pretend_duckdb_version("9.9.9") as caps:
+        assert caps.version == "9.9.9"
+        assert duckdb.__version__ == real
+    with pretend_duckdb_capabilities(native_geojson_writer=True) as caps:
+        assert caps.native_geojson_writer is True
+        assert caps.version == real
+
+
 def test_without_cache_clear_a_patched_version_is_not_seen(monkeypatch):
     """The cache is real: patching the version alone changes nothing."""
     before = duckdb_capabilities()
@@ -193,20 +223,25 @@ def test_complete_without_fetch_keeps_a_write(tmp_path):
         con.close()
 
 
-@pytest.mark.parametrize("has_complete", [True, False], ids=["duckdb-2.0", "duckdb-1.5"])
-def test_complete_without_fetch_never_fetches(has_complete):
-    """complete() is called where the result has it, and no row is ever fetched."""
+@pytest.mark.parametrize("result_complete", [True, False], ids=["duckdb-2.0", "duckdb-1.5"])
+def test_complete_without_fetch_follows_the_owner(result_complete):
+    """complete() is called where the owner says results have it; no row is ever fetched.
+
+    The stand-in always has ``complete``: whether it is called is the owner's
+    ``result_complete``, not a per-object probe.
+    """
     calls: list[str] = []
 
     class Result:
         def fetchone(self):
             calls.append("fetchone")
 
-    result = Result()
-    if has_complete:
-        result.complete = lambda: calls.append("complete")
-    complete_without_fetch(result)
-    assert calls == (["complete"] if has_complete else [])
+        def complete(self):
+            calls.append("complete")
+
+    with pretend_duckdb_capabilities(result_complete=result_complete):
+        complete_without_fetch(Result())
+    assert calls == (["complete"] if result_complete else [])
 
 
 # --- routed call sites read the owner ---------------------------------------------
@@ -234,9 +269,31 @@ def test_auto_spatial_reads_core_geometry(extension_loads, version, loads_spatia
 
 
 @pytest.mark.parametrize(("version", "expected"), [("1.5.6", False), ("2.0.0", True)])
-def test_geojson_gate_reads_the_owner(version, expected):
+def test_geojson_gate_reads_the_owner(monkeypatch, tmp_path, version, expected):
+    """``gpio convert geojson`` to a file tries the native writer exactly where the owner says.
+
+    The real native writer runs (wrapped, not replaced); on an engine without
+    ``FORMAT GEOJSON`` it declines and the hand-built writer finishes the file.
+    """
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    tried: list[bool] = []
+    original = geojson_stream._native_feature_collection_to_file
+
+    def recording(*args, **kwargs):
+        tried.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(geojson_stream, "_native_feature_collection_to_file", recording)
+    sample = str(REPO / "tests" / "data" / "places_test.parquet")
+    out = tmp_path / "out.geojson"
     with pretend_duckdb_version(version):
-        assert geojson_stream._native_geojson_writer_available() is expected
+        result = CliRunner().invoke(cli, ["convert", "geojson", sample, str(out)])
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    assert bool(tried) is expected
 
 
 def test_benchmark_environment_reports_the_owner_version():
@@ -259,21 +316,25 @@ def test_extension_error_reports_the_owner_version():
 
 @pytest.mark.parametrize(("version", "has_spatial"), [("1.5.6", True), ("2.0.0", False)])
 def test_inspect_preview_reads_the_owner(monkeypatch, version, has_spatial):
-    """``gpio inspect head`` tells the preview what the owner opened it with.
+    """``gpio inspect head`` tells the preview what its connection was opened with.
 
     The real preview runs (wrapped, not replaced); the wrapper records the
-    ``has_spatial`` the call site passed, which must follow ``core_geometry``.
+    ``has_spatial`` the call site passed and whether the connection actually has
+    spatial loaded. Both must follow ``core_geometry``.
     """
     from click.testing import CliRunner
 
     from geoparquet_io.cli.main import cli
     from geoparquet_io.core import inspect_utils
 
-    seen: list[bool] = []
+    seen: list[tuple[bool, bool]] = []
     original = inspect_utils._preview_table_from_query
 
     def recording(con, query, has_spatial):
-        seen.append(has_spatial)
+        loaded = con.execute(
+            "SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'spatial'"
+        ).fetchall()
+        seen.append((has_spatial, bool(loaded and loaded[0][0])))
         return original(con, query, has_spatial)
 
     monkeypatch.setattr(inspect_utils, "_preview_table_from_query", recording)
@@ -281,4 +342,79 @@ def test_inspect_preview_reads_the_owner(monkeypatch, version, has_spatial):
     with pretend_duckdb_version(version):
         result = CliRunner().invoke(cli, ["inspect", "head", sample, "5"])
     assert result.exit_code == 0, result.output
-    assert seen == [has_spatial]
+    assert seen == [(has_spatial, has_spatial)]
+
+
+# --- guard: version-dependent facts are read in the owner only ---------------------
+
+
+def _owner_only_reads(path: Path, root: Path = REPO) -> list[str]:
+    """``.core_geometry`` reads and ``hasattr``/``getattr(duckdb, ...)`` feature probes."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "core_geometry":
+            found.append(f"{path.relative_to(root)}:{node.lineno} core_geometry")
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in ("hasattr", "getattr")
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "duckdb"
+        ):
+            found.append(f"{path.relative_to(root)}:{node.lineno} {node.func.id}(duckdb)")
+    return sorted(found)
+
+
+def test_version_dependent_facts_are_decided_by_the_owner():
+    """Auto spatial resolves in ``resolve_load_spatial``; no module probes ``duckdb`` itself."""
+    found = [
+        site
+        for path in sorted(PACKAGE.rglob("*.py"))
+        if path.resolve() != OWNER.resolve()
+        for site in _owner_only_reads(path)
+    ]
+    assert not found, "decide these in core/duckdb_utils.py:\n  " + "\n  ".join(found)
+
+
+def test_owner_only_guard_sees_both_shapes(tmp_path):
+    module = tmp_path / "rogue.py"
+    module.write_text(
+        "import duckdb\n"
+        "from geoparquet_io.core.duckdb_utils import duckdb_capabilities\n"
+        "A = not duckdb_capabilities().core_geometry\n"
+        "B = hasattr(duckdb, 'HTTPException')\n"
+    )
+    assert _owner_only_reads(module, root=tmp_path) == [
+        "rogue.py:3 core_geometry",
+        "rogue.py:4 hasattr(duckdb)",
+    ]
+
+
+def test_wkt_detection_closes_its_probe_through_the_owner(monkeypatch, tmp_path):
+    """``gpio convert`` of a WKT CSV closes its parse probe with ``complete_without_fetch``.
+
+    The probe's GEOMETRY row is never fetched (1.5 cannot serialize it); on 2.0
+    an unclosed probe blocks the connection. The real helper runs, wrapped.
+    """
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+    from geoparquet_io.core import convert
+
+    closed: list[object] = []
+    original = convert.complete_without_fetch
+
+    def recording(result):
+        closed.append(result)
+        return original(result)
+
+    monkeypatch.setattr(convert, "complete_without_fetch", recording)
+    csv = tmp_path / "in.csv"
+    csv.write_text("id,wkt\n1,POINT (1 2)\n2,POINT (3 4)\n")
+    out = tmp_path / "out.parquet"
+    result = CliRunner().invoke(cli, ["convert", "geoparquet", str(csv), str(out)])
+    assert result.exit_code == 0, result.output
+    assert len(closed) == 1
+    assert duckdb.sql(f"SELECT count(*) FROM read_parquet('{out}')").fetchall() == [(2,)]

@@ -33,13 +33,13 @@ from geoparquet_io.core.duckdb_metadata import (
     get_row_count,
 )
 from geoparquet_io.core.duckdb_utils import (
-    duckdb_capabilities,
     fetch_one,
     fetch_row,
     get_duckdb_connection,
     is_interrupt,
     load_spatial_extension,
     quote_identifier,
+    resolve_load_spatial,
     sql_path,
 )
 from geoparquet_io.core.file_utils import resolve_file_url
@@ -663,10 +663,12 @@ def get_preview_data(
     raw_url = resolve_file_url(parquet_file, verbose=False)
     total_rows = get_row_count(parquet_file)
 
-    # load_spatial=None: the preview needs nothing beyond DuckDB's core geometry
-    # set (#1353); _preview_table_from_query loads spatial on demand if a file
-    # still turns out to need it.
-    con = get_duckdb_connection(load_spatial=None, load_httpfs=needs_httpfs(parquet_file))
+    # Auto spatial: the preview needs nothing beyond DuckDB's core geometry set
+    # (#1353); _preview_table_from_query loads spatial on demand if a file still
+    # turns out to need it. Resolved once, so the connection and the preview
+    # below act on the same answer.
+    load_spatial = resolve_load_spatial(None)
+    con = get_duckdb_connection(load_spatial=load_spatial, load_httpfs=needs_httpfs(parquet_file))
 
     try:
         # Detect geometry columns from native Parquet types
@@ -730,12 +732,9 @@ def get_preview_data(
             )
             mode = "head"
 
-        # Execute query and convert to PyArrow table. has_spatial mirrors what
-        # the auto sentinel above resolved to: spatial is on the connection
-        # exactly where DuckDB's core lacks GEOMETRY.
-        table = _preview_table_from_query(
-            con, query, has_spatial=not duckdb_capabilities().core_geometry
-        )
+        # Execute query and convert to PyArrow table. has_spatial is what the
+        # connection was opened with.
+        table = _preview_table_from_query(con, query, has_spatial=load_spatial)
 
         # Convert any native GeoArrow geometry columns to WKT strings for display.
         if native_geo_columns:

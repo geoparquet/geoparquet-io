@@ -20,7 +20,7 @@ import pytest
 from geoparquet_io.core import geojson_stream
 from geoparquet_io.core.duckdb_utils import duckdb_capabilities, get_duckdb_connection, sql_path
 from geoparquet_io.core.geojson_stream import convert_to_geojson
-from tests.test_duckdb_capabilities import pretend_duckdb_version
+from tests.test_duckdb_capabilities import pretend_duckdb_capabilities, pretend_duckdb_version
 
 TEST_DATA_DIR = Path(__file__).parent / "data"
 REPROJECT_PARQUET = TEST_DATA_DIR / "fields_pgo_5070_snappy.parquet"
@@ -92,13 +92,19 @@ def _convert_both(
 
     native_count = convert_to_geojson(str(parquet), str(native_out), **kwargs)
 
-    with monkeypatch.context() as m:
-        m.setattr(geojson_stream, "_native_geojson_writer_available", lambda: False)
+    with pretend_duckdb_capabilities(native_geojson_writer=False):
         legacy_count = convert_to_geojson(str(parquet), str(legacy_out), **kwargs)
 
     native_fc = json.loads(native_out.read_text(encoding="utf-8"))
     legacy_fc = json.loads(legacy_out.read_text(encoding="utf-8"))
     return native_fc, legacy_fc, native_count, legacy_count
+
+
+@pytest.fixture
+def native_writer_on():
+    """The owner reports the native writer present, whatever the installed DuckDB."""
+    with pretend_duckdb_capabilities(native_geojson_writer=True):
+        yield
 
 
 class TestVersionGate:
@@ -116,11 +122,11 @@ class TestVersionGate:
         ids=["v1", "v2", "v2dev", "v10", "unparsable"],
     )
     def test_gate_parses_major_version(self, version, expected):
-        with pretend_duckdb_version(version):
-            assert geojson_stream._native_geojson_writer_available() is expected
+        with pretend_duckdb_version(version) as caps:
+            assert caps.native_geojson_writer is expected
 
     def test_gate_matches_installed_duckdb(self):
-        assert geojson_stream._native_geojson_writer_available() is NATIVE_AVAILABLE
+        assert duckdb_capabilities().native_geojson_writer is NATIVE_AVAILABLE
 
     def test_never_invoked_on_duckdb_1x(self, tmp_path, monkeypatch):
         """On DuckDB 1.x the conversion must run without touching the fast path."""
@@ -204,12 +210,13 @@ class TestNativeEquivalence:
             convert_to_geojson(
                 str(parquet), str(tmp_path / "native.geojson"), repair_geometry=False
             )
-        with monkeypatch.context() as m:
-            m.setattr(geojson_stream, "_native_geojson_writer_available", lambda: False)
-            with pytest.raises(duckdb.Error):
-                convert_to_geojson(
-                    str(parquet), str(tmp_path / "legacy.geojson"), repair_geometry=False
-                )
+        with (
+            pretend_duckdb_capabilities(native_geojson_writer=False),
+            pytest.raises(duckdb.Error),
+        ):
+            convert_to_geojson(
+                str(parquet), str(tmp_path / "legacy.geojson"), repair_geometry=False
+            )
 
     def test_reprojection_equivalence(self, tmp_path, monkeypatch):
         """A projected input reprojects to WGS84 identically through both writers."""
@@ -327,8 +334,8 @@ class TestFastPathPlumbing:
         found = geojson_stream._geometry_typed_property_columns(con, "t", ["id", "name", "geom2"])
         assert found == ["geom2"]
 
+    @pytest.mark.usefixtures("native_writer_on")
     def test_maybe_runs_native_writer_when_eligible(self, con, tmp_path, monkeypatch):
-        monkeypatch.setattr(geojson_stream, "_native_geojson_writer_available", lambda: True)
         recorded = {}
 
         def _fake_native(
@@ -366,8 +373,8 @@ class TestFastPathPlumbing:
         # and the caller's verbose flag reaches the write scope.
         assert recorded["args"] == ("t", "geometry", ["id", "name"], 7, True)
 
+    @pytest.mark.usefixtures("native_writer_on")
     def test_maybe_declines_geometry_typed_property(self, con, tmp_path, monkeypatch):
-        monkeypatch.setattr(geojson_stream, "_native_geojson_writer_available", lambda: True)
         count = geojson_stream._maybe_native_feature_collection(
             con,
             "t",
@@ -650,6 +657,7 @@ class TestFallbacks:
         assert isinstance(feature["properties"]["geom2"], str)
         assert feature["properties"]["geom2"].startswith("POINT")
 
+    @pytest.mark.usefixtures("native_writer_on")
     def test_missing_copy_format_falls_back_to_hand_built(self, parquet, tmp_path, monkeypatch):
         """A 2.x library whose engine lacks FORMAT GEOJSON converts via fallback.
 
@@ -657,7 +665,6 @@ class TestFallbacks:
         unknown copy function, the conversion must land on the hand-built
         writer instead of hard-failing where DuckDB 1.5 worked.
         """
-        monkeypatch.setattr(geojson_stream, "_native_geojson_writer_available", lambda: True)
         real = geojson_stream._native_feature_collection_to_file
 
         class _CopyRefusingCon:

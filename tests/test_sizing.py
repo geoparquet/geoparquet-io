@@ -19,6 +19,7 @@ from geoparquet_io.cli.decorators import parse_row_group_options
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import memory_limits
 from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
 from geoparquet_io.core.sizing import (
     bytes_to_mb,
     format_memory_limit,
@@ -26,6 +27,9 @@ from geoparquet_io.core.sizing import (
     mb_to_bytes,
     normalize_size_string,
     parse_size_string,
+)
+from geoparquet_io.core.write_strategies.row_group_sizing import (
+    _resolve_row_group_rows_for_table,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -94,15 +98,24 @@ def test_mb_conversions_are_decimal_and_inverse():
     ("n", "expected"),
     [
         (512, "512.00 B"),
-        (1024, "1.00 KB"),
-        (1024**2, "1.00 MB"),
-        (1024**3, "1.00 GB"),
-        (1024**4, "1.00 TB"),
+        (999, "999.00 B"),
+        (1000, "1.00 KB"),
+        (10**6, "1.00 MB"),
+        (10**9, "1.00 GB"),
+        (10**12, "1.00 TB"),
+        (1024**3, "1.07 GB"),
     ],
 )
-def test_format_size_display_is_unchanged(n, expected):
-    """Display formatting keeps its bytes (recorded for the lead; see PROGRESS)."""
+def test_format_size_is_decimal(n, expected):
+    """KB/MB/GB on display are the powers of 1000 the parser reads them as."""
     assert format_size(n) == expected
+
+
+@pytest.mark.parametrize("n", [1000, 123_456, 10**9, 7 * 10**9 + 3, 2 * 10**12])
+def test_format_size_reads_back_through_the_parser(n):
+    """What the owner prints, the owner parses back to (within the two decimals shown)."""
+    back = parse_size_string(format_size(n))
+    assert abs(back - n) <= 0.005 * n, (n, format_size(n), back)
 
 
 @pytest.mark.parametrize(
@@ -125,10 +138,76 @@ def test_format_memory_limit_never_mixes_units():
 # --- the shared numbers the CLI options produce -----------------------------------
 
 
+class _OneBytePerRow:
+    """A table-shaped stand-in whose rows weigh one byte each, so rows == target bytes."""
+
+    num_rows = 10**13
+
+    def get_total_buffer_size(self):
+        return self.num_rows
+
+
+def _writer_target_bytes(row_group_size_mb: float) -> set[int]:
+    """The byte target each row-group writer turns ``row_group_size_mb`` into.
+
+    Both writers divide their target by the table's bytes per row; at one byte
+    per row the row count they return *is* the target in bytes.
+    """
+    table = _OneBytePerRow()
+    return {
+        resolve_row_group_rows_for_table(table, None, row_group_size_mb),
+        _resolve_row_group_rows_for_table(table, row_group_size_mb, None),
+    }
+
+
+@pytest.mark.parametrize(
+    ("text", "target"),
+    [("1MB", 10**6), ("1", 10**6), ("128MB", 128 * 10**6), ("1GB", 10**9), ("1GiB", 1024**3)],
+)
+def test_row_group_size_mb_reaches_the_writers_in_decimal_bytes(text, target):
+    """``--row-group-size-mb 1MB`` is a 1,000,000-byte target at both writers."""
+    assert _writer_target_bytes(parse_row_group_options(None, text)) == {target}
+
+
 def test_row_group_size_mb_and_min_size_agree_on_1gb():
-    """``--row-group-size-mb 1GB`` and ``--min-size 1GB`` are the same number of bytes."""
-    row_group_mb = parse_row_group_options(None, "1GB")
-    assert mb_to_bytes(row_group_mb) == parse_size_string("1GB") == 10**9
+    """``--row-group-size-mb 1GB`` targets the bytes ``--min-size 1GB`` selects on."""
+    targets = _writer_target_bytes(parse_row_group_options(None, "1GB"))
+    assert targets == {parse_size_string("1GB")} == {10**9}
+
+
+# --- --min-size reports the size it was given ----------------------------------
+
+
+@pytest.fixture
+def one_and_a_half_mb_dir(tmp_path):
+    """A directory holding one 1,500,000-byte ``.parquet`` (1.43 MiB, 1.5 MB)."""
+    directory = tmp_path / "d"
+    directory.mkdir()
+    (directory / "big.parquet").write_bytes(b"\0" * 1_500_000)
+    return directory
+
+
+def _partition_h3(directory, *args):
+    return CliRunner().invoke(cli, ["partition", "h3", str(directory), "--resolution", "4", *args])
+
+
+def test_min_size_preview_reports_decimal_mb(one_and_a_half_mb_dir):
+    result = _partition_h3(one_and_a_half_mb_dir, "--min-size", "1MB", "--preview")
+    assert result.exit_code == 0, result.output
+    assert "big.parquet (1.5MB)" in result.output, result.output
+
+
+def test_min_size_run_reports_decimal_mb(one_and_a_half_mb_dir):
+    """The per-file line of a real run (the file is not parquet, so it then fails)."""
+    result = _partition_h3(one_and_a_half_mb_dir, "--min-size", "1MB", "--in-place", "--force")
+    assert "Processing: big.parquet (1.5MB)" in result.output, result.output
+
+
+def test_min_size_no_match_reports_the_threshold_given(one_and_a_half_mb_dir):
+    """``--min-size 100MB`` used to say "exceeding 95.4MB"."""
+    result = _partition_h3(one_and_a_half_mb_dir, "--min-size", "100MB", "--in-place")
+    assert result.exit_code == 0, result.output
+    assert "No files found exceeding 100.0MB" in result.output, result.output
 
 
 def _limits_seen_by_writes(monkeypatch) -> list[str]:
@@ -176,7 +255,24 @@ def _size_function_defs(tree: ast.AST) -> list[int]:
         node.lineno
         for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name.lstrip("_").startswith(("parse_size", "format_size", "format_memory_limit"))
+        and node.name.lstrip("_").startswith(
+            ("parse_size", "format_size", "format_memory_limit", "displayed_size", "nudged_size")
+        )
+    ]
+
+
+def _size_regexes(tree: ast.AST) -> list[int]:
+    """``re.compile`` of a pattern that spells a size unit (``KiB``, ``MB``...)."""
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "compile"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+        and ("iB" in node.args[0].value or "MB" in node.args[0].value.upper().replace("\\", ""))
     ]
 
 
@@ -204,6 +300,7 @@ def _violations(root: Path = PACKAGE) -> list[str]:
         rel = path.relative_to(root)
         if path.resolve() != SIZING.resolve():
             found += [f"{rel}:{n} size parser/formatter" for n in _size_function_defs(tree)]
+            found += [f"{rel}:{n} size grammar" for n in _size_regexes(tree)]
         if path.resolve() not in {p.resolve() for p in SET_OWNERS}:
             found += [f"{rel}:{n} SET memory_limit" for n in _set_memory_limit_literals(tree)]
     return found
@@ -222,11 +319,72 @@ def test_guard_catches_both_patterns(tmp_path):
         '"""Docs may say SET memory_limit."""\n'
         "def _parse_size(t):\n    return 1\n\n"
         "def f(con, v):\n    con.execute(f\"SET memory_limit = '{v}'\")\n"
+        "import re\nR = re.compile(r'^(\\d+) ([KMG]iB)$')\n"
+        "def _displayed_size_max(t):\n    return t\n"
     )
     assert _violations(tmp_path) == [
         "rogue.py:2 size parser/formatter",
+        "rogue.py:9 size parser/formatter",
+        "rogue.py:8 size grammar",
         "rogue.py:6 SET memory_limit",
     ]
+
+
+# --- guard: one place applies a memory limit and its thread cap -------------------
+
+LIMIT_APPLIER = "core/duckdb_utils.py:_apply_memory_limit"
+
+
+def _limit_setters(path: Path, root: Path) -> set[str]:
+    """``path:function`` for every function that SETs ``memory_limit`` or ``threads``."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    docstrings = {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+    }
+
+    def sets_a_limit(node: ast.AST) -> bool:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            text = node.value.lower()
+            return id(node) not in docstrings and (
+                "set memory_limit" in text or "set threads" in text
+            )
+        return (
+            isinstance(node, ast.Call)
+            and getattr(node.func, "id", getattr(node.func, "attr", None)) == "_set_setting"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in ("memory_limit", "threads")
+        )
+
+    rel = path.relative_to(root).as_posix()
+    return {
+        f"{rel}:{func.name}"
+        for func in ast.walk(tree)
+        if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(sets_a_limit(node) for node in ast.walk(func))
+    }
+
+
+def _all_limit_setters(root: Path = PACKAGE) -> set[str]:
+    return {site for path in sorted(root.rglob("*.py")) for site in _limit_setters(path, root)}
+
+
+def test_memory_limit_and_thread_cap_are_applied_in_one_place():
+    """The connection default, a scoped write and an open connection share one apply step."""
+    assert _all_limit_setters() == {LIMIT_APPLIER}
+
+
+def test_limit_setter_guard_sees_each_spelling(tmp_path):
+    (tmp_path / "rogue.py").write_text(
+        '"""SET memory_limit in prose is fine."""\n'
+        "def a(con, v):\n    con.execute(f\"SET memory_limit = '{v}'\")\n"
+        "def b(con, n):\n    con.execute(f'SET threads = {n}')\n"
+        "def c(con, n):\n    _set_setting(con, 'threads', n)\n"
+        "def d(con):\n    con.execute('SET preserve_insertion_order = false')\n"
+    )
+    assert _all_limit_setters(tmp_path) == {"rogue.py:a", "rogue.py:b", "rogue.py:c"}
 
 
 @pytest.mark.parametrize(

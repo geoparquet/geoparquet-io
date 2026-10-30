@@ -31,13 +31,12 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import memory_limits
 from geoparquet_io.core.duckdb_utils import (
-    _displayed_size_max,
     fetch_one,
     get_duckdb_connection,
     restore_duckdb_settings,
     sql_path,
 )
-from geoparquet_io.core.sizing import parse_size_string
+from geoparquet_io.core.sizing import displayed_size_max, parse_size_string
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 GIB = 1024**3
@@ -253,7 +252,7 @@ class TestDisplayedSizeMax:
         ],
     )
     def test_one_step_up_from_the_display(self, displayed, expected):
-        assert _displayed_size_max(displayed) == expected
+        assert displayed_size_max(displayed) == expected
 
 
 def _fake_cgroups(tmp_path, proc_lines: list[str], files: dict[str, str]):

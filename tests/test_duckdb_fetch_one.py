@@ -16,6 +16,7 @@ import pyarrow as pa
 import pytest
 
 from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
+from tests.test_duckdb_capabilities import pretend_duckdb_capabilities
 
 
 @pytest.fixture
@@ -80,7 +81,8 @@ class _Result:
 @pytest.mark.parametrize("has_complete", [True, False], ids=["duckdb-2.0", "duckdb-1.5"])
 def test_completes_the_result_only_where_duckdb_can(has_complete):
     result = _Result([(1,), (2,)], has_complete)
-    assert fetch_one(result) == (1,)
+    with pretend_duckdb_capabilities(result_complete=has_complete):
+        assert fetch_one(result) == (1,)
     assert getattr(result, "completed", 0) == (1 if has_complete else 0)
 
 

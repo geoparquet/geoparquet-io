@@ -75,6 +75,7 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.geo_metadata import OVERVIEWS_KEY, sanitized_carried_geo
 from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
 from geoparquet_io.core.logging_config import debug, info
+from geoparquet_io.core.sizing import mb_to_bytes
 from geoparquet_io.core.streaming import extract_version_from_metadata
 
 if TYPE_CHECKING:
@@ -296,7 +297,7 @@ def resolve_row_group_rows_for_table(
     if resolved is not None or not row_group_size_mb or table.num_rows <= 0:
         return resolved
 
-    target_bytes = row_group_size_mb * 1024 * 1024
+    target_bytes = mb_to_bytes(row_group_size_mb)
     rows = max(WRITER_VECTOR_ROWS, int(target_bytes // estimate_row_size(table)))
     return min(rows, table.num_rows)
 

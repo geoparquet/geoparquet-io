@@ -406,16 +406,6 @@ def _build_feature_query(
     return query
 
 
-def _native_geojson_writer_available() -> bool:
-    """Whether DuckDB ships the native ``COPY ... (FORMAT GEOJSON)`` writer.
-
-    The format arrived with DuckDB 2.0's spatial extension; on 1.x the same
-    statement is a binder error (#1349). Decided by the owner,
-    ``duckdb_capabilities().native_geojson_writer``.
-    """
-    return duckdb_capabilities().native_geojson_writer
-
-
 def _geometry_typed_property_columns(
     con: duckdb.DuckDBPyConnection,
     source_ref: str,
@@ -540,7 +530,9 @@ def _maybe_native_feature_collection(
     """
     if not output_path or pretty or description or id_field or write_bbox:
         return None
-    if not _native_geojson_writer_available():
+    # FORMAT GEOJSON arrived with DuckDB 2.0's spatial extension; on 1.x the
+    # statement is a binder error (#1349).
+    if not duckdb_capabilities().native_geojson_writer:
         return None
     if _geometry_typed_property_columns(con, source_ref, property_columns):
         return None

@@ -75,6 +75,43 @@ def mb_to_bytes(size_mb: float) -> int:
     return int(round(size_mb * BYTES_PER_MB))
 
 
+# A size as current_setting() displays it: "2.7 GiB", "953.6 MiB".
+_DISPLAYED_SIZE_RE = re.compile(r"^(\d+)\.(\d+) ([KMGT]iB)$")
+
+
+def nudged_size(displayed: str) -> str | None:
+    """A size that DuckDB displays back as ``displayed``; None if it is not a size.
+
+    ``current_setting`` truncates a size to one decimal, so writing the display
+    string back lands a step low ("2.7 GiB" reads back "2.6 GiB") and a loop of
+    save/restore drifts down. Half a displayed step up reads back unchanged.
+    """
+    match = _DISPLAYED_SIZE_RE.match(displayed)
+    if not match:
+        return None
+    whole, frac, unit = match.groups()
+    return f"{whole}.{frac}5{unit}"
+
+
+def displayed_size_max(displayed: str) -> str | None:
+    """The largest size DuckDB would display as ``displayed``; None if it is not a size.
+
+    The same truncation seen from the other side: "7.4 GiB" is any size from
+    7.4 GiB up to 7.5 GiB, so a *comparison* against a number gpio itself set has
+    to use the top of that range. Against the bottom, the 8.0GB limit gpio puts
+    on a connection reads back as 7.4 GiB = 7.95e9 bytes and looks like a
+    stricter limit somebody else chose. :func:`nudged_size` takes the middle of
+    the range instead, because a restore has to read back unchanged rather than
+    err high.
+    """
+    match = _DISPLAYED_SIZE_RE.match(displayed)
+    if not match:
+        return None
+    whole, frac, unit = match.groups()
+    step = 10 ** -len(frac)
+    return f"{float(f'{whole}.{frac}') + step:.{len(frac)}f}{unit}"
+
+
 #: The smallest memory limit gpio sets: below it DuckDB cannot hold a scan's buffers.
 _MIN_MEMORY_LIMIT = 128 * 1024**2
 
@@ -93,9 +130,13 @@ def format_memory_limit(limit_bytes: int) -> str:
 
 
 def format_size(size_bytes):
-    """Convert bytes to a human readable string for display (1024-based steps)."""
+    """Bytes as a human-readable string for display, in 1000-based steps.
+
+    ``KB``/``MB``/``GB``/``TB`` mean here what :func:`parse_size_string` reads
+    them as, so a size gpio prints parses back to (about) the same bytes.
+    """
     for unit in ["B", "KB", "MB", "GB"]:
-        if size_bytes < 1024:
+        if size_bytes < 1000:
             return f"{size_bytes:.2f} {unit}"
-        size_bytes /= 1024
+        size_bytes /= 1000
     return f"{size_bytes:.2f} TB"

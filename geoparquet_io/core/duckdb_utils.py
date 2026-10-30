@@ -37,6 +37,7 @@ from geoparquet_io.core.exceptions import ExtensionUnavailableError, ValidationE
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.remote import is_s3_url, needs_httpfs
+from geoparquet_io.core.sizing import nudged_size
 
 # Per-bucket cache for S3 buckets that require authentication
 # Buckets not in this set are accessed without credentials (works for public buckets)
@@ -269,41 +270,6 @@ def _escape_sql_string(value: str) -> str:
 
 
 _SETTING_KEY_RE = re.compile(r"[a-z_]+")
-# A size as current_setting() displays it: "2.7 GiB", "953.6 MiB".
-_DISPLAYED_SIZE_RE = re.compile(r"^(\d+)\.(\d+) ([KMGT]iB)$")
-
-
-def _nudged_size(displayed: str) -> str | None:
-    """A size that DuckDB displays back as ``displayed``; None if it is not a size.
-
-    ``current_setting`` truncates a size to one decimal, so writing the display
-    string back lands a step low ("2.7 GiB" reads back "2.6 GiB") and a loop of
-    save/restore drifts down. Half a displayed step up reads back unchanged.
-    """
-    match = _DISPLAYED_SIZE_RE.match(displayed)
-    if not match:
-        return None
-    whole, frac, unit = match.groups()
-    return f"{whole}.{frac}5{unit}"
-
-
-def _displayed_size_max(displayed: str) -> str | None:
-    """The largest size DuckDB would display as ``displayed``; None if it is not a size.
-
-    The same truncation seen from the other side: "7.4 GiB" is any size from
-    7.4 GiB up to 7.5 GiB, so a *comparison* against a number gpio itself set has
-    to use the top of that range. Against the bottom, the 8.0GB limit gpio puts
-    on a connection reads back as 7.4 GiB = 7.95e9 bytes and looks like a
-    stricter limit somebody else chose. :func:`_nudged_size` takes the middle of
-    the range instead, because a restore has to read back unchanged rather than
-    err high.
-    """
-    match = _DISPLAYED_SIZE_RE.match(displayed)
-    if not match:
-        return None
-    whole, frac, unit = match.groups()
-    step = 10 ** -len(frac)
-    return f"{float(f'{whole}.{frac}') + step:.{len(frac)}f}{unit}"
 
 
 def restore_duckdb_settings(
@@ -330,7 +296,7 @@ def restore_duckdb_settings(
             if _current_setting(con, key) == value:
                 continue
             con.execute(f"RESET {key}")
-            nudged = _nudged_size(value) if isinstance(value, str) else None
+            nudged = nudged_size(value) if isinstance(value, str) else None
             if _current_setting(con, key) != value and nudged:
                 _set_setting(con, key, nudged)
         except duckdb.Error as e:  # pragma: no cover - defensive
@@ -437,10 +403,12 @@ class DuckDBCapabilities:
             extension (``get_duckdb_connection(load_spatial=None)``,
             ``inspect_utils`` previews, #1353).
         native_geojson_writer: ``COPY ... (FORMAT GEOJSON)`` exists
-            (``geojson_stream._native_geojson_writer_available``, #1349).
+            (the native fast path in ``geojson_stream``, #1349).
         a5_from_query_farm: the community ``a5`` is a stub that points at the
             Query.Farm repository, which publishes the real build for 2.0+
             (the routing open PR #1360 adds to ``load_community_extension``).
+            No reader yet by design: it is the hook #1360 is retargeted onto
+            once this lands, so that PR reads the owner instead of the version.
     """
 
     version: str
@@ -505,13 +473,24 @@ def complete_without_fetch(result) -> None:
     leaves nothing open. DuckDB 1.5 has no such method and needs none: the
     next statement replaces the result there.
 
-    Decided per object, not from :attr:`DuckDBCapabilities.result_complete`:
-    the answer is the same for a real result, and a stand-in result (a test
-    double, a wrapper) is judged by what it actually has.
+    Decided once, by :attr:`DuckDBCapabilities.result_complete` (probed on a
+    real result), not per object.
     """
-    complete = getattr(result, "complete", None)
-    if complete is not None:
-        complete()
+    if duckdb_capabilities().result_complete:
+        result.complete()
+
+
+def resolve_load_spatial(load_spatial: bool | None) -> bool:
+    """Whether a connection opened with ``load_spatial`` gets the spatial extension.
+
+    ``None`` is the auto mode: spatial only where DuckDB's own core lacks
+    GEOMETRY (``core_geometry``, #1353). :func:`get_duckdb_connection` decides
+    through this, and a caller that has to know what its auto-mode connection
+    carries resolves it here once and opens with the answer.
+    """
+    if load_spatial is None:
+        return not duckdb_capabilities().core_geometry
+    return load_spatial
 
 
 def fetch_one(result):
@@ -1316,12 +1295,33 @@ def _apply_connection_limits(
     :func:`memory_limits.open_bounded_connection`, which passes both.
     """
     limit, cap = (memory_limit, None) if memory_limit is not None else _ceiling_based_limits()
+    _apply_memory_limit(con, limit, None if threads is not None else cap)
+
+
+def _apply_memory_limit(
+    con: duckdb.DuckDBPyConnection,
+    limit: str | None,
+    thread_cap: int | None,
+    verbose: bool = False,
+) -> None:
+    """SET ``memory_limit``, then lower ``threads`` to ``thread_cap`` -- the one place gpio does.
+
+    Every bounded connection goes through here: one freshly opened
+    (:func:`_apply_connection_limits`), one write scoped on a caller's
+    connection (``memory_limits.scoped_write_memory_limit``) and an already-open
+    connection held to a limit (``memory_limits.bound_open_connection``). Either
+    half is skipped when its value is ``None``. The cap only ever brings
+    ``threads`` *down* from what the session has: a thread count is never raised
+    to match a limit.
+    """
     if limit is not None:
         con.execute(f"SET memory_limit = '{_escape_sql_string(str(limit))}';")
-    if cap is None or threads is not None:
-        return
-    if cap < int(str(_current_setting(con, "threads"))):
-        con.execute(f"SET threads = {cap}")
+        if verbose:
+            debug(f"DuckDB memory limit: {limit}")
+    if thread_cap is not None and thread_cap < int(str(_current_setting(con, "threads"))):
+        con.execute(f"SET threads = {thread_cap}")
+        if verbose:
+            debug(f"DuckDB threads: {thread_cap} (for the memory limit)")
 
 
 _PROFILE_ENV_VAR = "GPIO_DUCKDB_PROFILE"
@@ -1624,9 +1624,7 @@ def get_duckdb_connection(
 
     # Always load spatial extension by default (core use case). None is the
     # auto mode: spatial only where DuckDB's own core lacks GEOMETRY (#1353).
-    if load_spatial is None:
-        load_spatial = not duckdb_capabilities().core_geometry
-    if load_spatial:
+    if resolve_load_spatial(load_spatial):
         load_spatial_extension(con)
 
     # S3 config, resolved once (explicit kwargs over the ambient scope). The
