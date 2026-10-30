@@ -204,11 +204,6 @@ WFS_CREDENTIALS_HINT = "Check the credentials in the URL."
 _PROBE_TIMEOUT = 30.0
 
 
-def _wfs_status_error(url: str, response, detail: str | None = None) -> WFSError:
-    """A page's HTTP failure as a ``WFSError`` carrying the shared status sentence."""
-    return WFSError(status_error(url, response, WFS_CREDENTIALS_HINT, detail=detail).message)
-
-
 def _clean_service_url(url: str) -> str:
     """
     Clean WFS service URL by removing GetCapabilities parameters.
@@ -2253,7 +2248,9 @@ def _download_wfs_page(url: str, accept: str, tmp_dir: tempfile.TemporaryDirecto
                 raise WFSError(
                     f"Server rejected paginated request (startIndex limit): {body.strip()}"
                 )
-            raise _wfs_status_error(url, response, body[:500])
+            raise WFSError(
+                status_error(url, response, WFS_CREDENTIALS_HINT, detail=body[:500]).message
+            )
         response.raise_for_status()
 
         # Dispatch on the content-type the server actually sent. HTML and

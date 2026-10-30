@@ -98,7 +98,6 @@ get_files_to_check  # unused function (geoparquet_io/core/partition/reader.py:25
 _geo_block_to_carry_on_fast_path  # unused function (geoparquet_io/core/write_funnels.py:944) -- dead: T0e deletes (no package caller; only tests)
 sort_quadkey  # unused function (geoparquet_io/api/ops.py:911) -- dynamic: public Python API (docs/api/python-api.md)
 _.check_spatial_pushdown  # unused method (geoparquet_io/api/table.py:3277) -- dynamic: public Python API (docs/api/python-api.md)
-core_exception_handler  # unused function (geoparquet_io/cli/exception_handler.py:100) -- dead: T0e deletes (no package caller; only tests)
 _.add_s2  # unused method (geoparquet_io/api/table.py:2254) -- dynamic: public Python API (docs/api/python-api.md)
 add_bbox_metadata_cmd  # unused function (geoparquet_io/cli/commands/add.py:508) -- dynamic: Click command, registered by its decorator
 _.sort_quadkey  # unused method (geoparquet_io/api/table.py:2386) -- dynamic: public Python API (docs/api/python-api.md)

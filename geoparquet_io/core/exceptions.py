@@ -507,14 +507,18 @@ def _classify_one(exc: BaseException) -> FailureClass:
     if status is not None:
         return FailureClass(FailureKind.HTTP_STATUS, status)
 
-    import httpx
-    import requests
-
-    if isinstance(exc, (httpx.TimeoutException, requests.Timeout, TimeoutError)):
+    # httpx / requests are matched by class lineage, not imported: this module
+    # classifies their errors, it is not an HTTP client.
+    if (
+        isinstance(exc, TimeoutError)
+        or _derives_from(exc, "httpx", "TimeoutException")
+        or (_derives_from(exc, "requests", "Timeout"))
+    ):
         return FailureClass(FailureKind.TIMEOUT)
-    if isinstance(
-        exc,
-        (httpx.TransportError, requests.ConnectionError, ConnectionError, socket.gaierror),
+    if (
+        isinstance(exc, (ConnectionError, socket.gaierror))
+        or _derives_from(exc, "httpx", "TransportError")
+        or _derives_from(exc, "requests", "ConnectionError")
     ):
         return FailureClass(FailureKind.UNREACHABLE)
     if isinstance(exc, _MALFORMED_RESPONSE_TYPES) or _is_xml_syntax_error(exc):
@@ -523,6 +527,14 @@ def _classify_one(exc: BaseException) -> FailureClass:
     if verdict is not None:
         return verdict
     return FailureClass(FailureKind.UNKNOWN)
+
+
+def _derives_from(exc: BaseException, package: str, class_name: str) -> bool:
+    """Whether ``exc`` is ``<package>...<class_name>`` or a subclass, by name, without importing it."""
+    return any(
+        base.__name__ == class_name and base.__module__.split(".")[0] == package
+        for base in type(exc).__mro__
+    )
 
 
 def _local_duckdb_errors(duckdb) -> tuple[type[BaseException], ...]:
