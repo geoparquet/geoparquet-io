@@ -386,12 +386,12 @@ def test_1362_output_query_schema_survives_a_variant_column():
     On DuckDB 1.5 the ``LIMIT 0`` Arrow probe raised ``OSError: Not implemented
     Error: Unsupported Arrow type VARIANT`` and killed every write path.
     """
-    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-    from geoparquet_io.core.geo_metadata import output_query_schema
+    # T1c moved the probe to its owner: geo_metadata.output_query_schema -> duckdb_utils.query_schema.
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, query_schema
 
     con = get_duckdb_connection()
     try:
-        schema = output_query_schema(con, "SELECT 1 AS id, {'a': 1}::VARIANT AS v")
+        schema = query_schema(con, "SELECT 1 AS id, {'a': 1}::VARIANT AS v")
     finally:
         con.close()
     assert "id" in schema.names

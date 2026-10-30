@@ -31,6 +31,7 @@ from geoparquet_io.core.crs_utils import (
 )
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
+    query_schema,
     quote_identifier,
     register_arrow,
     sql_path,
@@ -217,7 +218,7 @@ def _file_stream_metadata(con, source, path, schema, metadata) -> dict:
         # The remote schema adapter has no Arrow field types. This zero-row
         # result carries each CRS, and the file reader supplies the edges
         # DuckDB does not understand. No source geometry rows are materialized.
-        described = con.sql(f"SELECT * FROM {source} LIMIT 0").arrow().read_all()
+        described = pa.Table.from_batches([], schema=query_schema(con, f"SELECT * FROM {source}"))
         for name, edges in collect_nonplanar_edges(path).items():
             described = apply_geoarrow_extension_type(described, name, edges=edges)
     return _stream_input_metadata(described.replace_schema_metadata(metadata))

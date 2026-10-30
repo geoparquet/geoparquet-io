@@ -53,6 +53,7 @@ from geoparquet_io.core.duckdb_metadata import (
     get_geo_metadata,
     get_kv_metadata,
     get_schema_info,
+    native_geo_type,
     parse_geometry_logical_type,
 )
 from geoparquet_io.core.duckdb_utils import (
@@ -134,7 +135,7 @@ def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
     try:
         for col in get_schema_info(input_file):
             logical = col.get("logical_type") or ""
-            if "GeographyType" in logical:
+            if native_geo_type(logical) == "GEOGRAPHY":
                 parsed = parse_geometry_logical_type(logical) or {}
                 edges_by_col[col["name"]] = parsed.get("algorithm") or "spherical"
         geo_meta = get_geo_metadata(input_file) or {}
@@ -321,7 +322,7 @@ def _already_geography(output_file: str, edges_by_col: dict[str, str]) -> bool:
     geography = {
         col["name"]
         for col in root_schema_columns(get_schema_info(output_file))
-        if "GeographyType" in (col.get("logical_type") or "")
+        if native_geo_type(col.get("logical_type")) == "GEOGRAPHY"
     }
     return set(edges_by_col) <= geography
 

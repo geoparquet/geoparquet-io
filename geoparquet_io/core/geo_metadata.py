@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 from collections.abc import Collection, Sequence
 from functools import cache, lru_cache
 from typing import TYPE_CHECKING
@@ -27,8 +26,10 @@ from typing import TYPE_CHECKING
 from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
     _get_query_column_type,
+    _get_query_columns,
     _strip_trailing_order_by,
     fetch_one,
+    query_schema,
     quote_identifier,
 )
 from geoparquet_io.core.logging_config import debug, warn
@@ -911,7 +912,7 @@ def gate_illegal_bbox_covering(geo_meta: dict, con: duckdb.DuckDBPyConnection, q
         for col_meta in (geo_meta.get("columns") or {}).values()
     ):
         return geo_meta
-    return strip_illegal_bbox_covering(geo_meta, output_query_schema(con, query))
+    return strip_illegal_bbox_covering(geo_meta, query_schema(con, query))
 
 
 def _add_custom_covering(
@@ -1346,24 +1347,6 @@ def create_geo_metadata(
 # =============================================================================
 # SQL-based Metadata Computation
 # =============================================================================
-
-
-def _get_query_columns(con, query: str) -> list[str]:
-    """
-    Get column names from a query without executing it fully.
-
-    Uses LIMIT 0 to get schema information efficiently.
-
-    Args:
-        con: DuckDB connection
-        query: SQL SELECT query
-
-    Returns:
-        Column names from the query result
-    """
-    describe_query = f"SELECT * FROM ({query}) AS __subq LIMIT 0"
-    result = con.execute(describe_query)
-    return [col[0] for col in result.description]
 
 
 def compute_bbox_via_sql(
@@ -1871,87 +1854,6 @@ def _self_evident_bbox_column(schema: pa.Schema, verbose: bool = False) -> str |
     return SELF_EVIDENT_BBOX_COLUMN
 
 
-def output_query_schema(con: duckdb.DuckDBPyConnection, query: str) -> pa.Schema:
-    """The Arrow schema a write's own query produces, without reading a row.
-
-    One shape for the sanctioned probe, shared by the steps that have to judge
-    what the *output* carries: ``declare_carried_bbox_column`` below, and the
-    three DuckDB write paths' :func:`strip_illegal_bbox_covering` gate (the 2.0
-    fast path, duckdb-kv, disk-rewrite), which each need the same schema to ask
-    the same question of a secondary column's covering.
-
-    DuckDB 1.5 cannot export a VARIANT column over the Arrow C interface
-    (``OSError: Not implemented Error: Unsupported Arrow type VARIANT``), so a
-    file DuckDB wrote with VARIANT properties used to kill every write path at
-    this probe (#1352). On that one failure it is re-run with a sentinel
-    non-struct field standing in for each VARIANT column, so the bbox-covering
-    gates still see the column exists and judge a covering declared over it
-    exactly as 2.0's real export does. Any other Arrow export failure re-raises.
-    """
-    try:
-        return con.sql(f"SELECT * FROM ({query}) LIMIT 0").arrow().schema
-    except OSError as exc:
-        if "Unsupported Arrow type VARIANT" not in str(exc):
-            raise
-        return _output_query_schema_without_variant(con, query)
-
-
-_VARIANT_TYPE_KEYWORD = re.compile(r"\bVARIANT\b")
-
-
-def _type_contains_variant(type_str: str) -> bool:
-    """Whether a DESCRIBE-rendered DuckDB type carries the ``VARIANT`` keyword.
-
-    Case-sensitive and word-bounded on the uppercase keyword ``DESCRIBE``
-    renders. Nested matching is load-bearing — ``STRUCT(a VARIANT)`` and
-    ``VARIANT[]`` cannot cross Arrow on DuckDB 1.5 any more than a top-level
-    ``VARIANT`` — while a struct *field* merely named ``variant_id`` has no
-    word boundary before the ``_`` and a lowercase ``variant`` never matches.
-    Shared by the probe fallback below and ``inspect``'s preview: a substring
-    match here dropped such a struct from the fallback schema and rendered it
-    as JSON text in previews (#1352 review).
-    """
-    return _VARIANT_TYPE_KEYWORD.search(type_str) is not None
-
-
-def _output_query_schema_without_variant(con: duckdb.DuckDBPyConnection, query: str) -> pa.Schema:
-    """The probe's schema with a sentinel standing in for every VARIANT column.
-
-    ``DESCRIBE`` never crosses Arrow, so it names the columns safely; a type
-    whose rendering carries the ``VARIANT`` keyword (top-level, or nested in a
-    STRUCT/LIST) is exactly the set DuckDB 1.5 refuses to export. Each such
-    column stays in the schema as a sentinel non-struct ``binary`` field rather
-    than being dropped: :func:`strip_illegal_bbox_covering` treats a covering
-    naming a column *absent* from the schema as somebody else's question and
-    keeps it, so dropping the column let a ``covering.bbox`` declared over a
-    VARIANT column ship untouched on 1.5 while 2.0's real export strips it. The
-    sentinel gives both versions the same verdict. This path runs only after a
-    real VARIANT broke the export.
-    """
-    import pyarrow as pa
-
-    described = con.sql(f"DESCRIBE SELECT * FROM ({query}) LIMIT 0").fetchall()
-    kept = [
-        quote_identifier(name)
-        for name, column_type, *_ in described
-        if not _type_contains_variant(column_type)
-    ]
-    exported = (
-        con.sql(f"SELECT {', '.join(kept)} FROM ({query}) LIMIT 0").arrow().schema
-        if kept
-        else pa.schema([])
-    )
-    exported_fields = iter(exported)
-    return pa.schema(
-        [
-            pa.field(name, pa.binary())
-            if _type_contains_variant(column_type)
-            else next(exported_fields)
-            for name, column_type, *_ in described
-        ]
-    )
-
-
 def declare_carried_bbox_column(
     con: duckdb.DuckDBPyConnection,
     query: str,
@@ -1995,7 +1897,7 @@ def declare_carried_bbox_column(
         return False
     if declared is None and _bbox_claimed_by_another_column(geo_meta, name):
         return False
-    schema = output_query_schema(con, query)
+    schema = query_schema(con, query)
     if name not in schema.names:
         return False
 

@@ -921,7 +921,9 @@ def _native_primary_column(root_columns: list[dict], requested: str | None) -> s
     by_name = detect_geometry_column_from_names(names)
     if by_name is not None:
         return by_name
-    native = [col["name"] for col in root_columns if _is_native_geo_column(col)]
+    from geoparquet_io.core.duckdb_metadata import is_geometry_column
+
+    native = [col["name"] for col in root_columns if is_geometry_column(col.get("logical_type"))]
     return native[0] if native else None
 
 
@@ -943,22 +945,22 @@ def _block_omits_requested_column(
     )
 
 
-def _is_native_geo_column(col: dict) -> bool:
-    return (col.get("logical_type") or "").startswith(("GeometryType(", "GeographyType("))
-
-
 def _native_type_crs_value(parquet_file, column: str | None = None):
     """The raw CRS the primary's Parquet GEOMETRY/GEOGRAPHY type names, or ``None``.
 
     ``None`` when the column has no native type or its type names no CRS.
     """
-    from geoparquet_io.core.duckdb_metadata import get_schema_info, parse_geometry_logical_type
+    from geoparquet_io.core.duckdb_metadata import (
+        get_schema_info,
+        is_geometry_column,
+        parse_geometry_logical_type,
+    )
     from geoparquet_io.core.parquet_schema import root_schema_columns
 
     root_columns = root_schema_columns(get_schema_info(parquet_file))
     target = _native_primary_column(root_columns, column)
     entry = next((col for col in root_columns if col["name"] == target), None)
-    if entry is None or not _is_native_geo_column(entry):
+    if entry is None or not is_geometry_column(entry.get("logical_type")):
         return None
     parsed = parse_geometry_logical_type(entry.get("logical_type") or "")
     return parsed.get("crs") if parsed else None

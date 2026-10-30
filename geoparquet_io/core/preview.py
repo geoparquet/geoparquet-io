@@ -165,18 +165,13 @@ def _row_group_spatial_stats(
     -- never the primary column's (#1171: a secondary's read must not be
     pruned on the primary's extents).
     """
-    stats = _native_stats(parquet_file, geometry_column)
-    if stats:
-        return stats, "native"
+    from geoparquet_io.core.duckdb_metadata import get_row_group_bbox_stats
 
-    from geoparquet_io.core.duckdb_metadata import get_per_row_group_bbox_stats
-
-    bbox_column = _covering_bbox_column(parquet_file, geometry_column)
-    if bbox_column:
-        stats = get_per_row_group_bbox_stats(parquet_file, bbox_column)
-        if stats:
-            return stats, "bbox_struct"
-    return [], None
+    return get_row_group_bbox_stats(
+        parquet_file,
+        native=lambda: _native_stats(parquet_file, geometry_column),
+        bbox_column=lambda: _covering_bbox_column(parquet_file, geometry_column),
+    )
 
 
 def _native_stats(parquet_file: str, geometry_column: str | None) -> list[dict]:

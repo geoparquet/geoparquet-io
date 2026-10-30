@@ -13,7 +13,7 @@ from geoparquet_io.core.bbox_structure import (
 )
 from geoparquet_io.core.common import add_computed_column
 from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadata, get_schema_info
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection, query_schema, quote_identifier
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
 from geoparquet_io.core.geo_metadata import (
@@ -122,7 +122,7 @@ def _has_bbox_struct_column(con, source: str, bbox_column_name: str) -> bool:
     ``covering`` may point at -- passed as gpio's own and the stream wrote
     nothing at all (#1176).
     """
-    schema = con.sql(f"SELECT * FROM {source} LIMIT 0").arrow().read_all().schema
+    schema = query_schema(con, f"SELECT * FROM {source}")
     if bbox_column_name not in schema.names:
         return False
     return _is_bbox_struct_field(schema.field(bbox_column_name))
@@ -537,8 +537,7 @@ def _make_streaming_bbox_query(
         return f"SELECT * FROM {source}", True, bbox_column_name
 
     # Get column names from query result (works with both table names and read_parquet)
-    sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
-    col_names = [col[0] for col in sample]
+    col_names = query_schema(con, f"SELECT * FROM {source}").names
 
     # Find geometry column from common names
     geom_col = None

@@ -991,9 +991,11 @@ class TestSchemaIsReadOnce:
 
         # One, now that the three sources a schema can come from -- a scan, a
         # local table, a pre-built --sql relation -- differ only in the
-        # relation they name, and the DESCRIBE around it is written once.
-        assert helper_source.count("DESCRIBE SELECT") == 1
-        assert module_source.count("DESCRIBE SELECT") == 1
+        # relation they name, and the probe around it is called once. The
+        # DESCRIBE itself is spelled only in duckdb_utils.describe_query (#1367).
+        assert helper_source.count("describe_query(") == 1
+        assert module_source.count("describe_query(") == 1
+        assert "DESCRIBE SELECT" not in module_source
 
     def test_given_rows_are_used_without_touching_the_connection(self):
         from geoparquet_io.core.extract_bigquery import _detect_geometry_column_from_schema

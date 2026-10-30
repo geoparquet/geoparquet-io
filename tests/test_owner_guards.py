@@ -75,7 +75,7 @@ EXPECTED_COUNTS = {
     "G1.retry_after": 0,
     "G1.retry_wrappers": 0,
     "G1.json_dumps": 40,
-    "G2.exemptions": 33,
+    "G2.exemptions": 31,
     "G3.pairs": 27,
     "G3.baseline": 27,
     "G3.pylint": 60,

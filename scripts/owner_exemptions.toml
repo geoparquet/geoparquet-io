@@ -386,7 +386,13 @@ reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 # atomic_write lives in write_strategies/base.py until T2f moves it to
 # file_utils (re-exported from write_funnels); T2f changes this owner with the move.
 "atomic_write" = ["geoparquet_io/core/write_strategies/base.py"]
+# T1c: the native-geo-type probe (was _is_geography_column, copied in validate.py) and
+# the query-schema probes (was geo_metadata.output_query_schema / LIMIT 0 / DESCRIBE copies).
 "_is_geography_column" = ["geoparquet_io/core/duckdb_metadata.py"]
+"native_geo_type" = ["geoparquet_io/core/duckdb_metadata.py"]
+"is_native_geo_column" = ["geoparquet_io/core/duckdb_metadata.py"]
+"*query_schema" = ["geoparquet_io/core/duckdb_utils.py"]
+"describe_query" = ["geoparquet_io/core/duckdb_utils.py"]
 "_compute_geometry_types" = ["geoparquet_io/core/geo_metadata.py"]
 "_compute_bbox_from_data" = ["geoparquet_io/core/geo_metadata.py"]
 "handle_output_overwrite" = ["geoparquet_io/core/file_utils.py"]
@@ -500,10 +506,6 @@ path = "geoparquet_io/core/format_writers.py"
 name = "_normalize_bbox"
 reason = "parse_bbox copy; T5c"
 [[G2.exemptions]]
-path = "geoparquet_io/core/geo_metadata.py"
-name = "_get_query_columns"
-reason = "copy of duckdb_utils'; T1c"
-[[G2.exemptions]]
 path = "geoparquet_io/core/hilbert_order.py"
 name = "_resolve_output_version"
 reason = "re-derives the DEFAULT_GEOPARQUET_VERSION fallback beside the owner call; T2b"
@@ -543,11 +545,6 @@ reason = "version resolver copy; T2b"
 path = "geoparquet_io/core/streaming.py"
 name = "detect_version_for_output"
 reason = "version resolver copy; T2b"
-[[G2.exemptions]]
-path = "geoparquet_io/core/validate.py"
-name = "_is_geography_column"
-count = 2
-reason = "two definitions in validate.py, the first shadowed; T1c"
 [[G2.exemptions]]
 path = "geoparquet_io/core/validate.py"
 name = "_crs_equals"

@@ -28,6 +28,7 @@ from geoparquet_io.core.crs_utils import (
 )
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
+    describe_query,
     fetch_one,
     get_duckdb_connection,
     load_community_extension,
@@ -211,7 +212,7 @@ _BBOX_STRUCT_FIELDS = frozenset({"xmin", "ymin", "xmax", "ymax"})
 
 def _relation_columns(con, relation: str) -> set[str]:
     """Column names exposed by ``relation``."""
-    return {row[0] for row in con.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()}
+    return {name for name, _ in describe_query(con, f"SELECT * FROM {relation}")}
 
 
 def build_exclude_clause(
@@ -517,7 +518,7 @@ def build_grid_query(
         # non-numeric metric.
         cols = source_columns
         if cols is None:
-            cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM ({source_sql})").fetchall()}
+            cols = {name for name, _ in describe_query(con, source_sql)}
         validate_agg_columns(cols, metrics, breakdown, bd_metric)
     # Resolve metric column types so sentinel literals match the column's actual
     # precision (REAL vs DOUBLE, #613) and non-numeric columns fail up-front.

@@ -15,9 +15,9 @@ import duckdb
 import pyarrow as pa
 import pytest
 
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection, query_schema, sql_path
 from geoparquet_io.core.extract import extract
-from geoparquet_io.core.geo_metadata import gate_illegal_bbox_covering, output_query_schema
+from geoparquet_io.core.geo_metadata import gate_illegal_bbox_covering
 from geoparquet_io.core.inspect_utils import get_preview_data
 
 # One row per VARIANT shape: int, string, nested object, mixed list, NULL.
@@ -64,7 +64,7 @@ class TestOutputQuerySchema:
         con = get_duckdb_connection()
         try:
             query = f"SELECT * FROM read_parquet({sql_path(variant_file)})"
-            schema = output_query_schema(con, query)
+            schema = query_schema(con, query)
         finally:
             con.close()
         assert "id" in schema.names
@@ -80,7 +80,7 @@ class TestOutputQuerySchema:
     def test_all_variant_query_yields_schema_without_crash(self):
         con = get_duckdb_connection(load_spatial=False)
         try:
-            schema = output_query_schema(con, "SELECT '1'::JSON::VARIANT AS v")
+            schema = query_schema(con, "SELECT '1'::JSON::VARIANT AS v")
         finally:
             con.close()
         assert list(schema.names) == ["v"]
@@ -96,7 +96,7 @@ class TestOutputQuerySchema:
         """
         con = get_duckdb_connection(load_spatial=False)
         try:
-            schema = output_query_schema(
+            schema = query_schema(
                 con,
                 "SELECT 1 AS id, {'variant_id': 7} AS attrs, '1'::JSON::VARIANT AS props",
             )
@@ -112,7 +112,7 @@ class TestTypeContainsVariant:
     """The shared predicate matches the VARIANT type keyword, not field names."""
 
     def test_word_boundary_matching(self):
-        from geoparquet_io.core.geo_metadata import _type_contains_variant
+        from geoparquet_io.core.duckdb_utils import _type_contains_variant
 
         assert _type_contains_variant("VARIANT")
         assert _type_contains_variant("VARIANT[]")
@@ -159,11 +159,11 @@ class TestCoveringGateParity:
                 raise OSError("some unrelated arrow failure")
 
         class _FakeCon:
-            def sql(self, query):
+            def sql(self, query, params=None):
                 return _BoomRelation()
 
         with pytest.raises(OSError, match="unrelated arrow failure"):
-            output_query_schema(_FakeCon(), "SELECT 1")
+            query_schema(_FakeCon(), "SELECT 1")
 
 
 class TestExtractRoundTrip:

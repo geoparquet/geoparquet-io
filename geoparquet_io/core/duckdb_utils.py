@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
     import duckdb
+    import pyarrow as pa
 
 from geoparquet_io.core.exceptions import ExtensionUnavailableError, ValidationError
 from geoparquet_io.core.logging_config import debug, warn
@@ -1818,9 +1819,113 @@ _TIMESTAMPTZ = "TIMESTAMP WITH TIME ZONE"
 _UTC = datetime.timezone.utc
 
 
+def _as_subquery(sql: str) -> str:
+    """``sql`` ready to sit inside parentheses: its own lines, no trailing ``;``.
+
+    On its own lines so a trailing ``--`` comment cannot swallow the closing
+    parenthesis.
+    """
+    return f"(\n{sql.rstrip().rstrip(';')}\n)"
+
+
+def describe_query(con, sql: str, params=None) -> list[tuple[str, str]]:
+    """``(name, DuckDB type)`` for each output column of ``sql``, without a scan.
+
+    The DuckDB-type view of :func:`query_schema`: for the questions only
+    DuckDB's own type names answer (GEOMETRY vs GEOGRAPHY vs BLOB, a GeoArrow
+    STRUCT's nesting depth, TIMESTAMP WITH TIME ZONE, an ENUM), which an Arrow
+    schema has already translated away. ``DESCRIBE`` binds the query and never
+    crosses Arrow, so no column type can make it fail. Raises whatever the
+    bind raises; a caller that tolerates a miss catches it itself.
+    """
+    rows = con.execute(f"DESCRIBE {_as_subquery(sql)}", params).fetchall()
+    return [(row[0], str(row[1])) for row in rows]
+
+
+def query_schema(con, sql: str, params=None) -> pa.Schema:
+    """The Arrow schema ``sql`` produces, without reading a row (#1367 concept 17).
+
+    The one schema probe: every "what does this query/relation output" question
+    gpio asks in Arrow terms comes here. Output names are the ones a written
+    file gets (duplicates de-duplicated as ``a``, ``a_1``), and the fields carry
+    their extension metadata (CRS, edges).
+
+    DuckDB 1.5 cannot export a VARIANT column over the Arrow C interface
+    (``OSError: Not implemented Error: Unsupported Arrow type VARIANT``), so a
+    file DuckDB wrote with VARIANT properties used to kill every write path at
+    this probe (#1352, #1362). On that one failure it is re-run with a sentinel
+    non-struct field standing in for each VARIANT column, so the bbox-covering
+    gates still see the column exists and judge a covering declared over it
+    exactly as 2.0's real export does. Any other failure raises.
+    """
+    try:
+        return _zero_row_schema(con, f"SELECT * FROM {_as_subquery(sql)} LIMIT 0", params)
+    except OSError as exc:
+        if "Unsupported Arrow type VARIANT" not in str(exc):
+            raise
+        return _query_schema_without_variant(con, sql, params)
+
+
+def _zero_row_schema(con, sql: str, params=None) -> pa.Schema:
+    # read_all() drains the (empty) reader, so the connection is free afterwards.
+    return con.sql(sql, params=params).arrow().read_all().schema
+
+
+_VARIANT_TYPE_KEYWORD = re.compile(r"\bVARIANT\b")
+
+
+def _type_contains_variant(type_str: str) -> bool:
+    """Whether a DESCRIBE-rendered DuckDB type carries the ``VARIANT`` keyword.
+
+    Case-sensitive and word-bounded on the uppercase keyword ``DESCRIBE``
+    renders. Nested matching is load-bearing — ``STRUCT(a VARIANT)`` and
+    ``VARIANT[]`` cannot cross Arrow on DuckDB 1.5 any more than a top-level
+    ``VARIANT`` — while a struct *field* merely named ``variant_id`` has no
+    word boundary before the ``_`` and a lowercase ``variant`` never matches.
+    Shared by the probe fallback below and ``inspect``'s preview: a substring
+    match here dropped such a struct from the fallback schema and rendered it
+    as JSON text in previews (#1352 review).
+    """
+    return _VARIANT_TYPE_KEYWORD.search(type_str) is not None
+
+
+def _query_schema_without_variant(con, sql: str, params=None) -> pa.Schema:
+    """The probe's schema with a sentinel standing in for every VARIANT column.
+
+    ``DESCRIBE`` never crosses Arrow, so it names the columns safely; a type
+    whose rendering carries the ``VARIANT`` keyword (top-level, or nested in a
+    STRUCT/LIST) is exactly the set DuckDB 1.5 refuses to export. Each such
+    column stays in the schema as a sentinel non-struct ``binary`` field rather
+    than being dropped: ``strip_illegal_bbox_covering`` treats a covering
+    naming a column *absent* from the schema as somebody else's question and
+    keeps it, so dropping the column let a ``covering.bbox`` declared over a
+    VARIANT column ship untouched on 1.5 while 2.0's real export strips it. The
+    sentinel gives both versions the same verdict. This path runs only after a
+    real VARIANT broke the export.
+    """
+    import pyarrow as pa
+
+    described = describe_query(con, f"SELECT * FROM {_as_subquery(sql)} LIMIT 0", params)
+    kept = [
+        quote_identifier(name) for name, type_ in described if not _type_contains_variant(type_)
+    ]
+    exported = (
+        _zero_row_schema(con, f"SELECT {', '.join(kept)} FROM {_as_subquery(sql)} LIMIT 0", params)
+        if kept
+        else pa.schema([])
+    )
+    exported_fields = iter(exported)
+    return pa.schema(
+        [
+            pa.field(name, pa.binary()) if _type_contains_variant(type_) else next(exported_fields)
+            for name, type_ in described
+        ]
+    )
+
+
 def _output_types(con, query: str, params=None) -> list[str]:
-    """The SQL type of each output column of ``query``. DESCRIBE binds it without a scan."""
-    return [column[1] for column in con.execute(f"DESCRIBE {query}", params).fetchall()]
+    """The SQL type of each output column of ``query`` (a view of :func:`describe_query`)."""
+    return [type_ for _, type_ in describe_query(con, query, params)]
 
 
 def _without_timestamptz(
@@ -1921,30 +2026,16 @@ def fetch_row(
 
 
 def _get_query_columns(con, query: str) -> list[str]:
-    """
-    Get column names from a SQL query without executing it fully.
-
-    Args:
-        con: DuckDB connection
-        query: SQL query to analyze
-
-    Returns:
-        List of column names in the query result
-    """
-    result = con.execute(f"DESCRIBE ({query})").fetchall()
-    return [row[0] for row in result]
+    """Output column names of ``query`` (a view of :func:`describe_query`)."""
+    return [name for name, _ in describe_query(con, query)]
 
 
 def _get_query_column_type(con, query: str, column_name: str) -> str | None:
-    """Return the DuckDB type string for a named column in a query, or None."""
+    """The DuckDB type of one output column of ``query``, or None if absent or unbindable."""
     try:
-        rows = con.execute(f"DESCRIBE ({query})").fetchall()
-        for row in rows:
-            if row[0] == column_name:
-                return row[1]
+        return next((t for name, t in describe_query(con, query) if name == column_name), None)
     except Exception:
-        pass
-    return None
+        return None
 
 
 # Clauses that must not follow a trailing ORDER BY for it to be safely strippable
