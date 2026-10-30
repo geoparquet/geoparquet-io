@@ -266,9 +266,12 @@ retries, ...) has one owner module, and these checks fail a new copy of it (#136
   `psutil`, `os.sysconf`, `requests` and `httpx` outside their owners (the message names
   the owner); `tests/test_owner_guards.py` walks the AST for a `json.loads` of the `geo`
   key, `SET memory_limit`, hand-rolled SQL escapes, `/sys/fs/cgroup`, `duckdb.__version__`,
-  private HTTP retry policy (loops with `time.sleep`, `DEFAULT_MAX_RETRIES`-style
-  constants, `max_retries=`/`retry_delay=` defaults, retryable-status sets, `Retry-After`
-  reads) and bare `json.dumps` in `cli/`.
+  private HTTP retry policy (a request plus a wait in a loop or a recursive call; retry,
+  backoff and attempt constants, or a `*_TIMEOUT` restating the owner's default;
+  `max_retries=`/`retries=`/`backoff=`/`timeout=` defaults that are not `None` or an owner
+  constant; retryable statuses as literals or comparisons; `Retry-After` reads; thin
+  wrappers, `functools.partial` or policy literals around an owner function) and bare
+  `json.dumps` in `cli/`.
 - **G2, owner-only definitions** — `scripts/check_owner_defs.py` (the
   `forbid-bespoke-schema-reconciliation` hook): a `def` named like `is_geographic*`,
   `resolve_*version*`, `parse_size*`, `atomic_write`, ... lives only in its owner, per the

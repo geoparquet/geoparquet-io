@@ -69,9 +69,10 @@ EXPECTED_COUNTS = {
     "G1.duckdb_version": 2,
     "G1.retry_loop": 3,
     "G1.retry_constants": 4,
-    "G1.retry_param_defaults": 10,
-    "G1.retry_status_sets": 1,
+    "G1.retry_param_defaults": 28,
+    "G1.retry_status_sets": 4,
     "G1.retry_after": 2,
+    "G1.retry_wrappers": 4,
     "G1.json_dumps": 2,
     "G2.exemptions": 38,
     "G4.whitelist": 146,
@@ -284,38 +285,127 @@ def _find_duckdb_version(m: _Module) -> Iterator[Hit]:
             yield m.hit(node)
 
 
-_HTTP_NAMES = {"httpx", "requests", "urllib", "urlopen", "aiohttp"}
+# The HTTP retry policy (attempts, delay, timeout, which statuses to retry,
+# Retry-After) is core/http_retry.py's. The arms below look for its shapes
+# rather than its names: #1367's T4a audit showed a name-based guard passing a
+# renamed constant, a tuple of statuses, a lowercase header and a ``cast()``
+# around an owner call.
+
+#: Owner entry points a caller may call but not wrap, partially apply, or hand
+#: its own policy literals. Read from the owner too, so a new one counts.
+_OWNER_HTTP_FUNCTIONS = {
+    "make_request_with_retry",
+    "run_with_retry",
+    "get_shared_http_client",
+    "reset_http_client",
+    "parse_retry_after",
+}
+_HTTP_OWNER_PATH = "geoparquet_io/core/http_retry.py"
+_HTTP_NAMES = {"httpx", "requests", "urllib", "urlopen", "aiohttp", "urllib3"}
+_HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "request", "send", "stream"}
+_HTTP_RECEIVERS = {"client", "session", "http", "httpx", "requests", "conn", "connection"}
+
+
+def _owner_module(repo: Path) -> ast.Module | None:
+    for root in (repo, REPO):
+        owner = root / _HTTP_OWNER_PATH
+        if owner.is_file():
+            return ast.parse(owner.read_text(encoding="utf-8"))
+    return None
+
+
+@functools.lru_cache(maxsize=8)
+def _owner_surface(repo: Path) -> tuple[frozenset[str], frozenset[float]]:
+    """The owner's public functions, and the values of its ``*TIMEOUT`` constants."""
+    tree = _owner_module(repo)
+    functions, timeouts = set(_OWNER_HTTP_FUNCTIONS), set()
+    for node in tree.body if tree else []:
+        if isinstance(node, ast.FunctionDef) and not node.name.startswith("_"):
+            functions.add(node.name)
+        elif (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, (int, float))
+            and any(isinstance(t, ast.Name) and t.id.endswith("TIMEOUT") for t in node.targets)
+        ):
+            timeouts.add(float(node.value.value))
+    return frozenset(functions), frozenset(timeouts)
+
+
+def _owner_imports(m: _Module) -> dict[str, str]:
+    """Local name -> owner name, for every ``from ...http_retry import X [as Y]``."""
+    return {
+        alias.asname or alias.name: alias.name
+        for node in ast.walk(m.tree)
+        if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("http_retry")
+        for alias in node.names
+    }
+
+
+def _defers_to_owner(m: _Module, default: ast.AST) -> bool:
+    """``None``, or a constant imported from the owner (``DEFAULT_TIMEOUT``,
+    ``http_retry.DEFAULT_MAX_RETRIES``): the owner still decides."""
+    if isinstance(default, ast.Constant) and default.value is None:
+        return True
+    if isinstance(default, ast.Name):
+        return default.id in _owner_imports(m)
+    if isinstance(default, ast.Attribute):
+        return "retry" in set(_identifier_tokens(default.value))
+    return False
 
 
 def _is_sleep(node: ast.AST) -> bool:
+    """``time.sleep(...)``, a bare ``sleep(...)`` (``from time import sleep``) or
+    ``<event>.wait(...)``: every way a retry waits."""
     if not isinstance(node, ast.Call):
         return False
     func = node.func
     if isinstance(func, ast.Attribute):
+        if func.attr == "wait":
+            return True
         return func.attr == "sleep" and isinstance(func.value, ast.Name) and func.value.id == "time"
     return isinstance(func, ast.Name) and func.id == "sleep"
 
 
-def _does_http(loop: ast.AST) -> bool:
-    """The loop names an HTTP client, or hands a URL to a call."""
-    for sub in ast.walk(loop):
+def _call_name(call: ast.Call) -> str | None:
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _does_http(scope: ast.AST) -> bool:
+    """The code names an HTTP library, calls a verb on a client-like receiver,
+    or hands a URL to a call."""
+    for sub in ast.walk(scope):
         if isinstance(sub, ast.Name) and sub.id in _HTTP_NAMES:
             return True
         if isinstance(sub, ast.Attribute) and sub.attr in _HTTP_NAMES:
             return True
-        if isinstance(sub, ast.Call) and any(
-            "url" in tok for arg in sub.args for tok in _identifier_tokens(arg)
+        if not isinstance(sub, ast.Call):
+            continue
+        func = sub.func
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr in _HTTP_VERBS
+            and _HTTP_RECEIVERS & set(_identifier_tokens(func.value))
         ):
+            return True
+        if any("url" in tok for arg in sub.args for tok in _identifier_tokens(arg)):
             return True
     return False
 
 
 def _find_retry_loop(m: _Module) -> Iterator[Hit]:
-    """A loop that makes an HTTP request and ``time.sleep``s, outside http_retry.
+    """A retry outside http_retry: code that makes an HTTP request and waits
+    (``time.sleep``, ``from time import sleep``, ``Event.wait``) in a loop, or
+    in a function that calls itself again after waiting.
 
-    That is a private retry policy: its own attempt count, backoff and
-    status classification. Would have caught the WFS, ArcGIS and CARTO retry
-    loops that #1367's T4a folded into ``core/http_retry.py``.
+    That is a private retry policy: its own attempt count, backoff and status
+    classification. Would have caught the WFS, ArcGIS and CARTO retry loops
+    that #1367's T4a folded into ``core/http_retry.py``.
     """
     parents = {id(c): p for p in ast.walk(m.tree) for c in ast.iter_child_nodes(p)}
     flagged: set[int] = set()
@@ -323,93 +413,206 @@ def _find_retry_loop(m: _Module) -> Iterator[Hit]:
         if not _is_sleep(node):
             continue
         up = parents.get(id(node))
-        while up is not None and not isinstance(up, (ast.For, ast.While)):
-            if isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                up = None
-                break
+        while up is not None and not isinstance(
+            up, (ast.For, ast.While, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+        ):
             up = parents.get(id(up))
-        if up is None or id(up) in flagged:
+        if up is None or id(up) in flagged or isinstance(up, ast.Lambda):
             continue
+        if isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            recursive = any(
+                isinstance(c, ast.Call) and _call_name(c) == up.name for c in ast.walk(up)
+            )
+            if not recursive:
+                continue
         if _does_http(up):
             flagged.add(id(up))
             yield m.hit(up)
 
 
-_RETRY_CONSTANTS = {"DEFAULT_MAX_RETRIES", "DEFAULT_RETRY_DELAY", "DEFAULT_TIMEOUT"}
+#: Module constants that are retry policy whatever their prefix:
+#: ``MAX_RETRIES``, ``DEFAULT_RETRY_DELAY``, ``BACKOFF``, ``MAX_ATTEMPTS``.
+_RETRY_CONSTANT = re.compile(
+    r"^_?(?:[A-Z0-9]+_)*(?:RETRIES|RETRY|BACKOFF|ATTEMPTS)(?:_[A-Z0-9]+)*$"
+)
 
 
-def _find_retry_constants(m: _Module) -> Iterator[Hit]:
-    """Module constants ``DEFAULT_MAX_RETRIES`` / ``DEFAULT_RETRY_DELAY`` /
-    ``DEFAULT_TIMEOUT`` outside ``core/http_retry.py``.
+def _number(node: ast.AST | None) -> float | None:
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        inner = _number(node.operand)
+        return None if inner is None else (inner if isinstance(node.op, ast.UAdd) else -inner)
+    if (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, (int, float))
+        and not isinstance(node.value, bool)
+    ):
+        return float(node.value)
+    return None
+
+
+def _find_retry_constants(m: _Module, repo: Path) -> Iterator[Hit]:
+    """A module-level retry constant outside ``core/http_retry.py``: any name
+    shaped like ``*RETRIES*``, ``*RETRY*``, ``*BACKOFF*``, ``*ATTEMPTS*``, the
+    exact ``DEFAULT_TIMEOUT``, or a ``*_TIMEOUT`` whose value equals an owner
+    timeout default.
 
     The fragmentation that survived T4a (#1367): with the loops gone, each
-    caller still kept its own attempt count, delay and timeout, so the
-    extractors disagreed on how hard to try.
+    caller kept its own attempt count, delay and timeout. A ``*_TIMEOUT`` with
+    its own value is a documented per-request budget of the caller (CARTO's
+    120, WFS's 600) and is not flagged; one that restates the owner's 60 is a
+    copy that drifts when the owner changes.
     """
+    _, owner_timeouts = _owner_surface(repo)
     for node in m.tree.body:
-        targets: list[ast.expr] = []
         if isinstance(node, ast.Assign):
-            targets = node.targets
+            targets, value = node.targets, node.value
         elif isinstance(node, ast.AnnAssign):
-            targets = [node.target]
+            targets, value = [node.target], node.value
+        else:
+            continue
         for target in targets:
-            if isinstance(target, ast.Name) and target.id in _RETRY_CONSTANTS:
-                yield m.hit(node, target.id)
+            if not isinstance(target, ast.Name):
+                continue
+            name = target.id
+            policy_name = _RETRY_CONSTANT.match(name) and name != "MAX_RETRY_AFTER"
+            if policy_name or name == "DEFAULT_TIMEOUT":
+                yield m.hit(node, name)
+            elif name.endswith("_TIMEOUT") and _number(value) in owner_timeouts:
+                yield m.hit(node, name)
 
 
-_RETRY_PARAMS = {"max_retries", "retry_delay"}
+#: Parameter names that carry retry policy.
+_RETRY_PARAMS = {
+    "max_retries",
+    "retries",
+    "retry_delay",
+    "attempts",
+    "max_attempts",
+    "backoff",
+    "backoff_factor",
+    "timeout",
+}
 
 
 def _find_retry_param_defaults(m: _Module) -> Iterator[Hit]:
-    """A ``max_retries=`` / ``retry_delay=`` parameter default outside http_retry.
+    """A default for a retry-policy parameter (``max_retries``, ``retries``,
+    ``retry_delay``, ``attempts``, ``backoff``, ``timeout`` ...) outside
+    http_retry, whether a literal, ``+3`` or a name.
 
     The same T4a residue in signature form: a default in a caller's signature
-    is a policy that silently overrides the owner's.
+    is a policy that silently overrides the owner's, and the API and CLI
+    retyped the owner's 60-second timeout as literals (#1367 T4a audit,
+    finding 3). A module-local name is as private as a literal. Allowed:
+    ``None`` ("let the owner decide") and a constant imported from the owner.
     """
     for node in ast.walk(m.tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         args = node.args
         positional = [*args.posonlyargs, *args.args]
-        defaulted = positional[len(positional) - len(args.defaults) :]
-        defaulted += [
-            a for a, d in zip(args.kwonlyargs, args.kw_defaults, strict=True) if d is not None
-        ]
+        pairs = list(
+            zip(positional[len(positional) - len(args.defaults) :], args.defaults, strict=True)
+        )
+        pairs += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults, strict=True) if d]
         scope = m.scope[id(node)]
-        for arg in defaulted:
-            if arg.arg in _RETRY_PARAMS:
+        for arg, default in pairs:
+            if arg.arg in _RETRY_PARAMS and not _defers_to_owner(m, default):
                 yield m.hit(arg, f"{scope}({arg.arg})")
 
 
 def _is_retry_status(value: object) -> bool:
-    return value == 429 or (isinstance(value, int) and 500 <= value <= 511)
+    return value == 429 or (isinstance(value, float) and 500 <= value <= 511)
+
+
+def _status_like(node: ast.AST) -> bool:
+    return bool({"status", "code"} & set(_identifier_tokens(node)))
 
 
 def _find_retry_status_sets(m: _Module) -> Iterator[Hit]:
-    """A set or tuple literal of HTTP statuses with 429 or a 5xx, outside http_retry.
+    """Which HTTP statuses are worth another attempt, decided outside http_retry.
 
-    Which statuses are worth another attempt is the owner's decision; a
-    private ``{408, 429}`` is a second classification (T4a residue, #1367).
+    A set, tuple or list literal of statuses holding 429 or a 5xx (one element
+    is enough: ``{429}``), and a comparison against one: ``s == 429``,
+    ``status in (429, 503)`` (the tuple), ``500 <= s < 600``, ``code >= 500``.
+    Comparisons with other 4xx codes (``== 401``) are error wording, not retry
+    policy, and are not flagged.
+    A private ``{408, 429}`` is a second classification (T4a residue, #1367).
     """
     for node in ast.walk(m.tree):
-        if not isinstance(node, (ast.Set, ast.Tuple)) or not node.elts:
-            continue
-        values = [e.value if isinstance(e, ast.Constant) else None for e in node.elts]
-        if all(
-            isinstance(v, int) and not isinstance(v, bool) and 100 <= v <= 599 for v in values
-        ) and any(_is_retry_status(v) for v in values):
-            yield m.hit(node)
+        if isinstance(node, (ast.Set, ast.Tuple, ast.List)) and node.elts:
+            values = [_number(e) for e in node.elts]
+            if all(v is not None and 100 <= v <= 599 for v in values) and any(
+                _is_retry_status(v) for v in values
+            ):
+                yield m.hit(node)
+        elif isinstance(node, ast.Compare):
+            operands = [node.left, *node.comparators]
+            numbers = {_number(o) for o in operands} - {None}
+            if 429 in numbers:
+                yield m.hit(node)
+            elif 500 in numbers and numbers & {599, 600}:
+                yield m.hit(node)
+            elif any(500 <= n <= 599 for n in numbers) and any(map(_status_like, operands)):
+                yield m.hit(node)
 
 
 def _find_retry_after(m: _Module) -> Iterator[Hit]:
-    """Reading the ``Retry-After`` header outside ``core/http_retry.py``.
+    """Reading the ``Retry-After`` header, in any case, outside ``core/http_retry.py``.
 
     The owner parses both RFC 9110 forms and caps the wait; a caller that
     fetches the header itself is one step from parsing it itself (T4a residue).
+    httpx headers are case-insensitive, so ``"retry-after"`` is the same read.
     """
     for node in m.strings():
         if "retry-after" in node.value.lower():
             yield m.hit(node)
+
+
+def _find_retry_wrappers(m: _Module, repo: Path) -> Iterator[Hit]:
+    """A private layer over an owner entry point outside http_retry:
+
+    * a function whose whole body is one statement calling an owner function,
+      however it is dressed (``cast(...)``, ``bytes(...)``) and under any
+      import alias -- the #1367 T4a audit's ``_get_shared_http_client``
+      pass-through;
+    * ``functools.partial(<owner function>, ...)``;
+    * a call to an owner function that passes its own numeric policy
+      (``run_with_retry(a, max_retries=5, retry_delay=2.0)``).
+    """
+    surface, _ = _owner_surface(repo)
+    owner_functions = set(surface) | {
+        local for local, name in _owner_imports(m).items() if name in surface
+    }
+
+    def calls_owner(node: ast.AST) -> bool:
+        return any(
+            isinstance(c, ast.Call) and _call_name(c) in owner_functions for c in ast.walk(node)
+        )
+
+    for node in ast.walk(m.tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = [
+                s
+                for s in node.body
+                if not (isinstance(s, ast.Expr) and id(s.value) in m.docstrings)
+            ]
+            if (
+                len(body) == 1
+                and isinstance(body[0], (ast.Return, ast.Expr))
+                and calls_owner(body[0])
+            ):
+                yield m.hit(node, m.scope[id(node)] + ".<wrapper>")
+        elif isinstance(node, ast.Call) and _call_name(node) == "partial":
+            target = node.args[0] if node.args else None
+            if (isinstance(target, ast.Name) and target.id in owner_functions) or (
+                isinstance(target, ast.Attribute) and target.attr in owner_functions
+            ):
+                yield m.hit(node)
+        elif isinstance(node, ast.Call) and _call_name(node) in owner_functions:
+            if any(
+                kw.arg in _RETRY_PARAMS and _number(kw.value) is not None for kw in node.keywords
+            ):
+                yield m.hit(node)
 
 
 def _find_json_dumps(m: _Module) -> Iterator[Hit]:
@@ -425,9 +628,11 @@ def _find_json_dumps(m: _Module) -> Iterator[Hit]:
 
 @dataclass(frozen=True)
 class Arm:
-    finder: Callable[[_Module], Iterator[Hit]]
+    finder: Callable[..., Iterator[Hit]]
     owners: tuple[str, ...]
     roots: tuple[str, ...] = ("geoparquet_io",)
+    #: The finder also takes the scanned repo (to read the owner's surface).
+    needs_repo: bool = False
 
 
 _HTTP_OWNER = ("geoparquet_io/core/http_retry.py",)
@@ -444,10 +649,11 @@ ARMS = {
     "cgroup": Arm(_find_cgroup, ("geoparquet_io/core/memory_limits.py",)),
     "duckdb_version": Arm(_find_duckdb_version, ("geoparquet_io/core/duckdb_utils.py",)),
     "retry_loop": Arm(_find_retry_loop, _HTTP_OWNER),
-    "retry_constants": Arm(_find_retry_constants, _HTTP_OWNER),
+    "retry_constants": Arm(_find_retry_constants, _HTTP_OWNER, needs_repo=True),
     "retry_param_defaults": Arm(_find_retry_param_defaults, _HTTP_OWNER),
     "retry_status_sets": Arm(_find_retry_status_sets, _HTTP_OWNER),
     "retry_after": Arm(_find_retry_after, _HTTP_OWNER),
+    "retry_wrappers": Arm(_find_retry_wrappers, _HTTP_OWNER, needs_repo=True),
     # cli/ only: in core/, json.dumps mostly serializes the geo block and other
     # footer metadata, which is not a report (see the T0b notes in #1367).
     "json_dumps": Arm(
@@ -483,7 +689,7 @@ def arm_hits(repo: Path, arm_name: str) -> list[Hit]:
         hit
         for module in _modules(repo, arm.roots)
         if not _owns(module.path, arm.owners)
-        for hit in arm.finder(module)
+        for hit in (arm.finder(module, repo) if arm.needs_repo else arm.finder(module))
     ]
 
 
@@ -787,6 +993,7 @@ G1_PLANTS = {
     "retry_param_defaults": "def fetch(url, max_retries=5):\n    return url\n",
     "retry_status_sets": "RETRYABLE = {429, 503}\n",
     "retry_after": 'def wait(resp):\n    return resp.headers.get("Retry-After")\n',
+    "retry_wrappers": "def fetch(url):\n    return make_request_with_retry('GET', url)\n",
     "json_dumps": "import json\n\ndef show(d):\n    print(json.dumps(d))\n",
 }
 
@@ -805,8 +1012,156 @@ G1_CLEAN = {
     "retry_param_defaults": "def fetch(url, max_retries):\n    return url\n",
     "retry_status_sets": "SIZES = (1000, 500, 100)\nTILE = (512, 512)\n",
     "retry_after": '"""Honours Retry-After through http_retry."""\n',
+    "retry_wrappers": "def f(a):\n    log(a)\n    return run_with_retry(a)\n",
     "json_dumps": "from geoparquet_io.core.json_output import dumps_json\n",
 }
+
+
+#: Every shape the #1367 T4a audit probe found a name-based retry guard
+#: missing (scratchpad probe.py, audit-t4a-2.md), each with the arm that must
+#: catch it.
+RETRY_SHAPES = [
+    ("retry_status_sets", "tuple", "RETRY = (429, 503)\n"),
+    ("retry_status_sets", "list", "RETRY = [429, 503]\n"),
+    ("retry_status_sets", "inline in", "def f(s):\n    return s in (429, 503)\n"),
+    ("retry_status_sets", "range compare", "def f(s):\n    return 500 <= s < 600\n"),
+    ("retry_status_sets", "== 429", "def f(s):\n    return s == 429\n"),
+    ("retry_status_sets", "code >= 500", "def f(code):\n    return code >= 500\n"),
+    ("retry_status_sets", "one-element set", "R = {429}\n"),
+    ("retry_status_sets", "frozenset", "R = frozenset({429, 503})\n"),
+    ("retry_after", "lowercase", "def g(r):\n    return r.headers.get('retry-after')\n"),
+    ("retry_constants", "MAX_RETRIES", "MAX_RETRIES = 5\n"),
+    ("retry_constants", "BACKOFF", "BACKOFF = 2.0\n"),
+    ("retry_constants", "MAX_ATTEMPTS", "MAX_ATTEMPTS = 4\n"),
+    ("retry_constants", "*_TIMEOUT at the owner default", "REQUEST_TIMEOUT = 60\n"),
+    ("retry_constants", "annotated", "DEFAULT_RETRY_DELAY: float = 2.0\n"),
+    ("retry_param_defaults", "name default", "_R = 5\n\ndef f(max_retries=_R):\n    pass\n"),
+    ("retry_param_defaults", "retries=", "def f(retries=5):\n    pass\n"),
+    ("retry_param_defaults", "attempts=", "def f(attempts=3):\n    pass\n"),
+    ("retry_param_defaults", "backoff=", "def f(backoff=2.0):\n    pass\n"),
+    ("retry_param_defaults", "timeout=", "def f(timeout=60.0):\n    pass\n"),
+    ("retry_param_defaults", "unary", "def f(max_retries=+3):\n    pass\n"),
+    ("retry_param_defaults", "keyword-only", "def f(*, retry_delay=1.5):\n    pass\n"),
+    (
+        "retry_wrappers",
+        "call literal",
+        "def f(a):\n    return run_with_retry(a, max_retries=5, retry_delay=2.0)\n",
+    ),
+    (
+        "retry_wrappers",
+        "cast wrapper",
+        "def w(url, timeout):\n"
+        "    return cast('dict', make_request_with_retry('GET', url, timeout=timeout))\n",
+    ),
+    (
+        "retry_wrappers",
+        "bytes wrapper",
+        "def w(a, d):\n    return bytes(run_with_retry(a, retry_delay=d))\n",
+    ),
+    (
+        "retry_wrappers",
+        "client wrapper",
+        "def w(timeout):\n    return get_shared_http_client(timeout=timeout)\n",
+    ),
+    (
+        "retry_wrappers",
+        "aliased wrapper",
+        "from geoparquet_io.core.http_retry import get_shared_http_client as _base\n\n"
+        "def w(timeout):\n    return _base(timeout=timeout)\n",
+    ),
+    (
+        "retry_wrappers",
+        "partial",
+        "import functools\nw = functools.partial(run_with_retry, max_retries=5)\n",
+    ),
+    (
+        "retry_loop",
+        "session.get",
+        "import time\ndef f(session):\n    for i in range(3):\n"
+        "        session.get('u')\n        time.sleep(1)\n",
+    ),
+    (
+        "retry_loop",
+        "self.client.get",
+        "import time\nclass C:\n    def f(self):\n        while True:\n"
+        "            self.client.get('u')\n            time.sleep(1)\n",
+    ),
+    (
+        "retry_loop",
+        "urlopen",
+        "import time, urllib.request\ndef f():\n    for i in range(3):\n"
+        "        urllib.request.urlopen('u')\n        time.sleep(1)\n",
+    ),
+    (
+        "retry_loop",
+        "from time import sleep",
+        "from time import sleep\ndef f(client):\n    for i in range(3):\n"
+        "        client.get('u')\n        sleep(1)\n",
+    ),
+    (
+        "retry_loop",
+        "recursion",
+        "import time\ndef f(client, n=3):\n    try:\n        return client.get('u')\n"
+        "    except Exception:\n        time.sleep(1)\n        return f(client, n - 1)\n",
+    ),
+    (
+        "retry_loop",
+        "Event.wait",
+        "def f(client, ev):\n    for i in range(3):\n        client.get('u')\n        ev.wait(1)\n",
+    ),
+]
+
+#: Caller policy or unrelated code the retry arms must leave alone.
+RETRY_NEAR_MISSES = [
+    ("retry_constants", "a caller's own request budget", "CARTO_REQUEST_TIMEOUT = 120\n"),
+    ("retry_constants", "a page timeout", "_PAGE_TIMEOUT = 600.0\n"),
+    ("retry_constants", "60 under a non-timeout name", "DEFAULT_BATCH_SIZE = 60\n"),
+    ("retry_param_defaults", "None defers", "def f(timeout=None, max_retries=None):\n    pass\n"),
+    (
+        "retry_param_defaults",
+        "an owner constant",
+        "from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT\n\n"
+        "def f(timeout=DEFAULT_TIMEOUT):\n    pass\n",
+    ),
+    ("retry_status_sets", "4xx wording", "def f(status):\n    return status == 401\n"),
+    ("retry_status_sets", "a row bound", "def f(n):\n    return 10 <= n <= 500\n"),
+    ("retry_status_sets", "a batch list", "B = [1000, 500, 100, 50]\n"),
+    (
+        "retry_wrappers",
+        "a call with the caller's value",
+        "def f(a, d):\n    x = 1\n    return run_with_retry(a, retry_delay=d)\n",
+    ),
+    (
+        "retry_loop",
+        "a file retry",
+        "import time\ndef f(p):\n    for i in range(3):\n        p.unlink()\n        time.sleep(1)\n",
+    ),
+    (
+        "retry_loop",
+        "recursion without HTTP",
+        "import time\ndef f(n):\n    time.sleep(1)\n    return f(n - 1)\n",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("arm_name", "label", "source"), RETRY_SHAPES, ids=[f"{a}-{lbl}" for a, lbl, _ in RETRY_SHAPES]
+)
+def test_g12_the_retry_arms_catch_every_shape_the_t4a_probe_found(
+    tmp_path, arm_name, label, source
+):
+    repo = _plant(tmp_path, arm_name, source)
+    assert arm_hits(repo, arm_name), f"{arm_name} missed the {label} shape:\n{source}"
+
+
+@pytest.mark.parametrize(
+    ("arm_name", "label", "source"),
+    RETRY_NEAR_MISSES,
+    ids=[f"{a}-{lbl}" for a, lbl, _ in RETRY_NEAR_MISSES],
+)
+def test_g12_the_retry_arms_leave_caller_policy_alone(tmp_path, arm_name, label, source):
+    repo = _plant(tmp_path, arm_name, source)
+    assert arm_hits(repo, arm_name) == [], f"{arm_name} flagged {label}"
 
 
 def _plant(tmp_path: Path, arm_name: str, source: str) -> Path:
