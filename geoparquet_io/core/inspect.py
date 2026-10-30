@@ -6,7 +6,11 @@ including summary, preview (head/tail), statistics, and metadata operations.
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_metadata import get_compression_stats, get_usable_columns
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, uses_aws_profile
+from geoparquet_io.core.duckdb_utils import (
+    get_duckdb_connection,
+    has_core_geometry,
+    uses_aws_profile,
+)
 from geoparquet_io.core.geo_metadata import parse_geo_metadata
 from geoparquet_io.core.inspect_utils import (
     extract_file_info,
@@ -98,8 +102,11 @@ def inspect_summary(
         partition_summary = extract_partition_summary(all_files, verbose=False)
         first_file = partition_info["first_file"]
 
-        # Create shared connection for all metadata operations
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(first_file))
+        # Create shared connection for all metadata operations (metadata-only,
+        # so no spatial on DuckDB with core GEOMETRY; see #1353).
+        con = get_duckdb_connection(
+            load_spatial=not has_core_geometry(), load_httpfs=needs_httpfs(first_file)
+        )
         try:
             geo_info = extract_geo_info(first_file, con=con)
             usable_columns = get_usable_columns(first_file, con=con)
@@ -124,8 +131,12 @@ def inspect_summary(
             "Use --check-all to aggregate all files."
         )
 
-    # Create shared connection for all metadata operations
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(file_to_inspect))
+    # Create shared connection for all metadata operations. Everything on it
+    # is metadata-only (parquet_metadata/parquet_schema/DESCRIBE), so on DuckDB
+    # with core GEOMETRY (>= 2.0) the spatial extension is not loaded (#1353).
+    con = get_duckdb_connection(
+        load_spatial=not has_core_geometry(), load_httpfs=needs_httpfs(file_to_inspect)
+    )
     try:
         file_info = extract_file_info(file_to_inspect, con=con)
         geo_info = extract_geo_info(file_to_inspect, con=con)
@@ -218,8 +229,12 @@ def inspect_preview(
         file_to_inspect = partition_info["first_file"]
         partition_notice = f"Previewing first file (of {partition_info['file_count']} total)."
 
-    # Create shared connection for all metadata operations
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(file_to_inspect))
+    # Create shared connection for all metadata operations. Everything on it
+    # is metadata-only (parquet_metadata/parquet_schema/DESCRIBE), so on DuckDB
+    # with core GEOMETRY (>= 2.0) the spatial extension is not loaded (#1353).
+    con = get_duckdb_connection(
+        load_spatial=not has_core_geometry(), load_httpfs=needs_httpfs(file_to_inspect)
+    )
     try:
         file_info = extract_file_info(file_to_inspect, con=con)
         geo_info = extract_geo_info(file_to_inspect, con=con)
@@ -321,8 +336,12 @@ def inspect_stats(
             f"Showing stats for first file (of {partition_info['file_count']} total)."
         )
 
-    # Create shared connection for all metadata operations
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(file_to_inspect))
+    # Create shared connection for all metadata operations. Everything on it
+    # is metadata-only (parquet_metadata/parquet_schema/DESCRIBE), so on DuckDB
+    # with core GEOMETRY (>= 2.0) the spatial extension is not loaded (#1353).
+    con = get_duckdb_connection(
+        load_spatial=not has_core_geometry(), load_httpfs=needs_httpfs(file_to_inspect)
+    )
     try:
         file_info = extract_file_info(file_to_inspect, con=con)
         geo_info = extract_geo_info(file_to_inspect, con=con)

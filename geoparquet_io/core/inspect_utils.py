@@ -36,7 +36,9 @@ from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     fetch_row,
     get_duckdb_connection,
+    has_core_geometry,
     is_interrupt,
+    load_spatial_extension,
     quote_identifier,
     sql_path,
 )
@@ -499,7 +501,9 @@ def wkb_to_wkt_preview(wkb_bytes: bytes, max_length: int = 45) -> str:
         return "<GEOMETRY>"
 
     try:
-        with get_duckdb_connection(load_httpfs=False) as con:
+        # DuckDB core covers ST_AsText/ST_GeomFromWKB on >= 2.0 (#1353); the
+        # except below already falls back to the bare geometry type on failure.
+        with get_duckdb_connection(load_spatial=not has_core_geometry(), load_httpfs=False) as con:
             # Check if this is DuckDB's internal GEOMETRY format (starts with 0x02)
             # vs standard ISO WKB (starts with 0x00 or 0x01 for byte order)
             if wkb_bytes[0] == 0x02:
@@ -659,8 +663,12 @@ def get_preview_data(
     raw_url = resolve_file_url(parquet_file, verbose=False)
     total_rows = get_row_count(parquet_file)
 
-    # Create DuckDB connection
-    con = get_duckdb_connection(load_httpfs=needs_httpfs(parquet_file))
+    # The preview query needs nothing beyond DuckDB's core geometry set
+    # (DESCRIBE, the GeoParquet-aware scan and ST_AsText), so on DuckDB >= 2.0
+    # the spatial extension is skipped; _preview_table_from_query loads it on
+    # demand if a file still turns out to need it (#1353).
+    load_spatial = not has_core_geometry()
+    con = get_duckdb_connection(load_spatial=load_spatial, load_httpfs=needs_httpfs(parquet_file))
 
     try:
         # Detect geometry columns from native Parquet types
@@ -716,7 +724,7 @@ def get_preview_data(
             mode = "head"
 
         # Execute query and convert to PyArrow table
-        table = con.sql(query).arrow().read_all()
+        table = _preview_table_from_query(con, query, has_spatial=load_spatial)
 
         # Convert any native GeoArrow geometry columns to WKT strings for display.
         if native_geo_columns:
@@ -725,6 +733,24 @@ def get_preview_data(
         con.close()
 
     return table, mode
+
+
+def _preview_table_from_query(con, query: str, has_spatial: bool) -> pa.Table:
+    """Run the preview SELECT, loading spatial on demand if core cannot bind it.
+
+    A connection opened without spatial (DuckDB >= 2.0 core GEOMETRY, #1353)
+    covers every function the preview builds today; if a file ever routes the
+    query to a function outside that core set, load the extension and retry
+    once rather than failing.
+    """
+    try:
+        return con.sql(query).arrow().read_all()
+    except duckdb.Error:
+        if has_spatial:
+            raise
+        debug("Preview query failed without the spatial extension; loading it and retrying")
+        load_spatial_extension(con)
+        return con.sql(query).arrow().read_all()
 
 
 def _native_geoarrow_columns_to_wkt(

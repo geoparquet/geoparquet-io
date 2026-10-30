@@ -1388,6 +1388,43 @@ class ProfiledConnection:
         return self._con.__exit__(*exc_info)
 
 
+def has_core_geometry() -> bool:
+    """Whether DuckDB's own core covers gpio's read-only geometry needs.
+
+    DuckDB 2.0 ships the ``GEOMETRY`` type, GeoParquet/native-geo conversion in
+    the Parquet scan, and the serialize/deserialize functions (``ST_AsText``,
+    ``ST_GeomFromWKB``, ``ST_AsWKB``, ``ST_CRS``, ...) without the spatial
+    extension. Read-only paths that touch nothing beyond that set (the
+    ``gpio inspect`` preview and metadata paths) pass
+    ``load_spatial=not has_core_geometry()`` so they start faster and keep
+    working where extensions cannot be downloaded (#1353). There are no core
+    bounds or measure functions (``ST_Extent``, ``ST_Area``, ...), so
+    everything else still loads spatial.
+
+    Gated on the installed major version: on DuckDB 1.x this is False and
+    those paths load spatial exactly as before.
+    """
+    import duckdb
+
+    return int(duckdb.__version__.split(".", 1)[0]) >= 2
+
+
+def load_spatial_extension(con) -> None:
+    """INSTALL and LOAD spatial on ``con``, with gpio's session settings.
+
+    The one place that knows loading spatial also means setting
+    ``geometry_always_xy`` (the setting is registered by the extension, so it
+    cannot be set before the LOAD). Used by :func:`get_duckdb_connection` and
+    by paths that opened without spatial (``load_spatial=False`` under
+    :func:`has_core_geometry`) but then hit a function outside DuckDB's core
+    set and load it on demand.
+    """
+    _install_and_load_extension(con, "spatial")
+    # DuckDB 1.5+: ensure lon/lat = x/y axis order globally.
+    # Replaces per-call always_xy := true in ST_Transform.
+    con.execute("SET geometry_always_xy = true;")
+
+
 def get_duckdb_connection(
     load_spatial=True,
     load_httpfs=None,
@@ -1486,10 +1523,7 @@ def get_duckdb_connection(
 
     # Always load spatial extension by default (core use case)
     if load_spatial:
-        _install_and_load_extension(con, "spatial")
-        # DuckDB 1.5+: ensure lon/lat = x/y axis order globally.
-        # Replaces per-call always_xy := true in ST_Transform.
-        con.execute("SET geometry_always_xy = true;")
+        load_spatial_extension(con)
 
     # S3 config, resolved once (explicit kwargs over the ambient scope). The
     # SET statements and the secret below are both built from it.

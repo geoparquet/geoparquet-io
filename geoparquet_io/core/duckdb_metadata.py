@@ -338,14 +338,19 @@ def _get_pyarrow_logical_type(field) -> str | None:
 # =============================================================================
 
 
-def _get_connection_for_file(parquet_file: str, existing_con=None, load_spatial=True):
+def _get_connection_for_file(parquet_file: str, existing_con=None, load_spatial=None):
     """Get or create DuckDB connection appropriate for file location.
 
     Args:
         parquet_file: Path or URL to the parquet file
         existing_con: Existing connection to reuse
-        load_spatial: Whether to load spatial extension (default: True)
-                     Set to False for metadata-only operations to save ~100ms
+        load_spatial: Whether to load spatial extension. Set to False for
+                     metadata-only operations to save ~100ms. The default
+                     (None) loads it only when DuckDB's core lacks the
+                     GEOMETRY type (:func:`has_core_geometry`): every caller
+                     that leaves it unset runs nothing beyond
+                     ``parquet_metadata()``/``parquet_schema()``/``DESCRIBE``,
+                     which DuckDB >= 2.0 covers without spatial (#1353).
 
     Returns:
         Tuple of (connection, should_close)
@@ -353,7 +358,11 @@ def _get_connection_for_file(parquet_file: str, existing_con=None, load_spatial=
     from geoparquet_io.core.duckdb_utils import (
         get_duckdb_connection,
         get_duckdb_connection_for_s3,
+        has_core_geometry,
     )
+
+    if load_spatial is None:
+        load_spatial = not has_core_geometry()
 
     if existing_con:
         return existing_con, False  # False = don't close

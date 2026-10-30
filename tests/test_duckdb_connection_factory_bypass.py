@@ -177,8 +177,11 @@ class TestWkbToWktPreview:
         wkt = inspect_utils.wkb_to_wkt_preview(WKB_POINT)
 
         assert "POINT" in wkt
-        # Converts bytes already in memory; no file, so no httpfs.
-        assert captured == [{"load_httpfs": False}]
+        # Converts bytes already in memory; no file, so no httpfs. Spatial is
+        # requested only when DuckDB's core lacks the GEOMETRY functions (#1353).
+        from geoparquet_io.core.duckdb_utils import has_core_geometry
+
+        assert captured == [{"load_spatial": not has_core_geometry(), "load_httpfs": False}]
 
 
 class TestGetColumnStatistics:
