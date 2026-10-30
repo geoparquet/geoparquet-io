@@ -521,6 +521,28 @@
     "run_with_retry",
     "status_error"
   ],
+  "geoparquet_io.core.index_ops": [
+    "IndexSpec",
+    "add_index_column",
+    "add_index_streaming",
+    "add_index_table",
+    "calculate_index_resolution",
+    "clamp_resolution",
+    "ensure_index_column",
+    "get_index_spec",
+    "index_expression",
+    "lat_lon_to_quadkey",
+    "load_index",
+    "make_index_query",
+    "partition_index",
+    "preflight_index",
+    "preview_index",
+    "table_bbox_column",
+    "validate_index_crs",
+    "validate_index_resolution",
+    "validate_partition_arguments",
+    "validate_partition_resolutions"
+  ],
   "geoparquet_io.core.json_output": [
     "dumps_json",
     "to_jsonable"

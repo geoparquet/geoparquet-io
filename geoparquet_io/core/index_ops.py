@@ -30,6 +30,7 @@ from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     get_duckdb_connection,
     load_community_extension,
+    query_schema,
     quote_identifier,
     register_arrow,
     sql_path,
@@ -375,7 +376,7 @@ def add_index_streaming(
     ):
         con.execute("SET geometry_always_xy = true;")
         load_index(con, spec, verbose=verbose)
-        schema = con.sql(f"SELECT * FROM {source} LIMIT 0").arrow().read_all()
+        schema = query_schema(con, f"SELECT * FROM {source}").empty_table()
         geom_col = detect_geometry_column_from_names(schema.column_names)
         if geom_col is None:
             raise GeoParquetError("No geometry column found")

@@ -465,68 +465,8 @@ reason = "CRS equality copy (approved change 9); T4c"
 baseline = "scripts/duplicate_pairs_baseline.txt"
 
 [[G3.pairs]]
-pair = "geoparquet_io/cli/commands/partition.py:partition_a5|geoparquet_io/cli/commands/partition.py:partition_h3"
-reason = "partition h3/s2/a5 CLI commands, one per index; T5b shares one implementation"
-[[G3.pairs]]
-pair = "geoparquet_io/cli/commands/partition.py:partition_a5|geoparquet_io/cli/commands/partition.py:partition_s2"
-reason = "partition h3/s2/a5 CLI commands, one per index; T5b shares one implementation"
-[[G3.pairs]]
-pair = "geoparquet_io/cli/commands/partition.py:partition_h3|geoparquet_io/cli/commands/partition.py:partition_s2"
-reason = "partition h3/s2/a5 CLI commands, one per index; T5b shares one implementation"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/a5.py:_add_a5_streaming.make_query|geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query"
-reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/a5.py:_add_a5_streaming.make_query|geoparquet_io/core/add/s2.py:_add_s2_streaming.make_query"
-reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/a5.py:_add_a5_streaming|geoparquet_io/core/add/h3.py:_add_h3_streaming"
-reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/a5.py:_add_a5_streaming|geoparquet_io/core/add/s2.py:_add_s2_streaming"
-reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/a5.py:add_a5_column|geoparquet_io/core/add/h3.py:add_h3_column"
-reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/a5.py:add_a5_table|geoparquet_io/core/add/h3.py:add_h3_table"
-reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query|geoparquet_io/core/add/s2.py:_add_s2_streaming.make_query"
-reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/h3.py:_add_h3_streaming|geoparquet_io/core/add/s2.py:_add_s2_streaming"
-reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
 pair = "geoparquet_io/core/benchmark.py:benchmark_geopandas_fiona|geoparquet_io/core/benchmark.py:benchmark_geopandas_pyogrio"
 reason = "geopandas benchmark harness differing only in the engine= literal; T5c (one function, engine parameter, two registry entries)"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/auto_resolution.py:_calculate_a5_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_h3_resolution"
-reason = "auto-resolution per index; T5b's one resolution calculator"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/auto_resolution.py:_calculate_a5_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_quadkey_resolution"
-reason = "auto-resolution per index; T5b's one resolution calculator"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/auto_resolution.py:_calculate_h3_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_quadkey_resolution"
-reason = "auto-resolution per index; T5b's one resolution calculator"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/by_a5.py:_ensure_a5_column|geoparquet_io/core/partition/by_h3.py:_ensure_h3_column"
-reason = "_ensure_*_column, one copy per index; T5b's ensure_index_column"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/by_a5.py:_ensure_a5_column|geoparquet_io/core/partition/by_quadkey.py:_ensure_quadkey_column"
-reason = "_ensure_*_column, one copy per index; T5b's ensure_index_column"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/by_a5.py:_ensure_a5_column|geoparquet_io/core/partition/by_s2.py:_ensure_s2_column"
-reason = "_ensure_*_column, one copy per index; T5b's ensure_index_column"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/by_a5.py:partition_by_a5|geoparquet_io/core/partition/by_h3.py:partition_by_h3"
-reason = "partition workflow, one copy per index; T5b's index_ops driver"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/by_h3.py:_ensure_h3_column|geoparquet_io/core/partition/by_quadkey.py:_ensure_quadkey_column"
-reason = "_ensure_*_column, one copy per index; T5b's ensure_index_column"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/by_h3.py:_ensure_h3_column|geoparquet_io/core/partition/by_s2.py:_ensure_s2_column"
-reason = "_ensure_*_column, one copy per index; T5b's ensure_index_column"
 
 # pylint R0801 (scripts/check_pylint_duplicates.py, the pylint-duplicates hook).
 # One entry per reported block, keyed by the module and the function (or class,
@@ -585,38 +525,8 @@ block = "cli.commands.process:process_aggregate_h3|core.process.aggregate.by_a5:
 count = 2
 reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
 [[G3.pylint]]
-block = "api.ops:_sub_partition|cli.commands.partition:partition_h3"
-reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
-[[G3.pylint]]
-block = "cli.commands.partition:partition_s2|cli.decorators:handle_directory_sub_partition"
-reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
-[[G3.pylint]]
-block = "core.add.a5:_add_a5_streaming.make_query|core.add.h3:_add_h3_streaming.make_query"
-reason = "index add workflow per index; T5b's index_ops driver"
-[[G3.pylint]]
-block = "core.add.a5:_add_a5_streaming|core.add.h3:_add_h3_streaming"
-reason = "index add workflow per index; T5b's index_ops driver"
-[[G3.pylint]]
-block = "core.add.a5:add_a5_column|core.sort_by_column:sort_by_column"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.add.a5:add_a5_table|core.add.h3:add_h3_table"
-reason = "index add workflow per index; T5b's index_ops driver"
-[[G3.pylint]]
-block = "core.add.bbox:_add_bbox_streaming|core.stream_io:execute_transform"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
 block = "core.add.geometry_metrics:_add_metrics_streaming|core.sort_by_column:_sort_by_column_streaming"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.add.h3:_add_h3_streaming|core.sort_by_column:_sort_by_column_streaming"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.add.h3:add_h3_column|core.sort_quadkey:sort_by_quadkey"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.add.h3:add_h3_table|core.add.quadkey:add_quadkey_table"
-reason = "index add workflow per index; T5b's index_ops driver"
 [[G3.pylint]]
 block = "core.add.kdtree:_add_kdtree_streaming|core.str_order:_str_order_streaming"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
@@ -627,9 +537,6 @@ reason = "is-geographic CRS copy (approved change 8); T4c"
 block = "core.crs_utils:<module>|core.duckdb_metadata:_get_pyarrow_logical_type"
 reason = "GeoArrow extension-name list copied; T3a's decoder owner"
 [[G3.pylint]]
-block = "core.extract:_execute_extraction|core.str_order:_str_order_file_based"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
 block = "core.extract:_extract_streaming|core.str_order:_str_order_streaming"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
@@ -638,24 +545,6 @@ count = 2
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
 block = "core.partition.admin_hierarchical:_create_all_partitions|core.partition.common:partition_by_column"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.partition.by_a5:_run_preview|core.partition.by_h3:_run_preview"
-reason = "partition workflow per index; T5b's index_ops driver"
-[[G3.pylint]]
-block = "core.partition.by_a5:partition_by_a5|core.partition.by_h3:partition_by_h3"
-reason = "partition workflow per index; T5b's index_ops driver"
-[[G3.pylint]]
-block = "core.partition.by_h3:_run_preview|core.partition.by_s2:_run_preview"
-reason = "partition workflow per index; T5b's index_ops driver"
-[[G3.pylint]]
-block = "core.partition.by_h3:partition_by_h3|core.partition.by_kdtree:partition_by_kdtree"
-reason = "partition analysis and write options per index; T5b's index_ops driver"
-[[G3.pylint]]
-block = "core.partition.by_quadkey:_ensure_quadkey_column|core.sort_quadkey:sort_by_quadkey"
-reason = "ensure-quadkey-via-temp-file workflow with the codec policy re-derived as literals; T5b's ensure_index_column"
-[[G3.pylint]]
-block = "core.partition.by_s2:_partition_with_temp_file|core.partition.by_string:partition_by_string"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
 block = "core.process.aggregate.by_a5:aggregate_by_a5|core.process.aggregate.by_h3:aggregate_by_h3"
