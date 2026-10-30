@@ -15,7 +15,7 @@ make a *new* copy fail the build:
   ``duckdb.__version__`` gate, the shapes of a private HTTP retry policy, and a
   bare ``json.dumps`` report in ``cli/``.
 * **G2, owner-only definitions.** ``scripts/check_owner_defs.py``, run by the
-  ``forbid-bespoke-schema-reconciliation`` hook; this module pins its count.
+  ``owner-only-defs`` hook; this module pins its count.
 * **G4, dead code.** vulture at ``min_confidence = 60`` with
   ``scripts/vulture_whitelist.py`` as the baseline; this module pins its size.
 
@@ -67,12 +67,12 @@ EXPECTED_COUNTS = {
     "G1.sql_escape": 1,
     "G1.cgroup": 0,
     "G1.duckdb_version": 2,
-    "G1.retry_loop": 3,
-    "G1.retry_constants": 4,
-    "G1.retry_param_defaults": 28,
-    "G1.retry_status_sets": 4,
-    "G1.retry_after": 2,
-    "G1.retry_wrappers": 4,
+    "G1.retry_loop": 0,
+    "G1.retry_constants": 0,
+    "G1.retry_param_defaults": 1,
+    "G1.retry_status_sets": 1,
+    "G1.retry_after": 0,
+    "G1.retry_wrappers": 0,
     "G1.json_dumps": 2,
     "G2.exemptions": 38,
     "G4.whitelist": 146,
@@ -303,7 +303,10 @@ _OWNER_HTTP_FUNCTIONS = {
 _HTTP_OWNER_PATH = "geoparquet_io/core/http_retry.py"
 _HTTP_NAMES = {"httpx", "requests", "urllib", "urlopen", "aiohttp", "urllib3"}
 _HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "request", "send", "stream"}
-_HTTP_RECEIVERS = {"client", "session", "http", "httpx", "requests", "conn", "connection"}
+_HTTP_RECEIVERS = {"client", "session", "http", "httpx", "requests", "con", "conn", "connection"}
+#: Calls that open a network client: the owner's, or a DuckDB connection whose
+#: remote read (httpfs) a loop retries.
+_CLIENT_FACTORIES = {"get_shared_http_client", "_get_shared_http_client", "get_duckdb_connection"}
 
 
 def _owner_module(repo: Path) -> ast.Module | None:
@@ -354,16 +357,25 @@ def _defers_to_owner(m: _Module, default: ast.AST) -> bool:
     return False
 
 
+def _names_a_request_budget(arg: ast.arg, default: ast.AST) -> bool:
+    """``timeout=CARTO_REQUEST_TIMEOUT``: a caller's own named, documented
+    request budget is caller policy (the #1367 T4a audit's ruling). Where that
+    constant is defined, ``retry_constants`` still flags it if its value merely
+    restates the owner's default; a literal ``timeout=60`` is still flagged."""
+    if arg.arg != "timeout":
+        return False
+    name = default.id if isinstance(default, ast.Name) else getattr(default, "attr", "")
+    return name.endswith("_TIMEOUT") and name != "DEFAULT_TIMEOUT"
+
+
 def _is_sleep(node: ast.AST) -> bool:
-    """``time.sleep(...)``, a bare ``sleep(...)`` (``from time import sleep``) or
-    ``<event>.wait(...)``: every way a retry waits."""
+    """``time.sleep(...)`` (or any ``<x>.sleep``), a bare ``sleep(...)``
+    (``from time import sleep``) or ``<event>.wait(...)``: every way a retry waits."""
     if not isinstance(node, ast.Call):
         return False
     func = node.func
     if isinstance(func, ast.Attribute):
-        if func.attr == "wait":
-            return True
-        return func.attr == "sleep" and isinstance(func.value, ast.Name) and func.value.id == "time"
+        return func.attr in ("wait", "sleep")
     return isinstance(func, ast.Name) and func.id == "sleep"
 
 
@@ -386,6 +398,8 @@ def _does_http(scope: ast.AST) -> bool:
             return True
         if not isinstance(sub, ast.Call):
             continue
+        if _call_name(sub) in _CLIENT_FACTORIES:
+            return True
         func = sub.func
         if (
             isinstance(func, ast.Attribute)
@@ -516,12 +530,14 @@ def _find_retry_param_defaults(m: _Module) -> Iterator[Hit]:
         pairs += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults, strict=True) if d]
         scope = m.scope[id(node)]
         for arg, default in pairs:
-            if arg.arg in _RETRY_PARAMS and not _defers_to_owner(m, default):
+            if arg.arg in _RETRY_PARAMS and not (
+                _defers_to_owner(m, default) or _names_a_request_budget(arg, default)
+            ):
                 yield m.hit(arg, f"{scope}({arg.arg})")
 
 
 def _is_retry_status(value: object) -> bool:
-    return value == 429 or (isinstance(value, float) and 500 <= value <= 511)
+    return value in (408, 429) or (isinstance(value, float) and 500 <= value <= 511)
 
 
 def _status_like(node: ast.AST) -> bool:
@@ -531,7 +547,7 @@ def _status_like(node: ast.AST) -> bool:
 def _find_retry_status_sets(m: _Module) -> Iterator[Hit]:
     """Which HTTP statuses are worth another attempt, decided outside http_retry.
 
-    A set, tuple or list literal of statuses holding 429 or a 5xx (one element
+    A set, tuple or list literal of statuses holding 408, 429 or a 5xx (one element
     is enough: ``{429}``), and a comparison against one: ``s == 429``,
     ``status in (429, 503)`` (the tuple), ``500 <= s < 600``, ``code >= 500``.
     Comparisons with other 4xx codes (``== 401``) are error wording, not retry
@@ -576,8 +592,9 @@ def _find_retry_wrappers(m: _Module, repo: Path) -> Iterator[Hit]:
       import alias -- the #1367 T4a audit's ``_get_shared_http_client``
       pass-through;
     * ``functools.partial(<owner function>, ...)``;
-    * a call to an owner function that passes its own numeric policy
-      (``run_with_retry(a, max_retries=5, retry_delay=2.0)``).
+    * a call that passes its own numeric retry policy
+      (``run_with_retry(a, max_retries=5, retry_delay=2.0)``, or the same
+      keywords to any helper), or a literal ``timeout=`` to an owner function.
     """
     surface, _ = _owner_surface(repo)
     owner_functions = set(surface) | {
@@ -608,9 +625,14 @@ def _find_retry_wrappers(m: _Module, repo: Path) -> Iterator[Hit]:
                 isinstance(target, ast.Attribute) and target.attr in owner_functions
             ):
                 yield m.hit(node)
-        elif isinstance(node, ast.Call) and _call_name(node) in owner_functions:
+        elif isinstance(node, ast.Call):
+            # Retry counts and delays as literals at any call; a literal timeout
+            # only at an owner call (subprocess and DuckDB take their own).
+            owner_call = _call_name(node) in owner_functions
             if any(
-                kw.arg in _RETRY_PARAMS and _number(kw.value) is not None for kw in node.keywords
+                (kw.arg in _RETRY_PARAMS - {"timeout"} or (owner_call and kw.arg == "timeout"))
+                and _number(kw.value) is not None
+                for kw in node.keywords
             ):
                 yield m.hit(node)
 
@@ -877,7 +899,7 @@ def test_g2_every_exemption_has_a_reason_and_owners_exist():
 
 
 def test_g2_hook_runs_the_owner_defs_script():
-    hook = hook_entry("forbid-bespoke-schema-reconciliation")
+    hook = hook_entry("owner-only-defs")
     assert "scripts/check_owner_defs.py" in " ".join([hook["entry"], *hook.get("args", [])])
     assert not {"files", "exclude"} & set(hook), "a files/exclude key would narrow the guard"
 
@@ -1040,6 +1062,12 @@ RETRY_SHAPES = [
     ("retry_param_defaults", "attempts=", "def f(attempts=3):\n    pass\n"),
     ("retry_param_defaults", "backoff=", "def f(backoff=2.0):\n    pass\n"),
     ("retry_param_defaults", "timeout=", "def f(timeout=60.0):\n    pass\n"),
+    (
+        "retry_param_defaults",
+        "a local DEFAULT_TIMEOUT",
+        "DEFAULT_TIMEOUT = 30\n\ndef f(timeout=DEFAULT_TIMEOUT):\n    pass\n",
+    ),
+    ("retry_param_defaults", "a local retry name", "_N = 4\n\ndef f(retries=_N):\n    pass\n"),
     ("retry_param_defaults", "unary", "def f(max_retries=+3):\n    pass\n"),
     ("retry_param_defaults", "keyword-only", "def f(*, retry_delay=1.5):\n    pass\n"),
     (
@@ -1104,6 +1132,24 @@ RETRY_SHAPES = [
         "import time\ndef f(client, n=3):\n    try:\n        return client.get('u')\n"
         "    except Exception:\n        time.sleep(1)\n        return f(client, n - 1)\n",
     ),
+    ("retry_status_sets", "408 with a 4xx", "R = {408, 400}\n"),
+    (
+        "retry_wrappers",
+        "literal to any helper",
+        "def f(a):\n    x = 1\n    return fetch(a, max_retries=5)\n",
+    ),
+    (
+        "retry_loop",
+        "asyncio.sleep",
+        "import asyncio\nasync def f(client):\n    for i in range(3):\n"
+        "        client.get('u')\n        await asyncio.sleep(1)\n",
+    ),
+    (
+        "retry_loop",
+        "a DuckDB remote read",
+        "import time\ndef f(q):\n    for i in range(3):\n"
+        "        con = get_duckdb_connection()\n        con.sql(q)\n        time.sleep(1)\n",
+    ),
     (
         "retry_loop",
         "Event.wait",
@@ -1122,6 +1168,11 @@ RETRY_NEAR_MISSES = [
         "an owner constant",
         "from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT\n\n"
         "def f(timeout=DEFAULT_TIMEOUT):\n    pass\n",
+    ),
+    (
+        "retry_param_defaults",
+        "a named request budget",
+        "CARTO_REQUEST_TIMEOUT = 120\n\ndef f(timeout=CARTO_REQUEST_TIMEOUT):\n    pass\n",
     ),
     ("retry_status_sets", "4xx wording", "def f(status):\n    return status == 401\n"),
     ("retry_status_sets", "a row bound", "def f(n):\n    return 10 <= n <= 500\n"),

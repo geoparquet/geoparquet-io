@@ -43,7 +43,7 @@ reason = "_write_table_with_settings, a second funnel beside write_funnels; T2 r
 [[G1.tid251]]
 path = "geoparquet_io/core/carto.py"
 name = "httpx"
-reason = "status probe outside http_retry; removed by T4a"
+reason = "CARTO status probe streams one request with httpx.stream to read the status without the body; outside http_retry (T4a kept it)"
 [[G1.tid251]]
 path = "geoparquet_io/core/constants.py"
 name = "pyarrow.parquet.ParquetWriter"
@@ -100,7 +100,7 @@ reason = "stdin spooled to a temp file; private write outside the facade (T2)"
 path = "geoparquet_io/core/wfs.py"
 name = "httpx"
 count = 4
-reason = "WFS client, its retry loops and its streaming page download; removed by T4a except the stream"
+reason = "WFS request, feature count, streaming page download and startIndex probe import httpx for its exception types and stream; retries now run through http_retry (T4a)"
 # json.loads of the geo key: parse through core/geo_metadata.py (#982, #913, #1120, #1169).
 [[G1.geo_parse]]
 path = "geoparquet_io/api/table.py"
@@ -176,188 +176,15 @@ path = "geoparquet_io/core/geojson_stream.py"
 name = "_native_geojson_writer_available"
 reason = "private DuckDB-2.0 gate (#1357/#1358/#1360 class); removed by T1a"
 # HTTP retry policy: core/http_retry.py owns attempts, delay, timeout, statuses and Retry-After.
-[[G1.retry_loop]]
-path = "geoparquet_io/core/carto.py"
-name = "_fetch_with_retry"
-reason = "private HTTP retry loop; removed by T4a"
-[[G1.retry_loop]]
-path = "geoparquet_io/core/wfs.py"
-name = "_make_request"
-reason = "private HTTP retry loop; removed by T4a"
-[[G1.retry_loop]]
-path = "geoparquet_io/core/wfs.py"
-name = "_fetch_wfs_page"
-reason = "private HTTP retry loop; removed by T4a"
-[[G1.retry_constants]]
-path = "geoparquet_io/core/carto.py"
-name = "DEFAULT_TIMEOUT"
-reason = "per-caller retry/timeout constant; removed by T4a"
-[[G1.retry_constants]]
-path = "geoparquet_io/core/carto.py"
-name = "DEFAULT_MAX_RETRIES"
-reason = "per-caller retry/timeout constant; removed by T4a"
-[[G1.retry_constants]]
-path = "geoparquet_io/core/carto.py"
-name = "DEFAULT_RETRY_DELAY"
-reason = "per-caller retry/timeout constant; removed by T4a"
-[[G1.retry_constants]]
-path = "geoparquet_io/core/wfs.py"
-name = "DEFAULT_TIMEOUT"
-reason = "per-caller retry/timeout constant; removed by T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/api/ops.py"
-name = "from_arcgis(timeout)"
-reason = "the owner's 60 s retyped as a literal at the API (T4a audit finding 3); T4"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/api/ops.py"
-name = "from_carto(timeout)"
-reason = "CARTO's 120 s retyped as a literal at the API (T4a audit finding 3); T4"
 [[G1.retry_param_defaults]]
 path = "geoparquet_io/api/table.py"
 name = "_safe_unlink(attempts)"
 reason = "retries a Windows file unlink, not an HTTP request; named like retry policy"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/api/table.py"
-name = "extract_arcgis(timeout)"
-reason = "the owner's 60 s retyped as a literal at the API (T4a audit finding 3); T4"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/arcgis.py"
-name = "_make_request(max_retries)"
-reason = "retry default in a caller's signature; removed by T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/arcgis.py"
-name = "_make_request(retry_delay)"
-reason = "retry default in a caller's signature; removed by T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/carto.py"
-name = "_get_row_count(timeout)"
-reason = "defaults to CARTO's module-local DEFAULT_TIMEOUT; T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/carto.py"
-name = "_carto_sql_json(timeout)"
-reason = "defaults to CARTO's module-local DEFAULT_TIMEOUT; T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/carto.py"
-name = "_probe_table_schema(timeout)"
-reason = "defaults to CARTO's module-local DEFAULT_TIMEOUT; T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/carto.py"
-name = "_detect_geometry_column(timeout)"
-reason = "defaults to CARTO's module-local DEFAULT_TIMEOUT; T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/carto.py"
-name = "_geometry_column_has_values(timeout)"
-reason = "defaults to CARTO's module-local DEFAULT_TIMEOUT; T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/carto.py"
-name = "_detect_table_shape(timeout)"
-reason = "defaults to CARTO's module-local DEFAULT_TIMEOUT; T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/carto.py"
-name = "_probe_schema_columns(timeout)"
-reason = "defaults to CARTO's module-local DEFAULT_TIMEOUT; T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/carto.py"
-name = "_probe_geometry_srids(timeout)"
-reason = "defaults to CARTO's module-local DEFAULT_TIMEOUT; T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/carto.py"
-name = "_resolve_table_crs(timeout)"
-reason = "defaults to CARTO's module-local DEFAULT_TIMEOUT; T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/carto.py"
-name = "_fetch_with_retry(timeout)"
-reason = "defaults to CARTO's module-local DEFAULT_TIMEOUT; T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/carto.py"
-name = "carto_to_table(timeout)"
-reason = "defaults to CARTO's module-local DEFAULT_TIMEOUT; T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/carto.py"
-name = "convert_carto_to_geoparquet(timeout)"
-reason = "defaults to CARTO's module-local DEFAULT_TIMEOUT; T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/carto.py"
-name = "_fetch_with_retry(max_retries)"
-reason = "defaults to CARTO's module-local retry constant; removed by T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/carto.py"
-name = "_fetch_with_retry(retry_delay)"
-reason = "defaults to CARTO's module-local retry constant; removed by T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/carto.py"
-name = "carto_to_table(max_retries)"
-reason = "defaults to CARTO's module-local retry constant; removed by T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/carto.py"
-name = "convert_carto_to_geoparquet(max_retries)"
-reason = "defaults to CARTO's module-local retry constant; removed by T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/wfs.py"
-name = "_get_shared_http_client(timeout)"
-reason = "defaults to WFS's module-local DEFAULT_TIMEOUT; removed by T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/wfs.py"
-name = "_make_request(timeout)"
-reason = "defaults to WFS's module-local DEFAULT_TIMEOUT; removed by T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/wfs.py"
-name = "_make_request(max_retries)"
-reason = "retry default in a caller's signature; removed by T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/wfs.py"
-name = "_make_request(retry_delay)"
-reason = "retry default in a caller's signature; removed by T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/wfs.py"
-name = "_fetch_wfs_page(max_retries)"
-reason = "retry default in a caller's signature; removed by T4a"
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/core/wfs.py"
-name = "_fetch_wfs_page(retry_delay)"
-reason = "retry default in a caller's signature; removed by T4a"
-[[G1.retry_status_sets]]
-path = "geoparquet_io/core/carto.py"
-name = "<module>"
-reason = "CARTO's own retryable-status set; removed by T4a"
-[[G1.retry_status_sets]]
-path = "geoparquet_io/core/carto.py"
-name = "_is_retryable"
-reason = "CARTO's own 5xx retry test; removed by T4a"
 [[G1.retry_status_sets]]
 path = "geoparquet_io/core/carto.py"
 name = "_probe_request_status"
 count = 2
-reason = "400 <= code < 500 and code != 429: CARTO's own classification; T4a"
-[[G1.retry_status_sets]]
-path = "geoparquet_io/core/wfs.py"
-name = "_make_request"
-count = 2
-reason = "status == 429 or 500 <= status < 600: WFS's own retry test; removed by T4a"
-[[G1.retry_wrappers]]
-path = "geoparquet_io/core/arcgis.py"
-name = "_make_request.<wrapper>"
-reason = "one-call wrapper of make_request_with_retry with its own defaults; T4a"
-[[G1.retry_wrappers]]
-path = "geoparquet_io/core/carto.py"
-name = "_retry_after.<wrapper>"
-reason = "one-call wrapper of parse_retry_after; T4a"
-[[G1.retry_wrappers]]
-path = "geoparquet_io/core/wfs.py"
-name = "_get_shared_http_client.<wrapper>"
-reason = "pass-through of get_shared_http_client under an alias (T4a audit finding 1)"
-[[G1.retry_wrappers]]
-path = "geoparquet_io/core/wfs.py"
-name = "_reset_http_client.<wrapper>"
-reason = "pass-through of reset_http_client under an alias; T4a"
-[[G1.retry_after]]
-path = "geoparquet_io/core/carto.py"
-name = "_retry_after"
-reason = "reads Retry-After itself (parsing is delegated); removed by T4a"
-[[G1.retry_after]]
-path = "geoparquet_io/core/wfs.py"
-name = "_make_request"
-reason = "reads Retry-After itself (parsing is delegated); removed by T4a"
+reason = "400 <= code < 500 and code != 429 picks which 4xx answers get a detail probe for the error message; not a retry decision (T4a kept it)"
 # Bare json.dumps reports in cli/: use core/json_output.dumps_json (#1226).
 [[G1.json_dumps]]
 path = "geoparquet_io/cli/commands/benchmark.py"
