@@ -418,6 +418,19 @@ class TestCeilingWithoutPsutil:
         finally:
             con.close()
 
+    def test_spill_sweep_keeps_everything(self, tmp_path):
+        """Without psutil, liveness is unknowable, so the sweep must not delete.
+
+        The sweep runs on every connection open; this is the other call-time
+        psutil import on that path, and it must stay optional too.
+        """
+        from geoparquet_io.core.duckdb_utils import sweep_orphaned_spill_dirs
+
+        leftover = tmp_path / "gpio-spill-999999999-0123456789ab"
+        leftover.mkdir()
+        assert sweep_orphaned_spill_dirs(tmp_path) == []
+        assert leftover.is_dir()
+
 
 class TestConvertSortsOnce:
     """The invalid-geometry count ran over the Hilbert-ordered query (#1153).

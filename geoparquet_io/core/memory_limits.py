@@ -168,6 +168,7 @@ def _physical_ram() -> int | None:
     try:
         import psutil
     except ImportError:
+        debug("psutil unavailable; memory ceiling from the cgroup cap alone")
         return None
     return int(psutil.virtual_memory().total)
 
