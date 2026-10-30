@@ -397,7 +397,7 @@ def _copy_row_groups(
 def _rewrite_file_with_geo_metadata(
     output_path: str,
     geo_meta: dict,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_rows: int | None = None,
 ) -> None:

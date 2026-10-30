@@ -25,11 +25,7 @@ from geoparquet_io.core.arrow_geo_metadata import (
     table_geometry_info,
 )
 from geoparquet_io.core.common import compute_geometry_types_via_sql
-from geoparquet_io.core.compression import (
-    ResolvedCodec,
-    resolve_codec,
-    validate_compression_settings,
-)
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
     _wrap_query_with_wkb_conversion,
     get_duckdb_connection,
@@ -165,10 +161,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             )
             return
 
-        validated_compression, validated_level, _ = validate_compression_settings(
-            compression, compression_level, verbose
-        )
-        codec = ResolvedCodec(validated_compression, validated_level)
+        codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
 
         is_remote = is_remote_url(output_path)
         work_dir = tempfile.mkdtemp(prefix="gpio_disk_rewrite_")
@@ -265,8 +258,8 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 input_path=temp_path,
                 output_path=final_path,
                 geo_meta=None if geoparquet_version == "parquet-geo-only" else geo_meta,
-                compression=validated_compression,
-                compression_level=validated_level,
+                compression=codec.name,
+                compression_level=codec.level,
                 verbose=verbose,
                 extra_kv_metadata=extra_kv_metadata,
                 row_group_rows=resolved_row_group_rows,
@@ -384,10 +377,8 @@ class DiskRewriteStrategy(BaseWriteStrategy):
     ) -> None:
         """Write plain Parquet (no geo metadata) from an Arrow table."""
 
-        validated_compression, validated_level, _ = validate_compression_settings(
-            compression, compression_level, verbose
-        )
-        writer_kwargs = ResolvedCodec(validated_compression, validated_level).pyarrow_kwargs()
+        codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
+        writer_kwargs = codec.pyarrow_kwargs()
         if row_group_rows:
             writer_kwargs["row_group_size"] = row_group_rows
 
@@ -398,7 +389,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             local_path = os.path.join(work_dir, "output.parquet") if is_remote else output_path
 
             if verbose:
-                debug(f"Writing plain Parquet with {validated_compression} compression...")
+                debug(f"Writing plain Parquet with {codec.name} compression...")
 
             pq.write_table(table, local_path, **writer_kwargs)
 

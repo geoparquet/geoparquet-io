@@ -21,6 +21,7 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_types import _rebuild_array_with_type
 from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
     _format_crs_display,
     apply_output_crs,
@@ -1120,10 +1121,8 @@ def _write_table_with_settings(
     )
 
     if verbose:
-        compression_desc = (
-            f"{compression}:{compression_level}" if compression_level else compression
-        )
-        debug(f"Writing with {compression_desc} compression")
+        codec = resolve_codec(compression, compression_level, context="write")
+        debug(f"Writing with {codec.description} compression")
         if rows_per_group:
             debug(f"Row group size: {rows_per_group:,} rows")
 

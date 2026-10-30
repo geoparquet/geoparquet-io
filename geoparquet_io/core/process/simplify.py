@@ -818,7 +818,7 @@ def simplify_file(
     drop_empty: bool = False,
     simplify_crs: str | None = None,
     refresh_metrics: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,

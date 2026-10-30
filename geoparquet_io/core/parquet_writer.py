@@ -699,14 +699,13 @@ class ParquetWriteSettings:
     Single source of truth for compression, row groups, and other settings.
     """
 
-    compression: str = "ZSTD"
-    compression_level: int = 15
+    #: ``None`` means the owner's default (``compression.resolve_codec``):
+    #: ZSTD, at the codec's documented level.
+    compression: str | None = None
+    compression_level: int | None = None
     row_group_rows: int | None = None
     row_group_size_mb: int | None = None
 
-    # Best practice constants
-    DEFAULT_COMPRESSION = "ZSTD"
-    DEFAULT_COMPRESSION_LEVEL = 15
     DEFAULT_PARQUET_VERSION = "2.6"
 
     def get_pyarrow_kwargs(

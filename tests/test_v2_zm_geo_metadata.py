@@ -118,7 +118,7 @@ def test_rewrite_keeps_row_group_structure_when_unspecified(tmp_path):
 
 
 def test_rewrite_preserves_lz4_codec_unit(tmp_path):
-    """codec_map must cover the normalized 'LZ4' name callers actually pass."""
+    """``resolve_codec`` keeps the normalized 'LZ4' name callers actually pass."""
     import pyarrow as pa
 
     from geoparquet_io.core.derive_geo_from_file import _rewrite_file_with_geo_metadata

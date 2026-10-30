@@ -107,7 +107,7 @@ def _run_partition_with_temp_file(
     *,
     temp_prefix: str = "gpio_partition",
     core_kwargs: dict,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
 ) -> dict:
     """
@@ -1220,7 +1220,7 @@ class Table:
         self,
         path: str | Path,
         format: str | None = None,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         compression_level: int | None = None,
         row_group_size_mb: float | None = None,
         row_group_rows: int | None = None,
@@ -1794,8 +1794,8 @@ class Table:
             self._table,
             output_file=str(temp_path),
             geometry_column=self._geometry_column,
-            compression="ZSTD",
-            compression_level=15,
+            compression=None,
+            compression_level=None,
             row_group_size_mb=None,
             row_group_rows=None,
             geoparquet_version=None,  # Use existing version from table
@@ -2455,7 +2455,7 @@ class Table:
         auto: bool = False,
         target_rows: int = 100000,
         max_partitions: int = 10000,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         hive: bool = False,
         keep_quadkey_column: bool | None = None,
         overwrite: bool = False,
@@ -2536,7 +2536,7 @@ class Table:
         auto: bool = False,
         target_rows: int = 100000,
         max_partitions: int = 10000,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         hive: bool = False,
         keep_h3_column: bool | None = None,
         overwrite: bool = False,
@@ -2611,7 +2611,7 @@ class Table:
         auto: bool = False,
         target_rows: int = 100000,
         max_partitions: int = 10000,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         hive: bool = False,
         keep_s2_column: bool | None = None,
         overwrite: bool = False,
@@ -2689,7 +2689,7 @@ class Table:
         auto: bool = False,
         target_rows: int = 100000,
         max_partitions: int = 10000,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         hive: bool = False,
         keep_a5_column: bool | None = None,
         overwrite: bool = False,
@@ -2763,7 +2763,7 @@ class Table:
         self,
         destination: str,
         *,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         compression_level: int | None = None,
         row_group_size_mb: float | None = None,
         row_group_rows: int | None = None,
@@ -3132,7 +3132,7 @@ class Table:
             # prospective verdict describes the file the caller would get.
             self._write_geoparquet(
                 temp_path,
-                compression="ZSTD",
+                compression=None,
                 compression_level=None,
                 row_group_size_mb=None,
                 row_group_rows=None,
@@ -3668,7 +3668,7 @@ class Table:
         chars: int | None = None,
         hive: bool = False,
         overwrite: bool = False,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         compression_level: int | None = None,
     ) -> dict:
         """
@@ -3729,7 +3729,7 @@ class Table:
         hive: bool = False,
         keep_kdtree_column: bool | None = None,
         overwrite: bool = False,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         compression_level: int | None = None,
     ) -> dict:
         """
@@ -3823,7 +3823,7 @@ class Table:
         hive: bool = False,
         overwrite: bool = False,
         vecorel: bool = False,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         compression_level: int | None = None,
     ) -> dict:
         """

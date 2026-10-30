@@ -18,7 +18,7 @@ from geoparquet_io.core.arrow_geo_metadata import (
     _normalize_arrow_large_types,
     _write_table_with_settings,
 )
-from geoparquet_io.core.compression import validate_compression_settings
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import _get_query_columns, _wrap_query_with_wkb_conversion
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.parquet_writer import apply_output_kv_metadata
@@ -68,8 +68,11 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
         query_columns = _get_query_columns(con, query)
         has_geometry = geometry_column in query_columns
 
-        compression, compression_level, compression_desc = validate_compression_settings(
-            compression, compression_level, verbose
+        codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
+        compression, compression_level, compression_desc = (
+            codec.name,
+            codec.level,
+            codec.description,
         )
 
         if verbose:
@@ -143,8 +146,11 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
         configure_verbose(verbose)
         self._validate_output_path(output_path)
 
-        compression, compression_level, compression_desc = validate_compression_settings(
-            compression, compression_level, verbose
+        codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
+        compression, compression_level, compression_desc = (
+            codec.name,
+            codec.level,
+            codec.description,
         )
 
         if verbose:

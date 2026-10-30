@@ -43,6 +43,10 @@ ACCEPTED_CODEC_NAMES = ALLOWED_CODECS + tuple(CODEC_ALIASES)
 #: The codec an unset name resolves to.
 DEFAULT_CODEC = "ZSTD"
 
+#: Footer codec names that are another spelling of a codec gpio writes:
+#: DuckDB reports pyarrow's and its own ``LZ4`` output as ``LZ4_RAW``.
+_FOOTER_ALIASES = {"LZ4_RAW": "LZ4"}
+
 #: One ``(min, max, default)`` per codec that takes a level. An unset level
 #: resolves from here, so this is where the global default is written down.
 COMPRESSION_RANGES = {
@@ -50,6 +54,9 @@ COMPRESSION_RANGES = {
     "ZSTD": (1, 22, 15),
     "BROTLI": (1, 11, 6),
 }
+
+#: The level an unset ZSTD level resolves to on every ordinary write.
+DEFAULT_WRITE_LEVEL = COMPRESSION_RANGES[DEFAULT_CODEC][2]
 
 #: The widest level any codec takes; the CLI's first bound before the codec
 #: is known.
@@ -78,15 +85,51 @@ WriteContext = Literal["write", "process"]
 _CONTEXTS = ("write", "process")
 
 
+def _invalid_codec(name) -> InvalidParameterError:
+    return InvalidParameterError(
+        "compression",
+        f"Invalid compression '{name}'. Must be one of: {', '.join(ALLOWED_CODECS)}",
+    )
+
+
+def _check_level(codec: str, level) -> None:
+    """Refuse a level the codec cannot take; the level is formatted into SQL."""
+    if codec not in COMPRESSION_RANGES:
+        if level is not None:
+            raise InvalidParameterError("compression_level", f"{codec} takes no level")
+        return
+    # ``bool`` is an ``int`` subclass, and ``COMPRESSION_LEVEL True`` is not
+    # something a caller meant. Anything but an int is refused here, never
+    # interpolated: ``COMPRESSION_LEVEL`` takes no parameter binding.
+    if isinstance(level, bool) or not isinstance(level, int):
+        raise InvalidParameterError(
+            "compression_level", f"expected an integer level, got {level!r}"
+        )
+    min_level, max_level, _ = COMPRESSION_RANGES[codec]
+    if not min_level <= level <= max_level:
+        raise InvalidParameterError(
+            "compression_level",
+            f"{codec} compression level must be between {min_level} and {max_level}, got {level}",
+        )
+
+
 @dataclass(frozen=True)
 class ResolvedCodec:
     """A validated codec and the level one write uses with it.
 
-    ``level`` is ``None`` exactly when the codec takes no level.
+    ``level`` is ``None`` exactly when the codec takes no level. The
+    constructor validates both, so no instance can carry a value that is not a
+    codec gpio writes or a level outside its range -- the clauses below are
+    interpolated into SQL. Build one with :func:`resolve_codec`.
     """
 
     name: str
     level: int | None
+
+    def __post_init__(self) -> None:
+        if self.name not in ALLOWED_CODECS:
+            raise _invalid_codec(self.name)
+        _check_level(self.name, self.level)
 
     @property
     def description(self) -> str:
@@ -102,17 +145,17 @@ class ResolvedCodec:
         out is not "the default", it is DuckDB's 3 (#1335).
         """
         options = [f"COMPRESSION {self.name}"]
-        if self.name == "ZSTD" and self.level is not None:
+        if self.name == "ZSTD":
             options.append(f"COMPRESSION_LEVEL {self.level}")
         return options
 
     def pyarrow_kwargs(self) -> dict:
         """``compression`` (and ``compression_level``) for a pyarrow writer.
 
-        The level is always passed for a levelled codec: an omitted one is
-        pyarrow's own default (ZSTD 1), not gpio's.
+        ``UNCOMPRESSED`` is pyarrow's ``None``. The level is always passed for
+        a levelled codec: an omitted one is pyarrow's own default (ZSTD 1).
         """
-        kwargs: dict = {"compression": "none" if self.name == "UNCOMPRESSED" else self.name.lower()}
+        kwargs: dict = {"compression": None if self.name == "UNCOMPRESSED" else self.name.lower()}
         if self.level is not None:
             kwargs["compression_level"] = self.level
         return kwargs
@@ -122,47 +165,36 @@ def _canonical_codec(name: str | None) -> str:
     if name is None:
         return DEFAULT_CODEC
     if not isinstance(name, str) or name.upper() not in ACCEPTED_CODEC_NAMES:
-        raise InvalidParameterError(
-            "compression",
-            f"Invalid compression '{name}'. Must be one of: {', '.join(ALLOWED_CODECS)}",
-        )
+        raise _invalid_codec(name)
     upper = name.upper()
     return CODEC_ALIASES.get(upper, upper)
 
 
-def _resolve_level(codec: str, level, context: WriteContext) -> int | None:
+def _default_level(codec: str, context: WriteContext) -> int | None:
     if codec not in COMPRESSION_RANGES:
         return None
-    min_level, max_level, default_level = COMPRESSION_RANGES[codec]
-    if level is None:
-        return (
-            _PROCESS_DEFAULTS.get(codec, default_level) if context == "process" else default_level
-        )
-    # ``bool`` is an ``int`` subclass, and ``COMPRESSION_LEVEL True`` is not
-    # something a caller meant. The level is formatted into SQL, so anything
-    # but an int is refused here, not interpolated.
-    if isinstance(level, bool) or not isinstance(level, int):
-        raise InvalidParameterError(
-            "compression_level", f"expected an integer level, got {level!r}"
-        )
-    if not min_level <= level <= max_level:
-        raise InvalidParameterError(
-            "compression_level",
-            f"{codec} compression level must be between {min_level} and {max_level}, got {level}",
-        )
-    return level
+    if context == "process":
+        return _PROCESS_DEFAULTS.get(codec, COMPRESSION_RANGES[codec][2])
+    return COMPRESSION_RANGES[codec][2]
 
 
-def resolve_codec(name: str | None, level: int | None, *, context: WriteContext) -> ResolvedCodec:
+def resolve_codec(
+    name: str | None,
+    level: int | None,
+    *,
+    context: WriteContext,
+    verbose: bool = False,
+) -> ResolvedCodec:
     """Validate a codec and level once and resolve them for one write.
 
     Args:
         name: Codec name in any case; ``none`` is ``UNCOMPRESSED``. ``None``
             means the default, ZSTD.
         level: The caller's level, or ``None`` for the codec's default. Ignored
-            for codecs that take none (LZ4, SNAPPY, UNCOMPRESSED).
+            (and, with ``verbose``, reported) for codecs that take none.
         context: ``"write"`` for every ordinary write (ZSTD 15), ``"process"``
             for the ``gpio process`` commands (ZSTD :data:`PROCESS_ZSTD_LEVEL`).
+        verbose: Report a level given to a codec that takes none.
 
     Raises:
         InvalidParameterError: an unknown codec (``LZ4_RAW`` included), or a
@@ -171,38 +203,32 @@ def resolve_codec(name: str | None, level: int | None, *, context: WriteContext)
     if context not in _CONTEXTS:
         raise ValueError(f"context must be one of {_CONTEXTS}, got {context!r}")
     codec = _canonical_codec(name)
-    return ResolvedCodec(codec, _resolve_level(codec, level, context))
+    if codec not in COMPRESSION_RANGES:
+        if verbose and level is not None and codec != "UNCOMPRESSED":
+            warn(f"Note: {codec} does not support compression levels. Ignoring level {level}.")
+        return ResolvedCodec(codec, None)
+    return ResolvedCodec(codec, _default_level(codec, context) if level is None else level)
+
+
+def codec_from_footer(
+    footer_codec: str | None, level: int | None, *, context: WriteContext = "write"
+) -> ResolvedCodec:
+    """The codec a rewrite keeps, given the name a Parquet footer reports.
+
+    A rewrite that mirrors its input's codec reads the name off the footer
+    (pyarrow and DuckDB spell ``LZ4`` as ``LZ4_RAW`` there). A codec gpio does
+    not write (``LZO``), or no name at all, falls to the default. Parquet
+    records no level, so ``level`` (or the codec's default) is the one used.
+    """
+    upper = (footer_codec or "").upper()
+    upper = _FOOTER_ALIASES.get(upper, upper)
+    return resolve_codec(upper if upper in ACCEPTED_CODEC_NAMES else None, level, context=context)
 
 
 def resolve_process_compression_level(compression, compression_level):
-    """The level a ``gpio process`` write should use: an unset ZSTD level becomes 9.
+    """The level a ``gpio process`` write uses: ``resolve_codec(..., context="process").level``.
 
     Kept for its callers in ``core/process/`` until they call
-    :func:`resolve_codec` themselves (T2f). Anything but an unset ZSTD level is
-    returned untouched, so the funnel downstream still fills in its own default.
+    :func:`resolve_codec` themselves (T2f).
     """
-    if compression_level is not None or (compression or "").upper() != "ZSTD":
-        return compression_level
-    return resolve_codec(compression, None, context="process").level
-
-
-def validate_compression_settings(compression, compression_level, verbose=False):
-    """``resolve_codec(..., context="write")`` as the ``(name, level, description)`` tuple.
-
-    Kept for the write strategies and funnels that still unpack the tuple.
-    With ``verbose``, a level the caller chose for a codec that takes none is
-    reported (the global ZSTD default arrives here from callers that pass it
-    unconditionally, so that one is not).
-    """
-    codec = resolve_codec(compression, compression_level, context="write")
-    if (
-        verbose
-        and codec.level is None
-        and codec.name != "UNCOMPRESSED"
-        and compression_level
-        and compression_level != COMPRESSION_RANGES["ZSTD"][2]
-    ):
-        warn(
-            f"Note: {codec.name} does not support compression levels. Ignoring level {compression_level}."
-        )
-    return codec.name, codec.level, codec.description
+    return resolve_codec(compression, compression_level, context="process").level

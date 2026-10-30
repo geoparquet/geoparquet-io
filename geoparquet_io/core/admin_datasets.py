@@ -16,6 +16,7 @@ from pathlib import Path
 
 import duckdb
 
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     get_duckdb_connection,
@@ -1136,9 +1137,12 @@ class OvertureAdminDataset(AdminDataset):
                     # scan + simplification of the ~4.5GB Overture dataset used
                     # to run at DuckDB's own 80%-of-RAM default.
                     with scoped_write_memory_limit(con, self.memory_limit, self.verbose):
+                        # A download cache, not an output: DuckDB's fast ZSTD 3,
+                        # named explicitly rather than left to DuckDB's default.
+                        cache_codec = resolve_codec("ZSTD", 3, context="write")
                         con.execute(
                             f"COPY ({query}) TO {sql_path(cache_path)} "
-                            "(FORMAT PARQUET, COMPRESSION ZSTD)"
+                            f"(FORMAT PARQUET, {', '.join(cache_codec.duckdb_copy_options())})"
                         )
                     info(f"Cached {level} dataset at: {cache_path}")
             finally:

@@ -42,7 +42,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -306,7 +306,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -618,7 +618,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -906,7 +906,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -1138,7 +1138,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -1418,7 +1418,7 @@
        "type": "integer"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -1698,7 +1698,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -1962,7 +1962,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -4782,7 +4782,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -5226,7 +5226,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -5645,7 +5645,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -6135,7 +6135,7 @@
        "type": "integer range[min=0,max=None,min_open=False,max_open=False,clamp=False]"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -6561,7 +6561,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -6941,7 +6941,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -7385,7 +7385,7 @@
        "type": "choice[auto|server|local,case_sensitive=True]"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -8391,7 +8391,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -8767,7 +8767,7 @@
      "kind": "command",
      "params": [
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -9111,7 +9111,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -9535,7 +9535,7 @@
        "type": "integer"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -9895,7 +9895,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -10335,7 +10335,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -10759,7 +10759,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -11797,7 +11797,7 @@
          "type": "text"
         },
         {
-         "default": "'ZSTD'",
+         "default": "None",
          "hidden": false,
          "is_flag": false,
          "metavar": null,
@@ -12125,7 +12125,7 @@
          "type": "text"
         },
         {
-         "default": "'ZSTD'",
+         "default": "None",
          "hidden": false,
          "is_flag": false,
          "metavar": null,
@@ -12437,7 +12437,7 @@
          "type": "text"
         },
         {
-         "default": "'ZSTD'",
+         "default": "None",
          "hidden": false,
          "is_flag": false,
          "metavar": null,
@@ -12724,7 +12724,7 @@
        "type": "float"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -13004,7 +13004,7 @@
        "type": "float"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -13253,7 +13253,7 @@
        "type": "integer"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -13471,7 +13471,7 @@
      "kind": "command",
      "params": [
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -14232,7 +14232,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -14464,7 +14464,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -14697,7 +14697,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -14977,7 +14977,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,

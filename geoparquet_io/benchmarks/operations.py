@@ -8,6 +8,8 @@ from typing import Any, TypedDict
 
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.compression import resolve_codec
+
 
 # Type-safe operation definition
 class OperationInfo(TypedDict):
@@ -28,8 +30,10 @@ def _run_write(input_path: Path, output_dir: Path) -> dict[str, Any]:
     """Benchmark write operation."""
     table = pq.read_table(input_path)
     output_path = output_dir / "output.parquet"
-    # Use ZSTD level 15 for optimal compression (per PyArrow best practices)
-    pq.write_table(table, output_path, compression="zstd", compression_level=15)
+    # gpio's own default codec and level, from the one owner.
+    pq.write_table(
+        table, output_path, **resolve_codec(None, None, context="write").pyarrow_kwargs()
+    )
     return {"output_size_mb": output_path.stat().st_size / (1024 * 1024)}
 
 

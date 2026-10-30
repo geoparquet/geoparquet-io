@@ -674,20 +674,15 @@ def _handle_dry_run_mode(
     else:
         info("-- Using full geometry intersection (no bbox optimization)")
 
-    from geoparquet_io.core.compression import COMPRESSION_RANGES
+    from geoparquet_io.core.compression import resolve_codec
 
-    if compression in COMPRESSION_RANGES:
-        compression_str = f"{compression}:{compression_level}"
-    else:
-        compression_str = compression
-
-    duckdb_compression = compression.lower() if compression != "UNCOMPRESSED" else "uncompressed"
+    codec = resolve_codec(compression, compression_level, context="write")
     display_query = f"""COPY ({query.strip()})
 TO {sql_path(output_parquet)}
-(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
+(FORMAT PARQUET, {", ".join(codec.duckdb_copy_options())});"""
     progress(display_query)
 
-    info(f"\n-- Note: Using {compression_str} compression")
+    info(f"\n-- Note: Using {codec.description} compression")
     info("-- Original metadata would also be preserved in the output file")
     return True
 
@@ -815,7 +810,7 @@ def add_admin_divisions_multi(
     add_bbox_flag: bool = False,
     dry_run: bool = False,
     verbose: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,

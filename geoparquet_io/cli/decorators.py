@@ -15,6 +15,8 @@ from geoparquet_io.core.compression import (
     ACCEPTED_CODEC_NAMES,
     ALLOWED_CODECS,
     COMPRESSION_RANGES,
+    DEFAULT_CODEC,
+    DEFAULT_WRITE_LEVEL,
     MAX_COMPRESSION_LEVEL,
     PROCESS_ZSTD_LEVEL,
     resolve_codec,
@@ -221,7 +223,7 @@ def _compression_level_help(zstd_default: int) -> str:
     with the row-group number.
     """
     ranges = ", ".join(
-        f"{codec}: {low}-{high} (default: {zstd_default if codec == 'ZSTD' else default})"
+        f"{codec}: {low}-{high} (default: {zstd_default if codec == DEFAULT_CODEC else default})"
         for codec, (low, high, default) in COMPRESSION_RANGES.items()
     )
     levelless = "/".join(
@@ -255,7 +257,7 @@ def _check_codec_and_level(ctx, param, value):
 def _add_compression_options(func, level_help: str):
     func = click.option(
         "--compression",
-        default="ZSTD",
+        default=None,
         type=click.Choice(list(ACCEPTED_CODEC_NAMES), case_sensitive=False),
         callback=_check_codec_and_level,
         help="Compression type for output file (default: ZSTD; NONE is UNCOMPRESSED)",
@@ -280,7 +282,7 @@ def compression_options(func):
     For a ``gpio process`` command use :func:`process_compression_options`
     instead, so the help names that group's lower ZSTD default.
     """
-    return _add_compression_options(func, _compression_level_help(COMPRESSION_RANGES["ZSTD"][2]))
+    return _add_compression_options(func, _compression_level_help(DEFAULT_WRITE_LEVEL))
 
 
 def process_compression_options(func):
@@ -1267,8 +1269,8 @@ def handle_directory_sub_partition(
             verbose=verbose,
             force=force,
             skip_analysis=skip_analysis,
-            compression=compression.upper() if compression else "ZSTD",
-            compression_level=compression_level or 15,
+            compression=compression,
+            compression_level=compression_level,
             auto=auto,
             target_rows=target_rows,
             max_partitions=max_partitions,

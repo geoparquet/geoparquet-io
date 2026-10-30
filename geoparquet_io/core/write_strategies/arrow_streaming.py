@@ -26,7 +26,7 @@ from geoparquet_io.core.arrow_geo_metadata import (
     _parse_geo_metadata_quietly,
     table_geometry_info,
 )
-from geoparquet_io.core.compression import validate_compression_settings
+from geoparquet_io.core.compression import ResolvedCodec, resolve_codec
 from geoparquet_io.core.crs_utils import apply_output_crs
 from geoparquet_io.core.duckdb_utils import (
     _wrap_query_with_wkb_conversion,
@@ -322,19 +322,15 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         configure_verbose(verbose)
         self._validate_output_path(output_path)
 
-        # Setup compression and version config
-        validated_compression, validated_level, _ = validate_compression_settings(
-            compression or "ZSTD", compression_level, verbose
-        )
-        if validated_compression == "UNCOMPRESSED":
-            validated_compression = None
+        # One owner validates and resolves the codec; the writers take its kwargs.
+        codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
 
         batch_size = row_group_rows or DEFAULT_BATCH_SIZE
 
         # Handle non-geo queries: write plain Parquet without geo metadata
         if geometry_column is None:
             self._write_plain_parquet_from_query(
-                con, query, output_path, validated_compression, validated_level, batch_size, verbose
+                con, query, output_path, codec, batch_size, verbose
             )
             return
 
@@ -418,9 +414,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             geo_meta = None
 
         # Prepare writer kwargs
-        writer_kwargs = {"compression": validated_compression or "NONE"}
-        if validated_level is not None and validated_compression:
-            writer_kwargs["compression_level"] = validated_level
+        writer_kwargs = codec.pyarrow_kwargs()
 
         if verbose:
             progress(f"Streaming to {output_path}...")
@@ -744,19 +738,13 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         carried_geo = _parse_geo_metadata_quietly(table.schema.metadata)
         table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
 
-        validated_compression, validated_level, _ = validate_compression_settings(
-            compression or "ZSTD", compression_level, verbose
-        )
-        if validated_compression == "UNCOMPRESSED":
-            validated_compression = None
+        codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
 
         batch_size = row_group_rows or DEFAULT_BATCH_SIZE
 
         # Handle non-geo tables: write plain Parquet without geo metadata
         if geometry_column is None:
-            self._write_plain_parquet_from_table(
-                table, output_path, validated_compression, validated_level, batch_size, verbose
-            )
+            self._write_plain_parquet_from_table(table, output_path, codec, batch_size, verbose)
             return
 
         # Auto-detect version from table schema metadata if not specified
@@ -877,9 +865,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             geometry_columns=geometry_columns,
         )
 
-        writer_kwargs = {"compression": validated_compression or "NONE"}
-        if validated_level is not None and validated_compression:
-            writer_kwargs["compression_level"] = validated_level
+        writer_kwargs = codec.pyarrow_kwargs()
         writer_kwargs = without_geometry_dictionary(
             writer_kwargs, schema_with_meta, geometry_columns
         )
@@ -1066,15 +1052,12 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         self,
         table: pa.Table,
         output_path: str,
-        compression: str | None,
-        compression_level: int | None,
+        codec: ResolvedCodec,
         batch_size: int,
         verbose: bool,
     ) -> None:
         """Write plain Parquet (no geo metadata) from an Arrow table using streaming."""
-        writer_kwargs = {"compression": compression or "NONE"}
-        if compression_level is not None and compression:
-            writer_kwargs["compression_level"] = compression_level
+        writer_kwargs = codec.pyarrow_kwargs()
 
         rows_written = 0
         batches_written = 0
@@ -1097,8 +1080,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         con: duckdb.DuckDBPyConnection,
         query: str,
         output_path: str,
-        compression: str | None,
-        compression_level: int | None,
+        codec: ResolvedCodec,
         batch_size: int,
         verbose: bool,
     ) -> None:
@@ -1110,9 +1092,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         reader = _sized_reader(con, query, batch_size)
         schema = reader.schema
 
-        writer_kwargs = {"compression": compression or "NONE"}
-        if compression_level is not None and compression:
-            writer_kwargs["compression_level"] = compression_level
+        writer_kwargs = codec.pyarrow_kwargs()
 
         rows_written = 0
         batches_written = 0

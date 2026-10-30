@@ -342,7 +342,7 @@ def hilbert_order(
     geometry_column: str = "geometry",
     add_bbox_flag: bool = False,
     verbose: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,

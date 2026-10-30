@@ -68,12 +68,10 @@ reason = "streams an HTTP source to disk chunk by chunk; T2e moves the download 
 [[G1.tid251]]
 path = "geoparquet_io/core/process/aggregate/by_admin.py"
 name = "pyarrow.parquet.write_table"
-count = 2
 reason = "geometry-free aggregate output bypasses the facade's row-group count (approved change 2); T2c"
 [[G1.tid251]]
 path = "geoparquet_io/core/process/aggregate/grid_common.py"
 name = "pyarrow.parquet.write_table"
-count = 2
 reason = "geometry-free aggregate output bypasses the facade's row-group count (approved change 2); T2c"
 [[G1.tid251]]
 path = "geoparquet_io/core/process/overview/overview_file.py"

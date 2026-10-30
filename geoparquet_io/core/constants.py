@@ -5,8 +5,6 @@ This module defines constants that are shared across multiple modules to ensure
 consistency and make it easy to change values in one place.
 """
 
-from typing import Any
-
 from geoparquet_io.core.common import add_computed_column
 from geoparquet_io.core.duckdb_metadata import get_column_names
 
@@ -30,9 +28,6 @@ DEFAULT_S2_COLUMN_NAME = "s2_cell"
 
 # Default S2 level (comparable to H3 resolution 9, ~1.2 km² cells)
 DEFAULT_S2_LEVEL = 13
-
-# Default compression level for S2 temp file generation
-DEFAULT_S2_COMPRESSION_LEVEL = 15
 
 # Default target rows per partition for S2 auto-resolution
 DEFAULT_S2_TARGET_ROWS = 100000
@@ -137,16 +132,15 @@ def ensure_vecorel_columns(
         os.close(fd)
         os.unlink(temp_out)
         try:
-            write_kwargs: dict[str, Any] = {}
-            if compression is not None:
-                write_kwargs["compression"] = compression
-                write_kwargs["compression_level"] = compression_level
+            # Both pass through as given: ``None`` is the owner's default, and a
+            # level set without a codec still applies to the default codec.
             add_computed_column(
                 parquet_file,
                 temp_out,
                 column_name="id",
                 sql_expression="CAST(row_number() OVER () AS VARCHAR)",
-                **write_kwargs,
+                compression=compression,
+                compression_level=compression_level,
             )
             os.replace(temp_out, parquet_file)
         finally:
@@ -250,18 +244,12 @@ def _fix_vecorel_schema(
     import os
     import tempfile
 
-    from geoparquet_io.core.compression import ALLOWED_CODECS, resolve_codec
+    from geoparquet_io.core.compression import codec_from_footer
 
-    # Keep the file's codec, read from the first row group's first column (a
-    # codec gpio does not write, such as LZO, falls to the default). Parquet
-    # records no level, so the caller's level or the codec's own default
-    # resolves through the owner -- omitted, pyarrow fills ZSTD level 1.
-    footer_codec = pf.metadata.row_group(0).column(0).compression.upper()
-    codec = resolve_codec(
-        footer_codec if footer_codec in ALLOWED_CODECS else None,
-        compression_level,
-        context="write",
-    )
+    # Keep the file's codec, read from the first row group's first column.
+    # Parquet records no level, so the caller's level or the codec's own
+    # default resolves through the owner -- omitted, pyarrow fills ZSTD level 1.
+    codec = codec_from_footer(pf.metadata.row_group(0).column(0).compression, compression_level)
 
     fd, temp_out = tempfile.mkstemp(suffix=".parquet")
     os.close(fd)

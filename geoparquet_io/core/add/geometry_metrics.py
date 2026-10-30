@@ -64,7 +64,7 @@ def add_geometry_metrics(
     vecorel: bool = True,
     dry_run: bool = False,
     verbose: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
@@ -300,7 +300,7 @@ def _add_vecorel_metadata_to_file(
     parquet_file: str,
     verbose: bool,
     memory_limit: str | None,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
 ) -> None:
     """Add Vecorel schema metadata to an existing file via rewrite."""

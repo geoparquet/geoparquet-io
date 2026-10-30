@@ -167,7 +167,7 @@ def contour_file(
     use_mask: bool = True,
     min_column: str = "min",
     max_column: str = "max",
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,

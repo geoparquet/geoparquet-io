@@ -25,6 +25,7 @@ from geoparquet_io.core.compression import (
     ALLOWED_CODECS,
     PROCESS_ZSTD_LEVEL,
     ResolvedCodec,
+    codec_from_footer,
     resolve_codec,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
@@ -144,7 +145,7 @@ RESOLVE_TABLE = [
         "UNCOMPRESSED",
         None,
         ["COMPRESSION UNCOMPRESSED"],
-        {"compression": "none"},
+        {"compression": None},
     ),
     # Approved change 4: `none` and `uncompressed` are one codec.
     (
@@ -154,7 +155,7 @@ RESOLVE_TABLE = [
         "UNCOMPRESSED",
         None,
         ["COMPRESSION UNCOMPRESSED"],
-        {"compression": "none"},
+        {"compression": None},
     ),
     (
         "NONE",
@@ -163,7 +164,7 @@ RESOLVE_TABLE = [
         "UNCOMPRESSED",
         None,
         ["COMPRESSION UNCOMPRESSED"],
-        {"compression": "none"},
+        {"compression": None},
     ),
     (
         "uncompressed",
@@ -172,7 +173,7 @@ RESOLVE_TABLE = [
         "UNCOMPRESSED",
         None,
         ["COMPRESSION UNCOMPRESSED"],
-        {"compression": "none"},
+        {"compression": None},
     ),
 ]
 
@@ -227,6 +228,65 @@ def test_resolved_codec_is_frozen():
 def test_allowed_codecs_are_canonical_and_exclude_lz4_raw():
     assert ALLOWED_CODECS == ("ZSTD", "GZIP", "BROTLI", "LZ4", "SNAPPY", "UNCOMPRESSED")
     assert "LZ4_RAW" not in ALLOWED_CODECS
+
+
+# The constructor is a gate too: every clause is interpolated into SQL.
+CONSTRUCTOR_ERRORS = [
+    ("ZSTD", "1; DROP TABLE t", "compression_level"),
+    ("ZSTD", "15", "compression_level"),
+    ("ZSTD", 15.0, "compression_level"),
+    ("ZSTD", 3.5, "compression_level"),
+    ("ZSTD", True, "compression_level"),
+    ("ZSTD", None, "compression_level"),
+    ("ZSTD", 23, "compression_level"),
+    ("GZIP", 12, "compression_level"),
+    ("SNAPPY", 3, "compression_level"),
+    ("LZ4_RAW", None, "compression"),
+    ("zstd", 15, "compression"),
+    ("NONE", None, "compression"),
+    ("ZSTD; DROP TABLE t", None, "compression"),
+]
+
+
+@pytest.mark.parametrize(("name", "level", "param"), CONSTRUCTOR_ERRORS)
+def test_resolved_codec_cannot_hold_a_bad_value(name, level, param):
+    with pytest.raises(InvalidParameterError) as excinfo:
+        ResolvedCodec(name, level)
+    assert excinfo.value.param_name == param
+
+
+@pytest.mark.parametrize("bad", ["1; DROP TABLE t", 3.5])
+def test_no_injected_level_reaches_a_copy_clause(bad):
+    """String and float levels die in the owner, on the factory and the constructor."""
+    with pytest.raises(InvalidParameterError):
+        resolve_codec("ZSTD", bad, context="write").duckdb_copy_options()
+    with pytest.raises(InvalidParameterError):
+        ResolvedCodec("ZSTD", bad).duckdb_copy_options()
+
+
+@pytest.mark.parametrize(
+    ("footer", "level", "name", "resolved"),
+    [
+        ("ZSTD", None, "ZSTD", 15),
+        ("zstd", 3, "ZSTD", 3),
+        ("LZ4_RAW", None, "LZ4", None),
+        ("LZ4", None, "LZ4", None),
+        ("UNCOMPRESSED", None, "UNCOMPRESSED", None),
+        ("GZIP", None, "GZIP", 6),
+        ("BROTLI", None, "BROTLI", 6),
+        ("SNAPPY", 9, "SNAPPY", None),
+        ("LZO", None, "ZSTD", 15),
+        ("", None, "ZSTD", 15),
+        (None, None, "ZSTD", 15),
+    ],
+)
+def test_codec_from_footer(footer, level, name, resolved):
+    codec = codec_from_footer(footer, level)
+    assert (codec.name, codec.level) == (name, resolved)
+
+
+def test_pyarrow_kwargs_give_uncompressed_as_pyarrows_none():
+    assert resolve_codec("none", None, context="write").pyarrow_kwargs() == {"compression": None}
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +535,165 @@ def test_the_owner_is_the_only_codec_list():
 
 
 # ---------------------------------------------------------------------------
+# Guard: no second default, case fold, COPY clause or pyarrow codec kwarg
+# ---------------------------------------------------------------------------
+#
+# The collection guard above misses the shapes the T2a audit found: a codec or
+# level filled in beside the call (`compression or "ZSTD"`, `compression_level
+# or 15`, a parameter or field default of `"ZSTD"`/`15`), a codec name folded
+# by hand (`compression.lower()`), a COPY clause spelled out (`f"COMPRESSION
+# {c}"`), and pyarrow handed `compression=`/`compression_level=` directly
+# instead of `**codec.pyarrow_kwargs()`.
+
+#: pyarrow writers whose codec kwargs must come from ``pyarrow_kwargs()``.
+PYARROW_WRITERS = {"write_table", "ParquetWriter", "write_to_dataset", "write_dataset"}
+
+
+def _ident(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return ""
+
+
+def _names_compression(node: ast.AST) -> bool:
+    return "compression" in _ident(node).lower()
+
+
+def _codec_or_level_literal(node: ast.AST) -> bool:
+    """A codec name, or gpio's default level, written as a literal."""
+    if not isinstance(node, ast.Constant):
+        return False
+    if isinstance(node.value, str):
+        return node.value.lower() in CODEC_NAMES
+    return type(node.value) is int and node.value == 15
+
+
+def _defaults(func: ast.FunctionDef | ast.AsyncFunctionDef):
+    args = func.args
+    positional = args.posonlyargs + args.args
+    yield from zip(positional[len(positional) - len(args.defaults) :], args.defaults, strict=True)
+    yield from (
+        (a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults, strict=True) if d is not None
+    )
+
+
+def _second_default(node: ast.AST) -> bool:
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        return any(_names_compression(v) for v in node.values[:-1]) and _codec_or_level_literal(
+            node.values[-1]
+        )
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return any(
+            "compression" in arg.arg and _codec_or_level_literal(default)
+            for arg, default in _defaults(node)
+        )
+    if isinstance(node, ast.AnnAssign) and node.value is not None:
+        return _names_compression(node.target) and _codec_or_level_literal(node.value)
+    if isinstance(node, ast.Assign):
+        return any("COMPRESSION" in _ident(t).upper() for t in node.targets) and (
+            _codec_or_level_literal(node.value)
+        )
+    return False
+
+
+def _case_fold(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("upper", "lower")
+        and _names_compression(node.func.value)
+    )
+
+
+def _copy_clause(node: ast.AST) -> bool:
+    """An f-string or concatenation that spells a COMPRESSION clause."""
+    if isinstance(node, ast.JoinedStr):
+        parts = [v.value for v in node.values if isinstance(v, ast.Constant)]
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        parts = [v.value for v in (node.left, node.right) if isinstance(v, ast.Constant)]
+        parts = [p for p in parts if isinstance(p, str)]
+    else:
+        return False
+    return any("COMPRESSION " in p or "COMPRESSION_LEVEL" in p for p in parts)
+
+
+def _pyarrow_codec_kwarg(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and _ident(node.func) in PYARROW_WRITERS
+        and any(kw.arg in ("compression", "compression_level") for kw in node.keywords)
+    )
+
+
+SHAPES = {
+    "second-default": _second_default,
+    "case-fold": _case_fold,
+    "copy-clause": _copy_clause,
+    "pyarrow-codec-kwarg": _pyarrow_codec_kwarg,
+}
+
+
+def codec_policy_copies(tree: ast.AST) -> dict[str, list[int]]:
+    """Line numbers per shape of a codec or level decided outside the owner."""
+    hits: dict[str, list[int]] = {}
+    for node in ast.walk(tree):
+        for shape, matches in SHAPES.items():
+            if matches(node):
+                hits.setdefault(shape, []).append(node.lineno)
+    return hits
+
+
+def test_no_codec_policy_outside_the_owner():
+    found = {}
+    for path in sorted(PACKAGE.rglob("*.py")):
+        if path == OWNER:
+            continue
+        hits = codec_policy_copies(ast.parse(path.read_text(encoding="utf-8")))
+        if hits:
+            found[str(path.relative_to(REPO))] = hits
+    assert found == {}, f"codec or level decided outside core/compression.py: {found}"
+
+
+@pytest.mark.parametrize(
+    ("shape", "source"),
+    [
+        ("second-default", 'c = compression or "ZSTD"'),
+        ("second-default", "lvl = compression_level or 15"),
+        ("second-default", 'def f(compression="ZSTD"): pass'),
+        ("second-default", "def f(*, compression_level: int = 15): pass"),
+        ("second-default", 'class S:\n    compression: str = "ZSTD"'),
+        ("second-default", "DEFAULT_COMPRESSION_LEVEL = 15"),
+        ("case-fold", "duck = compression.lower()"),
+        ("case-fold", "c = self.compression.upper()"),
+        ("copy-clause", 'q = f"COMPRESSION {codec}"'),
+        ("copy-clause", 'q = f"(FORMAT PARQUET, COMPRESSION_LEVEL {lvl})"'),
+        ("copy-clause", 'q = "COMPRESSION " + codec'),
+        ("pyarrow-codec-kwarg", 'pq.write_table(t, p, compression="zstd")'),
+        ("pyarrow-codec-kwarg", "pq.ParquetWriter(p, s, compression_level=lvl)"),
+    ],
+)
+def test_the_policy_guard_catches_each_shape(shape, source):
+    assert shape in codec_policy_copies(ast.parse(source))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "pq.write_table(t, p, **codec.pyarrow_kwargs())",
+        'q = f"(FORMAT PARQUET, {clauses})"',
+        "def f(compression=None, compression_level=None): pass",
+        "c = compression or None",
+        "name = path.lower()",
+        "def f(level=15): pass",
+    ],
+)
+def test_the_policy_guard_ignores_the_owner_routes(source):
+    assert codec_policy_copies(ast.parse(source)) == {}
+
+
+# ---------------------------------------------------------------------------
 # #1026: the geometry-less BigQuery branch skipped the owner and the remote write
 # ---------------------------------------------------------------------------
 
@@ -522,3 +741,207 @@ def test_1026_bigquery_plain_branch_writes_to_a_remote_url(tmp_path, monkeypatch
     local.write_bytes(uploaded["s3://bucket/plain.parquet"])
     assert pq.read_metadata(str(local)).num_rows == 200
     assert _codecs(local) == {"ZSTD"}
+
+
+# ---------------------------------------------------------------------------
+# Every COPY and pyarrow site writes the owner's level (read back from the file)
+# ---------------------------------------------------------------------------
+#
+# Parquet records no level, so each site is fingerprinted: written unset, at an
+# explicit 15 and at 3, the unset bytes must equal 15's and differ from 3's,
+# with the footer naming ZSTD. A site that drops its level falls to DuckDB's 3
+# or pyarrow's 1 and fails here (the T2a verifier's untested sites).
+
+
+def _plain_table():
+    """places_test without geometry: strings that compress differently at 3 and 15."""
+    return pq.read_table(str(PLACES)).drop_columns(["geometry", "bbox"])
+
+
+def _strategy(name: str):
+    from geoparquet_io.core.write_strategies import WriteStrategy, WriteStrategyFactory
+
+    return WriteStrategyFactory.get_strategy(WriteStrategy(name))
+
+
+def _table_plain(strategy: str):
+    def write(out: Path, level):
+        _strategy(strategy).write_from_table(
+            _plain_table(),
+            str(out),
+            geometry_column=None,
+            geoparquet_version=None,
+            compression="ZSTD",
+            compression_level=level,
+            row_group_size_mb=None,
+            row_group_rows=None,
+            verbose=False,
+        )
+
+    return write
+
+
+def _query_plain(strategy: str, geometry_column: str | None = None):
+    select = "*" if geometry_column else "* EXCLUDE (geometry, bbox)"
+
+    def write(out: Path, level):
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+
+        con = get_duckdb_connection(load_httpfs=False)
+        try:
+            _strategy(strategy).write_from_query(
+                con,
+                f"SELECT {select} FROM read_parquet({sql_path(str(PLACES))})",
+                str(out),
+                geometry_column=geometry_column,
+                original_metadata=None,
+                geoparquet_version="1.1" if geometry_column else None,
+                compression="ZSTD",
+                compression_level=level,
+                row_group_size_mb=None,
+                row_group_rows=None,
+                input_crs=None,
+                verbose=False,
+            )
+        finally:
+            con.close()
+
+    return write
+
+
+def _convert(version: str):
+    def write(out: Path, level):
+        extra = [] if level is None else ["--compression-level", str(level)]
+        args = ["convert", "geoparquet", str(PLACES), str(out), "--geoparquet-version", version]
+        result = CliRunner().invoke(cli, args + extra)
+        assert result.exit_code == 0, result.output
+
+    return write
+
+
+def _table_write(strategy: str):
+    def write(out: Path, level):
+        import geoparquet_io as gpio
+
+        gpio.read(str(PLACES)).write(str(out), compression_level=level, write_strategy=strategy)
+
+    return write
+
+
+def _geo_rewrite(out: Path, level):
+    """derive_geo_from_file's pyarrow rewrite, the V2 repair's fallback."""
+    from geoparquet_io.core.derive_geo_from_file import _rewrite_file_with_geo_metadata
+
+    pq.write_table(_plain_table(), str(out), compression="snappy")
+    _rewrite_file_with_geo_metadata(str(out), {"version": "2.0.0"}, "ZSTD", level, None)
+
+
+LEVEL_SITES = {
+    "duckdb-kv table, no geometry": _table_plain("duckdb-kv"),
+    "duckdb-kv query, no geometry": _query_plain("duckdb-kv"),
+    "disk-rewrite table, no geometry": _table_plain("disk-rewrite"),
+    "disk-rewrite query, no geometry": _query_plain("disk-rewrite"),
+    "streaming table, no geometry": _table_plain("streaming"),
+    "streaming query, no geometry": _query_plain("streaming"),
+    "streaming query, geometry": _query_plain("streaming", "geometry"),
+    "duckdb-kv query, geometry": _query_plain("duckdb-kv", "geometry"),
+    "disk-rewrite query, geometry": _query_plain("disk-rewrite", "geometry"),
+    "in-memory query, geometry": _query_plain("in-memory", "geometry"),
+    "in-memory table, no geometry": _table_plain("in-memory"),
+    "plain COPY, 2.0": _convert("2.0"),
+    "plain COPY, parquet-geo-only": _convert("parquet-geo-only"),
+    "Table.write in-memory": _table_write("in-memory"),
+    "Table.write disk-rewrite": _table_write("disk-rewrite"),
+    "Table.write streaming": _table_write("streaming"),
+    "Table.write duckdb-kv": _table_write("duckdb-kv"),
+    "geo rewrite": _geo_rewrite,
+}
+
+
+@pytest.mark.parametrize("site", sorted(LEVEL_SITES))
+def test_every_write_site_writes_the_owner_level(tmp_path, site):
+    write = LEVEL_SITES[site]
+    outputs = {}
+    for label, level in (("unset", None), ("l15", 15), ("l3", 3)):
+        out = tmp_path / f"{label}.parquet"
+        write(out, level)
+        outputs[label] = out
+    assert "ZSTD" in _codecs(outputs["unset"])
+    assert outputs["l15"].read_bytes() != outputs["l3"].read_bytes(), "15 and 3 must differ here"
+    assert outputs["unset"].read_bytes() == outputs["l15"].read_bytes()
+
+
+# ---------------------------------------------------------------------------
+# Dry-run displays print the clauses the real write emits
+# ---------------------------------------------------------------------------
+
+
+def test_extract_dry_run_prints_the_owner_clauses():
+    result = CliRunner().invoke(cli, ["extract", str(PLACES), "out.parquet", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "COMPRESSION ZSTD, COMPRESSION_LEVEL 15" in result.output
+    assert "Using ZSTD:15 compression" in result.output
+
+
+def test_extract_dry_run_prints_the_chosen_level():
+    args = ["extract", str(PLACES), "out.parquet", "--dry-run", "--compression-level", "7"]
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert "COMPRESSION ZSTD, COMPRESSION_LEVEL 7" in result.output
+
+
+def test_admin_divisions_dry_run_prints_the_owner_clauses():
+    args = [
+        "add",
+        "admin-divisions",
+        str(PLACES),
+        "out.parquet",
+        "--dataset",
+        "gaul",
+        "--levels",
+        "continent",
+        "--dry-run",
+        "--no-cache",
+    ]
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert "COMPRESSION ZSTD, COMPRESSION_LEVEL 15" in result.output
+    assert "Using ZSTD:15 compression" in result.output
+    assert "ZSTD:None" not in result.output
+
+
+def test_country_codes_dry_run_prints_the_owner_clauses(caplog):
+    import logging
+
+    from geoparquet_io.core.add.country_codes import add_country_codes
+
+    fields = str(DATA / "fields_gpq2_crs84_zstd.parquet")
+    with caplog.at_level(logging.INFO, logger="geoparquet_io"):
+        add_country_codes(
+            input_parquet=fields,
+            countries_parquet=fields,
+            output_parquet="output.parquet",
+            add_bbox_flag=False,
+            dry_run=True,
+            verbose=False,
+        )
+    assert "COMPRESSION ZSTD, COMPRESSION_LEVEL 15" in caplog.text
+    assert "Using ZSTD:15 compression" in caplog.text
+
+
+def test_add_computed_column_dry_run_prints_the_owner_clauses(caplog):
+    import logging
+
+    from geoparquet_io.core.common import add_computed_column
+
+    with caplog.at_level(logging.INFO, logger="geoparquet_io"):
+        add_computed_column(
+            str(PLACES),
+            "out.parquet",
+            column_name="one",
+            sql_expression="1",
+            dry_run=True,
+            compression="GZIP",
+        )
+    assert "COMPRESSION GZIP);" in caplog.text
+    assert "Using GZIP:6 compression" in caplog.text

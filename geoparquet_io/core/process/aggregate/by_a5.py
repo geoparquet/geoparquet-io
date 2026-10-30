@@ -53,7 +53,7 @@ def aggregate_by_a5(
     breakdown_limit: int = 20,
     out_geometry: str = "polygon",
     a5_column_name: str = DEFAULT_A5_COLUMN_NAME,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     geoparquet_version: str | None = None,
     verbose: bool = False,

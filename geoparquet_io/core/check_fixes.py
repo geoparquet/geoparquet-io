@@ -175,8 +175,8 @@ def _rewrite_through_staging(
                 query=query,
                 output_file=destination,
                 original_metadata=original_metadata,
-                compression="ZSTD",
-                compression_level=15,
+                compression=None,
+                compression_level=None,
                 row_group_rows=DEFAULT_ROW_GROUP_ROWS,
                 verbose=verbose,
                 profile=profile,
@@ -395,8 +395,8 @@ def fix_bbox_column(parquet_file, output_file, verbose=False, profile=None):
         bbox_column_name="bbox",
         dry_run=False,
         verbose=verbose,
-        compression="ZSTD",
-        compression_level=15,
+        compression=None,
+        compression_level=None,
         row_group_rows=DEFAULT_ROW_GROUP_ROWS,
         profile=profile,
         overwrite=True,  # check --fix manages file lifecycle
@@ -546,8 +546,8 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
             output_parquet=destination,
             add_bbox_flag=False,  # bbox should already be added if needed
             verbose=verbose,
-            compression="ZSTD",
-            compression_level=15,
+            compression=None,
+            compression_level=None,
             row_group_rows=DEFAULT_ROW_GROUP_ROWS,
             profile=profile,
             overwrite=True,  # check --fix manages file lifecycle

@@ -508,7 +508,7 @@ def add_computed_column(
     extensions=None,
     dry_run=False,
     verbose=False,
-    compression="ZSTD",
+    compression=None,
     compression_level=None,
     row_group_size_mb=None,
     row_group_rows=None,
@@ -649,18 +649,16 @@ def add_computed_column(
     # Handle dry-run display
     if dry_run:
         # Show formatted query with COPY wrapper
-        from geoparquet_io.core.compression import COMPRESSION_RANGES
+        from geoparquet_io.core.compression import resolve_codec
 
-        takes_level = compression in COMPRESSION_RANGES and compression_level
-        compression_desc = f"{compression}:{compression_level}" if takes_level else compression
-        duckdb_compression = compression.lower()  # "UNCOMPRESSED" lowers to "uncompressed"
+        codec = resolve_codec(compression, compression_level, context="write")
         display_query = f"""COPY ({query.strip()})
 TO {sql_path(output_parquet)}
-(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
+(FORMAT PARQUET, {", ".join(codec.duckdb_copy_options())});"""
 
         info("-- Main query:")
         progress(display_query)
-        info(f"\n-- Note: Using {compression_desc} compression")
+        info(f"\n-- Note: Using {codec.description} compression")
         info("-- This query creates a new parquet file with the computed column added")
         info("-- The covering metadata is updated only if the output has a bbox column")
         con.close()
@@ -764,8 +762,8 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
             extensions=None,
             dry_run=False,
             verbose=verbose,
-            compression="ZSTD",
-            compression_level=15,
+            compression=None,
+            compression_level=None,
             row_group_size_mb=None,
             row_group_rows=None,
             dry_run_description=None,

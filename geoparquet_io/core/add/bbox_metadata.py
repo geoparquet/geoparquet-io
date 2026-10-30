@@ -24,6 +24,7 @@ import duckdb
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.check_parquet_structure import get_compression_info, get_row_group_stats
 from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.compression import codec_from_footer
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     _wrap_query_with_blob_conversion,
@@ -519,7 +520,9 @@ def _rewrite_with_geo(
             # is what _wrap_query_with_blob_conversion below is for (#712).
             copy_options = [
                 "FORMAT PARQUET",
-                f"COMPRESSION {compression}",
+                # The input's codec, at the owner's level for it: the footer
+                # records no level, and an omitted one is DuckDB's 3 (#1335).
+                *codec_from_footer(compression, None).duckdb_copy_options(),
                 *geoparquet_copy_options(
                     "V2" if has_native_geometry else "NONE",
                     _kv_pairs_with_geo(existing_kv, geo_meta),

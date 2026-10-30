@@ -31,9 +31,10 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.compression import (
+    DEFAULT_WRITE_LEVEL,
     PROCESS_ZSTD_LEVEL,
+    resolve_codec,
     resolve_process_compression_level,
-    validate_compression_settings,
 )
 from geoparquet_io.core.derive_geo_from_file import _rewrite_writer_kwargs
 from geoparquet_io.core.parquet_writer import ParquetWriteSettings
@@ -106,25 +107,32 @@ class TestResolver:
     def test_codec_case_does_not_matter(self):
         assert resolve_process_compression_level("zstd", None) == PROCESS_ZSTD_LEVEL
 
-    @pytest.mark.parametrize("codec", ["GZIP", "BROTLI", "SNAPPY", "LZ4", "UNCOMPRESSED", "", None])
-    def test_only_zstd_moves(self, codec):
+    @pytest.mark.parametrize(
+        ("codec", "level"),
+        [("GZIP", 6), ("BROTLI", 6), ("SNAPPY", None), ("LZ4", None), ("UNCOMPRESSED", None)],
+    )
+    def test_only_zstd_moves(self, codec, level):
         # The measurement is ZSTD's. GZIP and BROTLI have their own curves and
-        # their own defaults in validate_compression_settings; nothing here
-        # claims to have measured them.
-        assert resolve_process_compression_level(codec, None) is None
+        # keep their global defaults; nothing here claims to have measured them.
+        assert resolve_process_compression_level(codec, None) == level
+
+    def test_an_unset_codec_is_zstd_at_the_process_level(self):
+        """One spelling of "process, unset": the wrapper is resolve_codec's level."""
+        assert resolve_process_compression_level(None, None) == PROCESS_ZSTD_LEVEL
+        assert resolve_codec(None, None, context="process").level == PROCESS_ZSTD_LEVEL
 
 
 class TestGlobalDefaultIsUnchanged:
     """15 stays the answer for every write that is not a process write."""
 
-    def test_validate_still_resolves_an_unset_zstd_level_to_fifteen(self):
-        _, level, desc = validate_compression_settings("ZSTD", None)
-        assert level == 15
-        assert desc == "ZSTD:15"
+    def test_the_owner_still_resolves_an_unset_zstd_level_to_fifteen(self):
+        codec = resolve_codec("ZSTD", None, context="write")
+        assert codec.level == DEFAULT_WRITE_LEVEL == 15
+        assert codec.description == "ZSTD:15"
 
-    def test_the_write_facade_still_defaults_to_fifteen(self):
-        assert ParquetWriteSettings.DEFAULT_COMPRESSION_LEVEL == 15
-        assert ParquetWriteSettings().compression_level == 15
+    def test_the_write_facade_leaves_the_default_to_the_owner(self):
+        assert ParquetWriteSettings().compression_level is None
+        assert ParquetWriteSettings().get_pyarrow_kwargs()["compression_level"] == 15
 
     def test_a_plain_funnel_write_lands_on_fifteen(self, tmp_path, levels):
         from geoparquet_io.core.write_funnels import write_geoparquet_table
@@ -133,25 +141,21 @@ class TestGlobalDefaultIsUnchanged:
         assert levels == [15]
 
     def test_the_process_level_is_below_the_global_one(self):
-        _, global_level, _ = validate_compression_settings("ZSTD", None)
-        assert PROCESS_ZSTD_LEVEL < global_level
+        assert PROCESS_ZSTD_LEVEL < DEFAULT_WRITE_LEVEL
 
     def test_a_levelless_codec_warns_only_about_a_level_the_caller_chose(self, caplog):
-        """The warning compares against the global ZSTD default, from one place.
-
-        Callers that pass a level unconditionally hand SNAPPY the ZSTD default,
-        which is not something to warn about; anything else is.
-        """
+        """No caller hands a default level through any more, so any level is the caller's."""
         import logging
 
         with caplog.at_level(logging.WARNING):
-            _, level, desc = validate_compression_settings("SNAPPY", 9, verbose=True)
-        assert level is None and desc == "SNAPPY"
+            codec = resolve_codec("SNAPPY", 9, context="write", verbose=True)
+        assert codec.level is None and codec.description == "SNAPPY"
         assert "does not support compression levels" in caplog.text
 
         caplog.clear()
         with caplog.at_level(logging.WARNING):
-            validate_compression_settings("SNAPPY", 15, verbose=True)
+            resolve_codec("SNAPPY", None, context="write", verbose=True)
+            resolve_codec("SNAPPY", 15, context="write", verbose=False)
         assert caplog.text == ""
 
 
@@ -180,7 +184,7 @@ class TestRewriteWriterKwargs:
     def test_the_codec_still_round_trips(self):
         assert _rewrite_writer_kwargs("SNAPPY", None)["compression"] == "snappy"
         assert _rewrite_writer_kwargs("ZSTD", None)["compression"] == "zstd"
-        assert _rewrite_writer_kwargs("UNCOMPRESSED", None)["compression"] == "none"
+        assert _rewrite_writer_kwargs("UNCOMPRESSED", None)["compression"] is None
 
 
 class TestVecorelSchemaFixLevel:

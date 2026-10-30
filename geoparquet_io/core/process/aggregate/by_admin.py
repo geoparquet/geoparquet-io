@@ -7,7 +7,7 @@ import gc
 
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.compression import resolve_process_compression_level
+from geoparquet_io.core.compression import resolve_codec, resolve_process_compression_level
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet
 from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
@@ -179,7 +179,7 @@ def aggregate_by_admin(
     breakdown_limit: int = 20,
     out_geometry: str = "polygon",
     dataset: str = "overture",
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     geoparquet_version: str | None = None,
     verbose: bool = False,
@@ -370,15 +370,9 @@ def aggregate_by_admin(
         gc.collect()
 
     if out_geometry == "none":
-        if compression_level is not None:
-            pq.write_table(
-                result,
-                output_parquet,
-                compression=compression,
-                compression_level=compression_level,
-            )
-        else:
-            pq.write_table(result, output_parquet, compression=compression)
+        # The codec through its owner even before this write is routed (T2c).
+        codec = resolve_codec(compression, compression_level, context="process")
+        pq.write_table(result, output_parquet, **codec.pyarrow_kwargs())
     else:
         write_geoparquet_table(
             result,
