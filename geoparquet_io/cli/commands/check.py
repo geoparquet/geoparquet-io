@@ -146,7 +146,7 @@ class _VerifyCapture:
 
 
 #: Width the progress line is blanked to before an issue or the summary prints.
-PROGRESS_LINE_WIDTH = 80
+_PROGRESS_LINE_WIDTH = 80
 
 
 class MultiFileCheckRunner:
@@ -205,7 +205,7 @@ class MultiFileCheckRunner:
     @staticmethod
     def _clear_progress_line() -> None:
         """Blank the ``Checking files...`` line so the next message starts clean."""
-        click.echo("\r" + " " * PROGRESS_LINE_WIDTH + "\r", nl=False)
+        click.echo("\r" + " " * _PROGRESS_LINE_WIDTH + "\r", nl=False)
 
     @property
     def show_output(self) -> bool:
