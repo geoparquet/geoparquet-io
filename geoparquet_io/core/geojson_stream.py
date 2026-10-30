@@ -43,6 +43,7 @@ from geoparquet_io.core.crs_utils import (
 )
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
+    duckdb_capabilities,
     fetch_one,
     quote_identifier,
     register_arrow,
@@ -409,13 +410,10 @@ def _native_geojson_writer_available() -> bool:
     """Whether DuckDB ships the native ``COPY ... (FORMAT GEOJSON)`` writer.
 
     The format arrived with DuckDB 2.0's spatial extension; on 1.x the same
-    statement is a binder error. Gate on the library's major version so one
-    wheel serves both (#1349).
+    statement is a binder error (#1349). Decided by the owner,
+    ``duckdb_capabilities().native_geojson_writer``.
     """
-    import duckdb
-
-    major = duckdb.__version__.split(".", 1)[0]
-    return major.isdigit() and int(major) >= 2
+    return duckdb_capabilities().native_geojson_writer
 
 
 def _geometry_typed_property_columns(

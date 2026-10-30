@@ -33,10 +33,10 @@ from geoparquet_io.core.duckdb_metadata import (
     get_row_count,
 )
 from geoparquet_io.core.duckdb_utils import (
+    duckdb_capabilities,
     fetch_one,
     fetch_row,
     get_duckdb_connection,
-    has_core_geometry,
     is_interrupt,
     load_spatial_extension,
     quote_identifier,
@@ -733,7 +733,9 @@ def get_preview_data(
         # Execute query and convert to PyArrow table. has_spatial mirrors what
         # the auto sentinel above resolved to: spatial is on the connection
         # exactly where DuckDB's core lacks GEOMETRY.
-        table = _preview_table_from_query(con, query, has_spatial=not has_core_geometry())
+        table = _preview_table_from_query(
+            con, query, has_spatial=not duckdb_capabilities().core_geometry
+        )
 
         # Convert any native GeoArrow geometry columns to WKT strings for display.
         if native_geo_columns:

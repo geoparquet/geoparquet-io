@@ -18,13 +18,14 @@ import duckdb
 import pytest
 
 from geoparquet_io.core import geojson_stream
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import duckdb_capabilities, get_duckdb_connection, sql_path
 from geoparquet_io.core.geojson_stream import convert_to_geojson
+from tests.test_duckdb_capabilities import pretend_duckdb_version
 
 TEST_DATA_DIR = Path(__file__).parent / "data"
 REPROJECT_PARQUET = TEST_DATA_DIR / "fields_pgo_5070_snappy.parquet"
 
-NATIVE_AVAILABLE = int(duckdb.__version__.split(".", 1)[0]) >= 2
+NATIVE_AVAILABLE = duckdb_capabilities().native_geojson_writer
 
 requires_native = pytest.mark.skipif(
     not NATIVE_AVAILABLE, reason="needs DuckDB 2.0's native GeoJSON writer"
@@ -114,9 +115,9 @@ class TestVersionGate:
         ],
         ids=["v1", "v2", "v2dev", "v10", "unparsable"],
     )
-    def test_gate_parses_major_version(self, monkeypatch, version, expected):
-        monkeypatch.setattr(duckdb, "__version__", version)
-        assert geojson_stream._native_geojson_writer_available() is expected
+    def test_gate_parses_major_version(self, version, expected):
+        with pretend_duckdb_version(version):
+            assert geojson_stream._native_geojson_writer_available() is expected
 
     def test_gate_matches_installed_duckdb(self):
         assert geojson_stream._native_geojson_writer_available() is NATIVE_AVAILABLE
