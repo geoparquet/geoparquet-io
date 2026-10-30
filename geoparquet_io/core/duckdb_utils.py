@@ -912,7 +912,7 @@ def _process_is_alive(pid: int) -> bool:
         import psutil
 
         return psutil.pid_exists(pid)
-    except Exception:  # pragma: no cover - psutil is a hard dependency
+    except Exception:  # psutil is optional on vendored hosts (#1330): unsure means alive
         return True
 
 

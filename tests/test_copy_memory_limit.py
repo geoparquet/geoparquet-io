@@ -21,6 +21,7 @@ sorting it to count invalid geometries.
 
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
 import duckdb
@@ -378,6 +379,57 @@ class TestCgroupMemory:
         )
         self._point_at(monkeypatch, proc, root, ram=512 * GIB)
         assert memory_limits.get_default_memory_limit() == "60.0GB"
+
+
+class TestCeilingWithoutPsutil:
+    """A host that vendors the embeddable surface may not ship psutil (QGIS).
+
+    psutil is only the physical-RAM half of the ceiling; without it the first
+    connection raised ``ModuleNotFoundError: psutil``. ``sys.modules["psutil"]
+    = None`` makes ``import psutil`` raise ImportError, as it does there.
+    """
+
+    @pytest.fixture(autouse=True)
+    def no_psutil(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "psutil", None)
+
+    def _point_at(self, monkeypatch, proc, root):
+        monkeypatch.setattr(memory_limits, "_PROC_SELF_CGROUP", proc)
+        monkeypatch.setattr(memory_limits, "_CGROUP_ROOT", root)
+
+    def test_ceiling_is_the_cgroup_cap(self, tmp_path, monkeypatch):
+        proc, root = _fake_cgroups(tmp_path, ["0::/job"], {"job/memory.max": str(2 * GIB)})
+        self._point_at(monkeypatch, proc, root)
+        assert memory_limits.memory_ceiling() == 2 * GIB
+        assert memory_limits.default_memory_limit() == "1.0GB"
+
+    def test_ceiling_is_unknown_without_a_cgroup_cap(self, tmp_path, monkeypatch):
+        self._point_at(monkeypatch, str(tmp_path / "missing"), str(tmp_path / "missing_root"))
+        assert memory_limits.memory_ceiling() is None
+        assert memory_limits.default_memory_limit() is None
+
+    def test_connection_opens_with_duckdbs_own_default(self, tmp_path, monkeypatch):
+        self._point_at(monkeypatch, str(tmp_path / "missing"), str(tmp_path / "missing_root"))
+        con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
+        try:
+            plain = duckdb.connect()
+            assert _setting(con, "memory_limit") == _setting(plain, "memory_limit")
+            plain.close()
+        finally:
+            con.close()
+
+    def test_spill_sweep_keeps_everything(self, tmp_path):
+        """Without psutil, liveness is unknowable, so the sweep must not delete.
+
+        The sweep runs on every connection open; this is the other call-time
+        psutil import on that path, and it must stay optional too.
+        """
+        from geoparquet_io.core.duckdb_utils import sweep_orphaned_spill_dirs
+
+        leftover = tmp_path / "gpio-spill-999999999-0123456789ab"
+        leftover.mkdir()
+        assert sweep_orphaned_spill_dirs(tmp_path) == []
+        assert leftover.is_dir()
 
 
 class TestConvertSortsOnce:

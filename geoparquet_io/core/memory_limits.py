@@ -159,11 +159,27 @@ def _cgroup_limit(proc_self_cgroup: str, cgroup_root: str) -> int | None:
     return min(limits, default=None)
 
 
-def memory_ceiling() -> int | None:
-    """Bytes this process may use in total: its cgroup cap or physical RAM, the lower."""
-    import psutil
+def _physical_ram() -> int | None:
+    """Physical RAM in bytes, or None where psutil is not installed.
 
-    candidates = [_cgroup_limit(_PROC_SELF_CGROUP, _CGROUP_ROOT), psutil.virtual_memory().total]
+    A host that vendors the embeddable surface (a QGIS plugin) may not ship
+    psutil, and the first connection must not fail for it.
+    """
+    try:
+        import psutil
+    except ImportError:
+        debug("psutil unavailable; memory ceiling from the cgroup cap alone")
+        return None
+    return int(psutil.virtual_memory().total)
+
+
+def memory_ceiling() -> int | None:
+    """Bytes this process may use in total: its cgroup cap or physical RAM, the lower.
+
+    Without psutil only the cgroup cap is known; with neither, None, and
+    DuckDB keeps its own default.
+    """
+    candidates = [_cgroup_limit(_PROC_SELF_CGROUP, _CGROUP_ROOT), _physical_ram()]
     return min((v for v in candidates if v), default=None)
 
 

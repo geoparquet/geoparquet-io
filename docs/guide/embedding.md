@@ -33,7 +33,10 @@ travels with them as an implementation detail.
   is required at *call* time — the first function that needs a connection
   raises `ModuleNotFoundError: duckdb` — so a plugin can import, detect the
   missing dependency, and tell the user to install it instead of dying at
-  import. click is never required: `core/` cannot import it (enforced by an
+  import. psutil is optional: without it, a connection's default memory limit
+  comes from the cgroup cap alone, or is left to DuckDB, and orphaned spill
+  directories from crashed runs are left to the OS temp reaper instead of
+  being reclaimed at the next connection. click is never required: `core/` cannot import it (enforced by an
   import-linter contract).
 - **`import geoparquet_io` is side-effect-light.** The package root resolves
   its public names lazily (PEP 562), so importing it pulls in neither the CLI
