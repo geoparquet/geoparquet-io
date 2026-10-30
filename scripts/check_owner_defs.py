@@ -14,10 +14,15 @@ of modules (paths from the repo root) allowed to define a matching name. Every
 ``def`` in ``geoparquet_io/`` -- module level, nested, or a method -- is
 checked; a definition is allowed when its module owns *any* glob it matches.
 
-The copies that exist today are listed one by one under ``[[G2.exemptions]]``
-(``path``, ``name``, ``reason``). An exemption that no longer matches a
-definition is stale and fails the check too, so the list can only shrink as the
-copies are deleted.
+A leading underscore does not take a name out of its family
+(``_is_geographic_crs`` is an ``is_geographic*``), and ``[G2.known_copies]``
+lists, per glob, the renamed copies no glob can see.
+
+The copies that exist today are listed under ``[[G2.exemptions]]`` (``path``,
+``name``, optional ``count`` of definitions, ``reason``). An entry whose count
+differs from the tree fails the check: a stale one (0) so the list shrinks as
+copies are deleted, and an extra one so a second copy under an exempted name
+is still caught.
 
 This grew out of the ``forbid-bespoke-schema-reconciliation`` hook (now
 ``owner-only-defs``, which runs this script), which was a
@@ -72,8 +77,30 @@ def _owners(table: dict) -> dict[str, tuple[str, ...]]:
     }
 
 
-def owned_definitions(repo: Path, owners: dict[str, tuple[str, ...]]) -> list[Definition]:
-    """Every ``def`` under ``geoparquet_io/`` whose name matches an owner glob."""
+def _known_copies(table: dict) -> dict[str, frozenset[str]]:
+    """``[G2.known_copies]``: glob -> exact names that answer the same question
+    under a name the glob cannot see (``_detect_version_from_table`` for
+    ``resolve_*version*``)."""
+    return {glob: frozenset(names) for glob, names in table.get("known_copies", {}).items()}
+
+
+def matches(name: str, glob: str, known: frozenset[str] = frozenset()) -> bool:
+    """*name* is in *glob*'s family: by the glob, by the glob with a leading
+    underscore either side ignored (``_is_geographic_crs`` is an
+    ``is_geographic*``, ``get_query_columns`` a ``_get_query_columns``), or by
+    being listed as a known copy."""
+    return (
+        name in known or fnmatchcase(name, glob) or fnmatchcase(name.lstrip("_"), glob.lstrip("_"))
+    )
+
+
+def owned_definitions(
+    repo: Path,
+    owners: dict[str, tuple[str, ...]],
+    known: dict[str, frozenset[str]] | None = None,
+) -> list[Definition]:
+    """Every ``def`` under ``geoparquet_io/`` whose name is in an owner family."""
+    known = known or {}
     found: list[Definition] = []
     for source in sorted((repo / SCAN_ROOT).rglob("*.py")):
         rel = source.relative_to(repo).as_posix()
@@ -81,17 +108,21 @@ def owned_definitions(repo: Path, owners: dict[str, tuple[str, ...]]) -> list[De
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            patterns = tuple(g for g in owners if fnmatchcase(node.name, g))
+            patterns = tuple(g for g in owners if matches(node.name, g, known.get(g, frozenset())))
             if patterns:
                 found.append(Definition(rel, node.name, node.lineno, patterns))
     return found
 
 
-def violations(repo: Path, owners: dict[str, tuple[str, ...]]) -> list[Definition]:
+def violations(
+    repo: Path,
+    owners: dict[str, tuple[str, ...]],
+    known: dict[str, frozenset[str]] | None = None,
+) -> list[Definition]:
     """Definitions that live outside every owner of every glob they match."""
     return [
         d
-        for d in owned_definitions(repo, owners)
+        for d in owned_definitions(repo, owners, known)
         if not any(d.path in owners[glob] for glob in d.patterns)
     ]
 
@@ -99,12 +130,17 @@ def violations(repo: Path, owners: dict[str, tuple[str, ...]]) -> list[Definitio
 def apply_exemptions(
     found: list[Definition], exemptions: list[dict]
 ) -> tuple[list[Definition], list[dict]]:
-    """Split *found* into the unexempted, and return the exemptions that matched nothing."""
+    """Split *found* into the unexempted, and return the exemptions whose
+    ``count`` (default 1) is not the number of definitions they cover: a stale
+    entry covers none, and a second copy under an exempted name is one too many."""
     keys = {(e["path"], e["name"]) for e in exemptions}
     unexempted = [d for d in found if (d.path, d.name) not in keys]
-    hit = {(d.path, d.name) for d in found}
-    stale = [e for e in exemptions if (e["path"], e["name"]) not in hit]
-    return unexempted, stale
+    miscounted = [
+        e
+        for e in exemptions
+        if sum((d.path, d.name) == (e["path"], e["name"]) for d in found) != e.get("count", 1)
+    ]
+    return unexempted, miscounted
 
 
 def _owner_hint(d: Definition, owners: dict[str, tuple[str, ...]]) -> str:
@@ -135,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: no [G2.owners] table in {exemptions_file}")
         return 2
 
-    found = violations(repo, owners)
+    found = violations(repo, owners, _known_copies(table))
     exemptions = [] if args.no_exemptions else table.get("exemptions", [])
     unexempted, stale = apply_exemptions(found, exemptions)
 
@@ -145,9 +181,11 @@ def main(argv: list[str] | None = None) -> int:
             f"only {_owner_hint(d, owners)} may define it"
         )
     for e in stale:
+        have = sum((d.path, d.name) == (e["path"], e["name"]) for d in found)
         print(
-            f"{exemptions_file.name}: stale [[G2.exemptions]] entry "
-            f"{e['path']} {e['name']}: no such definition any more; delete the entry"
+            f"{exemptions_file.name}: [[G2.exemptions]] entry {e['path']} {e['name']} "
+            f"says count={e.get('count', 1)}, the tree has {have}"
+            + ("; stale: delete the entry" if have == 0 else "")
         )
     if args.no_exemptions:
         print(f"{len(found)} definition(s) outside their owner")
