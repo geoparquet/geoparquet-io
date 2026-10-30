@@ -792,7 +792,7 @@ class TestCartoCli:
                 ],
             )
             assert result.exit_code != 0
-            assert "Invalid bbox format" in result.output
+            assert "Invalid value for bbox" in result.output
 
     def test_cli_timeout_option(self):
         """CLI accepts --timeout option."""
