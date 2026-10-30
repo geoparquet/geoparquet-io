@@ -269,8 +269,9 @@ def open_bounded_connection(
     real ``gpio process aggregate``/``overview`` paths -- #1354 has the table).
     So the bound stays on 2.0. What it never covered is the result's own
     ``.arrow().read_all()`` materialization, which DuckDB does not account;
-    that is why peak RSS still runs past the limit, and why the share of the
-    ceiling is half rather than DuckDB's 80%.
+    that is why peak RSS still runs past the limit, and one more reason the
+    share of the ceiling is half rather than DuckDB's 80% (the share's own
+    rationale is on :data:`DEFAULT_MEMORY_FRACTION`).
 
     ``preserve_insertion_order`` defaults off: every caller today takes its
     output order from a GROUP BY, so buffering the scan to keep the input's
