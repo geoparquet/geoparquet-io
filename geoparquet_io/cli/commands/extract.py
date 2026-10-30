@@ -22,6 +22,7 @@ from geoparquet_io.cli.decorators import (
     compression_options,
     dry_run_option,
     geoparquet_version_option,
+    limit_option,
     output_format_options,
     overwrite_option,
     parse_row_group_options,
@@ -99,11 +100,7 @@ def extract(ctx):
     help="DuckDB WHERE clause for filtering rows. Column names with special "
     'characters need double quotes in SQL (e.g., "crop:name"). Shell escaping varies.',
 )
-@click.option(
-    "--limit",
-    type=int,
-    help="Maximum number of rows to extract.",
-)
+@limit_option(help="Maximum number of rows to extract.")
 @click.option(
     "--skip-count",
     is_flag=True,
@@ -298,11 +295,7 @@ def extract_geoparquet(
     "--exclude-cols",
     help="Comma-separated columns to exclude (applied after download)",
 )
-@click.option(
-    "--limit",
-    type=int,
-    help="Maximum number of features to extract",
-)
+@limit_option(help="Maximum number of features to extract")
 @click.option(
     "--output-crs",
     help="Output CRS such as EPSG:25830, or 'native' for the layer's "
@@ -623,11 +616,7 @@ def _reject_query_shaping_with_sql(ctx: click.Context, sql: str | None) -> None:
     help="Row count threshold for auto bbox mode. Tables with more rows use "
     "server-side filtering. Must be non-negative. Default: 500000",
 )
-@click.option(
-    "--limit",
-    type=click.IntRange(0, None),
-    help="Maximum number of rows to extract. Must be non-negative.",
-)
+@limit_option(help="Maximum number of rows to extract. Must be non-negative.")
 @click.option(
     "--geography-column",
     help="Column containing geometry data. Auto-detected for native GEOGRAPHY columns. "
@@ -884,11 +873,7 @@ def _deprecated_version_callback(ctx, param, value):
     help="Bbox filter mode: 'auto' (default) chooses based on server capabilities, "
     "'server' forces server-side filtering, 'local' forces client-side filtering",
 )
-@click.option(
-    "--limit",
-    type=click.IntRange(0, None),
-    help="Maximum number of features to extract. Must be non-negative.",
-)
+@limit_option(help="Maximum number of features to extract. Must be non-negative.")
 @click.option(
     "--output-crs",
     help="Request specific CRS from server (e.g., EPSG:4326, urn:ogc:def:crs:EPSG::4326)",
@@ -1159,11 +1144,7 @@ def extract_wfs_cmd(
     "--bbox",
     help="Bounding box filter: xmin,ymin,xmax,ymax in WGS84",
 )
-@click.option(
-    "--limit",
-    type=click.IntRange(0, None),
-    help="Maximum number of rows to extract",
-)
+@limit_option(help="Maximum number of rows to extract")
 @column_list_option(
     "--include-cols",
     help="Comma-separated columns to include (default: all)",

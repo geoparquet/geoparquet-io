@@ -105,6 +105,7 @@
     "geoparquet_version_option",
     "grid_aggregate_options",
     "handle_directory_sub_partition",
+    "limit_option",
     "linearize_curves_options",
     "metric_nodata_option",
     "output_format_options",

@@ -549,10 +549,6 @@ option = "--level"
 fields = ["type", "default"]
 reason = "permanent: S2 level (add 13; partition None = auto-resolve) vs aggregate admin's country/region level"
 [[G13.options]]
-option = "--limit"
-fields = ["type"]
-reason = "T5c: extract geoparquet/arcgis take a plain int where bigquery/wfs/carto reject negatives (IntRange min=0)"
-[[G13.options]]
 option = "--precision"
 fields = ["default"]
 reason = "T5c: pmtiles create forwards --precision to the GeoJSON writer (core/pmtiles.py) with its own default 6 against the writer's 7"

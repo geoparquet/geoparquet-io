@@ -5754,7 +5754,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "integer"
+       "type": "integer range[min=0,max=None,min_open=False,max_open=False,clamp=False]"
       },
       {
        "default": "None",
@@ -7114,7 +7114,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "integer"
+       "type": "integer range[min=0,max=None,min_open=False,max_open=False,clamp=False]"
       },
       {
        "default": "None",

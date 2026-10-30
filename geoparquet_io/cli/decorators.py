@@ -439,6 +439,16 @@ def overwrite_option(
     return add(func) if func is not None else add
 
 
+def limit_option(*, help: str):
+    """``--limit``: the most rows (or features) a command returns, never negative.
+
+    Each extract command words its own help; the type is the one rule, so a
+    negative count is a usage error everywhere instead of reaching SQL as
+    ``LIMIT -1`` (#1367 G13).
+    """
+    return click.option("--limit", type=click.IntRange(0, None), help=help)
+
+
 def strict_option(func):
     """
     Add --strict option to a ``check`` command.
