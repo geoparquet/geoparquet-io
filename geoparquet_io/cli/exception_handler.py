@@ -8,7 +8,6 @@ Framework-agnostic core exceptions are translated here into Click exceptions:
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -20,6 +19,7 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
     classify_failure,
     clean_error_text,
+    not_parquet_file_error,
 )
 
 
@@ -48,16 +48,6 @@ def error_text(exc: BaseException) -> str:
     if isinstance(exc, duckdb.Error):
         text = text.split("\nLINE ")[0].strip()
     return text
-
-
-def _not_parquet_message(path: str | None) -> str:
-    subject = f"The file '{os.path.basename(path)}'" if path else "This file"
-    return (
-        f"{subject} has a .parquet extension but is not a valid "
-        f"Parquet file. It may be a different format (CSV, JSON, etc.) that was "
-        f"incorrectly named. Check the file contents or use 'gpio convert' to "
-        f"create a proper GeoParquet file."
-    )
 
 
 def cli_error_for(exc: BaseException, *, path: str | None = None) -> click.ClickException | None:
@@ -102,7 +92,7 @@ def cli_error_for(exc: BaseException, *, path: str | None = None) -> click.Click
 
     # Only with a file to name: a gpio error that already names it (and says what to do) is better as it is.
     if path is not None and classify_failure(exc).kind is FailureKind.NOT_PARQUET:
-        return click.ClickException(_not_parquet_message(path))
+        return click.ClickException(not_parquet_file_error(path).message)
 
     if isinstance(exc, GeoParquetError):
         return handle_core_exception(exc)
@@ -171,8 +161,8 @@ def error_boundary(*, path: str | None = None, hint: str | None = None) -> Itera
     An exception ``cli_error_for`` does not claim (a genuine gpio bug) is
     re-raised untouched, traceback intact. Both the root group and every command
     class wrap their ``invoke`` in this, so a command run on its own answers
-    exactly as it does under the root; a command that knows its input file wraps
-    its work in ``error_boundary(path=...)`` so a non-Parquet answer can name it.
+    exactly as it does under the root; a command whose input file should be named in a non-Parquet answer sets
+    ``GlobAwareCommand.input_param`` (see ``ParquetInputCommand``).
     """
     try:
         yield

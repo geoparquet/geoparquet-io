@@ -615,3 +615,18 @@ def status_message(status: int, *, subject: str, credentials: str, reason: str =
     return fatal_status_message(status, subject=subject, credentials=credentials) or (
         f"HTTP error {status} {reason}".rstrip() + f" for {subject}"
     )
+
+
+def not_parquet_file_error(path: str | None) -> GeoParquetError:
+    """The one answer to "this file is not Parquet", naming the file.
+
+    Every site that finds out (``duckdb_metadata``'s readers, ``inspect``,
+    ``check``) raises or returns this, so the wording is one, not one per place.
+    """
+    subject = f"The file '{path}'" if path else "This file"
+    return GeoParquetError(
+        f"{subject} has a .parquet extension but is not a valid "
+        f"Parquet file. It may be a different format (CSV, JSON, etc.) that was "
+        f"incorrectly named. Check the file contents or use 'gpio convert' to "
+        f"create a proper GeoParquet file."
+    )

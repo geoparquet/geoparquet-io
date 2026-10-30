@@ -366,8 +366,10 @@ def test_every_answering_path_logs_exactly_one_traceback(monkeypatch, tmp_path, 
         (["inspect", "stats", "{src}"], "_inspect_stats_core"),
         (["inspect", "summary", "{src}"], "_inspect_summary_core"),
         (["inspect", "head", "{src}"], "_inspect_preview_core"),
+        (["inspect", "tail", "{src}"], "_inspect_preview_core"),
+        (["inspect", "meta", "{src}"], "_handle_meta_display"),
     ],
-    ids=["stats", "summary", "head"],
+    ids=["stats", "summary", "head", "tail", "meta"],
 )
 def test_an_inspect_command_answers_a_gpio_error_without_a_usage_preamble(
     monkeypatch, tmp_path, argv, target
@@ -393,3 +395,31 @@ def test_an_inspect_command_answers_a_gpio_error_without_a_usage_preamble(
     assert result.exit_code == 2, result.output
     assert "Usage:" not in result.output
     assert "must be positive" in result.output
+
+
+def test_a_file_that_is_not_parquet_gets_one_answer_from_every_path(tmp_path):
+    """inspect, check and the metadata readers word it the same, naming the file."""
+    import pytest as _pytest
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+    from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_kv_metadata
+    from geoparquet_io.core.exceptions import not_parquet_file_error
+
+    bad = tmp_path / "data.parquet"
+    bad.write_text("id,name\n1,x\n")
+    expected = not_parquet_file_error(str(bad)).message
+
+    for argv in (
+        ["inspect", "summary"],
+        ["check", "all"],
+        ["check", "bbox"],
+        ["check", "row-group"],
+    ):
+        result = CliRunner().invoke(cli, [*argv, str(bad)])
+        assert result.exit_code == 1, (argv, result.output)
+        assert f"Error: {expected}" in result.output, (argv, result.output)
+    for reader in (get_geo_metadata, get_kv_metadata):
+        with _pytest.raises(GeoParquetError) as caught:
+            reader(str(bad))
+        assert caught.value.message == expected

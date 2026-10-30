@@ -30,6 +30,7 @@ from geoparquet_io.core.exceptions import (
     GeoParquetError,
     InvalidParameterError,
     classify_failure,
+    not_parquet_file_error,
 )
 from geoparquet_io.core.file_utils import (
     get_first_parquet_file,
@@ -76,11 +77,7 @@ def _pyarrow_get_kv_metadata(parquet_file: str) -> dict[bytes, bytes]:
     except Exception as e:
         error_msg = str(e)
         if classify_failure(e).kind is FailureKind.NOT_PARQUET:
-            raise GeoParquetError(
-                f"Not a valid Parquet file: {parquet_file}\n"
-                f"This command requires .parquet files with valid Parquet format.\n"
-                f"Hint: Use 'gpio convert geoparquet' to convert other formats."
-            ) from e
+            raise not_parquet_file_error(parquet_file) from e
         raise GeoParquetError(f"Cannot read file: {parquet_file}\n{error_msg}") from e
 
 
@@ -99,11 +96,7 @@ def _pyarrow_get_geo_metadata(parquet_file: str) -> dict | None:
     except Exception as e:
         error_msg = str(e)
         if classify_failure(e).kind is FailureKind.NOT_PARQUET:
-            raise GeoParquetError(
-                f"Not a valid GeoParquet file: {parquet_file}\n"
-                f"This command requires .parquet files with valid Parquet format.\n"
-                f"Hint: Use 'gpio convert' to convert other formats to GeoParquet."
-            ) from e
+            raise not_parquet_file_error(parquet_file) from e
         raise GeoParquetError(f"Cannot read file: {parquet_file}\n{error_msg}") from e
 
 
@@ -471,11 +464,7 @@ def _read_kv_entries(parquet_file: str, con=None) -> list[tuple[bytes | None, by
         # File is not a valid Parquet file (e.g., wrong format, corrupt)
         error_msg = str(e)
         if classify_failure(e).kind is FailureKind.NOT_PARQUET:
-            raise GeoParquetError(
-                f"Not a valid Parquet file: {parquet_file}\n"
-                f"This command requires .parquet files with valid Parquet format.\n"
-                f"Hint: Use 'gpio convert geoparquet' to convert other formats."
-            ) from e
+            raise not_parquet_file_error(parquet_file) from e
         raise GeoParquetError(f"Invalid Parquet file: {parquet_file}\n{error_msg}") from e
     except duckdb.IOException as e:
         # File not found, permission denied, or other I/O error
@@ -524,12 +513,9 @@ def get_geo_metadata(parquet_file: str, con=None) -> dict | None:
             return json.loads(json_str)
         return None
     except duckdb.InvalidInputException as e:
-        # File is not a valid Parquet file (e.g., wrong format, corrupt)
-        raise GeoParquetError(
-            f"Not a valid GeoParquet file: {parquet_file}\n"
-            f"This command requires .parquet files with valid Parquet format.\n"
-            f"Hint: Use 'gpio convert' to convert other formats to GeoParquet."
-        ) from e
+        if classify_failure(e).kind is FailureKind.NOT_PARQUET:
+            raise not_parquet_file_error(parquet_file) from e
+        raise GeoParquetError(f"Invalid Parquet file: {parquet_file}\n{e}") from e
     except duckdb.IOException as e:
         # File not found, permission denied, or other I/O error
         raise GeoParquetError(f"Cannot read file: {parquet_file}\n{str(e)}") from e

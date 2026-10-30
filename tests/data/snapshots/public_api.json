@@ -320,6 +320,7 @@
     "fatal_status_message",
     "is_auth_status",
     "is_unpublished_extension_error",
+    "not_parquet_file_error",
     "redact_credentials",
     "sanitize_url_for_logging",
     "status_message",

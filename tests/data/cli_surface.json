@@ -2739,7 +2739,7 @@
    "class": "_DefaultGroup",
    "commands": {
     "all": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -2970,7 +2970,7 @@
      ]
     },
     "bbox": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -3153,7 +3153,7 @@
      ]
     },
     "compression": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -3304,7 +3304,7 @@
      ]
     },
     "optimization": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -3391,7 +3391,7 @@
      ]
     },
     "row-group": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -3558,7 +3558,7 @@
      ]
     },
     "spatial": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -3741,7 +3741,7 @@
      ]
     },
     "spec": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [

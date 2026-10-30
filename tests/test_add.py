@@ -788,7 +788,7 @@ class TestAddCommandErrorHandling:
 
         # Should show friendly error message, not a stack trace
         assert "Traceback" not in result.output
-        assert "Not a valid Parquet file" in result.output
+        assert "is not a valid Parquet file" in result.output
         assert "gpio convert" in result.output
 
     def test_add_bbox_with_nonexistent_file_shows_friendly_error(self):

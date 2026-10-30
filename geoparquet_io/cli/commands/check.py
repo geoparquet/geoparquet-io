@@ -28,7 +28,7 @@ from click.core import ParameterSource
 
 from geoparquet_io.cli._shared import _activate_s3, create_default_group, init_group_context
 from geoparquet_io.cli.decorators import (
-    GlobAwareCommand,
+    ParquetInputCommand,
     check_partition_options,
     enable_verbose_logging,
     overwrite_option,
@@ -733,7 +733,7 @@ def _echo_spec_result(spec_result, spec_details: bool) -> None:
         )
 
 
-@check.command(name="all", cls=GlobAwareCommand)
+@check.command(name="all", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--verbose",
@@ -1035,7 +1035,7 @@ def _echo_pushdown(pushdown: dict | None) -> None:
         click.echo("  ℹ️  A single row group: nothing for a spatial filter to skip")
 
 
-@check.command(name="spatial", cls=GlobAwareCommand)
+@check.command(name="spatial", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--random-sample-size",
@@ -1157,7 +1157,7 @@ def check_spatial(
         runner.finish()
 
 
-@check.command(name="compression", cls=GlobAwareCommand)
+@check.command(name="compression", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--verbose",
@@ -1267,7 +1267,7 @@ def _bbox_fix_action(needs_column: bool, needs_metadata: bool) -> str:
     return "Rewrote the bbox column"
 
 
-@check.command(name="bbox", cls=GlobAwareCommand)
+@check.command(name="bbox", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--verbose",
@@ -1449,7 +1449,7 @@ def check_bbox_cmd(
         runner.finish()
 
 
-@check.command(name="row-group", cls=GlobAwareCommand)
+@check.command(name="row-group", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--verbose",
@@ -1595,7 +1595,7 @@ def check_stac_cmd(ctx, stac_file, verbose, strict):
         exit_for_verdict(check_stac(stac_file, verbose), strict=strict)
 
 
-@check.command(name="spec", cls=GlobAwareCommand)
+@check.command(name="spec", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--geoparquet-version",
@@ -1700,7 +1700,7 @@ def check_spec(
         exit_for_verdict(verdict, strict=strict)
 
 
-@check.command(name="optimization", cls=GlobAwareCommand)
+@check.command(name="optimization", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--verbose",
