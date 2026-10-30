@@ -649,8 +649,10 @@ def add_computed_column(
     # Handle dry-run display
     if dry_run:
         # Show formatted query with COPY wrapper
+        from geoparquet_io.core.compression import COMPRESSION_RANGES
+
         compression_desc = compression
-        if compression in ["GZIP", "ZSTD", "BROTLI"] and compression_level:
+        if compression in COMPRESSION_RANGES and compression_level:
             compression_desc = f"{compression}:{compression_level}"
 
         duckdb_compression = (

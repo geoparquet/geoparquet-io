@@ -21,7 +21,7 @@ at ZSTD level 3 and level 15, once by pyarrow and once by DuckDB (the two
 encoders gpio writes with), with the output's row-group sizes, and the level of
 the nearest reference is the level the path wrote. The Arrow strategies land
 exactly on pyarrow's level-15 size and ``duckdb-kv`` exactly on DuckDB's level
-3; paths that stream through batches land within a few hundred bytes of a
+15 (it landed on DuckDB's 3 before #1335); paths that stream through batches land within a few hundred bytes of a
 reference and thousands away from the other level.
 """
 
@@ -92,7 +92,6 @@ XFAIL = {
     ("table_write_streaming", "row_groups"): (
         "#1367: the streaming strategy keeps the input's 10,000-row batches as row groups"
     ),
-    ("table_write_duckdb-kv", "level"): "#1335",
     ("convert_geoparquet", "epoch"): _EPOCH,
     **{(f"table_write_{s}", "epoch"): _EPOCH for s in STRATEGIES},
 }

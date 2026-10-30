@@ -674,7 +674,9 @@ def _handle_dry_run_mode(
     else:
         info("-- Using full geometry intersection (no bbox optimization)")
 
-    if compression in ["GZIP", "ZSTD", "BROTLI"]:
+    from geoparquet_io.core.compression import COMPRESSION_RANGES
+
+    if compression in COMPRESSION_RANGES:
         compression_str = f"{compression}:{compression_level}"
     else:
         compression_str = compression

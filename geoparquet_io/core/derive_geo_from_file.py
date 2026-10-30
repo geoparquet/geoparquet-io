@@ -22,7 +22,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.compression import validate_compression_settings
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import NULL_CRS_HINT, is_default_crs, is_unknown_type_crs
 from geoparquet_io.core.duckdb_metadata import (
     get_geo_metadata,
@@ -362,34 +362,14 @@ def derive_v2_geo_metadata(
 def _rewrite_writer_kwargs(compression: str, compression_level: int | None) -> dict:
     """ParquetWriter kwargs mirroring the codec the original writer used.
 
-    An unset level resolves through the one owner
-    (:func:`validate_compression_settings`) rather than being left out of the
-    kwargs. Leaving it out is not "the default": it is pyarrow's own ZSTD
-    default of 1, 14 levels below what the funnel writes from the same data, so
-    a file that reached this fallback came out 10-35% larger than the same file
+    The codec and level resolve through the one owner
+    (:func:`~geoparquet_io.core.compression.resolve_codec`). An unset level is
+    not left out of the kwargs: leaving it out is pyarrow's own ZSTD default of
+    1, 14 levels below what the funnel writes from the same data, so a file
+    that reached this fallback came out 10-35% larger than the same file
     written by any other path (#1299).
     """
-    # Keys cover every normalized name callers can pass (DuckDB COPY names
-    # from _plain_copy_to's compression_map plus pyarrow-style variants).
-    codec_map = {
-        "ZSTD": "zstd",
-        "GZIP": "gzip",
-        "BROTLI": "brotli",
-        "SNAPPY": "snappy",
-        "UNCOMPRESSED": "none",
-        "NONE": "none",
-        "LZ4": "lz4",
-        "LZ4_RAW": "lz4",
-    }
-    write_kwargs: dict = {"compression": codec_map.get(compression.upper(), "zstd")}
-    if write_kwargs["compression"] in ("zstd", "gzip", "brotli"):
-        # LZ4_RAW/NONE never reach here, so the codec is one of the three the
-        # owner gives a level to, and it always returns one: this codec's
-        # default when the caller left the level unset, the caller's otherwise.
-        _, write_kwargs["compression_level"], _ = validate_compression_settings(
-            write_kwargs["compression"].upper(), compression_level
-        )
-    return write_kwargs
+    return resolve_codec(compression, compression_level, context="write").pyarrow_kwargs()
 
 
 def _copy_row_groups(

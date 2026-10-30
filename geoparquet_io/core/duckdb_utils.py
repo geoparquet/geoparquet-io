@@ -588,40 +588,6 @@ def build_kv_metadata_clause(pairs: Mapping[str, str] | None) -> str | None:
     return f"KV_METADATA {{{body}}}"
 
 
-def validate_compression_level(value: int) -> int:
-    """Validate a compression level before interpolating it into SQL.
-
-    ``COMPRESSION_LEVEL`` takes no parameter binding, so the value is formatted
-    straight into the ``COPY … (…)`` option list. The CLI constrains it with
-    ``click.IntRange(1, 22)``, but ``write_parquet_with_metadata`` and the write
-    strategies are public entry points that a Python caller reaches directly,
-    where nothing has checked it. DuckDB's ``execute`` runs multi-statement
-    strings, so an unvalidated value is an injection surface as well as a
-    confusing error.
-
-    ``bool`` is rejected explicitly: it is an ``int`` subclass, and
-    ``COMPRESSION_LEVEL True`` is not something a caller meant.
-
-    Args:
-        value: Candidate ZSTD compression level.
-
-    Returns:
-        The level as an ``int``.
-
-    Raises:
-        ValueError: If the value is not an integer in DuckDB's 1-22 range.
-    """
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(
-            f"Invalid compression_level {value!r}; expected an integer between 1 and 22."
-        )
-    if not 1 <= value <= 22:
-        raise ValueError(
-            f"Invalid compression_level {value}; expected an integer between 1 and 22."
-        )
-    return value
-
-
 def quote_identifier(name: str) -> str:
     """
     Quote a SQL identifier for safe use in DuckDB queries.

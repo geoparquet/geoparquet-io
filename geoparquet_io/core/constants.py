@@ -250,19 +250,18 @@ def _fix_vecorel_schema(
     import os
     import tempfile
 
-    # Detect compression from the first row group's first column
-    rg0 = pf.metadata.row_group(0)
-    original_compression = rg0.column(0).compression.lower()
-    compression_map = {
-        "snappy": "SNAPPY",
-        "gzip": "GZIP",
-        "brotli": "BROTLI",
-        "lz4": "LZ4",
-        "zstd": "ZSTD",
-        "none": "NONE",
-        "uncompressed": "NONE",
-    }
-    pa_compression = compression_map.get(original_compression, "ZSTD")
+    from geoparquet_io.core.compression import ALLOWED_CODECS, resolve_codec
+
+    # Keep the file's codec, read from the first row group's first column (a
+    # codec gpio does not write, such as LZO, falls to the default). Parquet
+    # records no level, so the caller's level or the codec's own default
+    # resolves through the owner -- omitted, pyarrow fills ZSTD level 1.
+    footer_codec = pf.metadata.row_group(0).column(0).compression.upper()
+    codec = resolve_codec(
+        footer_codec if footer_codec in ALLOWED_CODECS else None,
+        compression_level,
+        context="write",
+    )
 
     fd, temp_out = tempfile.mkstemp(suffix=".parquet")
     os.close(fd)
@@ -270,16 +269,7 @@ def _fix_vecorel_schema(
         # The facade's use_dictionary, or pyarrow re-encodes the geometry the
         # write funnel kept out of the dictionary (#1122). The geo block and the
         # geoarrow extension types name the geometry columns.
-        writer_kwargs = without_geometry_dictionary({"compression": pa_compression}, new_schema)
-        # An omitted level is not "the default": pyarrow fills ZSTD level 1,
-        # 14 under the global 15 the file was most likely written at. Resolve
-        # the caller's level (or the codec's own default) through the owner.
-        if pa_compression != "NONE":
-            from geoparquet_io.core.compression import validate_compression_settings
-
-            _, resolved_level, _ = validate_compression_settings(pa_compression, compression_level)
-            if resolved_level is not None:
-                writer_kwargs["compression_level"] = resolved_level
+        writer_kwargs = without_geometry_dictionary(codec.pyarrow_kwargs(), new_schema)
         with pq.ParquetWriter(temp_out, new_schema, **writer_kwargs) as writer:
             for rg_idx in range(pf.metadata.num_row_groups):
                 rg_table = pf.read_row_group(rg_idx)

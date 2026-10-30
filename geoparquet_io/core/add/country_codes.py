@@ -396,10 +396,10 @@ def _print_dry_run_query(
     else:
         info("-- Using full geometry intersection (no bbox optimization)")
 
+    from geoparquet_io.core.compression import COMPRESSION_RANGES
+
     compression_str = (
-        f"{compression}:{compression_level}"
-        if compression in ["GZIP", "ZSTD", "BROTLI"]
-        else compression
+        f"{compression}:{compression_level}" if compression in COMPRESSION_RANGES else compression
     )
     duckdb_compression = compression.lower() if compression != "UNCOMPRESSED" else "uncompressed"
 

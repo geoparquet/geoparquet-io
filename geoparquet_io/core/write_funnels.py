@@ -34,7 +34,7 @@ from geoparquet_io.core.arrow_geo_metadata import (
     nonplanar_edges_from_schema,
     with_planar_edge_types,
 )
-from geoparquet_io.core.compression import validate_compression_settings
+from geoparquet_io.core.compression import resolve_codec, validate_compression_settings
 from geoparquet_io.core.crs_utils import (
     _wrap_query_with_crs,
     apply_output_crs,
@@ -59,7 +59,6 @@ from geoparquet_io.core.duckdb_utils import (
     _get_query_column_type,
     _get_query_columns,
     sql_path,
-    validate_compression_level,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import is_partition_path
@@ -616,16 +615,10 @@ def _plain_copy_to(
         The repair's pending ``geo`` block when ``defer_v2_geo_repair`` asked
         for it and the output needs one; ``None`` otherwise.
     """
-    compression_map = {
-        "zstd": "ZSTD",
-        "gzip": "GZIP",
-        "snappy": "SNAPPY",
-        "lz4": "LZ4",
-        "none": "UNCOMPRESSED",
-        "uncompressed": "UNCOMPRESSED",
-        "brotli": "BROTLI",
-    }
-    duckdb_compression = compression_map.get(compression.lower(), "ZSTD")
+    # One owner validates the codec and resolves the level: an unknown codec is
+    # an error rather than a silent ZSTD, and an unset ZSTD level is gpio's 15
+    # rather than DuckDB's own 3 (#1335).
+    codec = resolve_codec(compression, compression_level, context="write")
 
     # Map version to DuckDB GEOPARQUET_VERSION parameter
     version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
@@ -639,14 +632,7 @@ def _plain_copy_to(
     )
 
     # Build options list
-    options = [
-        "FORMAT PARQUET",
-        f"COMPRESSION {duckdb_compression}",
-    ]
-    # DuckDB accepts COMPRESSION_LEVEL for ZSTD only; pairing it with GZIP or
-    # BROTLI is a binder error, not a silently ignored option.
-    if compression_level is not None and duckdb_compression.upper() == "ZSTD":
-        options.append(f"COMPRESSION_LEVEL {validate_compression_level(compression_level)}")
+    options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
     if row_group_rows is not None:
         options.append(f"ROW_GROUP_SIZE {row_group_rows}")
     kv_pairs = dict(extra_kv_metadata or {})
@@ -669,7 +655,7 @@ def _plain_copy_to(
     """
 
     if verbose:
-        debug(f"Executing plain COPY TO with {duckdb_compression} compression...")
+        debug(f"Executing plain COPY TO with {codec.name} compression...")
 
     with scoped_write_memory_limit(con, memory_limit, verbose):
         con.execute(copy_query)
@@ -683,8 +669,8 @@ def _plain_copy_to(
     if duckdb_version == "V2":
         pending_v2_geo = _ensure_v2_geo_metadata(
             output_path,
-            compression=duckdb_compression,
-            compression_level=compression_level,
+            compression=codec.name,
+            compression_level=codec.level,
             row_group_rows=row_group_rows,
             verbose=verbose,
             primary_column=geometry_column,

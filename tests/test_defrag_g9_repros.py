@@ -141,11 +141,11 @@ def test_1015_check_bbox_fix_keeps_sidecar_keys(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="#1335")
 def test_1335_unset_compression_level_is_level_15(tmp_path):
-    """Expected to fail: unset and ``--compression-level 3`` are byte-identical.
+    """Unset is the documented 15, not DuckDB's 3.
 
-    Appendix: unset 61,554 B; level 3 61,554 B; level 15 57,963 B.
+    Appendix (base): unset 61,554 B; level 3 61,554 B; level 15 57,963 B, and
+    unset was byte-identical to level 3.
     """
     outputs = {}
     for label, extra in (

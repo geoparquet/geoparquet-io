@@ -1113,8 +1113,10 @@ def _print_dry_run_output(
         info(f"-- Limit: {limit}")
     progress("")
 
+    from geoparquet_io.core.compression import COMPRESSION_RANGES
+
     compression_desc = compression
-    if compression in ["GZIP", "ZSTD", "BROTLI"] and compression_level:
+    if compression in COMPRESSION_RANGES and compression_level:
         compression_desc = f"{compression}:{compression_level}"
 
     duckdb_compression = compression.lower() if compression != "UNCOMPRESSED" else "uncompressed"

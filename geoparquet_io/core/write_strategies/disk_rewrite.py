@@ -25,7 +25,11 @@ from geoparquet_io.core.arrow_geo_metadata import (
     table_geometry_info,
 )
 from geoparquet_io.core.common import compute_geometry_types_via_sql
-from geoparquet_io.core.compression import validate_compression_settings
+from geoparquet_io.core.compression import (
+    ResolvedCodec,
+    resolve_codec,
+    validate_compression_settings,
+)
 from geoparquet_io.core.duckdb_utils import (
     _wrap_query_with_wkb_conversion,
     get_duckdb_connection,
@@ -161,20 +165,10 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             )
             return
 
-        compression_map = {
-            "zstd": "ZSTD",
-            "gzip": "GZIP",
-            "snappy": "SNAPPY",
-            "lz4": "LZ4",
-            "none": "UNCOMPRESSED",
-            "uncompressed": "UNCOMPRESSED",
-            "brotli": "BROTLI",
-        }
-        duckdb_compression = compression_map.get(compression.lower(), "ZSTD")
-
         validated_compression, validated_level, _ = validate_compression_settings(
             compression, compression_level, verbose
         )
+        codec = ResolvedCodec(validated_compression, validated_level)
 
         is_remote = is_remote_url(output_path)
         work_dir = tempfile.mkdtemp(prefix="gpio_disk_rewrite_")
@@ -193,7 +187,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
 
             final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
 
-            copy_options = ["FORMAT PARQUET", f"COMPRESSION {duckdb_compression}"]
+            copy_options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
             if resolved_row_group_rows:
                 copy_options.append(f"ROW_GROUP_SIZE {resolved_row_group_rows}")
             copy_query = f"""
@@ -203,7 +197,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             """
 
             if verbose:
-                debug(f"Writing via DuckDB COPY TO with {duckdb_compression} compression...")
+                debug(f"Writing via DuckDB COPY TO with {codec.name} compression...")
 
             # This strategy takes no `--write-memory` (the CLI rejects the
             # combination), so the scope applies the ceiling-based default:
@@ -393,11 +387,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         validated_compression, validated_level, _ = validate_compression_settings(
             compression, compression_level, verbose
         )
-
-        pa_compression = validated_compression if validated_compression != "UNCOMPRESSED" else None
-        writer_kwargs = {"compression": pa_compression}
-        if validated_level is not None and pa_compression:
-            writer_kwargs["compression_level"] = validated_level
+        writer_kwargs = ResolvedCodec(validated_compression, validated_level).pyarrow_kwargs()
         if row_group_rows:
             writer_kwargs["row_group_size"] = row_group_rows
 
@@ -429,28 +419,17 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         query: str,
         output_path: str,
         compression: str,
-        compression_level: int | None,  # noqa: ARG002 - DuckDB COPY doesn't support compression_level
+        compression_level: int | None,
         verbose: bool,
         row_group_rows: int | None = None,
     ) -> None:
         """Write plain Parquet (no geo metadata) from a query.
 
-        Note: compression_level is accepted for API consistency but not used.
-        DuckDB's COPY TO command doesn't support compression_level for most
-        compression types. For compression_level support, use write_from_table
-        which uses PyArrow directly.
+        The codec and level resolve through the owner like every other COPY, so
+        an unset ZSTD level is 15 here too, not DuckDB's 3 (#1335). DuckDB takes
+        a level for ZSTD only; GZIP and BROTLI write at DuckDB's level for them.
         """
-
-        compression_map = {
-            "zstd": "ZSTD",
-            "gzip": "GZIP",
-            "snappy": "SNAPPY",
-            "lz4": "LZ4",
-            "none": "UNCOMPRESSED",
-            "uncompressed": "UNCOMPRESSED",
-            "brotli": "BROTLI",
-        }
-        duckdb_compression = compression_map.get(compression.lower(), "ZSTD")
+        codec = resolve_codec(compression, compression_level, context="write")
 
         is_remote = is_remote_url(output_path)
         work_dir = tempfile.mkdtemp(prefix="gpio_disk_rewrite_") if is_remote else None
@@ -458,7 +437,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         try:
             local_path = os.path.join(work_dir, "output.parquet") if is_remote else output_path
 
-            copy_options = ["FORMAT PARQUET", f"COMPRESSION {duckdb_compression}"]
+            copy_options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
             if row_group_rows:
                 copy_options.append(f"ROW_GROUP_SIZE {row_group_rows}")
 
@@ -469,7 +448,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             """
 
             if verbose:
-                debug(f"Writing plain Parquet with {duckdb_compression} compression...")
+                debug(f"Writing plain Parquet with {codec.name} compression...")
             with scoped_write_memory_limit(con, None, verbose):
                 con.execute(copy_query)
 
@@ -578,12 +557,9 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         if verbose:
             progress(f"Rewriting with geo metadata ({pf.metadata.num_row_groups} row groups)...")
 
-        pa_compression = compression if compression != "UNCOMPRESSED" else None
-        writer_kwargs = {
-            "compression": pa_compression,
-        }
-        if compression_level is not None and pa_compression:
-            writer_kwargs["compression_level"] = compression_level
+        writer_kwargs = resolve_codec(
+            compression, compression_level, context="write"
+        ).pyarrow_kwargs()
         # Imported here, not at the top, to keep this hunk clear of the module's
         # import block (#1281 edits that line).
         from geoparquet_io.core.parquet_writer import without_geometry_dictionary
