@@ -85,3 +85,26 @@ def points_table(n: int = 40, with_bbox: bool = False) -> pa.Table:
             pa.struct([(k, pa.float64()) for k in ("xmin", "ymin", "xmax", "ymax")]),
         )
     return pa.table(columns)
+
+
+def grid_points_table(n: int, with_bbox: bool = True) -> pa.Table:
+    """``n`` distinct points on a deterministic grid over West Africa, lon/lat.
+
+    Enough rows (pass more than ``DEFAULT_ROW_GROUP_ROWS``) make the row-group
+    policy observable: one group for everything and the facade's 49,152 differ.
+    """
+    side = int(n**0.5) + 1
+    xs = [-10.0 + (i % side) * (20.0 / side) for i in range(n)]
+    ys = [0.0 + (i // side) * (20.0 / side) for i in range(n)]
+    columns = {
+        "id": pa.array(range(n), pa.int64()),
+        "name": pa.array([f"feature-{i % 997}" for i in range(n)]),
+        "value": pa.array([float(i % 113) for i in range(n)], pa.float64()),
+        "geometry": pa.array([point_wkb(x, y) for x, y in zip(xs, ys, strict=True)], pa.binary()),
+    }
+    if with_bbox:
+        columns["bbox"] = pa.array(
+            [{"xmin": x, "ymin": y, "xmax": x, "ymax": y} for x, y in zip(xs, ys, strict=True)],
+            pa.struct([(k, pa.float64()) for k in ("xmin", "ymin", "xmax", "ymax")]),
+        )
+    return pa.table(columns)
