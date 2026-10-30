@@ -7,6 +7,7 @@
 geoparquet_io/cli/commands/partition.py:partition_a5|geoparquet_io/cli/commands/partition.py:partition_h3
 geoparquet_io/cli/commands/partition.py:partition_a5|geoparquet_io/cli/commands/partition.py:partition_s2
 geoparquet_io/cli/commands/partition.py:partition_h3|geoparquet_io/cli/commands/partition.py:partition_s2
+geoparquet_io/cli/commands/publish.py:_check_output_stac_collection|geoparquet_io/cli/commands/publish.py:_check_output_stac_item
 geoparquet_io/core/add/a5.py:_add_a5_streaming.make_query|geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query
 geoparquet_io/core/add/a5.py:_add_a5_streaming.make_query|geoparquet_io/core/add/s2.py:_add_s2_streaming.make_query
 geoparquet_io/core/add/a5.py:_add_a5_streaming|geoparquet_io/core/add/h3.py:_add_h3_streaming
@@ -16,8 +17,17 @@ geoparquet_io/core/add/a5.py:add_a5_table|geoparquet_io/core/add/h3.py:add_h3_ta
 geoparquet_io/core/add/admin_divisions.py:_print_dry_run_header|geoparquet_io/core/add/country_codes.py:_print_dry_run_header
 geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query|geoparquet_io/core/add/s2.py:_add_s2_streaming.make_query
 geoparquet_io/core/add/h3.py:_add_h3_streaming|geoparquet_io/core/add/s2.py:_add_s2_streaming
+geoparquet_io/core/add/s2.py:_create_geometry_view|geoparquet_io/core/extract.py:_setup_geometry_view
+geoparquet_io/core/arrow_geo_metadata.py:_compute_bbox_from_data|geoparquet_io/core/geo_metadata.py:_compute_bbox_from_data
+geoparquet_io/core/arrow_geo_metadata.py:_compute_geometry_types|geoparquet_io/core/geo_metadata.py:_compute_geometry_types
 geoparquet_io/core/benchmark.py:benchmark_geopandas_fiona|geoparquet_io/core/benchmark.py:benchmark_geopandas_pyogrio
 geoparquet_io/core/geo_metadata.py:_initialize_geo_metadata|geoparquet_io/core/write_strategies/base.py:_initialize_geo_metadata
+geoparquet_io/core/partition/auto_resolution.py:_calculate_a5_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_h3_resolution
+geoparquet_io/core/partition/auto_resolution.py:_calculate_a5_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_quadkey_resolution
 geoparquet_io/core/partition/auto_resolution.py:_calculate_h3_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_quadkey_resolution
 geoparquet_io/core/partition/by_a5.py:_ensure_a5_column|geoparquet_io/core/partition/by_h3.py:_ensure_h3_column
+geoparquet_io/core/partition/by_a5.py:_ensure_a5_column|geoparquet_io/core/partition/by_quadkey.py:_ensure_quadkey_column
+geoparquet_io/core/partition/by_a5.py:_ensure_a5_column|geoparquet_io/core/partition/by_s2.py:_ensure_s2_column
 geoparquet_io/core/partition/by_a5.py:partition_by_a5|geoparquet_io/core/partition/by_h3.py:partition_by_h3
+geoparquet_io/core/partition/by_h3.py:_ensure_h3_column|geoparquet_io/core/partition/by_quadkey.py:_ensure_quadkey_column
+geoparquet_io/core/partition/by_h3.py:_ensure_h3_column|geoparquet_io/core/partition/by_s2.py:_ensure_s2_column

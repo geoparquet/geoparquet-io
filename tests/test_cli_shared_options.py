@@ -17,6 +17,7 @@ must leave the list.
 
 from __future__ import annotations
 
+import ast
 from collections import defaultdict
 from pathlib import Path
 
@@ -229,3 +230,156 @@ def test_g12_the_walk_passes_identical_declarations_and_one_off_options():
         pass
 
     assert shared_option_differences(group, None) == {}
+
+
+# ---------------------------------------------------------------------------
+# G13, parse layer: a --bbox parser written inline in cli/
+# ---------------------------------------------------------------------------
+# Every --bbox declaration is the same ``str``, so the declaration walk above
+# cannot see the ticket's own evidence: three commands parse the string
+# themselves, and differ on NaN (#1367). The owner is core/extract.parse_bbox
+# (T5c decides its final home). This arm finds a function in cli/ that splits a
+# string on "," and casts the parts with float() (a comprehension or map of
+# float() over ``.split(",")``, or four float() calls on its parts) and is about
+# four values (compares a length with 4, or names a bbox).
+
+
+def _splits_on_comma(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "split"
+        and bool(node.args)
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == ","
+    )
+
+
+def _is_float_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "float"
+    )
+
+
+def _is_about_four_values(func: ast.AST) -> bool:
+    """A bbox, not any float list: the function compares a length with 4 or
+    names a bbox (``_parse_float_csv`` for contour levels is neither)."""
+    for node in ast.walk(func):
+        if isinstance(node, ast.Compare) and any(
+            isinstance(c, ast.Constant) and c.value == 4 for c in [node.left, *node.comparators]
+        ):
+            return True
+        if isinstance(node, (ast.Name, ast.arg)) and "bbox" in (
+            getattr(node, "id", None) or node.arg
+        ):
+            return True
+    return False
+
+
+def _parses_floats_from_a_split(func: ast.AST) -> bool:
+    if not _is_about_four_values(func):
+        return False
+    split_names = {
+        t.id
+        for n in ast.walk(func)
+        if isinstance(n, ast.Assign) and _splits_on_comma(n.value)
+        for t in n.targets
+        if isinstance(t, ast.Name)
+    }
+    for node in ast.walk(func):
+        if isinstance(node, (ast.ListComp, ast.GeneratorExp, ast.SetComp)):
+            if _is_float_call(node.elt) and any(_splits_on_comma(g.iter) for g in node.generators):
+                return True
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "map"
+            and len(node.args) == 2
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "float"
+            and _splits_on_comma(node.args[1])
+        ):
+            return True
+    on_parts = [
+        n
+        for n in ast.walk(func)
+        if _is_float_call(n)
+        and n.args
+        and any(isinstance(sub, ast.Name) and sub.id in split_names for sub in ast.walk(n.args[0]))
+    ]
+    return len(on_parts) >= 4
+
+
+def inline_bbox_parsers(repo: Path = REPO) -> list[tuple[str, str]]:
+    """``(path, function qualname)`` of every cli/ function that parses floats
+    out of a comma-split string; the innermost function is reported."""
+    found = []
+    for source in sorted((repo / "geoparquet_io" / "cli").rglob("*.py")):
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        rel = source.relative_to(repo).as_posix()
+
+        def walk(node, scope, rel=rel):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    qual = [*scope, child.name]
+                    inner = [
+                        n
+                        for n in ast.walk(child)
+                        if n is not child and isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    ]
+                    own = _parses_floats_from_a_split(child) and not any(
+                        _parses_floats_from_a_split(n) for n in inner
+                    )
+                    if own:
+                        found.append((rel, ".".join(qual)))
+                    walk(child, qual)
+                elif isinstance(child, ast.ClassDef):
+                    walk(child, [*scope, child.name])
+
+        walk(tree, [])
+    return found
+
+
+def _pinned_bbox_parsers() -> dict[tuple[str, str], str]:
+    with EXEMPTIONS_FILE.open("rb") as fh:
+        entries = tomllib.load(fh).get("G13", {}).get("bbox_parsers", [])
+    return {(e["path"], e["name"]): e["reason"] for e in entries}
+
+
+def test_no_unpinned_inline_bbox_parser_in_cli():
+    live = set(inline_bbox_parsers())
+    pinned = _pinned_bbox_parsers()
+    assert live == set(pinned), (
+        "inline --bbox parsing in cli/ (call core/extract.parse_bbox instead):\n"
+        f"  new: {sorted(live - set(pinned))}\n"
+        f"  pinned but gone (delete the [[G13.bbox_parsers]] entry): {sorted(set(pinned) - live)}"
+    )
+    assert all(r.strip() for r in pinned.values())
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def cmd(bbox):\n    parts = [float(x.strip()) for x in bbox.split(',')]\n    return parts\n",
+        "def cmd(bbox):\n    return tuple(map(float, bbox.split(',')))\n",
+        "def cmd(bbox):\n    p = bbox.split(',')\n    return float(p[0]), float(p[1]), float(p[2]), float(p[3])\n",
+    ],
+    ids=["comprehension", "map", "four-calls"],
+)
+def test_g12_the_bbox_arm_flags_an_inline_parser(tmp_path, source):
+    target = tmp_path / "geoparquet_io" / "cli" / "commands" / "x.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(source, encoding="utf-8")
+    assert inline_bbox_parsers(tmp_path) == [("geoparquet_io/cli/commands/x.py", "cmd")]
+
+
+def test_g12_the_bbox_arm_passes_a_call_to_the_owner_and_other_splits(tmp_path):
+    target = tmp_path / "geoparquet_io" / "cli" / "commands" / "x.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "def cmd(bbox, cols):\n    names = [c.strip() for c in cols.split(',')]\n"
+        "    return parse_bbox(bbox), names, float(cols)\n\n\n"
+        "def levels(value):\n    return [float(part) for part in value.split(',')]\n",
+        encoding="utf-8",
+    )
+    assert inline_bbox_parsers(tmp_path) == []

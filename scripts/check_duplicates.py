@@ -2,12 +2,15 @@
 """Fail on a new near-duplicate function pair under geoparquet_io/ (guard G3 of #1367).
 
 Every function with at least 8 statements (counted recursively, the docstring
-left out) is normalised: its own name, its parameters and every ``Name`` are
-renamed ``v0``, ``v1``, ... in order of first occurrence, so two functions that
-differ only in their identifiers read the same. Attributes and constants are
-kept. The bodies are compared as token sequences with ``difflib.SequenceMatcher``
-(``real_quick_ratio`` and ``quick_ratio`` prefilter), and a pair at or above
-0.90 is a near-duplicate.
+left out) is normalised: every ``Name`` and ``arg`` in its body is renamed
+``v0``, ``v1``, ... in order of first occurrence *in the body*, so two
+functions that differ only in their identifiers read the same. The signature
+(parameter names, annotations, defaults) and the decorators are not part of
+the body and do not shift the numbering: a copy with an annotation or an extra
+leading parameter still reads the same. Attributes and constants are kept. The
+bodies are compared as token sequences with ``difflib.SequenceMatcher``
+(``autojunk=False``; ``real_quick_ratio`` and ``quick_ratio`` prefilter), and a
+pair at or above 0.90 is a near-duplicate.
 
 The pairs that exist today are listed in ``scripts/duplicate_pairs_baseline.txt``
 as ``fileA:qualnameA|fileB:qualnameB`` (``#`` starts a comment). A pair that is
@@ -51,8 +54,7 @@ def _without_docstring(body: list[ast.stmt]) -> list[ast.stmt]:
 
 
 class _Rename(ast.NodeTransformer):
-    """Rename identifiers by first occurrence: the function, then its
-    parameters, then the body in AST field order."""
+    """Rename identifiers by first occurrence in the body, in AST field order."""
 
     def __init__(self) -> None:
         self.names: dict[str, str] = {}
@@ -70,13 +72,13 @@ class _Rename(ast.NodeTransformer):
 
 
 def normalized_tokens(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
-    """The body's tokens with identifiers renamed (signature and decorators are
-    not body tokens, but the parameters seed the naming order)."""
+    """The body's tokens with identifiers renamed by first occurrence in the
+    body. Nothing from the signature seeds the numbering: numbering parameter
+    annotations and defaults first let one annotation shift every later name
+    and hid byte-identical twins (T0c audit)."""
     func = copy.deepcopy(func)
     body = _without_docstring(func.body)
     rename = _Rename()
-    rename.identifier(func.name)
-    rename.visit(func.args)
     for statement in body:
         rename.visit(statement)
     return _TOKEN.findall(ast.unparse(ast.Module(body=body, type_ignores=[])))
@@ -152,7 +154,9 @@ def scan(functions: list[Function], floor: float = FLOOR) -> list[Pair]:
     """Every pair at or above *floor*, highest ratio first."""
     pairs = []
     for j, right in enumerate(functions):
-        matcher = difflib.SequenceMatcher(None, [], list(right.tokens))
+        # autojunk=False: the default junks tokens frequent in a long body and
+        # lowered real pairs below the floor (T0c audit).
+        matcher = difflib.SequenceMatcher(None, [], list(right.tokens), autojunk=False)
         for left in functions[:j]:
             matcher.set_seq1(list(left.tokens))
             if matcher.real_quick_ratio() < floor or matcher.quick_ratio() < floor:
@@ -252,7 +256,9 @@ def main(argv: list[str] | None = None) -> int:
             "call the existing function instead of copying it\n"
             f"  key: {p.key}"
         )
-    if gone and args.update:
+    if gone and args.update and new:
+        print("not updating the baseline: this run found new pairs")
+    elif gone and args.update:
         drop_from_baseline(baseline_file, set(gone))
         print(f"dropped {len(gone)} gone pair(s) from {baseline_file.name}")
     elif gone:

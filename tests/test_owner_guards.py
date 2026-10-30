@@ -76,10 +76,11 @@ EXPECTED_COUNTS = {
     "G1.retry_wrappers": 0,
     "G1.json_dumps": 40,
     "G2.exemptions": 33,
-    "G3.pairs": 17,
-    "G3.baseline": 17,
+    "G3.pairs": 27,
+    "G3.baseline": 27,
     "G3.pylint": 58,
     "G13.options": 13,
+    "G13.bbox_parsers": 3,
     "G4.whitelist": 186,
     "G4.tests_whitelist": 99,
 }
@@ -1297,8 +1298,8 @@ def test_g3_every_baseline_pair_has_a_reason_and_only_those():
 
 def test_g3_every_pylint_entry_has_a_reason():
     entries = load_exemptions()["G3"]["pylint"]
-    assert all(e["reason"].strip() and "|" in e["modules"] for e in entries)
-    assert len({e["modules"] for e in entries}) == len(entries)
+    assert all(e["reason"].strip() and "|" in e["block"] for e in entries)
+    assert len({e["block"] for e in entries}) == len(entries)
 
 
 def test_g3_hooks_run_both_layers():
@@ -1345,6 +1346,7 @@ def _measured_counts() -> dict[str, int]:
     counts["G3.baseline"] = len(_g3_baseline())
     counts["G3.pylint"] = sum(e.get("count", 1) for e in data["G3"]["pylint"])
     counts["G13.options"] = len(data["G13"]["options"])
+    counts["G13.bbox_parsers"] = len(data["G13"]["bbox_parsers"])
     counts["G4.whitelist"] = len(_whitelist_entries())
     counts["G4.tests_whitelist"] = len(_whitelist_entries("tests_whitelist"))
     return counts
@@ -2088,7 +2090,22 @@ geoparquet_io/x.py:1:0: R0801: Similar lines in 2 files
 """
 
 
-def _run_pylint_wrapper(tmp_path: Path, pinned: str) -> subprocess.CompletedProcess[str]:
+def _pylint_tree(tmp_path: Path, y_source: str) -> Path:
+    pkg = tmp_path / "geoparquet_io"
+    pkg.mkdir(exist_ok=True)
+    (pkg / "x.py").write_text("def f():\n" + "    a = 1\n" * 14, encoding="utf-8")
+    (pkg / "y.py").write_text(y_source, encoding="utf-8")
+    return tmp_path
+
+
+_Y_COPY_IN_G = "def g():\n" + "    a = 1\n" * 14
+_Y_COPY_IN_H = "def g():\n    return 0\ndef h():\n" + "    a = 1\n" * 12
+
+
+def _run_pylint_wrapper(
+    tmp_path: Path, pinned: str, y_source: str = _Y_COPY_IN_G
+) -> subprocess.CompletedProcess[str]:
+    repo = _pylint_tree(tmp_path, y_source)
     report = tmp_path / "report.txt"
     report.write_text(_PYLINT_REPORT, encoding="utf-8")
     toml = tmp_path / "owner_exemptions.toml"
@@ -2097,6 +2114,8 @@ def _run_pylint_wrapper(tmp_path: Path, pinned: str) -> subprocess.CompletedProc
         [
             sys.executable,
             str(CHECK_PYLINT_DUPLICATES),
+            "--repo",
+            str(repo),
             "--report",
             str(report),
             "--exemptions",
@@ -2108,10 +2127,60 @@ def _run_pylint_wrapper(tmp_path: Path, pinned: str) -> subprocess.CompletedProc
     )
 
 
+_PINNED_BLOCK = '[[G3.pylint]]\nblock = "x:f|y:g"\nreason = "r"\n'
+
+
 def test_g12_g3_pylint_wrapper_fails_an_unpinned_pair_and_passes_a_pinned_one(tmp_path):
     assert _run_pylint_wrapper(tmp_path, "").returncode == 1
-    entry = '[[G3.pylint]]\nmodules = "x|y"\nreason = "r"\n'
-    assert _run_pylint_wrapper(tmp_path, entry).returncode == 0
-    stale = entry + '[[G3.pylint]]\nmodules = "p|q"\nreason = "r"\n'
+    assert _run_pylint_wrapper(tmp_path, _PINNED_BLOCK).returncode == 0
+    stale = _PINNED_BLOCK + '[[G3.pylint]]\nblock = "p:a|q:b"\nreason = "r"\n'
     result = _run_pylint_wrapper(tmp_path, stale)
     assert result.returncode == 1 and "stale" in result.stdout
+
+
+def test_g12_g3_pylint_wrapper_fails_a_copy_swapped_between_the_same_modules(tmp_path):
+    """The pin names the functions, so trading the copy in y.g for one in y.h fails."""
+    result = _run_pylint_wrapper(tmp_path, _PINNED_BLOCK, _Y_COPY_IN_H)
+    assert result.returncode == 1, result.stdout
+    assert "x:f|y:h" in result.stdout
+
+
+_BODY = """
+    total = 0
+    seen = set()
+    for row in rows:
+        if row in seen:
+            continue
+        seen.add(row)
+        total += row
+        if total > limit:
+            break
+    return [total, len(seen)]
+"""
+
+
+def test_g12_g3_the_signature_does_not_shift_the_numbering(tmp_path):
+    """Byte-identical bodies under signatures that differ by an annotation, a
+    default and an extra leading parameter are one pair (the T0c audit's
+    normaliser defect hid the stats twins this way)."""
+    repo = _g3_tree(
+        tmp_path,
+        {
+            "a.py": "def first(rows, limit):" + _BODY,
+            "b.py": "def second(ctx, rows: list[int], limit: int = 5) -> list:" + _BODY,
+        },
+    )
+    result = _run_check_duplicates(repo)
+    assert result.returncode == 1 and _G3_KEY in result.stdout, result.stdout
+    assert "(1.00)" in result.stdout
+
+
+def test_g12_g3_update_refuses_to_write_on_a_failing_run(tmp_path):
+    second = _TEN_STATEMENTS.format(name="second")
+    repo = _g3_tree(tmp_path, {"a.py": _TEN_STATEMENTS.format(name="first"), "b.py": second})
+    baseline = tmp_path / "baseline.txt"
+    original = "geoparquet_io/a.py:gone|geoparquet_io/b.py:gone\n"
+    baseline.write_text(original, encoding="utf-8")
+    result = _run_check_duplicates(repo, "--baseline", str(baseline), "--update")
+    assert result.returncode == 1 and "not updating" in result.stdout
+    assert baseline.read_text(encoding="utf-8") == original

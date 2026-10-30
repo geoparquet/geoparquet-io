@@ -1130,6 +1130,10 @@ PUBLIC_API_MODULES = (
     "geoparquet_io.core.format_writers",
     "geoparquet_io.cli.decorators",
     "geoparquet_io.cli.exception_handler",
+    # Concept 15 (shared CLI behaviour): today's owners of the check runner and
+    # of parse_bbox, until T5c settles their homes.
+    "geoparquet_io.cli.commands.check",
+    "geoparquet_io.core.extract",
     "geoparquet_io.core.edges",
     "geoparquet_io.core.index_ops",
 )
@@ -1218,8 +1222,10 @@ def test_public_api_matches_the_snapshot():
         GPIO_UPDATE_SNAPSHOT=1 uv run pytest tests/test_api.py -k public_api_matches
 
     (refused when ``CI`` is set, as in tests/test_cli_surface.py)."""
-    if os.environ.get("GPIO_UPDATE_SNAPSHOT", "").strip().lower() in {"1", "true", "yes", "on"}:
-        assert not os.environ.get("CI"), "GPIO_UPDATE_SNAPSHOT must not be set in CI"
+    from tests.test_cli_surface import UPDATE_ENV_VAR, _env_flag
+
+    if _env_flag(UPDATE_ENV_VAR):
+        assert not os.environ.get("CI"), f"{UPDATE_ENV_VAR} must not be set in CI"
         PUBLIC_API_SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
         PUBLIC_API_SNAPSHOT.write_text(
             json.dumps(public_api_surface(), indent=2, sort_keys=True) + "\n",

@@ -72,6 +72,16 @@
     "read",
     "read_partition"
   ],
+  "geoparquet_io.cli.commands.check": [
+    "MultiFileCheckRunner",
+    "T",
+    "begin_check_run",
+    "exit_for_verdict",
+    "fix_output_for",
+    "quiet_recheck",
+    "refuse_no_parquet_match",
+    "refuse_shared_fix_output"
+  ],
   "geoparquet_io.cli.decorators": [
     "DEFAULT_KDTREE_APPROX",
     "DEFAULT_KDTREE_TARGET_ROWS",
@@ -287,6 +297,21 @@
     "sanitize_error_message",
     "sanitize_url_for_logging",
     "unpublished_extension_hint"
+  ],
+  "geoparquet_io.core.extract": [
+    "build_column_selection",
+    "build_extract_query",
+    "build_spatial_filter",
+    "convert_geojson_to_wkt",
+    "extract",
+    "extract_table",
+    "get_parquet_row_count",
+    "get_schema_columns",
+    "is_geographic_crs",
+    "looks_like_latlong_bbox",
+    "parse_bbox",
+    "parse_geometry_input",
+    "validate_columns"
   ],
   "geoparquet_io.core.file_utils": [
     "copy_file",
