@@ -611,9 +611,12 @@ def read_raw_geo(metadata) -> RawGeo:
     or str keys. Never raises: an undecodable value (bad UTF-8, bad JSON) comes
     back with ``error`` set instead of a decoder traceback.
 
-    A write path must not use it on a carried *input* block -- it would carry
-    a malformed block forward. Re-reading gpio's own just-built block (the
-    footer patch, ``_rewrite_geo_metadata``) is the exception: gpio wrote it.
+    A write path must not read a carried *input* block's contents through it --
+    it would carry a malformed block forward; that is
+    :func:`sanitized_carried_geo`'s job. Two uses are allowed there: asking only
+    whether a ``geo`` key is present (``.present``, as
+    ``write_strategies.base.needs_metadata_rewrite`` does), and re-reading the
+    block gpio itself just wrote (the footer patch in ``write_funnels``).
     """
     present, raw = _geo_key_value(metadata)
     if not present:
