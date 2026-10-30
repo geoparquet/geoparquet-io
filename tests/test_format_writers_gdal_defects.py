@@ -125,3 +125,15 @@ def test_issue_1320_no_flag_keeps_file_stem(with_geo, tmp_path):
     result = _run("geopackage", with_geo, out)
     assert result.exit_code == 0, result.output
     assert _gpkg(out)[0] == ["stem"]
+
+
+@pytest.mark.parametrize("fmt,suffix", [("geopackage", "gpkg"), ("flatgeobuf", "fgb")])
+def test_issue_1161_native_geoarrow_geometry_is_a_clear_error(tmp_path, fmt, suffix):
+    source = Path(__file__).parent / "data" / "data-point-encoding_native.parquet"
+    out = tmp_path / f"out.{suffix}"
+    result = _run(fmt, source, out)
+    assert result.exit_code != 0
+    assert "GeoArrow-native" in result.output
+    assert "Re-encode it as WKB" in result.output
+    assert "NULL geometry" not in result.output
+    assert not out.exists()
