@@ -702,22 +702,18 @@ def _find_geometry_column(
         ValueError: If no geometry column found
     """
     # Look for common geometry column names
-    columns = [name for name, _ in describe_query(con, f"SELECT * FROM {source_ref}")]
+    described = describe_query(con, f"SELECT * FROM {source_ref}")
+    columns = [name for name, _ in described]
 
     for name in STANDARD_GEOMETRY_NAMES:
         for col in columns:
             if col.lower() == name:
                 return col
 
-    # Check column types for GEOMETRY type
-    for col in columns:
-        try:
-            type_query = f"SELECT typeof({quote_identifier(col)}) FROM {source_ref} LIMIT 1"
-            type_result = fetch_one(con.execute(type_query))
-            if type_result and duckdb_type_is_geometry(type_result[0]):
-                return col
-        except Exception:
-            continue
+    # Otherwise the first column DuckDB types as GEOMETRY
+    for col, col_type in described:
+        if duckdb_type_is_geometry(col_type):
+            return col
 
     raise ValueError(
         "Could not find geometry column. "

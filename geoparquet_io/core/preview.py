@@ -165,35 +165,19 @@ def _row_group_spatial_stats(
     -- never the primary column's (#1171: a secondary's read must not be
     pruned on the primary's extents).
     """
-    from geoparquet_io.core.duckdb_metadata import get_row_group_bbox_stats
+    from geoparquet_io.core.duckdb_metadata import (
+        get_per_row_group_native_geo_stats,
+        get_row_group_bbox_stats,
+    )
 
     return get_row_group_bbox_stats(
         parquet_file,
-        native=lambda: _native_stats(parquet_file, geometry_column),
+        # An explicit column the file lacks is the caller's typo: raise it.
+        native=lambda: get_per_row_group_native_geo_stats(
+            parquet_file, geometry_column, strict=True
+        ),
         bbox_column=lambda: _covering_bbox_column(parquet_file, geometry_column),
     )
-
-
-def _native_stats(parquet_file: str, geometry_column: str | None) -> list[dict]:
-    """Per-row-group native geo statistics; a typo'd explicit column raises."""
-    from geoparquet_io.core.duckdb_metadata import (
-        get_native_geo_stats_by_row_group,
-        get_per_row_group_native_geo_stats,
-    )
-
-    if geometry_column is None:
-        return get_per_row_group_native_geo_stats(parquet_file)
-
-    chunks = get_native_geo_stats_by_row_group(parquet_file, geometry_column)
-    if chunks is None:
-        raise InvalidParameterError(
-            "geometry_column", f"the file has no column named {geometry_column!r}"
-        )
-    return [
-        {key: chunk[key] for key in ("row_group_id", "xmin", "ymin", "xmax", "ymax")}
-        for chunk in chunks
-        if chunk["xmin"] is not None
-    ]
 
 
 def _covering_bbox_column(parquet_file: str, geometry_column: str | None) -> str | None:

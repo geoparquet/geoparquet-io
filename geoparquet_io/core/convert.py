@@ -31,6 +31,7 @@ from geoparquet_io.core.duckdb_utils import (
     _install_and_load_extension,
     complete_without_fetch,
     describe_query,
+    duckdb_type_is_numeric,
     fetch_one,
     free_column_name,
     get_duckdb_connection,
@@ -950,23 +951,6 @@ def _try_detect_wkt_column(con, csv_read, col_names_lower):
 
 _LAT_TOKENS = ("lat", "latitude")
 _LON_TOKENS = ("lon", "lng", "long", "longitude")
-_NUMERIC_TYPES = frozenset(
-    {
-        "TINYINT",
-        "SMALLINT",
-        "INTEGER",
-        "BIGINT",
-        "HUGEINT",
-        "UTINYINT",
-        "USMALLINT",
-        "UINTEGER",
-        "UBIGINT",
-        "UHUGEINT",
-        "FLOAT",
-        "DOUBLE",
-        "DECIMAL",
-    }
-)
 
 
 def _name_tokens(name):
@@ -999,8 +983,7 @@ def _coordinate_castable(col_type):
     (BOOLEAN, TIMESTAMP, a list or struct) cannot be a coordinate, and used to
     be "detected" here only to fail later as a raw DuckDB cast error.
     """
-    base = str(col_type).split("(")[0]
-    return base in _NUMERIC_TYPES or base == "VARCHAR"
+    return duckdb_type_is_numeric(col_type) or str(col_type).split("(")[0] == "VARCHAR"
 
 
 def _exact_latlon_pair(columns, allow_xy=True):

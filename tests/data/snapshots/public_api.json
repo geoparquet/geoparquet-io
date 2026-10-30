@@ -265,6 +265,7 @@
     "duckdb_capabilities",
     "duckdb_type_contains_geometry",
     "duckdb_type_is_geometry",
+    "duckdb_type_is_numeric",
     "fetch_one",
     "fetch_row",
     "fetch_rows",

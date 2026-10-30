@@ -25,7 +25,7 @@ from geoparquet_io.core.crs_utils import (
     merge_longitude_ranges,
 )
 from geoparquet_io.core.duckdb_utils import _escape_sql_string, describe_query, fetch_one, sql_path
-from geoparquet_io.core.exceptions import GeoParquetError
+from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.file_utils import (
     get_first_parquet_file,
     is_partition_path,
@@ -1497,8 +1497,17 @@ def aggregate_native_geo_stats(chunks: list[dict]) -> dict:
     return stats
 
 
+def _chunk_bboxes(chunks: list[dict]) -> list[dict]:
+    """The per-row-group bbox rows of the chunks that carry one."""
+    return [
+        {key: chunk[key] for key in ("row_group_id", "xmin", "ymin", "xmax", "ymax")}
+        for chunk in chunks
+        if chunk["xmin"] is not None
+    ]
+
+
 def get_per_row_group_native_geo_stats(
-    parquet_file: str, geometry_column: str | None = None, con=None
+    parquet_file: str, geometry_column: str | None = None, con=None, *, strict: bool = False
 ) -> list[dict]:
     """
     Get per-row-group native Parquet geo_bbox statistics.
@@ -1510,6 +1519,11 @@ def get_per_row_group_native_geo_stats(
         parquet_file: Path to the parquet file
         geometry_column: Name of the geometry column (auto-detected if None)
         con: Optional existing DuckDB connection
+        strict: For a caller that named ``geometry_column`` itself (the preview's
+            explicit column): a column the file does not have raises
+            ``InvalidParameterError`` and a file that cannot be read raises,
+            instead of both reading as "no statistics". Ignored when the column
+            is auto-detected.
 
     Returns:
         List of dicts with row_group_id, xmin, ymin, xmax, ymax (empty if no stats)
@@ -1519,25 +1533,19 @@ def get_per_row_group_native_geo_stats(
             geometry_column = find_primary_geometry_column_duckdb(parquet_file, con)
         except Exception:
             return []
+    elif strict:
+        chunks = get_native_geo_stats_by_row_group(parquet_file, geometry_column, con)
+        if chunks is None:
+            raise InvalidParameterError(
+                "geometry_column", f"the file has no column named {geometry_column!r}"
+            )
+        return _chunk_bboxes(chunks)
 
     try:
         chunks = get_native_geo_stats_by_row_group(parquet_file, geometry_column, con)
     except Exception:
         return []
-    if not chunks:
-        return []
-
-    return [
-        {
-            "row_group_id": chunk["row_group_id"],
-            "xmin": chunk["xmin"],
-            "ymin": chunk["ymin"],
-            "xmax": chunk["xmax"],
-            "ymax": chunk["ymax"],
-        }
-        for chunk in chunks
-        if chunk["xmin"] is not None
-    ]
+    return _chunk_bboxes(chunks or [])
 
 
 def _format_geo_types(geo_types: list) -> list[str]:

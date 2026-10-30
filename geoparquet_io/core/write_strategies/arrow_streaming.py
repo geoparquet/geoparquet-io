@@ -30,9 +30,8 @@ from geoparquet_io.core.compression import ResolvedCodec, resolve_codec
 from geoparquet_io.core.crs_utils import apply_output_crs
 from geoparquet_io.core.duckdb_utils import (
     _wrap_query_with_wkb_conversion,
+    describe_query,
     duckdb_type_is_geometry,
-    fetch_one,
-    quote_identifier,
 )
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
@@ -272,11 +271,9 @@ def _check_geometry_type(
 ) -> tuple[bool, str]:
     """Check if geometry column needs WKB conversion. Returns (needs_conversion, final_sql)."""
 
-    type_result = fetch_one(
-        con.execute(f"SELECT TYPEOF({quote_identifier(geometry_column)}) FROM ({query}) LIMIT 1")
-    )
-    duckdb_type = type_result[0] if type_result else None
-    needs_wkb = duckdb_type_is_geometry(duckdb_type)
+    duckdb_type = dict(describe_query(con, query)).get(geometry_column)
+    # A CRS-typed GEOMETRY crosses Arrow with its CRS; only a bare one is wrapped.
+    needs_wkb = duckdb_type_is_geometry(duckdb_type, allow_crs=False)
 
     if verbose:
         msg = "wrapping with WKB conversion" if needs_wkb else "no conversion needed"

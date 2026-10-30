@@ -334,8 +334,8 @@ def read_partition(
     from geoparquet_io.core.duckdb_utils import (
         _wrap_query_with_wkb_conversion,
         describe_query,
+        duckdb_type_is_geometry,
         get_duckdb_connection,
-        parse_duckdb_geo_type,
         s3_config_scope,
     )
     from geoparquet_io.core.partition.reader import build_read_parquet_expr
@@ -360,10 +360,8 @@ def read_partition(
         try:
             query = f"SELECT * FROM {expr}"
             for name, type_ in describe_query(con, query):
-                # Only a CRS-less GEOMETRY is wrapped. A CRS-typed one,
-                # GEOMETRY('EPSG:4326'), crosses Arrow as geoarrow.wkb carrying
-                # that CRS; ST_AsWKB would drop it.
-                if parse_duckdb_geo_type(type_) == ("GEOMETRY", None):
+                # A CRS-typed GEOMETRY crosses Arrow with its CRS; only a bare one is wrapped.
+                if duckdb_type_is_geometry(type_, allow_crs=False):
                     query = _wrap_query_with_wkb_conversion(query, name, con=con)
 
             arrow_table = con.sql(query).arrow().read_all()

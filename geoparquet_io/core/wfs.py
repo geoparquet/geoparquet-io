@@ -1867,18 +1867,19 @@ def _probe_properties_type(
     See: https://github.com/geoparquet/geoparquet-io/issues/441
     """
     try:
-        props_type_result = fetch_one(
-            con.execute(f"""
+        # The bound type, from DESCRIBE: no feature is read, so a response with
+        # no features reports the type DuckDB inferred (JSON) instead of "NULL".
+        ((_, props_type),) = describe_query(
+            con,
+            f"""
             WITH features AS (
                 SELECT unnest(features) AS feature
                 FROM read_json_auto({sql_path(response_path)}, maximum_object_size={max_object_size})
             )
-            SELECT typeof(feature.properties) AS props_type
+            SELECT feature.properties AS props_type
             FROM features
-            LIMIT 1
-        """)
+        """,
         )
-        props_type = props_type_result[0] if props_type_result else "NULL"
     except duckdb.BinderException as e:
         # Missing 'properties' key in feature struct (malformed GeoJSON per RFC 7946)
         if "properties" in str(e):
@@ -1989,7 +1990,7 @@ _GML_CONTENT_TYPE_MARKERS: Final[tuple[str, ...]] = ("gml", "xml")
 _ERROR_PAGE_CONTENT_TYPE_MARKERS: Final[tuple[str, ...]] = ("html", "text/plain")
 
 # GDAL reports a GML layer's CRS in the DuckDB column type, e.g.
-# GEOMETRY('EPSG:4326') (read by duckdb_metadata.parse_duckdb_geo_type). That is
+# GEOMETRY('EPSG:4326') (read by duckdb_utils.parse_duckdb_geo_type). That is
 # the server's own statement of the CRS it returned, so it plays the same role
 # the GeoJSON `crs` member does.
 

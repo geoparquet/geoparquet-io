@@ -304,13 +304,9 @@ class _Module:
         return None
 
 
-def _identifier_tokens(node: ast.AST) -> Iterator[str]:
-    """Tokens of the variable and attribute names under *node*, not of a callee's
-    name: ``geo_bytes`` is the footer key by name, ``parse_duckdb_geo_type(t)``
-    is a call whose result is whatever that function returns."""
-    callees = {id(sub.func) for sub in ast.walk(node) if isinstance(sub, ast.Call)}
+def _identifier_tokens(node: ast.AST, skip: frozenset[int] = frozenset()) -> Iterator[str]:
     for sub in ast.walk(node):
-        if id(sub) in callees:
+        if id(sub) in skip:
             continue
         if isinstance(sub, ast.Name):
             yield from sub.id.lower().split("_")
@@ -320,13 +316,19 @@ def _identifier_tokens(node: ast.AST) -> Iterator[str]:
 
 def _mentions_geo(node: ast.AST) -> bool:
     """The ``geo`` key by constant (``b"geo"``, or ``key = 'geo'`` in a footer
-    query) or by an identifier token (``geo_bytes``)."""
+    query) or by an identifier token (``geo_bytes``).
+
+    A callee's own name is not read: ``parse_duckdb_geo_type(t)`` is a call whose
+    result is whatever that function returns, not the footer key. (Only this arm
+    skips callees; the retry arms read a callee's name on purpose.)
+    """
     for sub in ast.walk(node):
         if isinstance(sub, ast.Constant) and sub.value in ("geo", b"geo"):
             return True
         if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and "'geo'" in sub.value:
             return True
-    return "geo" in set(_identifier_tokens(node))
+    callees = frozenset(id(sub.func) for sub in ast.walk(node) if isinstance(sub, ast.Call))
+    return "geo" in set(_identifier_tokens(node, callees))
 
 
 def _geo_bound(m: _Module, node: ast.AST, depth: int = 2) -> bool:
@@ -1696,6 +1698,23 @@ def test_g12_geo_parse_ignores_geo_in_a_callee_name(tmp_path):
     ):
         repo = _plant(tmp_path / str(len(source)), "geo_parse", source)
         assert len(arm_hits(repo, "geo_parse")) == 1, source
+
+
+@pytest.mark.parametrize(
+    "request_line",
+    ["return make_client().get(x)", "return c.fetch(build_url(x))"],
+    ids=["client-factory-receiver", "url-builder-argument"],
+)
+def test_g12_retry_loop_reads_a_callee_name(tmp_path, request_line):
+    """The retry arms read a callee's name (a client factory, a URL builder);
+    only geo_parse ignores callees, so its fix must not blind them."""
+    source = (
+        "import time\n\ndef fetch(c, x):\n    for attempt in range(3):\n        try:\n"
+        f"            {request_line}\n"
+        "        except Exception:\n            time.sleep(attempt)\n"
+    )
+    repo = _plant(tmp_path, "retry_loop", source)
+    assert arm_hits(repo, "retry_loop"), source
 
 
 def test_g12_an_exemption_excuses_exactly_its_count(tmp_path):

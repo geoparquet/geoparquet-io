@@ -193,7 +193,8 @@ def test_describe_renders_what_the_parser_reads(con):
 
 # --- guards ---------------------------------------------------------------------------
 
-_PROBE_SQL = re.compile(r"\bLIMIT\s+0\b|\bDESCRIBE\b")
+#: A schema probe: ``LIMIT 0``, ``DESCRIBE``, or a ``TYPEOF(col)`` that reads a row for its type.
+_PROBE_SQL = re.compile(r"\bLIMIT\s+0\b|\bDESCRIBE\b|\b(?i:typeof)\s*\(")
 
 #: The probe owner's own functions: the only code allowed to spell a schema probe.
 #: ``_query_schema_without_variant`` is ``query_schema``'s VARIANT fallback.
@@ -430,6 +431,8 @@ def test_guards_catch_new_copies(tmp_path):
         '    return re.match("Geography\\\\(.*algorithm=(\\\\w+)", t)\n\n'
         "def cols(con, src):\n"
         '    return con.execute(f"SELECT * FROM {src} LIMIT 0").description\n\n'
+        "def col_type(con, src, c):\n"
+        '    return con.execute(f"SELECT typeof({c}) FROM {src} LIMIT 1").fetchone()\n\n'
         "def is_geom(t):\n"
         '    return t.upper() == "GEOMETRY" or t.startswith("GEOMETRY") or "GEOMETRY" in t\n'
     )
@@ -456,7 +459,7 @@ def test_guards_catch_new_copies(tmp_path):
         "def _wkb(t):\n"
         '    return t.startswith("GEOMETRY")\n'
     )
-    assert dict(_probe_counts(pkg)) == {"pkg/rogue.py": 1, "pkg/core/duckdb_utils.py": 1}
+    assert dict(_probe_counts(pkg)) == {"pkg/rogue.py": 2, "pkg/core/duckdb_utils.py": 1}
     assert dict(_native_counts(pkg)) == {
         "pkg/rogue.py": 3,
         "pkg/rogue.py::_is_geography_column": 1,

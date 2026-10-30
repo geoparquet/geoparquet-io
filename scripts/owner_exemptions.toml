@@ -399,6 +399,7 @@ reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 "_parquet_metadata_rows" = ["geoparquet_io/core/duckdb_metadata.py"]
 "duckdb_type_is_geometry" = ["geoparquet_io/core/duckdb_utils.py"]
 "duckdb_type_contains_geometry" = ["geoparquet_io/core/duckdb_utils.py"]
+"duckdb_type_is_numeric" = ["geoparquet_io/core/duckdb_utils.py"]
 "parse_duckdb_geo_type" = ["geoparquet_io/core/duckdb_utils.py"]
 "_compute_geometry_types" = ["geoparquet_io/core/geo_metadata.py"]
 "_compute_bbox_from_data" = ["geoparquet_io/core/geo_metadata.py"]
@@ -766,13 +767,10 @@ reason = "geometry stats twins; T3b"
 block = "core.arrow_geo_metadata:_detect_version_from_table|core.streaming:extract_version_from_metadata"
 reason = "version read from the geo key, copied; T2b"
 [[G3.pylint]]
-block = "core.convert:<module>|core.process.aggregate.common:<module>"
-reason = "DuckDB integer type-name list copied; T1c's type owner"
-[[G3.pylint]]
 block = "core.crs_utils:<module>|core.duckdb_metadata:_get_pyarrow_logical_type"
 reason = "GeoArrow extension-name list copied; T3a's decoder owner"
 [[G3.pylint]]
-block = "core.duckdb_metadata:get_per_row_group_native_geo_stats|core.validate:<module>"
+block = "core.duckdb_metadata:_format_geo_types|core.validate:<module>"
 reason = "WKB_TYPE_CODES table copied into validate; T3b"
 [[G3.pylint]]
 block = "core.extract:_execute_extraction|core.str_order:_str_order_file_based"

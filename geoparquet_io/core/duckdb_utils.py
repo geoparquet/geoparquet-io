@@ -1866,10 +1866,55 @@ def parse_duckdb_geo_type(type_name: object) -> tuple[str, str | None] | None:
     return match.group(1).upper(), crs
 
 
-def duckdb_type_is_geometry(type_name: object) -> bool:
-    """Whether a DuckDB type name is GEOMETRY, with or without a CRS (not GEOGRAPHY)."""
+def duckdb_type_is_geometry(type_name: object, *, allow_crs: bool = True) -> bool:
+    """Whether a DuckDB type name is GEOMETRY, with or without a CRS (not GEOGRAPHY).
+
+    ``allow_crs=False`` answers only for a CRS-less ``GEOMETRY``. It is for a
+    caller deciding whether to wrap the column in ``ST_AsWKB`` before an Arrow
+    export: a CRS-typed ``GEOMETRY('EPSG:4326')`` already crosses Arrow as
+    ``geoarrow.wkb`` carrying that CRS, and the wrap would drop it
+    (``api.table.read_partition``, the streaming write strategy).
+    """
     parsed = parse_duckdb_geo_type(type_name)
-    return parsed is not None and parsed[0] == "GEOMETRY"
+    if parsed is None or parsed[0] != "GEOMETRY":
+        return False
+    return allow_crs or parsed[1] is None
+
+
+#: DuckDB's numeric type names as DESCRIBE renders them, with the parameters cut
+#: off (``DECIMAL(18,3)`` -> ``DECIMAL``). ``REAL`` and ``NUMERIC`` are the aliases
+#: DuckDB accepts for ``FLOAT`` and ``DECIMAL``.
+_DUCKDB_NUMERIC_TYPES = frozenset(
+    {
+        "TINYINT",
+        "SMALLINT",
+        "INTEGER",
+        "BIGINT",
+        "HUGEINT",
+        "UTINYINT",
+        "USMALLINT",
+        "UINTEGER",
+        "UBIGINT",
+        "UHUGEINT",
+        "FLOAT",
+        "REAL",
+        "DOUBLE",
+        "DECIMAL",
+        "NUMERIC",
+    }
+)
+
+
+def duckdb_type_is_numeric(type_name: object) -> bool:
+    """Whether a DuckDB type name (DESCRIBE / TYPEOF output) is a numeric type.
+
+    Case-insensitive, and a parameterized ``DECIMAL(18,3)`` counts. The one
+    answer for the coordinate-column test in ``convert`` and the metric-column
+    test in ``process aggregate``, which used to keep two lists that disagreed
+    (one lacked ``REAL``, the other ``DECIMAL`` without its prefix test).
+    """
+    base = str(type_name or "").split("(", 1)[0].strip().upper()
+    return base in _DUCKDB_NUMERIC_TYPES
 
 
 def duckdb_type_contains_geometry(type_name: object) -> bool:

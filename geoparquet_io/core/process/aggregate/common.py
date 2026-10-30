@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
+    duckdb_type_is_numeric,
     fetch_one,
     fetch_rows,
     quote_identifier,
@@ -39,28 +40,6 @@ VALID_OUT_GEOMETRY = {"polygon", "centroid", "both", "none"}
 # Unicode digits, underscores, inf/Infinity -- none of which are valid SQL).
 _NUMERIC_TOKEN_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$", re.ASCII)
 _NAN_TOKEN_RE = re.compile(r"^[+-]?nan$", re.IGNORECASE | re.ASCII)
-
-# DuckDB numeric type names (DESCRIBE output). REAL columns report as FLOAT.
-_NUMERIC_SQL_TYPES = {
-    "TINYINT",
-    "SMALLINT",
-    "INTEGER",
-    "BIGINT",
-    "HUGEINT",
-    "UTINYINT",
-    "USMALLINT",
-    "UINTEGER",
-    "UBIGINT",
-    "UHUGEINT",
-    "FLOAT",
-    "REAL",
-    "DOUBLE",
-}
-
-
-def _is_numeric_sql_type(col_type: str) -> bool:
-    t = col_type.upper()
-    return t in _NUMERIC_SQL_TYPES or t.startswith(("DECIMAL", "NUMERIC"))
 
 
 def aggregate_source_relation(input_url: str) -> str:
@@ -405,7 +384,7 @@ def _aggregated_column_expr(
     if not nodata_values:
         return quote_identifier(column)
     col_type = (column_types or {}).get(column)
-    if col_type is not None and not _is_numeric_sql_type(col_type):
+    if col_type is not None and not duckdb_type_is_numeric(col_type):
         raise InvalidParameterError(
             "metric-nodata",
             f"NoData sentinels apply only to numeric metric columns; "
@@ -453,7 +432,7 @@ def _pct_cell_expr(
     if cell_area_expr is None:
         reject_pct_cell_metrics([m])
     col_type = (column_types or {}).get(m.column)
-    if col_type is not None and not _is_numeric_sql_type(col_type):
+    if col_type is not None and not duckdb_type_is_numeric(col_type):
         raise InvalidParameterError(
             "metric",
             f"'{PCT_CELL_FUNC}:{m.column}' needs a numeric per-feature area column; "
