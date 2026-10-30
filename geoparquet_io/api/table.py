@@ -28,6 +28,7 @@ from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.duckdb_utils import fetch_one, quote_identifier
+from geoparquet_io.core.file_utils import unlink_released_file
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
 from geoparquet_io.core.logging_config import warn
 from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE
@@ -38,24 +39,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from geoparquet_io.api.check import CheckResult
-
-
-def _safe_unlink(path: Path, attempts: int = 3) -> None:
-    """
-    Safely unlink a file with retry for Windows file handle release.
-
-    Args:
-        path: Path to the file to delete
-        attempts: Number of retry attempts (default: 3)
-    """
-    import time
-
-    for attempt in range(attempts):
-        try:
-            path.unlink(missing_ok=True)
-            break
-        except OSError:
-            time.sleep(0.1 * (attempt + 1))
 
 
 def _require_auto_or_resolution(
@@ -166,7 +149,7 @@ def _run_partition_with_temp_file(
             "hive": core_kwargs.get("hive", False),
         }
     finally:
-        _safe_unlink(temp_input)
+        unlink_released_file(temp_input)
 
 
 def _calculate_bounds_from_table(
@@ -1618,8 +1601,8 @@ class Table:
             return local_path
         finally:
             # Clean up temp file for remote writes
-            if is_remote and local_path.exists():
-                local_path.unlink()
+            if is_remote:
+                unlink_released_file(local_path)
 
     def _write_format(
         self,
@@ -2810,7 +2793,6 @@ class Table:
             ... )
         """
         import tempfile
-        import time
         import uuid
         from pathlib import Path
 
@@ -2839,13 +2821,7 @@ class Table:
                 chunk_concurrency=chunk_concurrency,
             )
         finally:
-            # Retry cleanup with incremental backoff for Windows file handle release
-            for attempt in range(3):
-                try:
-                    temp_path.unlink(missing_ok=True)
-                    break
-                except OSError:
-                    time.sleep(0.1 * (attempt + 1))
+            unlink_released_file(temp_path)
 
     def head(self, n: int = 10) -> Table:
         """
@@ -3147,7 +3123,7 @@ class Table:
             )
             return func(str(temp_path), *args, **kwargs)
         finally:
-            _safe_unlink(temp_path)
+            unlink_released_file(temp_path)
 
     def _check_file(
         self, func: Callable[..., Any], *args: Any, **kwargs: Any
@@ -3209,8 +3185,8 @@ class Table:
             # Read the output file
             return pq.read_table(str(temp_output))
         finally:
-            _safe_unlink(temp_input)
-            _safe_unlink(temp_output)
+            unlink_released_file(temp_input)
+            unlink_released_file(temp_output)
 
     def check(self) -> CheckResult:
         """

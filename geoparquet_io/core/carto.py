@@ -11,7 +11,6 @@ import os
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote, urlparse
 
@@ -37,6 +36,7 @@ from geoparquet_io.core.exceptions import (
     classify_failure,
     status_message,
 )
+from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
     DEFAULT_MAX_RETRIES,
@@ -55,6 +55,7 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
+from geoparquet_io.core.remote import has_http_scheme
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 # Default timeout and retry settings
@@ -127,7 +128,7 @@ def _validate_carto_url(url: str) -> str:
 
     # Restrict to http(s) — rejects empty, file://, and other schemes so the
     # URL can be safely handed to urllib.request.urlopen (see _carto_sql_json).
-    if parsed.scheme not in ("http", "https"):
+    if not has_http_scheme(url):
         raise InvalidParameterError(
             "url",
             f"Invalid URL: {url}. Must include an http:// or https:// scheme",
@@ -1333,10 +1334,7 @@ def convert_carto_to_geoparquet(
     """
     configure_verbose(verbose)
 
-    # Check output file
-    output_path = Path(output_file)
-    if output_path.exists() and not overwrite:
-        raise CartoError(f"Output file exists: {output_file}\nUse --overwrite to replace it.")
+    handle_output_overwrite(output_file, overwrite, remove=False)
 
     # Fetch data
     table = carto_to_table(

@@ -18,7 +18,7 @@ from geoparquet_io.core.file_utils import (
     resolve_partition_path,
 )
 from geoparquet_io.core.logging_config import debug
-from geoparquet_io.core.remote import is_remote_url
+from geoparquet_io.core.remote import display_path, is_remote_url, needs_httpfs
 
 
 def require_parquet_files(path: str) -> None:
@@ -142,7 +142,7 @@ def get_partition_info(path: str, verbose: bool = False) -> dict:
     Returns:
         dict with:
             - is_partition: bool - True if this is a partitioned dataset
-            - file_count: int - Number of parquet files (1 for remote globs)
+            - file_count: int - Number of parquet files (1 for an HTTP(S) glob)
             - first_file: str|None - Path to first file for metadata
             - all_files: list[str] - All parquet file paths
             - partition_type: str - 'single', 'flat', 'hive', 'glob', or 'remote_glob'
@@ -162,13 +162,14 @@ def get_partition_info(path: str, verbose: bool = False) -> dict:
 
     info_dict["is_partition"] = True
 
-    # Handle remote paths
+    # Handle remote paths: an object-store glob is listed by file_utils (the
+    # one remote listing); an HTTP(S) glob cannot be and stays the pattern.
     if is_remote_url(path):
         if has_glob_pattern(path):
             info_dict["partition_type"] = "remote_glob"
-            info_dict["first_file"] = path  # Can't enumerate remote
-            info_dict["all_files"] = [path]
-            info_dict["file_count"] = 1  # Unknown for remote
+            info_dict["first_file"] = get_first_parquet_file(path)
+            info_dict["all_files"] = get_all_parquet_files(path)
+            info_dict["file_count"] = len(info_dict["all_files"])
             info_dict["resolved_path"] = path
         return info_dict
 
@@ -307,10 +308,21 @@ def select_files_to_check(
     all_files = partition_info["all_files"]
     file_count = partition_info["file_count"]
 
-    # For remote globs, we can only check the glob pattern as a whole
+    # An object-store glob is listed and checked like a local one; an HTTP(S)
+    # glob cannot be listed and is checked as one pattern.
     if partition_info["partition_type"] == "remote_glob":
-        notice = "Checking remote glob pattern (file enumeration not supported)"
-        return [path], notice, 1
+        if fix:
+            # A repair rewrites files one by one; handing it the pattern made
+            # it "fix" one file named `*.parquet` (#1075).
+            raise GeoParquetError(
+                f"cannot --fix a remote glob: {display_path(path)}\n\n"
+                "A fix is written back file by file, and gpio does not write "
+                "back to a remote glob. Run the fix on each remote file, or copy "
+                "the files locally and fix them there with --fix-output DIR."
+            )
+        if not needs_httpfs(path):
+            notice = "Checking remote glob pattern (file enumeration not supported)"
+            return [path], notice, 1
 
     if check_all:
         notice = f"Checking all {file_count} files in partition"

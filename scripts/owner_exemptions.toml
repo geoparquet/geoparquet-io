@@ -54,10 +54,6 @@ path = "geoparquet_io/core/duckdb_utils.py"
 name = "psutil"
 reason = "permanent: process-liveness check for stale DuckDB temp dirs, not a memory fact; optional import (#1330)"
 [[G1.tid251]]
-path = "geoparquet_io/core/file_utils.py"
-name = "httpx"
-reason = "streams an HTTP source to disk chunk by chunk; T2e moves the download behind http_retry"
-[[G1.tid251]]
 path = "geoparquet_io/core/process/overview/overview_file.py"
 name = "pyarrow.parquet.ParquetWriter"
 count = 2
@@ -173,10 +169,6 @@ path = "geoparquet_io/core/benchmark.py"
 line_pattern = "ROW_GROUP_SIZE=100000"
 reason = "permanent: the same baseline, named in the benchmark's report"
 # HTTP retry policy: core/http_retry.py owns attempts, delay, timeout, statuses and Retry-After.
-[[G1.retry_param_defaults]]
-path = "geoparquet_io/api/table.py"
-name = "_safe_unlink(attempts)"
-reason = "retries a Windows file unlink, not an HTTP request; named like retry policy"
 [[G1.retry_status_sets]]
 path = "geoparquet_io/core/carto.py"
 name = "_probe_request_status"
@@ -446,10 +438,6 @@ path = "geoparquet_io/core/add/bbox_metadata.py"
 name = "_covering_for"
 reason = "covering builder copy of build_bbox_covering; T3e"
 [[G2.exemptions]]
-path = "geoparquet_io/core/add/bbox_metadata.py"
-name = "_is_remote_url"
-reason = "remote-URL test with 6 schemes (owner has 10); T2e"
-[[G2.exemptions]]
 path = "geoparquet_io/core/add/admin_divisions.py"
 name = "_build_spatial_join_query"
 reason = "spatial-join builder copy; T1d"
@@ -580,9 +568,6 @@ reason = "partition h3/s2/a5 CLI commands, one per index; T5b shares one impleme
 pair = "geoparquet_io/cli/commands/partition.py:partition_h3|geoparquet_io/cli/commands/partition.py:partition_s2"
 reason = "partition h3/s2/a5 CLI commands, one per index; T5b shares one implementation"
 [[G3.pairs]]
-pair = "geoparquet_io/cli/commands/publish.py:_check_output_stac_collection|geoparquet_io/cli/commands/publish.py:_check_output_stac_item"
-reason = "STAC item/collection output-overwrite checks, one per kind; T2e (owner file_utils.handle_output_overwrite)"
-[[G3.pairs]]
 pair = "geoparquet_io/core/add/a5.py:_add_a5_streaming.make_query|geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query"
 reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
 [[G3.pairs]]
@@ -602,7 +587,7 @@ pair = "geoparquet_io/core/add/a5.py:add_a5_table|geoparquet_io/core/add/h3.py:a
 reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
 [[G3.pairs]]
 pair = "geoparquet_io/core/add/admin_divisions.py:_print_dry_run_header|geoparquet_io/core/add/country_codes.py:_print_dry_run_header"
-reason = "one dry-run banner with the dataset label as a parameter; T5c (its remote-path display expression is T2e's path concept)"
+reason = "one dry-run banner with the dataset label as a parameter; T5c (T2e moved its remote-path display into remote.display_path)"
 [[G3.pairs]]
 pair = "geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query|geoparquet_io/core/add/s2.py:_add_s2_streaming.make_query"
 reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"

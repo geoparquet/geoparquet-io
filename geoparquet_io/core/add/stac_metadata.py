@@ -54,7 +54,7 @@ from typing import TYPE_CHECKING, Any
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.exceptions import GeoParquetError
-from geoparquet_io.core.file_utils import is_same_file_path
+from geoparquet_io.core.file_utils import handle_output_overwrite, is_same_file_path
 from geoparquet_io.core.logging_config import debug, success, warn
 from geoparquet_io.core.parquet_footer import FooterPatchUnsupported, patch_footer_kv
 from geoparquet_io.core.remote import is_remote_url
@@ -444,10 +444,8 @@ def add_stac_metadata(
     if is_same_file_path(destination, parquet_file):
         # `./a.parquet` for `a.parquet` is the in-place patch, not an output.
         destination = parquet_file
-    elif os.path.exists(destination) and not overwrite:
-        raise GeoParquetError(
-            f"Output file already exists: {destination}\nUse --overwrite to replace it."
-        )
+    else:
+        handle_output_overwrite(destination, overwrite, remove=False)
 
     existing, column_names = _existing_payload(parquet_file)
     payload = _merged_payload(existing, payload)

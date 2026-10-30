@@ -11,7 +11,7 @@ import pyarrow.parquet as pq
 import pytest
 
 import geoparquet_io.core.pmtiles_chunks as pc
-from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.geo_metadata import OVERVIEWS_KEY, is_levelled_overview
 from geoparquet_io.core.pmtiles_chunks import (
     MAX_CHUNK_CELLS,
@@ -206,7 +206,7 @@ class TestGuards:
     def test_existing_output_fails_before_any_tiling(self, tmp_path, fake_tools):
         out = tmp_path / "o.pmtiles"
         out.write_bytes(b"old")
-        with pytest.raises(InvalidParameterError, match="already exists"):
+        with pytest.raises(GeoParquetError, match="already exists.*\n.*--force"):
             _run(tmp_path, out)
         assert fake_tools["split"] == []
 

@@ -932,3 +932,25 @@ def skip_if_geography_available() -> None:
             f"DuckDB community extension 'geography' (S2) is published for "
             f"DuckDB {duckdb.__version__}, so S2 no longer raises"
         )
+
+
+@pytest.fixture
+def remote_parts(monkeypatch):
+    """Two copies of a bbox-less 1.0 file behind a loopback S3 endpoint, as
+    ``s3://bkt/parts/``, with that endpoint as the ambient S3 config."""
+    from geoparquet_io.core.duckdb_utils import s3_config_scope
+    from tests._fake_s3 import fake_s3
+
+    data = (Path(__file__).parent / "data" / "buildings_test.parquet").read_bytes()
+    for name, value in {
+        "AWS_ACCESS_KEY_ID": "test",
+        "AWS_SECRET_ACCESS_KEY": "test",
+        "AWS_REGION": "us-east-1",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    with (
+        fake_s3({"bkt/parts/a.parquet": data, "bkt/parts/b.parquet": data}) as served,
+        s3_config_scope({"s3_endpoint": served[0], "s3_use_ssl": False}),
+    ):
+        yield served

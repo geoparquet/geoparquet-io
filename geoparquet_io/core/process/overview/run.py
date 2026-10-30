@@ -19,7 +19,7 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.duckdb_utils import fetch_one, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.logging_config import info as log_info
 from geoparquet_io.core.partition.auto_resolution import _register_quadkey_udf
@@ -326,13 +326,9 @@ def _plan_levels(
 
 def _refuse_existing(paths: list[str], force: bool) -> None:
     """Refuse to silently overwrite files the user did not name one by one
-    (mirrors the --force gate on gpio pmtiles pyramid)."""
-    existing = [path for path in paths if Path(path).exists()]
-    if existing and not force:
-        raise InvalidParameterError(
-            "output",
-            f"overview output already exists: {', '.join(existing)}. Use --force to overwrite.",
-        )
+    (the --force gate gpio pmtiles pyramid shares, through the one owner)."""
+    for path in paths:
+        handle_output_overwrite(path, force, flag="--force", remove=False)
 
 
 def _build_levels(
@@ -483,12 +479,7 @@ def _refuse_overview_out(input_parquet: str, overview_out: str, force: bool) -> 
     the siblings, is not silently replaced. Its ``level`` column must not
     shadow one the input already has (OVERVIEWS_SPEC 4.1) -- checked on the
     input before any rollup runs."""
-    if Path(overview_out).exists():
-        if Path(overview_out).samefile(input_parquet):
-            raise InvalidParameterError(
-                "overview_out", f"{overview_out} is the input; it would be destroyed while read"
-            )
-        _refuse_existing([overview_out], force)
+    handle_output_overwrite(overview_out, force, input_parquet, flag="--force", remove=False)
     names = [n for n in pq.read_schema(input_parquet).names if n.lower() == "level"]
     if names:
         raise InvalidParameterError(

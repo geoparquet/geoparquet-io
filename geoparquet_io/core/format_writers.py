@@ -40,7 +40,12 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
     ValidationError,
 )
-from geoparquet_io.core.file_utils import resolve_file_url, validate_output_path
+from geoparquet_io.core.file_utils import (
+    handle_output_overwrite,
+    output_exists_error,
+    resolve_file_url,
+    validate_output_path,
+)
 from geoparquet_io.core.geometry_detection import (
     GeometryRead,
     detect_parquet_geometry_column,
@@ -51,6 +56,7 @@ from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.remote import (
     is_remote_url,
     needs_httpfs,
+    open_url,
     validate_profile_for_urls,
 )
 from geoparquet_io.core.sizing import format_size
@@ -59,7 +65,6 @@ from geoparquet_io.core.write_strategies.base import atomic_write
 
 # Error message templates for consistency
 ERROR_REMOTE_OUTPUT = "{format} output path must be local. Use upload() for cloud destinations."
-ERROR_FILE_EXISTS = "{format} file already exists: {path}\nUse --overwrite to replace it."
 ERROR_CONVERSION_FAILED = "Failed to create {format}: {error}"
 ERROR_NO_GEOMETRY = "No geometry column found. Expected 'geometry', 'geom', or 'wkb_geometry'."
 ERROR_NATIVE_GEOMETRY = (
@@ -106,12 +111,11 @@ def shapefile_members(shapefile_path: str | Path) -> list[Path]:
 
 
 # Format configuration for GDAL-based writers
-GDAL_FORMATS = {
+GDAL_FORMATS: dict[str, dict[str, object]] = {
     "geopackage": {
         "cli_command": "geopackage",
         "driver": "GPKG",
         "description": "GeoPackage",
-        "check_overwrite": True,
         "layer_option": "LAYER_NAME",
         "sidecar_suffixes": None,
         "extension": ".gpkg",
@@ -120,7 +124,6 @@ GDAL_FORMATS = {
         "cli_command": "flatgeobuf",
         "driver": "FlatGeobuf",
         "description": "FlatGeobuf",
-        "check_overwrite": True,
         "layer_option": "LAYER_NAME",
         "sidecar_suffixes": None,
         "extension": ".fgb",
@@ -129,7 +132,6 @@ GDAL_FORMATS = {
         "cli_command": "shapefile",
         "driver": "ESRI Shapefile",
         "description": "Shapefile",
-        "check_overwrite": True,
         "layer_option": None,
         "sidecar_suffixes": SHAPEFILE_SIDECARS,
         "extension": ".shp",
@@ -426,7 +428,7 @@ def write_gdal_format(
 
     config = GDAL_FORMATS[format_name]
 
-    # str(): GDAL_FORMATS mixes str/bool/None values, so mypy infers `object`.
+    # str(): GDAL_FORMATS mixes str/tuple/None values, typed `object`.
     _reject_stdin_input(
         input_path,
         str(config["description"]),
@@ -442,14 +444,7 @@ def write_gdal_format(
 
     validate_profile_for_urls(profile, input_path)
 
-    # Check if output exists
-    from pathlib import Path
-
-    output_file = Path(output_path)
-    if config["check_overwrite"] and output_file.exists() and not overwrite:
-        raise GeoParquetError(
-            ERROR_FILE_EXISTS.format(format=config["description"], path=output_path)
-        )
+    handle_output_overwrite(output_path, overwrite, remove=False)
 
     validate_output_path(output_path, verbose)
     progress(f"Converting to {config['description']}: {output_path}")
@@ -473,11 +468,8 @@ def write_gdal_format(
             debug("No CRS metadata found or using default CRS")
 
         # GDAL formats don't support complex types (STRUCT, LIST, MAP), so select only compatible columns
-        # Read schema to filter out incompatible columns
-        # Use fsspec to support remote URLs (HTTP/HTTPS)
-        import fsspec
-
-        with fsspec.open(input_url, "rb") as f:
+        # Read schema to filter out incompatible columns (local or remote)
+        with open_url(input_url) as f:
             pf = pq.ParquetFile(f)
             schema = pf.schema_arrow
 
@@ -523,7 +515,7 @@ def write_gdal_format(
         # (#1320). The write is staged under a temp name, so the name the layer
         # would have had (the output's stem) is passed explicitly.
         if config.get("layer_option"):
-            layer = layer_name if layer_name is not None else output_file.stem
+            layer = layer_name if layer_name is not None else Path(output_path).stem
             lco_clause = f", {config['layer_option']} '{_escape_sql_string(layer)}'{lco_clause}"
 
         geometry_read = (
@@ -578,10 +570,10 @@ def write_gdal_format(
         raise
     except Exception as e:
         error_msg = str(e)
-        if "already exists" in error_msg.lower():
-            raise GeoParquetError(
-                ERROR_FILE_EXISTS.format(format=config["description"], path=output_path)
-            ) from e
+        # A writer's own "already exists" is the owner's refusal only when the
+        # switch was not given; with it, the write failed for another reason.
+        if not overwrite and "already exists" in error_msg.lower():
+            raise output_exists_error(output_path) from e
         raise GeoParquetError(
             ERROR_CONVERSION_FAILED.format(format=config["description"], error=error_msg)
         ) from e
@@ -629,7 +621,6 @@ def write_csv(
     Raises:
         GeoParquetError: If conversion fails
     """
-    from pathlib import Path
 
     configure_verbose(verbose)
 
@@ -638,10 +629,7 @@ def write_csv(
     if is_remote_url(output_path):
         raise InvalidParameterError("output_path", ERROR_REMOTE_OUTPUT.format(format="CSV"))
 
-    # Check if output exists
-    output_file = Path(output_path)
-    if output_file.exists() and not overwrite:
-        raise GeoParquetError(ERROR_FILE_EXISTS.format(format="CSV", path=output_path))
+    handle_output_overwrite(output_path, overwrite, remove=False)
 
     validate_profile_for_urls(profile, input_path)
     validate_output_path(output_path, verbose)
@@ -653,11 +641,8 @@ def write_csv(
     try:
         input_url = resolve_file_url(input_path, verbose)
 
-        # Read parquet to inspect schema
-        # Use fsspec to support remote URLs (HTTP/HTTPS)
-        import fsspec
-
-        with fsspec.open(input_url, "rb") as f:
+        # Read parquet to inspect schema (local or remote)
+        with open_url(input_url) as f:
             pf = pq.ParquetFile(f)
             schema = pf.schema_arrow
             columns = [field.name for field in schema]
@@ -757,7 +742,6 @@ def write_geojson(
     Raises:
         GeoParquetError: If conversion fails
     """
-    from pathlib import Path
 
     from geoparquet_io.core.geojson_stream import convert_to_geojson
 
@@ -768,10 +752,7 @@ def write_geojson(
             "output_path", "GeoJSON output path must be local. Use upload() for cloud destinations."
         )
 
-    # Check if output exists
-    output_file = Path(output_path)
-    if output_file.exists() and not overwrite:
-        raise GeoParquetError(ERROR_FILE_EXISTS.format(format="GeoJSON", path=output_path))
+    handle_output_overwrite(output_path, overwrite, remove=False)
 
     validate_profile_for_urls(profile, input_path)
 

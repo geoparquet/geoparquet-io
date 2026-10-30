@@ -398,13 +398,29 @@ def show_sql_option(func):
     )(func)
 
 
-def overwrite_option(func):
+def overwrite_option(
+    func=None,
+    *,
+    help_text: str = "Overwrite existing files",
+    flag: str = "--overwrite",
+    short: str | None = None,
+):
     """
-    Add --overwrite option to a command.
+    Add the one overwrite switch to a command.
 
-    Allows overwriting existing files without prompting.
+    The switch every command hands to
+    :func:`~geoparquet_io.core.file_utils.handle_output_overwrite`, which owns
+    what an existing output means. Use it bare (``@overwrite_option``), or with
+    ``help_text=`` where the command names what it replaces. The tile and
+    overview commands spell it ``flag="--force", short="-f"``, after the
+    tippecanoe switch they pass it on to; the owner's refusal names *flag*.
     """
-    return click.option("--overwrite", is_flag=True, help="Overwrite existing files")(func)
+    decls = (flag, short) if short else (flag,)
+
+    def add(command):
+        return click.option(*decls, is_flag=True, help=help_text)(command)
+
+    return add(func) if func is not None else add
 
 
 def strict_option(func):

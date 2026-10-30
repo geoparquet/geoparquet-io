@@ -5,7 +5,7 @@ import shutil
 
 import click
 
-from geoparquet_io.core.file_utils import is_same_file_path
+from geoparquet_io.core.file_utils import handle_output_overwrite, is_same_file_path
 from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT
 from geoparquet_io.core.remote import is_remote_url
 
@@ -50,28 +50,29 @@ class NoBackupConfirmation:
 
 
 def validate_remote_file_modification(parquet_file, fix_output, overwrite):
-    """Validate remote file modification parameters."""
+    """Check where a fix writes against the one overwrite policy
+    (``handle_output_overwrite``) before anything is rewritten.
+
+    A ``--fix-output`` that is another file is an output like any other: an
+    existing one is refused without --overwrite. An in-place fix of a remote
+    file is refused without --overwrite, with a warning that it has no backup.
+    Returns whether *parquet_file* is remote.
+    """
+    if fix_output and not is_same_file_path(fix_output, parquet_file):
+        handle_output_overwrite(fix_output, overwrite, parquet_file, remove=False)
     is_remote = is_remote_url(parquet_file)
-    if not is_remote:
+    if not is_remote or fix_output:
         return is_remote
 
-    if not fix_output:
-        click.echo(
-            click.style(
-                "⚠ Warning: Modifying remote files in-place cannot create .bak backups.",
-                fg="yellow",
-            )
+    click.echo(
+        click.style(
+            "⚠ Warning: Modifying remote files in-place cannot create .bak backups.",
+            fg="yellow",
         )
+    )
+    handle_output_overwrite(parquet_file, overwrite, parquet_file, remove=False)
 
-        if not overwrite:
-            raise click.BadParameter(
-                "Cannot modify remote file without --overwrite flag. "
-                "Use --overwrite to confirm overwriting the remote file, "
-                "or use --fix-output to specify a different output path."
-            )
-
-        click.echo("Proceeding with remote file overwrite (no backup will be created)...")
-
+    click.echo("Proceeding with remote file overwrite (no backup will be created)...")
     return is_remote
 
 
@@ -209,25 +210,7 @@ def handle_fix_common(
         tuple: (output_path, backup_path or None)
     """
     no_backup = confirmation.no_backup
-    # Handle remote files
-    if is_remote_url(parquet_file):
-        if not fix_output:
-            # Warn about remote file modification
-            click.echo(
-                click.style(
-                    "⚠ Warning: Modifying remote files in-place cannot create .bak backups.",
-                    fg="yellow",
-                )
-            )
-
-            if not overwrite:
-                raise click.BadParameter(
-                    "Cannot modify remote file without --overwrite flag. "
-                    "Use --overwrite to confirm overwriting the remote file, "
-                    "or use --fix-output to specify a different output path."
-                )
-
-            click.echo("Proceeding with remote file overwrite (no backup will be created)...")
+    validate_remote_file_modification(parquet_file, fix_output, overwrite)
 
     output_path = fix_output or parquet_file
     backup_path = f"{parquet_file}.bak"

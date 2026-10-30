@@ -747,10 +747,10 @@ class TestRemoteWriteSupport:
             con.execute("INSTALL spatial; LOAD spatial;")
 
             # Simple query to read the test file
-            from geoparquet_io.core.file_utils import safe_file_url
+            from geoparquet_io.core.duckdb_utils import sql_path
 
-            input_url = safe_file_url(buildings_test_file, False)
-            query = f"SELECT * FROM '{input_url}' LIMIT 10"
+            input_url = sql_path(buildings_test_file)
+            query = f"SELECT * FROM {input_url} LIMIT 10"
 
             # Remote S3 output
             remote_output = "s3://test-bucket/output.parquet"

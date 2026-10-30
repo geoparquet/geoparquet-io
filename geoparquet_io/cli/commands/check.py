@@ -63,6 +63,7 @@ from geoparquet_io.core.duckdb_utils import is_interrupt
 from geoparquet_io.core.file_utils import is_same_file_path
 from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT
 from geoparquet_io.core.logging_config import configure_verbose
+from geoparquet_io.core.remote import is_remote_url
 
 # CheckDefaultGroup: defaults to 'all' when no subcommand is provided
 CheckDefaultGroup = create_default_group(
@@ -631,10 +632,10 @@ def refuse_no_parquet_match(path: str) -> None:
     refuse an empty match in :func:`begin_check_run`. A plain path is left to
     the check, which reports a file it cannot read.
     """
+    from geoparquet_io.core.file_utils import is_partition_path
     from geoparquet_io.core.partition.reader import select_files_to_check
-    from geoparquet_io.core.remote import is_remote_url
 
-    if is_remote_url(path) or not (any(c in path for c in "*?[") or Path(path).is_dir()):
+    if is_remote_url(path) or not is_partition_path(path):
         return
     try:
         files, _, _ = select_files_to_check(path, check_all=True)
@@ -954,8 +955,8 @@ def check_all(
                 # Generate PMTiles
                 # Use fixed output path if available, otherwise original
                 source_file = per_file_output if fix and per_file_output else file_path
-                # Handle S3 URIs: Path().with_suffix() mangles s3:// schemes
-                if source_file.startswith("s3://"):
+                # Path().with_suffix() mangles a URL's scheme separator
+                if is_remote_url(source_file):
                     output_pmtiles = source_file.rsplit(".", 1)[0] + ".pmtiles"
                 else:
                     output_pmtiles = str(Path(source_file).with_suffix(".pmtiles"))

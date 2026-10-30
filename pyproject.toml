@@ -226,6 +226,7 @@ ignore = [
 "requests".msg = "HTTP goes through core/http_retry.py, which owns retries, timeouts and Retry-After."
 "httpx".msg = "HTTP goes through core/http_retry.py, which owns retries, timeouts and Retry-After."
 "urllib.request".msg = "HTTP goes through core/http_retry.py, which owns retries, timeouts and Retry-After."
+"fsspec".msg = "Open a URL through core/remote.open_url; the scheme table in core/remote decides what is remote (#1367)."
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # unused imports in __init__.py
@@ -236,6 +237,7 @@ ignore = [
 "geoparquet_io/core/write_strategies/*.py" = ["TID251"]
 "geoparquet_io/core/memory_limits.py" = ["TID251"]
 "geoparquet_io/core/http_retry.py" = ["TID251"]
+"geoparquet_io/core/remote.py" = ["TID251"]
 "geoparquet_io/core/benchmark.py" = ["TID251"]
 "geoparquet_io/core/benchmark_suite.py" = ["TID251"]
 "geoparquet_io/benchmarks/*.py" = ["TID251"]
@@ -260,7 +262,6 @@ ignore = [
 "geoparquet_io/core/constants.py" = ["TID251"]
 "geoparquet_io/core/derive_geo_from_file.py" = ["TID251"]
 "geoparquet_io/core/duckdb_utils.py" = ["TID251"]
-"geoparquet_io/core/file_utils.py" = ["TID251"]
 "geoparquet_io/core/overture.py" = ["TID251"]
 "geoparquet_io/core/process/overview/overview_file.py" = ["TID251"]
 "geoparquet_io/core/process/simplify.py" = ["TID251"]

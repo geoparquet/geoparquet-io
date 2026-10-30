@@ -16,7 +16,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.api import ops, read
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.geo_metadata import OVERVIEWS_KEY
 from geoparquet_io.core.process.overview import run as run_module
 from geoparquet_io.core.process.overview.overview_file import (
@@ -311,14 +311,14 @@ class TestCreateOverviewFile:
 
     def test_output_equal_to_the_input_is_refused(self, tmp_path, cells):
         before = pq.read_table(cells)
-        with pytest.raises(InvalidParameterError, match="is the input"):
+        with pytest.raises(GeoParquetError, match="Cannot overwrite input file"):
             create_overview_file(str(cells), str(cells), levels="8")
         assert pq.read_table(cells).equals(before)
 
     def test_existing_output_needs_force(self, tmp_path, cells):
         out = tmp_path / "precious.parquet"
         out.write_text("precious")
-        with pytest.raises(InvalidParameterError, match="already exists"):
+        with pytest.raises(GeoParquetError, match="already exists.*\n.*--force"):
             create_overview_file(str(cells), str(out), levels="8")
         assert out.read_text() == "precious"
         create_overview_file(str(cells), str(out), levels="8", force=True)

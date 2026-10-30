@@ -1,7 +1,7 @@
 """Regression tests: a file path is escaped for SQL exactly once.
 
-``file_utils.safe_file_url()`` escapes a path for interpolation into SQL
-(``'`` -> ``''``) *and* validates that the raw path exists.
+``file_utils.safe_file_url()`` (since deleted, #1367) escaped a path for SQL
+(``'`` -> ``''``) *and* validated that the raw path exists.
 Every public ``duckdb_metadata`` getter used to escape its own ``parquet_file``
 argument through it.
 
@@ -58,9 +58,14 @@ from geoparquet_io.core.duckdb_metadata import (
     get_per_row_group_bbox_stats,
     get_schema_info,
 )
-from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    _escape_sql_string,
+    fetch_one,
+    get_duckdb_connection,
+    sql_path,
+)
 from geoparquet_io.core.exceptions import FileNotFoundGeoParquetError
-from geoparquet_io.core.file_utils import safe_file_url
+from geoparquet_io.core.file_utils import resolve_file_url
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEST_DATA_DIR = Path(__file__).parent / "data"
@@ -107,18 +112,18 @@ def apostrophe_file_with_bbox(apostrophe_file, tmp_path):
     return out
 
 
-class TestSafeFileUrlIsIdempotentlyApplied:
+class TestEscapingIsAppliedOnce:
     """Passing an already-escaped path to a duckdb_metadata getter must not
     re-escape it. Before the fix these raised FileNotFoundGeoParquetError."""
 
     def test_escaping_twice_is_fatal(self, apostrophe_file):
         """The premise of this module: escaping is not idempotent."""
-        once = safe_file_url(apostrophe_file)
+        once = _escape_sql_string(resolve_file_url(apostrophe_file))
         assert "o''brien" in once
-        # Re-escaping mangles the path, and safe_file_url's existence check
-        # then fails on a file that is plainly there.
+        # An escaped value handed back to a filesystem API names a file that
+        # is not there: the existence check fails on a file that plainly is.
         with pytest.raises(FileNotFoundGeoParquetError):
-            safe_file_url(once)
+            resolve_file_url(once)
 
     @pytest.mark.parametrize(
         "getter",
@@ -243,14 +248,13 @@ class TestSqlPath:
         expected = "'" + os.fspath(p).replace("'", "''") + "'"
         assert sql_path(p) == expected
 
-    def test_takes_a_raw_path_not_a_safe_file_url_result(self, apostrophe_file):
+    def test_takes_a_raw_path_not_an_escaped_one(self, apostrophe_file):
         """The contract is RAW in.
 
         No heuristic guard is possible -- ``a''b.parquet`` is a legal filename --
-        so the guarantee is structural: ``sql_path`` is the only escape, and a
-        caller never reaches for ``safe_file_url`` as well.
+        so the guarantee is structural: ``sql_path`` is the only escape.
         """
-        assert sql_path(apostrophe_file) == f"'{safe_file_url(apostrophe_file)}'"
+        assert sql_path(apostrophe_file) == f"'{_escape_sql_string(apostrophe_file)}'"
 
 
 class TestApostropheInInputPath:

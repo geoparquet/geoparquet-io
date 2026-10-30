@@ -13,7 +13,7 @@ from __future__ import annotations
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.exceptions import RemoteAccessError
+from geoparquet_io.core.exceptions import GeoParquetError, RemoteAccessError
 from geoparquet_io.core.http_retry import MAX_RETRY_AFTER, make_request_with_retry
 from geoparquet_io.core.wfs import (
     LayerNotFoundError,
@@ -866,7 +866,8 @@ def test_an_existing_output_is_refused_without_overwrite(monkeypatch, tmp_path):
     out = tmp_path / "exists.parquet"
     out.write_bytes(b"not parquet")
 
-    with pytest.raises(WFSError, match="Output file exists"):
+    # The owner's refusal, not a WFS-local re-raise (#1367 T2e, after T4b)
+    with pytest.raises(GeoParquetError, match="Output file already exists"):
         convert_wfs_to_geoparquet(SERVICE, TYPENAME, str(out), version="1.1.0")
     assert http.requests == []
 

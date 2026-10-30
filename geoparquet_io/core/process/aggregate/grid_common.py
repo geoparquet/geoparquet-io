@@ -38,7 +38,7 @@ from geoparquet_io.core.duckdb_utils import (
     where_sql_fragment,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.file_utils import has_glob_pattern, resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success, warn
@@ -784,7 +784,7 @@ def _warn_files_missing_column(con, input_path: str, column: str) -> None:
 
     ``input_path`` is a RAW path: this function does its own escaping (#718).
     """
-    if not any(ch in input_path for ch in "*?["):
+    if not has_glob_pattern(input_path):
         return
     col_lit = _escape_sql_string(column)
     try:

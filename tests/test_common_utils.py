@@ -19,7 +19,7 @@ from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import (
     has_glob_pattern,
     is_partition_path,
-    safe_file_url,
+    resolve_file_url,
     validate_parquet_extension,
 )
 from geoparquet_io.core.geo_metadata import _get_geometry_type_name
@@ -673,8 +673,8 @@ class TestValidateParquetExtension:
         validate_parquet_extension("gs://bucket/path/file.json", any_extension=True)
 
 
-class TestSafeFileUrl:
-    """Tests for safe_file_url function."""
+class TestResolveFileUrl:
+    """Tests for resolve_file_url function."""
 
     def test_http_url_is_taken_as_already_encoded(self):
         """An http(s) URL is passed through verbatim, encoded or not (#825).
@@ -685,26 +685,26 @@ class TestSafeFileUrl:
         """
 
         already_encoded = "https://example.com/path%20with%20spaces/file.parquet"
-        assert safe_file_url(already_encoded) == already_encoded
+        assert resolve_file_url(already_encoded) == already_encoded
 
         raw_space = "https://example.com/path with spaces/file.parquet"
-        assert safe_file_url(raw_space) == raw_space
+        assert resolve_file_url(raw_space) == raw_space
 
     def test_http_preserves_duckdb_safe_chars(self):
         """Test that DuckDB-safe chars like * ? [ ] are preserved."""
 
         # Glob patterns should be preserved
-        result = safe_file_url("https://example.com/data/*.parquet")
+        result = resolve_file_url("https://example.com/data/*.parquet")
         assert "/*.parquet" in result  # Asterisk should not be encoded
 
-        result = safe_file_url("https://example.com/file[0-9].parquet")
+        result = resolve_file_url("https://example.com/file[0-9].parquet")
         assert "[0-9]" in result  # Brackets should not be encoded
 
     def test_s3_url_passthrough(self):
         """Test that S3 URLs are passed through without encoding."""
 
         s3_url = "s3://bucket/path/file.parquet"
-        result = safe_file_url(s3_url)
+        result = resolve_file_url(s3_url)
         assert result == s3_url
 
     def test_local_file_not_found_raises_error(self):
@@ -712,14 +712,14 @@ class TestSafeFileUrl:
         from geoparquet_io.core.exceptions import FileNotFoundGeoParquetError
 
         with pytest.raises(FileNotFoundGeoParquetError) as exc_info:
-            safe_file_url("/nonexistent/path/file.parquet")
+            resolve_file_url("/nonexistent/path/file.parquet")
         assert "not found" in str(exc_info.value).lower()
 
     def test_local_file_with_glob_skips_validation(self):
         """Test that local glob patterns skip existence check."""
 
         # Should not raise even if path doesn't exist
-        result = safe_file_url("/some/path/*.parquet")
+        result = resolve_file_url("/some/path/*.parquet")
         assert result == "/some/path/*.parquet"
 
 

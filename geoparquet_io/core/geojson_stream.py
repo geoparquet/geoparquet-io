@@ -54,7 +54,12 @@ from geoparquet_io.core.duckdb_utils import (
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import GeoParquetError
-from geoparquet_io.core.file_utils import get_all_parquet_files, has_glob_pattern, resolve_file_url
+from geoparquet_io.core.file_utils import (
+    get_all_parquet_files,
+    glob_matches,
+    has_glob_pattern,
+    resolve_file_url,
+)
 from geoparquet_io.core.geo_metadata import GEOGRAPHY_EDGE_ALGORITHMS
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
@@ -132,15 +137,8 @@ def require_planar_geojson_file(
 def _geojson_input_files(input_path: str) -> list[str]:
     """Enumerate every footer so a planar-first glob cannot hide non-planar rows."""
     if has_glob_pattern(input_path):
-        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-
-        con = get_duckdb_connection(load_spatial=False, load_httpfs=needs_httpfs(input_path))
-        try:
-            return [
-                row[0] for row in con.execute("SELECT file FROM glob(?)", [input_path]).fetchall()
-            ]
-        finally:
-            con.close()
+        # Every match, not only `.parquet`: `*.pq` is a GeoParquet glob too.
+        return glob_matches(input_path)
     return get_all_parquet_files(input_path)
 
 

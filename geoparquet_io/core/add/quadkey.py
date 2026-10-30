@@ -44,8 +44,7 @@ from geoparquet_io.core.logging_config import (
     warn,
 )
 from geoparquet_io.core.remote import (
-    _sanitize_url_for_logging,
-    is_remote_url,
+    display_path,
     needs_httpfs,
     validate_profile_for_urls,
 )
@@ -633,16 +632,8 @@ def _add_quadkey_file_based(
     # Dry-run mode header
     if dry_run:
         warn("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n")
-        display_input = (
-            _sanitize_url_for_logging(input_file_path)
-            if is_remote_url(input_file_path)
-            else input_file_path
-        )
-        display_output = (
-            _sanitize_url_for_logging(output_parquet)
-            if is_remote_url(output_parquet)
-            else output_parquet
-        )
+        display_input = display_path(input_file_path)
+        display_output = display_path(output_parquet)
         info(f"-- Input file: {display_input}")
         info(f"-- Output file: {display_output}")
         info(f"-- Geometry column: {geom_col}")

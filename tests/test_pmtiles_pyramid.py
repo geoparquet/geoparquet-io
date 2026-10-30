@@ -8,7 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.pmtiles_pyramid import (
     TileJoinNotFoundError,
     _band_zoom_args,
@@ -548,7 +548,7 @@ class TestPreflightAndErrors:
 
         out = tmp_path / "pyramid.pmtiles"
         out.write_bytes(b"existing archive")
-        with pytest.raises(InvalidParameterError, match="force"):
+        with pytest.raises(GeoParquetError, match="already exists.*\n.*--force"):
             create_pmtiles_pyramid("in.parquet", str(out))
         assert out.read_bytes() == b"existing archive"
 

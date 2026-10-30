@@ -38,6 +38,7 @@ from geoparquet_io.core.parquet_writer import (
     resolve_row_group_rows,
     without_geometry_dictionary,
 )
+from geoparquet_io.core.remote import is_remote_url
 from geoparquet_io.core.write_funnels import table_nonplanar_edges, write_geoparquet_table
 
 #: Above this row count, coverage mode's whole-column materialization gets a
@@ -843,7 +844,7 @@ def simplify_file(
     in-memory path is also taken for native/2.0 outputs and byte-sized row
     group targets, which only the funnel resolves.
     """
-    if "://" not in input_parquet and not os.path.exists(input_parquet):
+    if not is_remote_url(input_parquet) and not os.path.exists(input_parquet):
         raise FileNotFoundGeoParquetError(input_parquet)
     # Resolved once, here, so every branch below -- streamed, in-memory, or
     # routed through add geometry-metrics -- writes at the same level. The

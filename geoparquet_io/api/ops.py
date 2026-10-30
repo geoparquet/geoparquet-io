@@ -33,6 +33,7 @@ from geoparquet_io.core.add.stac_metadata import add_stac_metadata as _add_stac_
 from geoparquet_io.core.add.stac_metadata import add_stac_metadata_table as _add_stac_metadata_table
 from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT
 from geoparquet_io.core.extract import extract_table
+from geoparquet_io.core.file_utils import unlink_released_file as _unlink_released_file
 from geoparquet_io.core.hilbert_order import hilbert_order_table
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
 from geoparquet_io.core.reproject import reproject_table
@@ -2176,8 +2177,7 @@ def convert_to_geojson(
 
     finally:
         # Clean up temp file
-        if temp_input.exists():
-            temp_input.unlink()
+        _unlink_released_file(temp_input)
 
 
 def _file_round_trip(
@@ -2211,8 +2211,7 @@ def _file_round_trip(
         return pq.read_table(str(temp_output))
     finally:
         for f in (temp_input, temp_output):
-            if f.exists():
-                f.unlink()
+            _unlink_released_file(f)
 
 
 def _table_to_temp_parquet_and_convert(
@@ -2268,8 +2267,7 @@ def _table_to_temp_parquet_and_convert(
 
     finally:
         # Clean up temp file
-        if temp_input.exists():
-            temp_input.unlink()
+        _unlink_released_file(temp_input)
 
 
 def convert_to_geopackage(

@@ -65,6 +65,7 @@ from geoparquet_io.core.exceptions import (
     fatal_status_message,
     is_auth_status,
 )
+from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
     DEFAULT_MAX_RETRIES,
@@ -3630,10 +3631,7 @@ def convert_wfs_to_geoparquet(
     """
     configure_verbose(verbose)
 
-    # Check output file
-    output_path = Path(output_file)
-    if output_path.exists() and not overwrite:
-        raise WFSError(f"Output file exists: {output_file}\nUse --overwrite to replace it.")
+    handle_output_overwrite(output_file, overwrite, remove=False)
 
     # Fetch data
     table = wfs_to_table(
@@ -3801,20 +3799,10 @@ def convert_wfs_layers_to_directory(
     else:
         output_path.mkdir(parents=True)
 
-    # Check for existing files if not overwriting
-    if not overwrite:
-        existing = []
-        for typename in typenames:
-            safe_name = typename.replace(":", "_").replace("/", "_")
-            file_path = output_path / f"{safe_name}.parquet"
-            if file_path.exists():
-                existing.append(str(file_path))
-        if existing:
-            raise WFSError(
-                "Output files already exist:\n  "
-                + "\n  ".join(existing)
-                + "\nUse --overwrite to replace them."
-            )
+    # Every layer's output is checked before the first layer is fetched
+    for typename in typenames:
+        safe_name = typename.replace(":", "_").replace("/", "_")
+        handle_output_overwrite(str(output_path / f"{safe_name}.parquet"), overwrite, remove=False)
 
     progress(
         f"Extracting {len(typenames)} layers to {output_dir} "

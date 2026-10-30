@@ -13,57 +13,21 @@ from geoparquet_io.cli._shared import _activate_s3, init_group_context
 from geoparquet_io.cli.decorators import (
     aws_profile_option,
     dry_run_option,
+    overwrite_option,
     verbose_option,
 )
+from geoparquet_io.core.file_utils import get_all_parquet_files, handle_output_overwrite
 from geoparquet_io.core.upload import check_credentials
 from geoparquet_io.core.upload import upload as upload_impl
 
 
 # STAC commands
-def _check_output_stac_item(output_path, output: str, overwrite: bool) -> None:
-    """Check if output already exists and is a STAC Item, handle overwrite."""
-
-    from geoparquet_io.core.stac import detect_stac
-
-    if not output_path.exists():
-        return
-
-    existing_stac_type = detect_stac(str(output_path))
-    if existing_stac_type == "Item":
-        if not overwrite:
-            raise click.ClickException(
-                f"Output file already exists and is a STAC Item: {output}\n"
-                "Use --overwrite to overwrite the existing file."
-            )
-        click.echo(
-            click.style(
-                f"⚠️  Overwriting existing STAC Item: {output}",
-                fg="yellow",
-            )
-        )
-
-
-def _check_output_stac_collection(output_path, collection_file, overwrite: bool) -> None:
-    """Check if output directory already contains a STAC Collection, handle overwrite."""
-
-    from geoparquet_io.core.stac import detect_stac
-
-    if not collection_file.exists():
-        return
-
-    existing_stac_type = detect_stac(str(collection_file))
-    if existing_stac_type == "Collection":
-        if not overwrite:
-            raise click.ClickException(
-                f"Output directory already contains a STAC Collection: {collection_file}\n"
-                "Use --overwrite to overwrite the existing collection and items."
-            )
-        click.echo(
-            click.style(
-                f"⚠️  Overwriting existing STAC Collection: {collection_file}",
-                fg="yellow",
-            )
-        )
+def _check_existing_stac(path, shown, overwrite: bool) -> None:
+    """Refuse to replace any existing output without --overwrite (the one
+    overwrite policy, whatever the file holds), and say so when replacing it."""
+    handle_output_overwrite(str(path), overwrite, remove=False)
+    if Path(path).exists():
+        click.echo(click.style(f"⚠️  Overwriting existing file: {shown}", fg="yellow"))
 
 
 def _handle_stac_item(
@@ -84,7 +48,7 @@ def _handle_stac_item(
         click.echo(f"Generating STAC Item for {input_path}")
 
     output_path = Path(output)
-    _check_output_stac_item(output_path, output, overwrite)
+    _check_existing_stac(output_path, output, overwrite)
 
     item_dict = generate_stac_item(str(input_path), bucket, public_url, item_id, verbose)
     write_stac_json(item_dict, output, verbose)
@@ -122,7 +86,7 @@ def _handle_stac_collection(
         output_path = input_path_obj
         collection_file = output_path / "collection.json"
 
-    _check_output_stac_collection(output_path, collection_file, overwrite)
+    _check_existing_stac(collection_file, collection_file, overwrite)
 
     collection_dict, item_dicts = generate_stac_collection(
         str(input_path), bucket, public_url, collection_id, verbose
@@ -136,27 +100,20 @@ def _handle_stac_collection(
 
     # Write items alongside their parquet files in the input directory
     # This follows STAC best practice of co-locating metadata with data
+    partition_files: dict[str, Path] = {}
+    for found in get_all_parquet_files(str(input_path_obj)):
+        partition_files.setdefault(Path(found).stem, Path(found))
     for item_dict in item_dicts:
         item_id = item_dict["id"]
-        # Find the parquet file in input directory
+        # The item's parquet file: top level first, else where the one
+        # partition listing (file_utils) found it
         parquet_file = input_path_obj / f"{item_id}.parquet"
         if not parquet_file.exists():
-            # Check for hive-style partitions
-            hive_partitions = list(input_path_obj.glob(f"*/{item_id}.parquet"))
-            if hive_partitions:
-                parquet_file = hive_partitions[0]
+            parquet_file = partition_files.get(item_id, parquet_file)
 
         # Write item JSON next to parquet file
         item_file = parquet_file.parent / f"{item_id}.json"
-
-        # Check if we need to overwrite
-        if item_file.exists() and not overwrite:
-            from geoparquet_io.core.stac import detect_stac
-
-            if detect_stac(str(item_file)):
-                raise click.ClickException(
-                    f"STAC Item already exists: {item_file}\nUse --overwrite to replace it."
-                )
+        handle_output_overwrite(str(item_file), overwrite, remove=False)
 
         write_stac_json(item_dict, str(item_file), verbose)
 
@@ -212,11 +169,7 @@ def publish(ctx):
 )
 @click.option("--collection-id", help="Custom collection ID (for partitioned datasets)")
 @click.option("--item-id", help="Custom item ID (for single files)")
-@click.option(
-    "--overwrite",
-    is_flag=True,
-    help="Overwrite existing STAC files in output location",
-)
+@overwrite_option(help_text="Overwrite existing STAC files in output location")
 @verbose_option
 def publish_stac(input, output, bucket, public_url, collection_id, item_id, overwrite, verbose):
     """

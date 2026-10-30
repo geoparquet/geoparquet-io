@@ -11,6 +11,7 @@ from geoparquet_io.cli.decorators import (
     SingleFileCommand,
     aws_profile_option,
     column_list_option,
+    overwrite_option,
     repair_geometry_option,
     verbose_option,
 )
@@ -106,11 +107,10 @@ def pmtiles(ctx):
     default=None,
     help="Explicit per-tile byte cap (--maximum-tile-bytes); takes precedence over --no-tile-size-limit",
 )
-@click.option(
-    "--force",
-    "-f",
-    is_flag=True,
-    help="Overwrite the output file if it already exists (tippecanoe --force)",
+@overwrite_option(
+    flag="--force",
+    short="-f",
+    help_text="Overwrite the output file if it already exists (tippecanoe --force)",
 )
 @temporary_directory_option
 @click.option(
@@ -273,11 +273,10 @@ def pmtiles_create(
     help="Max zoom of the base aggregate band (auto-detected if not set).",
 )
 @click.option("--attribution", help="Custom attribution HTML for tiles")
-@click.option(
-    "--force",
-    "-f",
-    is_flag=True,
-    help="Overwrite the output archive if it already exists",
+@overwrite_option(
+    flag="--force",
+    short="-f",
+    help_text="Overwrite the output archive if it already exists",
 )
 @temporary_directory_option
 @verbose_option
