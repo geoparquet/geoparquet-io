@@ -10,8 +10,8 @@ import os
 import click
 
 from geoparquet_io.cli._shared import _activate_s3, create_default_group, init_group_context
-from geoparquet_io.cli.decorators import GlobAwareCommand, verbose_option
-from geoparquet_io.cli.exception_handler import click_error_for, error_boundary
+from geoparquet_io.cli.decorators import GlobAwareCommand, ParquetInputCommand, verbose_option
+from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.inspect import (
     display_metadata,
     format_preview_output,
@@ -116,21 +116,20 @@ def _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_
 
     _validate_parquet_input(parquet_file)
 
-    with error_boundary(path=parquet_file):
-        try:
-            result = _inspect_summary_core(parquet_file, check_all_files)
+    try:
+        result = _inspect_summary_core(parquet_file, check_all_files)
 
-            # Show partition notice if applicable
-            if result.get("partition_notice"):
-                click.echo(click.style(result["partition_notice"], fg="cyan"))
-                click.echo()
+        # Show partition notice if applicable
+        if result.get("partition_notice"):
+            click.echo(click.style(result["partition_notice"], fg="cyan"))
+            click.echo()
 
-            output = format_summary_output(result, json_output, markdown_output)
-            if output:
-                click.echo(output)
+        output = format_summary_output(result, json_output, markdown_output)
+        if output:
+            click.echo(output)
 
-        except ValueError as e:
-            raise click_error_for(e) from e
+    except ValueError as e:
+        raise click_error_for(e) from e
 
 
 def _inspect_preview_impl(
@@ -145,19 +144,18 @@ def _inspect_preview_impl(
 
     _validate_parquet_input(parquet_file)
 
-    with error_boundary(path=parquet_file):
-        result = _inspect_preview_core(parquet_file, count, mode)
+    result = _inspect_preview_core(parquet_file, count, mode)
 
-        # Show partition notice if applicable
-        if result.get("partition_notice"):
-            click.echo(click.style(result["partition_notice"], fg="cyan"))
-            click.echo()
+    # Show partition notice if applicable
+    if result.get("partition_notice"):
+        click.echo(click.style(result["partition_notice"], fg="cyan"))
+        click.echo()
 
-        output = format_preview_output(
-            result, json_output, markdown_output, max_columns=max_columns, no_truncate=no_truncate
-        )
-        if output:
-            click.echo(output)
+    output = format_preview_output(
+        result, json_output, markdown_output, max_columns=max_columns, no_truncate=no_truncate
+    )
+    if output:
+        click.echo(output)
 
 
 def _inspect_stats_impl(parquet_file, json_output, markdown_output):
@@ -167,17 +165,16 @@ def _inspect_stats_impl(parquet_file, json_output, markdown_output):
 
     _validate_parquet_input(parquet_file)
 
-    with error_boundary(path=parquet_file):
-        result = _inspect_stats_core(parquet_file)
+    result = _inspect_stats_core(parquet_file)
 
-        # Show partition notice if applicable
-        if result.get("partition_notice"):
-            click.echo(click.style(result["partition_notice"], fg="cyan"))
-            click.echo()
+    # Show partition notice if applicable
+    if result.get("partition_notice"):
+        click.echo(click.style(result["partition_notice"], fg="cyan"))
+        click.echo()
 
-        output = format_stats_output(result, json_output, markdown_output)
-        if output:
-            click.echo(output)
+    output = format_stats_output(result, json_output, markdown_output)
+    if output:
+        click.echo(output)
 
 
 # Meta command - delegates to core.inspect.display_metadata
@@ -196,7 +193,7 @@ def _handle_meta_display(
     )
 
 
-@inspect.command(name="summary", cls=GlobAwareCommand)
+@inspect.command(name="summary", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
 @click.option(
@@ -219,7 +216,7 @@ def inspect_summary(ctx, parquet_file, json_output, markdown_output, check_all_f
         _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_files)
 
 
-@inspect.command(name="head", cls=GlobAwareCommand)
+@inspect.command(name="head", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.argument("count", type=int, default=10, required=False)
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
@@ -262,7 +259,7 @@ def inspect_head(
         )
 
 
-@inspect.command(name="tail", cls=GlobAwareCommand)
+@inspect.command(name="tail", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.argument("count", type=int, default=10, required=False)
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
@@ -305,7 +302,7 @@ def inspect_tail(
         )
 
 
-@inspect.command(name="stats", cls=GlobAwareCommand)
+@inspect.command(name="stats", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
 @click.option(
@@ -319,7 +316,7 @@ def inspect_stats(ctx, parquet_file, json_output, markdown_output, verbose):
         _inspect_stats_impl(parquet_file, json_output, markdown_output)
 
 
-@inspect.command(name="meta", cls=GlobAwareCommand)
+@inspect.command(name="meta", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option("--geo", "meta_geoparquet", is_flag=True, help="Show only GeoParquet 'geo' metadata")
 @click.option("--parquet", "meta_parquet", is_flag=True, help="Show only Parquet file metadata")
@@ -367,16 +364,15 @@ def inspect_meta(
     _validate_parquet_input(parquet_file)
 
     with _activate_s3(ctx):
-        with error_boundary(path=parquet_file):
-            _handle_meta_display(
-                parquet_file,
-                meta_parquet,
-                meta_geoparquet,
-                meta_parquet_geo,
-                meta_row_groups,
-                json_output,
-                meta_geo_stats,
-            )
+        _handle_meta_display(
+            parquet_file,
+            meta_parquet,
+            meta_geoparquet,
+            meta_parquet_geo,
+            meta_row_groups,
+            json_output,
+            meta_geo_stats,
+        )
 
 
 @inspect.command(name="layers", cls=GlobAwareCommand)

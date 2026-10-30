@@ -1012,9 +1012,14 @@ class GlobAwareCommand(click.Command):
         "inspect": "summary",
     }
 
+    #: The parameter that names the input file, for a command whose answer to a
+    #: non-Parquet file should name it. ``None`` keeps the gpio error's own message.
+    input_param: str | None = None
+
     def invoke(self, ctx):
         """Invoke the command inside the same boundary the root group uses."""
-        with error_boundary():
+        path = ctx.params.get(self.input_param) if self.input_param else None
+        with error_boundary(path=path if isinstance(path, str) else None):
             return super().invoke(ctx)
 
     def make_context(self, info_name, args, parent=None, **extra):
@@ -1072,6 +1077,16 @@ class GlobAwareCommand(click.Command):
                 parts = parts[:-1]
 
         return " ".join(parts)
+
+
+class ParquetInputCommand(GlobAwareCommand):
+    """A :class:`GlobAwareCommand` whose input is the ``parquet_file`` argument.
+
+    A file that is not Parquet is answered by name ("The file 'x.parquet' has a
+    .parquet extension but is not a valid Parquet file...").
+    """
+
+    input_param = "parquet_file"
 
 
 class SingleFileCommand(GlobAwareCommand):

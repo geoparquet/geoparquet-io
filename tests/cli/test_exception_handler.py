@@ -358,3 +358,38 @@ def test_every_answering_path_logs_exactly_one_traceback(monkeypatch, tmp_path, 
     assert result.exit_code == 1, result.output
     assert "Could not read the input" in result.output
     assert len(records) == 1, [r.getMessage() for r in records]
+
+
+@pytest.mark.parametrize(
+    ("argv", "target"),
+    [
+        (["inspect", "stats", "{src}"], "_inspect_stats_core"),
+        (["inspect", "summary", "{src}"], "_inspect_summary_core"),
+        (["inspect", "head", "{src}"], "_inspect_preview_core"),
+    ],
+    ids=["stats", "summary", "head"],
+)
+def test_an_inspect_command_answers_a_gpio_error_without_a_usage_preamble(
+    monkeypatch, tmp_path, argv, target
+):
+    import sys
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    src = tmp_path / "in.parquet"
+    pq.write_table(pa.table({"id": [1]}), src)
+
+    def boom(*_a, **_k):
+        raise InvalidParameterError("count", "must be positive")
+
+    monkeypatch.setattr(sys.modules["geoparquet_io.cli.commands.inspect"], target, boom)
+
+    result = CliRunner().invoke(cli, [a.format(src=src) for a in argv])
+
+    assert result.exit_code == 2, result.output
+    assert "Usage:" not in result.output
+    assert "must be positive" in result.output

@@ -45,6 +45,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.geo_metadata import sanitize_geo_metadata
 from geoparquet_io.core.json_output import dumps_json, to_jsonable
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.metadata_utils import (
@@ -310,7 +311,7 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
     )
 
     # Get metadata using DuckDB
-    geo_meta = get_geo_metadata(parquet_file, con=con)
+    geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file, con=con))
     schema_info = get_schema_info(parquet_file, con=con)
     geo_columns = detect_geometry_columns(parquet_file, con=con)
 
@@ -676,7 +677,7 @@ def get_preview_data(
         geo_columns = set(detect_geometry_columns(parquet_file).keys())
 
         # Also detect geometry columns from GeoParquet metadata
-        geo_meta = get_geo_metadata(parquet_file)
+        geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file))
         columns_meta = {}
         if geo_meta:
             columns_meta = geo_meta.get("columns", {})
