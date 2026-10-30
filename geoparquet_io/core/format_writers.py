@@ -139,6 +139,22 @@ GDAL_FORMATS: dict[str, dict[str, object]] = {
     },
 }
 
+#: Output format by file extension: the GDAL formats' own extensions plus the
+#: formats gpio writes itself. ``gpio convert``'s auto-detection and
+#: ``Table.write`` both read it, so the two cannot disagree on a suffix.
+EXTENSION_TO_FORMAT: dict[str, str] = {
+    ".parquet": "geoparquet",
+    **{str(config["extension"]): name for name, config in GDAL_FORMATS.items()},
+    ".csv": "csv",
+    ".geojson": "geojson",
+    ".json": "geojson",
+}
+
+
+def default_output_name(input_path: str, format_name: str) -> str:
+    """``<input stem><format extension>`` in the working directory, for a GDAL format."""
+    return Path(input_path).stem + str(GDAL_FORMATS[format_name]["extension"])
+
 
 def _get_srs_parameter(input_path: str, verbose: bool = False) -> str | None:
     """

@@ -29,6 +29,7 @@ from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.crs_utils import transform_source_label
 from geoparquet_io.core.file_utils import handle_output_overwrite, validate_parquet_extension
+from geoparquet_io.core.format_writers import EXTENSION_TO_FORMAT, default_output_name
 from geoparquet_io.core.logging_config import configure_verbose
 from geoparquet_io.core.reproject import reproject as reproject_core
 
@@ -54,16 +55,8 @@ class ConvertDefaultGroup(click.Group):
     - gpio convert geopackage input.parquet output.gpkg -> explicit subcommand
     """
 
-    # Extension to subcommand mapping
-    EXTENSION_TO_SUBCOMMAND = {
-        ".parquet": "geoparquet",
-        ".gpkg": "geopackage",
-        ".fgb": "flatgeobuf",
-        ".csv": "csv",
-        ".shp": "shapefile",
-        ".geojson": "geojson",
-        ".json": "geojson",
-    }
+    # Extension to subcommand mapping (the subcommands are named after the formats)
+    EXTENSION_TO_SUBCOMMAND = EXTENSION_TO_FORMAT
 
     def parse_args(self, ctx, args):
         """Parse args with format auto-detection from output file extension."""
@@ -774,7 +767,7 @@ def convert_geopackage(
 
     if output_file is None:
         # Generate output filename
-        output_file = Path(input_file).stem + ".gpkg"
+        output_file = default_output_name(input_file, "geopackage")
 
     with _activate_s3(ctx, aws_profile=aws_profile):
         write_geopackage(
@@ -841,7 +834,7 @@ def convert_flatgeobuf(
 
     if output_file is None:
         # Generate output filename
-        output_file = Path(input_file).stem + ".fgb"
+        output_file = default_output_name(input_file, "flatgeobuf")
 
     with _activate_s3(ctx, aws_profile=aws_profile):
         write_flatgeobuf(
@@ -998,7 +991,7 @@ def convert_shapefile(
 
     if output_file is None:
         # Generate output filename
-        output_file = Path(input_file).stem + ".shp"
+        output_file = default_output_name(input_file, "shapefile")
 
     with _activate_s3(ctx, aws_profile=aws_profile):
         write_shapefile(

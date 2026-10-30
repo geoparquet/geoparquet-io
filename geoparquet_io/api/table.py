@@ -1295,17 +1295,11 @@ class Table:
         """Detect output format from file extension."""
         from pathlib import Path as PathLib
 
-        ext = PathLib(path).suffix.lower()
-        EXTENSION_MAP = {
-            ".parquet": "parquet",
-            ".gpkg": "geopackage",
-            ".fgb": "flatgeobuf",
-            ".csv": "csv",
-            ".shp": "shapefile",
-            ".geojson": "geojson",
-            ".json": "geojson",
-        }
-        return EXTENSION_MAP.get(ext, "parquet")  # Default to parquet
+        from geoparquet_io.core.format_writers import EXTENSION_TO_FORMAT
+
+        detected = EXTENSION_TO_FORMAT.get(PathLib(path).suffix.lower(), "geoparquet")
+        # write() spells GeoParquet "parquet"; an unknown suffix defaults to it.
+        return "parquet" if detected == "geoparquet" else detected
 
     def _require_geometry_column_present(self) -> None:
         """Refuse a write whose named geometry column is not in the table (#1176).
