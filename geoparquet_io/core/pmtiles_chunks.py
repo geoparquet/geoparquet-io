@@ -54,7 +54,7 @@ from geoparquet_io.core.duckdb_utils import (
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geo_metadata import is_levelled_overview, sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, success, warn
@@ -348,10 +348,7 @@ def create_pmtiles_chunked(
             "--chunks needs --max-zoom: tippecanoe would guess a zoom per chunk and the "
             "sparse chunks would have no tiles above their own guess",
         )
-    if os.path.exists(output_path) and not force:
-        raise InvalidParameterError(
-            "output_path", f"output file already exists: {output_path}. Use --force to overwrite."
-        )
+    handle_output_overwrite(output_path, force, flag="--force", remove=False)
     if not _check_tile_join():
         raise TileJoinNotFoundError()
     scratch = resolve_scratch_directory(tiling.get("temporary_directory"))

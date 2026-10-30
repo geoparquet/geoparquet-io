@@ -350,16 +350,17 @@
     "has_glob_pattern",
     "is_partition_path",
     "is_same_file_path",
+    "output_exists_error",
+    "output_is_kept",
     "resolve_file_url",
     "resolve_object_store",
     "resolve_partition_path",
-    "safe_file_url",
+    "unlink_released_file",
     "validate_output_path",
     "validate_parquet_extension"
   ],
   "geoparquet_io.core.format_writers": [
     "ERROR_CONVERSION_FAILED",
-    "ERROR_FILE_EXISTS",
     "ERROR_NATIVE_GEOMETRY",
     "ERROR_NO_GEOMETRY",
     "ERROR_REMOTE_OUTPUT",
@@ -506,16 +507,22 @@
     "write_arrow_table"
   ],
   "geoparquet_io.core.remote": [
+    "REMOTE_SCHEMES",
+    "display_path",
     "get_remote_error_hint",
+    "has_http_scheme",
     "is_azure_url",
     "is_gcs_url",
     "is_remote_url",
     "is_s3_url",
     "needs_httpfs",
+    "protocol_label",
+    "remote_family",
     "remote_write_context",
     "resolve_s3_config",
     "show_remote_read_message",
     "upload_if_remote",
+    "url_scheme",
     "validate_profile_for_urls"
   ],
   "geoparquet_io.core.sizing": [

@@ -33,6 +33,7 @@ from geoparquet_io.core.exceptions import (
 from geoparquet_io.core.logging_config import debug, info, warn
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.overture import OVERTURE_FALLBACK_RELEASE, get_latest_overture_release
+from geoparquet_io.core.remote import is_remote_url
 
 # =============================================================================
 # Cache Configuration
@@ -588,13 +589,13 @@ class AdminDataset(ABC):
 
     def is_remote(self) -> bool:
         """
-        Check if the data source is remote (HTTP/HTTPS/S3).
+        Check if the data source is a remote URL (:func:`is_remote_url`).
 
         Returns:
             True if remote, False if local file
         """
         source = self.get_source()
-        return source.startswith(("http://", "https://", "s3://"))
+        return is_remote_url(source)
 
     def validate_levels(self, levels: list[str]) -> None:
         """

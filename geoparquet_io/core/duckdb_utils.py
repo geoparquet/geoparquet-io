@@ -539,14 +539,11 @@ def sql_path(path: str | os.PathLike[str]) -> str:
     it had already written the file (issue #718).
 
     The argument must be **RAW**: the path as the user typed it, or as
-    :func:`~geoparquet_io.core.file_utils.resolve_file_url` resolved it. It must
-    NOT be a :func:`~geoparquet_io.core.file_utils.safe_file_url` result, which
-    is already escaped; escaping is not idempotent, so a second pass doubles the
-    doubling. No guard can catch that automatically -- a filename may legally
-    contain two apostrophes in a row -- so the rule is structural: a path is
-    escaped exactly once, either by ``safe_file_url`` (which also resolves
-    remote URLs and checks existence, and whose bare result the caller quotes)
-    or by ``sql_path``, never by both.
+    :func:`~geoparquet_io.core.file_utils.resolve_file_url` resolved it, never a
+    value already escaped for SQL; escaping is not idempotent, so a second pass
+    doubles the doubling. No guard can catch that automatically -- a filename
+    may legally contain two apostrophes in a row -- so the rule is structural: a
+    path is escaped exactly once, here.
 
     For a non-path SQL string literal use :func:`_escape_sql_string` and supply
     your own quotes; for an identifier use :func:`quote_identifier`.
@@ -1765,7 +1762,7 @@ def get_duckdb_connection_for_s3(
     s3_kwargs = {"s3_endpoint": s3_endpoint, "s3_region": s3_region, "s3_use_ssl": s3_use_ssl}
 
     # Non-S3 paths: use standard connection
-    if not path.startswith(("s3://", "s3a://")):
+    if not is_s3_url(path):
         return get_duckdb_connection(
             load_spatial=load_spatial, load_httpfs=needs_httpfs(path), **s3_kwargs
         )

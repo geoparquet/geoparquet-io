@@ -26,6 +26,7 @@ from urllib.parse import unquote
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import sql_path
 from geoparquet_io.core.exceptions import PartitionError
+from geoparquet_io.core.file_utils import output_is_kept
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.remote import is_remote_url
@@ -255,7 +256,7 @@ def finalize_partition_file(
     column that loses ``geometry_types`` without one lands in the output missing
     a key GeoParquet 1.1 requires (#934).
     """
-    if os.path.exists(output_filename) and not overwrite:
+    if output_is_kept(output_filename, overwrite):
         if verbose:
             debug(f"Output file {output_filename} already exists, skipping...")
         return False

@@ -6,7 +6,7 @@ import pytest
 
 from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import FileNotFoundGeoParquetError, InvalidParameterError
-from geoparquet_io.core.file_utils import safe_file_url
+from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.remote import is_remote_url, needs_httpfs, resolve_s3_config
 
 
@@ -68,33 +68,33 @@ class TestRemoteURLDetection:
         assert not needs_httpfs("/local/path/file.parquet")
 
 
-class TestSafeFileURL:
-    """Test safe_file_url function."""
+class TestResolveFileURL:
+    """Test resolve_file_url function."""
 
-    def test_safe_file_url_https(self):
+    def test_resolve_file_url_https(self):
         """Test HTTPS URL handling."""
         url = "https://example.com/path/file.parquet"
-        assert safe_file_url(url) == url
+        assert resolve_file_url(url) == url
 
-    def test_safe_file_url_https_percent_encoded(self):
+    def test_resolve_file_url_https_percent_encoded(self):
         """An already-encoded HTTPS URL is not encoded a second time (#825)."""
         url = "https://example.com/path%20with%20spaces/file.parquet"
-        assert safe_file_url(url) == url
+        assert resolve_file_url(url) == url
 
-    def test_safe_file_url_https_with_raw_spaces_is_not_encoded(self):
+    def test_resolve_file_url_https_with_raw_spaces_is_not_encoded(self):
         """BREAKING (#825): a raw space is passed through, not encoded."""
         url = "https://example.com/path with spaces/file.parquet"
-        assert safe_file_url(url) == url
+        assert resolve_file_url(url) == url
 
-    def test_safe_file_url_s3(self):
+    def test_resolve_file_url_s3(self):
         """Test S3 URL handling."""
         url = "s3://bucket/path/file.parquet"
-        assert safe_file_url(url) == url
+        assert resolve_file_url(url) == url
 
-    def test_safe_file_url_local_nonexistent(self):
+    def test_resolve_file_url_local_nonexistent(self):
         """Test local file that doesn't exist."""
         with pytest.raises(FileNotFoundGeoParquetError, match="(?i)file not found"):
-            safe_file_url("/nonexistent/file.parquet")
+            resolve_file_url("/nonexistent/file.parquet")
 
 
 @pytest.mark.network

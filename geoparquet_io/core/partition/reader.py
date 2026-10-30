@@ -18,7 +18,7 @@ from geoparquet_io.core.file_utils import (
     resolve_partition_path,
 )
 from geoparquet_io.core.logging_config import debug
-from geoparquet_io.core.remote import is_remote_url
+from geoparquet_io.core.remote import display_path, is_remote_url
 
 
 def require_parquet_files(path: str) -> None:
@@ -309,6 +309,15 @@ def select_files_to_check(
 
     # For remote globs, we can only check the glob pattern as a whole
     if partition_info["partition_type"] == "remote_glob":
+        if fix:
+            # A repair rewrites files one by one; handing it the pattern made
+            # it "fix" one file named `*.parquet` (#1075).
+            raise GeoParquetError(
+                f"cannot --fix a remote glob: {display_path(path)}\n\n"
+                "A remote glob is checked as one pattern, so there is no single "
+                "file to rewrite. Run the fix on each remote file, or copy the "
+                "files locally and fix them there with --fix-output DIR."
+            )
         notice = "Checking remote glob pattern (file enumeration not supported)"
         return [path], notice, 1
 

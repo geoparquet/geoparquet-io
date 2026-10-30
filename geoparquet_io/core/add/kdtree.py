@@ -32,8 +32,7 @@ from geoparquet_io.core.logging_config import (
 )
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
-    _sanitize_url_for_logging,
-    is_remote_url,
+    display_path,
     needs_httpfs,
 )
 from geoparquet_io.core.stream_io import write_output
@@ -652,14 +651,8 @@ def add_kdtree_column(
 
     if dry_run:
         warn("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n")
-        display_input = (
-            _sanitize_url_for_logging(input_path) if is_remote_url(input_path) else input_path
-        )
-        display_output = (
-            _sanitize_url_for_logging(output_parquet)
-            if is_remote_url(output_parquet)
-            else output_parquet
-        )
+        display_input = display_path(input_path)
+        display_output = display_path(output_parquet)
         info(f"-- Input: {display_input}")
         info(f"-- Output: {display_output}")
         info(f"-- Column: {kdtree_column_name}")

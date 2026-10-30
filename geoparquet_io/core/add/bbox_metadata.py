@@ -36,6 +36,7 @@ from geoparquet_io.core.geo_metadata import (
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, success, warn
 from geoparquet_io.core.parquet_footer import FooterPatchUnsupported, patch_footer_kv
+from geoparquet_io.core.remote import is_remote_url
 from geoparquet_io.core.streaming import find_geometry_column_from_table
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 from geoparquet_io.core.write_strategies.base import atomic_write
@@ -44,10 +45,6 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
 
-def _is_remote_url(path: str) -> bool:
-    """Check if the path is a remote URL (S3, GCS, Azure, HTTP)."""
-    remote_prefixes = ("s3://", "gs://", "az://", "azure://", "http://", "https://")
-    return path.lower().startswith(remote_prefixes)
 
 
 def require_geo_metadata_for_covering(geo_meta: object, source: str | None = None) -> dict:
@@ -275,7 +272,7 @@ def add_bbox_metadata(
     output_file = output_file or parquet_file
     # Reject remote URLs - the rewrite below needs a local filesystem
     for path in {parquet_file, output_file}:
-        if _is_remote_url(path):
+        if is_remote_url(path):
             raise GeoParquetError(
                 f"Remote URLs are not supported for in-place metadata modification: {path}\n"
                 "Download the file locally, modify it, then upload."

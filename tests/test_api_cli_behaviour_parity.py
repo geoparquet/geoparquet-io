@@ -367,7 +367,7 @@ class TestGenerateStacParity:
         gpio.generate_stac(part, out, bucket=STAC_BUCKET)
         out.unlink()  # clear the collection guard, leave the item file behind
 
-        with pytest.raises(ValueError, match="STAC item file already exists"):
+        with pytest.raises(ValueError, match="Output file already exists: .*json"):
             gpio.generate_stac(part, out, bucket=STAC_BUCKET)
 
     def test_generated_stac_validates_through_both_front_ends(self, places_test_file, tmp_path):

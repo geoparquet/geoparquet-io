@@ -27,6 +27,7 @@ from geoparquet_io.core.inspect import (
 from geoparquet_io.core.inspect import (
     inspect_summary as _inspect_summary_core,
 )
+from geoparquet_io.core.remote import is_remote_url
 
 # InspectDefaultGroup: defaults to 'summary' when no subcommand is provided
 InspectDefaultGroup = create_default_group(
@@ -90,7 +91,7 @@ def _validate_parquet_input(file_path: str) -> None:
         return
 
     # Extract filename from path (handles both local and remote URLs)
-    if "://" in file_path:
+    if is_remote_url(file_path):
         # Use urllib.parse to properly handle URLs with query strings (e.g., presigned URLs)
         from urllib.parse import urlparse
 

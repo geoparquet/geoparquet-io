@@ -195,11 +195,11 @@ PRIVATE_NAMES_CEILING = frozenset(
     }
 )
 
-#: Sizes measured on the tree G5 landed on: 789 lines (778 after T2a), 15 module-level
-#: functions and classes. These are pins, not ceilings: growth fails, and so
+#: Sizes measured on the tree G5 landed on: 789 lines (778 after T2a, 772 after
+#: T2e), 15 module-level functions and classes. These are pins, not ceilings: growth fails, and so
 #: does shrinking until the number here is lowered to match, so slack left by a
 #: deletion never becomes a budget for the next helper (T0b audit).
-LINE_PIN = 778
+LINE_PIN = 772
 DEF_PIN = 15
 
 

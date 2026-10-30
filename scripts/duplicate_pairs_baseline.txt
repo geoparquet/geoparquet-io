@@ -7,7 +7,6 @@
 geoparquet_io/cli/commands/partition.py:partition_a5|geoparquet_io/cli/commands/partition.py:partition_h3
 geoparquet_io/cli/commands/partition.py:partition_a5|geoparquet_io/cli/commands/partition.py:partition_s2
 geoparquet_io/cli/commands/partition.py:partition_h3|geoparquet_io/cli/commands/partition.py:partition_s2
-geoparquet_io/cli/commands/publish.py:_check_output_stac_collection|geoparquet_io/cli/commands/publish.py:_check_output_stac_item
 geoparquet_io/core/add/a5.py:_add_a5_streaming.make_query|geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query
 geoparquet_io/core/add/a5.py:_add_a5_streaming.make_query|geoparquet_io/core/add/s2.py:_add_s2_streaming.make_query
 geoparquet_io/core/add/a5.py:_add_a5_streaming|geoparquet_io/core/add/h3.py:_add_h3_streaming

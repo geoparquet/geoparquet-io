@@ -167,15 +167,67 @@ def test_1335_unset_compression_level_is_level_15(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="#1243")
 def test_1243_sort_hilbert_accepts_a_regular_file_named_with_a_bracket(tmp_path):
-    """Expected to fail with ``Partitioned input detected: .../l[c.parquet``."""
+    """Failed on the base with ``Partitioned input detected: .../l[c.parquet``."""
     src = tmp_path / "l[c.parquet"
     shutil.copy(PLACES, src)
     out = tmp_path / "out.parquet"
     result = _run("sort", "hilbert", src, out)
     assert result.exit_code == 0, _explain(result)
     assert pq.read_metadata(str(out)).num_rows == pq.read_metadata(str(PLACES)).num_rows
+
+
+# ---------------------------------------------------------------------------
+# #1075 / #1332 -- a remote glob is a dataset, not one file
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def remote_parts(monkeypatch):
+    """Two copies of a bbox-less 1.0 file behind a loopback S3 endpoint, as
+    ``s3://bkt/parts/``, with that endpoint as the ambient S3 config."""
+    from geoparquet_io.core.duckdb_utils import s3_config_scope
+    from tests._fake_s3 import fake_s3
+
+    data = (DATA / "buildings_test.parquet").read_bytes()
+    for name, value in {
+        "AWS_ACCESS_KEY_ID": "test",
+        "AWS_SECRET_ACCESS_KEY": "test",
+        "AWS_REGION": "us-east-1",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    with (
+        fake_s3({"bkt/parts/a.parquet": data, "bkt/parts/b.parquet": data}) as served,
+        s3_config_scope({"s3_endpoint": served[0], "s3_use_ssl": False}),
+    ):
+        yield served
+
+
+def test_1332_preview_of_a_remote_glob_describes_its_first_file(remote_parts):
+    """Failed on the base: the glob's totals summed both footers (``total_bytes``
+    7310 against the first file's 3655)."""
+    from geoparquet_io.api.ops import preview_bbox_filter
+
+    whole_world = (-180.0, -90.0, 180.0, 90.0)
+    first = preview_bbox_filter("s3://bkt/parts/a.parquet", whole_world)
+    glob = preview_bbox_filter("s3://bkt/parts/*.parquet", whole_world)
+    assert glob == first
+
+
+def test_1075_check_fix_refuses_a_remote_glob_before_checking(remote_parts):
+    """Failed on the base: the glob was checked, then handed to ``add bbox`` as one
+    file, which stopped with ``Partitioned input detected: s3://bkt/parts/*.parquet``."""
+    endpoint, requests = remote_parts
+    result = _run(
+        "--s3-endpoint", endpoint, "--s3-no-ssl",
+        "check", "bbox", "s3://bkt/parts/*.parquet", "--fix", "--overwrite", "--no-backup",
+    )  # fmt: skip
+    assert result.exit_code == 1, _explain(result)
+    assert "cannot --fix a remote glob" in result.output, _explain(result)
+    assert "Partitioned input detected" not in result.output, _explain(result)
+    assert "GeoParquet Metadata" not in result.output, "the glob was checked before the refusal"
+    assert all(method in ("GET", "HEAD") for method, _ in requests)
 
 
 # ---------------------------------------------------------------------------

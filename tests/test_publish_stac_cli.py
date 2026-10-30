@@ -71,7 +71,8 @@ class TestPublishStacItem:
             cli, ["publish", "stac", places_test_file, str(out), "--bucket", BUCKET]
         )
         assert result.exit_code != 0
-        assert "already exists and is a STAC Item" in result.output
+        assert "Output file already exists" in result.output
+        assert "--overwrite" in result.output
         assert "--overwrite" in result.output
         # The refused run must not have clobbered the existing file.
         assert json.loads(out.read_text())["id"] == "existing"
@@ -200,7 +201,8 @@ class TestPublishStacCollection:
             cli, ["publish", "stac", str(parts), str(out), "--bucket", BUCKET]
         )
         assert result.exit_code != 0
-        assert "already contains a STAC Collection" in result.output
+        assert "Output file already exists" in result.output
+        assert "collection.json" in result.output
         assert json.loads((out / "collection.json").read_text())["id"] == "old"
 
     def test_existing_collection_overwritten_with_flag(
@@ -228,7 +230,7 @@ class TestPublishStacCollection:
             cli, ["publish", "stac", str(parts), str(out), "--bucket", BUCKET]
         )
         assert result.exit_code != 0
-        assert "STAC Item already exists" in result.output
+        assert "Output file already exists" in result.output
         assert json.loads((parts / "places.json").read_text())["id"] == "existing"
 
     def test_in_place_collection_when_output_is_none(

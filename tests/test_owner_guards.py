@@ -63,7 +63,7 @@ CHECK_OWNER_DEFS = REPO / "scripts" / "check_owner_defs.py"
 #: The pinned number of exemption entries per check (G1 per arm). Lower it with
 #: the commit that deletes a copy; raising it needs a reason in review.
 EXPECTED_COUNTS = {
-    "G1.tid251": 16,
+    "G1.tid251": 15,
     "G1.geo_parse": 17,
     "G1.set_memory_limit": 0,
     "G1.sql_escape": 1,
@@ -71,16 +71,18 @@ EXPECTED_COUNTS = {
     "G1.duckdb_version": 0,
     "G1.retry_loop": 0,
     "G1.retry_constants": 0,
-    "G1.retry_param_defaults": 1,
+    "G1.retry_param_defaults": 0,
     "G1.retry_status_sets": 2,
     "G1.retry_after": 0,
     "G1.retry_wrappers": 0,
     "G1.json_dumps": 40,
     "G1.parquet_metadata": 0,
     "G1.row_group_policy": 2,
-    "G2.exemptions": 31,
-    "G3.pairs": 26,
-    "G3.baseline": 26,
+    "G1.scheme_test": 0,
+    "G1.overwrite_check": 0,
+    "G2.exemptions": 30,
+    "G3.pairs": 25,
+    "G3.baseline": 25,
     "G3.pylint": 55,
     "G13.options": 13,
     "G13.bbox_parsers": 3,
@@ -975,6 +977,98 @@ def _row_group_policy_node(node: ast.AST, strings: set[int]) -> bool:
     return False
 
 
+#: ``in`` and ``not in``.
+_MEMBERSHIP_OPS = (ast.In, ast.NotIn)  # codespell:ignore
+
+#: A scheme prefix spelled out as a literal: ``"s3://"``, ``"https://"``.
+_SCHEME_PREFIX = re.compile(r"^[a-z][a-z0-9+.-]*://$")
+
+
+def _remote_scheme_names(repo: Path) -> frozenset[str]:
+    """The keys of the owner's ``REMOTE_SCHEMES`` table, read from its source."""
+    owner = repo / "geoparquet_io" / "core" / "remote.py"
+    if not owner.is_file():
+        return frozenset({"http", "https", "s3", "s3a", "gs", "gcs", "az", "azure"})
+    for node in ast.walk(ast.parse(owner.read_text(encoding="utf-8"))):
+        if (
+            isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "REMOTE_SCHEMES" for t in node.targets)
+            and isinstance(node.value, ast.Dict)
+        ):
+            return frozenset(k.value for k in node.value.keys if isinstance(k, ast.Constant))
+    return frozenset()
+
+
+def _find_scheme_test(m: _Module, repo: Path) -> Iterator[Hit]:
+    """A URL-scheme test outside ``core/remote.py``: ``"://" in path``, a scheme
+    prefix spelled out (``startswith("s3://")``, a prefix tuple), or a
+    tuple/list/set of two or more scheme names (``("s3", "gs", "az")``).
+
+    ``remote.REMOTE_SCHEMES`` is the one scheme table, and ``is_remote_url``,
+    ``url_scheme`` and ``remote_family`` the tests over it. Would have caught
+    the six-scheme ``_is_remote_url`` in ``add/bbox_metadata.py`` (no
+    ``s3a``/``gcs``/``abfs``), the three-scheme ``startswith`` copies in
+    ``stac_check`` and ``admin_datasets`` that called ``gs://`` local, and the
+    ``"://" in`` test in ``process/simplify.py`` (#1367 T2e). Building a URL
+    (``f"s3://{bucket}"``) and splitting one (``.partition("://")``) are not
+    tests and pass.
+    """
+    names = _remote_scheme_names(repo)
+    for node in ast.walk(m.tree):
+        if isinstance(node, ast.Compare):
+            literal = isinstance(node.left, ast.Constant) and node.left.value == "://"
+            if literal and any(isinstance(op, _MEMBERSHIP_OPS) for op in node.ops):
+                yield m.hit(node)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            in_fstring = isinstance(m.parents.get(id(node)), ast.JoinedStr)
+            if _SCHEME_PREFIX.match(node.value) and id(node) not in m.docstrings and not in_fstring:
+                yield m.hit(node)
+        elif isinstance(node, (ast.Tuple, ast.List, ast.Set)) and len(node.elts) >= 2:
+            values = [e.value if isinstance(e, ast.Constant) else None for e in node.elts]
+            if all(isinstance(v, str) and v in names for v in values):
+                yield m.hit(node)
+
+
+#: The names a command's overwrite switch goes by.
+_OVERWRITE_SWITCHES = {"overwrite", "force"}
+#: Calls that ask whether a path exists.
+_EXISTENCE_CALLS = {"exists", "isfile", "is_file", "lexists"}
+
+
+def _find_overwrite_check(m: _Module) -> Iterator[Hit]:
+    """An overwrite check outside ``core/file_utils.py``: an ``if`` whose test
+    asks whether a path exists *and* reads the overwrite switch
+    (``if os.path.exists(out) and not force: raise ...``,
+    ``if overwrite and out.exists(): out.unlink()``).
+
+    ``file_utils.handle_output_overwrite`` is the one overwrite policy, with
+    one refusal (``output_exists_error``). Would have caught the nine hand-rolled
+    checks #1367 found -- pmtiles chunks and pyramid, process overview, ArcGIS,
+    CARTO, WFS, the format writers, ``add stac-metadata`` and the STAC API --
+    each with its own message, exception type and exit code (T2e).
+    """
+
+    def switch(node: ast.AST) -> bool:
+        return any(
+            (isinstance(n, ast.Name) and n.id in _OVERWRITE_SWITCHES)
+            or (isinstance(n, ast.Attribute) and n.attr in _OVERWRITE_SWITCHES)
+            for n in ast.walk(node)
+        )
+
+    def existence(node: ast.AST) -> bool:
+        return any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, (ast.Attribute, ast.Name))
+            and (n.func.attr if isinstance(n.func, ast.Attribute) else n.func.id)
+            in _EXISTENCE_CALLS
+            for n in ast.walk(node)
+        )
+
+    for node in ast.walk(m.tree):
+        if isinstance(node, (ast.If, ast.IfExp)) and existence(node.test) and switch(node.test):
+            yield m.hit(node)
+
+
 @dataclass(frozen=True)
 class Arm:
     finder: Callable[..., Iterator[Hit]]
@@ -1010,6 +1104,8 @@ ARMS = {
         ("geoparquet_io/cli", "geoparquet_io/core"),
     ),
     "row_group_policy": Arm(_find_row_group_policy, _ROW_GROUP_OWNER),
+    "scheme_test": Arm(_find_scheme_test, ("geoparquet_io/core/remote.py",), needs_repo=True),
+    "overwrite_check": Arm(_find_overwrite_check, ("geoparquet_io/core/file_utils.py",)),
 }
 
 
@@ -1510,6 +1606,11 @@ G1_PLANTS = {
         "def rows(con, path):\n"
         "    return con.execute(f\"SELECT * FROM parquet_metadata('{path}')\").fetchall()\n"
     ),
+    "scheme_test": 'def remote(p):\n    return p.startswith("s3://")\n',
+    "overwrite_check": (
+        "import os\n\ndef check(out, force):\n"
+        "    if os.path.exists(out) and not force:\n        raise ValueError(out)\n"
+    ),
 }
 
 #: Near-misses each arm must not flag, so a planted hit is the pattern itself.
@@ -1536,6 +1637,13 @@ G1_CLEAN = {
     "parquet_metadata": (
         '"""Reads parquet_metadata() through the owner."""\n'
         "from geoparquet_io.core.duckdb_metadata import get_row_group_sizes\n"
+    ),
+    "scheme_test": (
+        'def url(bucket, path):\n    scheme, _, rest = path.partition("://")\n'
+        '    return f"s3://{bucket}/{rest}"\n'
+    ),
+    "overwrite_check": (
+        "import os\n\ndef cleanup(tmp):\n    if os.path.exists(tmp):\n        os.remove(tmp)\n"
     ),
 }
 

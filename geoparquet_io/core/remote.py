@@ -20,9 +20,51 @@ from geoparquet_io.core.exceptions import (
 )
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
 
-# Re-export with underscore prefix for backward compatibility
-# TODO: Migrate all call sites to sanitize_url_for_logging and remove this alias
-_sanitize_url_for_logging = sanitize_url_for_logging
+#: Every URL scheme gpio reads or writes, and the store family it belongs to.
+#: The one scheme table (#1367): :func:`is_remote_url` and every family test
+#: below read it, and nothing outside this module spells a scheme out.
+#: Matching is case-sensitive, as DuckDB's own is.
+REMOTE_SCHEMES = {
+    "http": "http",
+    "https": "http",
+    "s3": "s3",
+    "s3a": "s3",
+    "gs": "gcs",
+    "gcs": "gcs",
+    "az": "azure",
+    "azure": "azure",
+    "abfs": "azure",
+    "abfss": "azure",
+}
+
+
+def url_scheme(path) -> str | None:
+    """The scheme of a remote URL as written (``"s3a"``, ``"https"``), else None.
+
+    None for a local path, ``file://``, an unknown scheme and anything that is
+    not a string.
+    """
+    if not isinstance(path, str):
+        return None
+    scheme, separator, _ = path.partition("://")
+    return scheme if separator and scheme in REMOTE_SCHEMES else None
+
+
+def remote_family(path) -> str | None:
+    """The store family of a remote URL: ``http``, ``s3``, ``gcs`` or ``azure``."""
+    scheme = url_scheme(path)
+    return REMOTE_SCHEMES[scheme] if scheme else None
+
+
+def has_http_scheme(url: str) -> bool:
+    """Whether *url* parses with an ``http``/``https`` scheme, in any case.
+
+    For a service endpoint (CARTO's SQL API) that must be handed to an HTTP
+    client and nothing else: an empty, ``file://`` or object-store scheme fails.
+    """
+    from urllib.parse import urlparse
+
+    return REMOTE_SCHEMES.get(urlparse(url).scheme) == "http"
 
 
 def is_remote_url(path):
@@ -41,21 +83,7 @@ def is_remote_url(path):
     Returns:
         bool: True if path is a remote URL, False otherwise
     """
-    if path is None:
-        return False
-    remote_schemes = [
-        "http://",
-        "https://",
-        "s3://",
-        "s3a://",
-        "gs://",
-        "gcs://",
-        "az://",
-        "azure://",
-        "abfs://",
-        "abfss://",
-    ]
-    return any(path.startswith(scheme) for scheme in remote_schemes)
+    return url_scheme(path) is not None
 
 
 def is_s3_url(path):
@@ -68,7 +96,7 @@ def is_s3_url(path):
     Returns:
         bool: True if path is S3
     """
-    return isinstance(path, str) and path.startswith(("s3://", "s3a://"))
+    return remote_family(path) == "s3"
 
 
 def is_azure_url(path):
@@ -81,7 +109,7 @@ def is_azure_url(path):
     Returns:
         bool: True if path is Azure
     """
-    return isinstance(path, str) and path.startswith(("az://", "azure://", "abfs://", "abfss://"))
+    return remote_family(path) == "azure"
 
 
 def is_gcs_url(path):
@@ -94,7 +122,7 @@ def is_gcs_url(path):
     Returns:
         bool: True if path is GCS
     """
-    return isinstance(path, str) and path.startswith(("gs://", "gcs://"))
+    return remote_family(path) == "gcs"
 
 
 def needs_httpfs(path):
@@ -109,17 +137,17 @@ def needs_httpfs(path):
     Returns:
         bool: True if httpfs extension is needed
     """
-    httpfs_schemes = [
-        "s3://",
-        "s3a://",
-        "gs://",
-        "gcs://",
-        "az://",
-        "azure://",
-        "abfs://",
-        "abfss://",
-    ]
-    return any(path.startswith(scheme) for scheme in httpfs_schemes)
+    return remote_family(path) not in (None, "http")
+
+
+def protocol_label(path, default: str = "HTTP") -> str:
+    """The upper-cased scheme a message names a URL by (``S3``), else *default*."""
+    return path.split("://")[0].upper() if "://" in path else default
+
+
+def display_path(path):
+    """*path* as a message may show it: a remote URL with its secrets stripped."""
+    return sanitize_url_for_logging(path) if is_remote_url(path) else path
 
 
 def resolve_s3_config(
@@ -187,7 +215,7 @@ def validate_profile_for_urls(profile, *urls):
 
     for url in urls:
         if url and is_remote_url(url) and not is_s3_url(url):
-            protocol = url.split("://")[0].upper() if "://" in url else "unknown"
+            protocol = protocol_label(url, "unknown")
             raise InvalidParameterError(
                 "profile",
                 f"only valid for S3 URLs, but got {protocol} URL: {sanitize_url_for_logging(url)}. "
@@ -206,7 +234,7 @@ def show_remote_read_message(file_path, verbose=False):
     if not is_remote_url(file_path):
         return
 
-    protocol = file_path.split("://")[0].upper() if "://" in file_path else "HTTP"
+    protocol = protocol_label(file_path)
     if verbose:
         info(f"Reading from {protocol}: {sanitize_url_for_logging(file_path)}")
     else:

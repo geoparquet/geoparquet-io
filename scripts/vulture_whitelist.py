@@ -103,7 +103,6 @@ add_bbox_metadata_cmd  # unused function (geoparquet_io/cli/commands/add.py:508)
 _.sort_quadkey  # unused method (geoparquet_io/api/table.py:2386) -- dynamic: public Python API (docs/api/python-api.md)
 OptionalIntCommand  # unused class (geoparquet_io/cli/main.py:29) -- dead: T0e deletes
 add_s2  # unused function (geoparquet_io/api/ops.py:853) -- dynamic: public Python API (docs/api/python-api.md)
-safe_file_url  # unused function (geoparquet_io/core/file_utils.py:572) -- dead: T2e deletes (no package caller; only tests)
 convert_to_shapefile  # unused function (geoparquet_io/api/ops.py:2409) -- dynamic: public Python API (docs/api/python-api.md)
 check_stac_cmd  # unused function (geoparquet_io/cli/commands/check.py:1561) -- dynamic: Click command, registered by its decorator
 convert_to_flatgeobuf  # unused function (geoparquet_io/api/ops.py:2322) -- dynamic: public Python API (docs/api/python-api.md)

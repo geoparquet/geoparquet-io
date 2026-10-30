@@ -10,6 +10,7 @@ import pystac.validation
 
 from geoparquet_io.core.check_verdict import Verdict
 from geoparquet_io.core.logging_config import debug, error, progress, success, warn
+from geoparquet_io.core.remote import is_remote_url
 
 
 def _not_stac_json_error(stac_path: str) -> ValueError:
@@ -93,7 +94,7 @@ def _validate_assets(stac_dict: dict, stac_dir: Path, results: dict) -> None:
 
     for asset_key, asset in stac_dict["assets"].items():
         href = asset.get("href", "")
-        if not href.startswith(("http://", "https://", "s3://")):
+        if not is_remote_url(href):
             asset_path = stac_dir / href
             if not asset_path.exists():
                 results["warnings"].append(

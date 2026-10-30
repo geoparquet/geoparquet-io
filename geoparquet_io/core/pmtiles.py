@@ -17,6 +17,7 @@ from typing import IO
 
 from geoparquet_io.core.column_selection import split_column_list
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geojson_stream import require_planar_geojson_file
 from geoparquet_io.core.logging_config import debug, success
 from geoparquet_io.core.streaming import is_stdin
@@ -659,6 +660,9 @@ def create_pmtiles_from_geoparquet(
     # tippecanoe probe, so a bad option is not reported as a missing binary.
     cols = split_column_list(include_cols, "--include-cols")
     scratch = resolve_scratch_directory(temporary_directory)
+    # tippecanoe (or tile-join, for --chunks) replaces the archive itself on
+    # --force; refused here, before any tiling work, when the flag is absent.
+    handle_output_overwrite(output_path, force, flag="--force", remove=False)
 
     if not _check_tippecanoe():
         raise TippecanoeNotFoundError()

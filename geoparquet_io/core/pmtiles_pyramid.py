@@ -15,6 +15,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geojson_stream import require_planar_geojson_file
 from geoparquet_io.core.logging_config import configure_verbose, debug, success, warn
 from geoparquet_io.core.pmtiles import (
@@ -374,11 +375,7 @@ def create_pmtiles_pyramid(
         _validate_path(features_source)
     # Fail fast before any tiling work: tile-join would only reject an
     # existing output after every per-band tippecanoe run had completed.
-    if os.path.exists(output_path) and not force:
-        raise InvalidParameterError(
-            "output_path",
-            f"output file already exists: {output_path}. Use --force to overwrite.",
-        )
+    handle_output_overwrite(output_path, force, flag="--force", remove=False)
     base_max, feat_min = _resolve_feature_zooms(max_zoom, features_min_zoom, include_features)
     if not _check_tippecanoe():
         raise TippecanoeNotFoundError()

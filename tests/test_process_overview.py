@@ -10,7 +10,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.admin_datasets import OvertureAdminDataset
-from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.process.overview import create_overviews
 from geoparquet_io.core.process.overview.detect import (
     detect_aggregate_file,
@@ -1036,7 +1036,7 @@ class TestAdminRollup:
         (result,) = create_overviews(str(src), levels="country")
         first_bytes = Path(result[1]).read_bytes()
 
-        with pytest.raises(InvalidParameterError, match="force"):
+        with pytest.raises(GeoParquetError, match="already exists.*\n.*--force"):
             create_overviews(str(src), levels="country")
         assert Path(result[1]).read_bytes() == first_bytes  # untouched
 

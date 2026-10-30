@@ -31,7 +31,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.exceptions import PartitionError
-from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.file_utils import output_is_kept, resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, progress, success, warn
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
@@ -580,7 +580,7 @@ def _finalize_admin_partition(
     check_output_collision(seen_outputs, output_file, tuple(values))
 
     os.makedirs(partition_folder, exist_ok=True)
-    if verbose and not (os.path.exists(output_file) and not overwrite):
+    if verbose and not output_is_kept(output_file, overwrite):
         debug(f"  → Creating: {'/'.join(folder_parts)}")
 
     created = finalize_partition_file(

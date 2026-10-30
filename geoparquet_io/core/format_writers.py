@@ -40,7 +40,12 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
     ValidationError,
 )
-from geoparquet_io.core.file_utils import resolve_file_url, validate_output_path
+from geoparquet_io.core.file_utils import (
+    handle_output_overwrite,
+    output_exists_error,
+    resolve_file_url,
+    validate_output_path,
+)
 from geoparquet_io.core.geometry_detection import (
     GeometryRead,
     detect_parquet_geometry_column,
@@ -59,7 +64,6 @@ from geoparquet_io.core.write_strategies.base import atomic_write
 
 # Error message templates for consistency
 ERROR_REMOTE_OUTPUT = "{format} output path must be local. Use upload() for cloud destinations."
-ERROR_FILE_EXISTS = "{format} file already exists: {path}\nUse --overwrite to replace it."
 ERROR_CONVERSION_FAILED = "Failed to create {format}: {error}"
 ERROR_NO_GEOMETRY = "No geometry column found. Expected 'geometry', 'geom', or 'wkb_geometry'."
 ERROR_NATIVE_GEOMETRY = (
@@ -442,14 +446,8 @@ def write_gdal_format(
 
     validate_profile_for_urls(profile, input_path)
 
-    # Check if output exists
-    from pathlib import Path
-
-    output_file = Path(output_path)
-    if config["check_overwrite"] and output_file.exists() and not overwrite:
-        raise GeoParquetError(
-            ERROR_FILE_EXISTS.format(format=config["description"], path=output_path)
-        )
+    if config["check_overwrite"]:
+        handle_output_overwrite(output_path, overwrite, remove=False)
 
     validate_output_path(output_path, verbose)
     progress(f"Converting to {config['description']}: {output_path}")
@@ -523,7 +521,7 @@ def write_gdal_format(
         # (#1320). The write is staged under a temp name, so the name the layer
         # would have had (the output's stem) is passed explicitly.
         if config.get("layer_option"):
-            layer = layer_name if layer_name is not None else output_file.stem
+            layer = layer_name if layer_name is not None else Path(output_path).stem
             lco_clause = f", {config['layer_option']} '{_escape_sql_string(layer)}'{lco_clause}"
 
         geometry_read = (
@@ -579,9 +577,7 @@ def write_gdal_format(
     except Exception as e:
         error_msg = str(e)
         if "already exists" in error_msg.lower():
-            raise GeoParquetError(
-                ERROR_FILE_EXISTS.format(format=config["description"], path=output_path)
-            ) from e
+            raise output_exists_error(output_path) from e
         raise GeoParquetError(
             ERROR_CONVERSION_FAILED.format(format=config["description"], error=error_msg)
         ) from e
@@ -629,7 +625,6 @@ def write_csv(
     Raises:
         GeoParquetError: If conversion fails
     """
-    from pathlib import Path
 
     configure_verbose(verbose)
 
@@ -638,10 +633,7 @@ def write_csv(
     if is_remote_url(output_path):
         raise InvalidParameterError("output_path", ERROR_REMOTE_OUTPUT.format(format="CSV"))
 
-    # Check if output exists
-    output_file = Path(output_path)
-    if output_file.exists() and not overwrite:
-        raise GeoParquetError(ERROR_FILE_EXISTS.format(format="CSV", path=output_path))
+    handle_output_overwrite(output_path, overwrite, remove=False)
 
     validate_profile_for_urls(profile, input_path)
     validate_output_path(output_path, verbose)
@@ -757,7 +749,6 @@ def write_geojson(
     Raises:
         GeoParquetError: If conversion fails
     """
-    from pathlib import Path
 
     from geoparquet_io.core.geojson_stream import convert_to_geojson
 
@@ -768,10 +759,7 @@ def write_geojson(
             "output_path", "GeoJSON output path must be local. Use upload() for cloud destinations."
         )
 
-    # Check if output exists
-    output_file = Path(output_path)
-    if output_file.exists() and not overwrite:
-        raise GeoParquetError(ERROR_FILE_EXISTS.format(format="GeoJSON", path=output_path))
+    handle_output_overwrite(output_path, overwrite, remove=False)
 
     validate_profile_for_urls(profile, input_path)
 

@@ -4,22 +4,44 @@ File path utilities for GeoParquet files.
 
 import contextlib
 import fnmatch
+import functools
 import glob as glob_module
 import os
 from pathlib import Path, PurePath
 
-from geoparquet_io.core.duckdb_utils import _escape_sql_string, get_active_s3_config
+from geoparquet_io.core.duckdb_utils import get_active_s3_config
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
     InvalidParameterError,
 )
 from geoparquet_io.core.logging_config import debug
-from geoparquet_io.core.remote import is_remote_url
+from geoparquet_io.core.remote import (
+    is_azure_url,
+    is_remote_url,
+    needs_httpfs,
+    protocol_label,
+    remote_family,
+)
+
+
+def _has_glob_characters(text: str) -> bool:
+    """Whether *text* holds a character a glob reads as magic: ``*``, ``?``, ``[``."""
+    return any(c in text for c in ("*", "?", "["))
 
 
 def has_glob_pattern(path: str) -> bool:
-    return any(c in path for c in ("*", "?", "["))
+    """Whether *path* is a glob pattern rather than the name of one file.
+
+    A local path that exists as a regular file names that file, whatever
+    characters it holds: ``[`` is legal in file names and common in names
+    decoded from Shift_JIS ZIPs, and such a file is not a dataset (#1243).
+    Remote URLs are classified by their characters alone; gpio does not stat
+    an object store to ask.
+    """
+    if not _has_glob_characters(path):
+        return False
+    return is_remote_url(path) or not os.path.isfile(path)
 
 
 def is_partition_path(path: str) -> bool:
@@ -75,8 +97,33 @@ def resolve_partition_path(path: str, hive_partitioning: bool | None = None) -> 
     return resolved, options
 
 
+def _first_remote_match(pattern: str) -> str | None:
+    """The first object a remote glob matches, as DuckDB's ``glob()`` lists it.
+
+    One listing call. Without it a "first file" read of ``s3://b/part-*.parquet``
+    handed DuckDB the whole pattern, which read every matched footer and merged
+    row groups across files by their per-file ids (#1332).
+    """
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection_for_s3
+
+    con = get_duckdb_connection_for_s3(pattern, load_spatial=False)
+    try:
+        rows = con.execute("SELECT file FROM glob(?) ORDER BY file", [pattern]).fetchall()
+    finally:
+        con.close()
+    return next((row[0] for row in rows if row[0].endswith(".parquet")), None)
+
+
 def get_first_parquet_file(partition_path: str) -> str | None:
+    """The one file a metadata read of *partition_path* should open.
+
+    A directory or a glob resolves to its first ``.parquet`` file, local or
+    in an object store (``s3``, ``gcs``, ``azure``). An HTTP(S) URL cannot be
+    listed and is returned as given, as is any other single path.
+    """
     if is_remote_url(partition_path):
+        if has_glob_pattern(partition_path) and needs_httpfs(partition_path):
+            return _first_remote_match(partition_path)
         return partition_path
 
     if os.path.isdir(partition_path):
@@ -134,7 +181,7 @@ def validate_parquet_extension(output_file: str, any_extension: bool = False) ->
     if any_extension:
         return
 
-    if "://" in output_file:
+    if is_remote_url(output_file):
         path_part = output_file.split("://", 1)[1]
         filename = path_part.split("/")[-1] if "/" in path_part else path_part
     else:
@@ -176,7 +223,7 @@ def _absolute_glob_segments(pattern: str) -> tuple[str, ...]:
     on macOS is exactly this trap).
     """
     parts = PurePath(pattern).parts
-    first_magic = next((i for i, p in enumerate(parts) if has_glob_pattern(p)), len(parts))
+    first_magic = next((i for i, p in enumerate(parts) if _has_glob_characters(p)), len(parts))
     return (*Path(*parts[:first_magic]).resolve().parts, *parts[first_magic:])
 
 
@@ -268,9 +315,52 @@ def is_same_file_path(first: str | None, second: str | None) -> bool:
         return False
 
 
+def output_is_kept(output_path: str, overwrite: bool) -> bool:
+    """Whether a re-run leaves an existing output in place instead of writing it.
+
+    The resume half of the overwrite policy, for the per-partition files a
+    partition run writes: an existing one is skipped, not refused, unless
+    *overwrite* is set.
+    """
+    return not overwrite and os.path.exists(output_path)
+
+
+def output_exists_error(output_path: str, flag: str = "--overwrite") -> GeoParquetError:
+    """The one refusal for an existing output, naming the switch that replaces it."""
+    return GeoParquetError(f"Output file already exists: {output_path}\nUse {flag} to replace it.")
+
+
 def handle_output_overwrite(
-    output_path: str | None, overwrite: bool, input_path: str | None = None
+    output_path: str | None,
+    overwrite: bool,
+    input_path: str | None = None,
+    *,
+    flag: str = "--overwrite",
+    remove: bool = True,
 ) -> None:
+    """The one overwrite policy: what a command does about an output that exists.
+
+    Every command calls this before it writes (#1367). An output inside, or
+    matched by, a directory or glob input is refused whether or not it exists
+    yet (:func:`guard_output_not_read_as_input`); an existing output that is
+    the input itself is refused; any other existing output is refused unless
+    *overwrite* is set. Remote outputs are the object store's business and pass.
+
+    Args:
+        output_path: The output the command is about to write
+        overwrite: The caller's overwrite switch
+        input_path: The RAW input, when the command has one
+        flag: How the caller spells the switch, for the refusal's hint
+            (``--force`` for the tile and overview commands, ``overwrite=True``
+            for the Python API)
+        remove: Unlink an existing output when *overwrite* is set. False for a
+            writer that replaces the file itself (an atomic rename, an in-place
+            patch, tippecanoe's own ``--force``), so the old output survives a
+            run that fails before it is replaced.
+
+    Raises:
+        GeoParquetError: When the output may not be written.
+    """
     if not output_path:
         return
 
@@ -278,6 +368,8 @@ def handle_output_overwrite(
     # exist yet, and creating it is what breaks every later run (#867).
     guard_output_not_read_as_input(input_path, output_path)
 
+    if is_remote_url(output_path):
+        return
     output_file = Path(output_path)
 
     if not output_file.exists():
@@ -287,23 +379,44 @@ def handle_output_overwrite(
         raise GeoParquetError(f"Cannot overwrite input file: {output_path}")
 
     if not overwrite:
-        raise GeoParquetError(f"Output file already exists: {output_path}")
+        raise output_exists_error(output_path, flag)
 
-    output_file.unlink()
+    if remove:
+        output_file.unlink()
 
 
-# Schemes copy_file can resolve to a configured object store. The aliases map onto
-# the canonical scheme gpio's upload path speaks; every other scheme is_remote_url()
-# accepts is refused by name, rather than dying inside a filesystem library on a
-# dependency gpio does not ship (#810). Azure is served through the one spelling
-# gpio's upload path parses -- az://<account>/<container>/<path>, built by
+#: Seconds to wait before each further attempt at an unlink Windows refused.
+_UNLINK_WAITS = (0.1, 0.2, 0.3)
+
+
+def unlink_released_file(path: Path) -> None:
+    """Delete a scratch file, waiting for Windows to release its handle.
+
+    Windows refuses to unlink a file another handle still holds, and a reader
+    gpio just closed can keep it briefly. Three tries, then give up quietly:
+    this is cleanup of a temporary file, never a write path.
+    """
+    import time
+
+    for wait in _UNLINK_WAITS:
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except OSError:
+            time.sleep(wait)
+
+
+# copy_file resolves the s3, gcs and azure families (remote.REMOTE_SCHEMES) to a
+# configured object store, under the one scheme gpio's upload path speaks for
+# each: s3a:// becomes s3:// and gcs:// becomes gs://. Anything else is refused
+# by name, rather than dying inside a filesystem library on a dependency gpio
+# does not ship (#810). Azure is served through the one spelling gpio's upload
+# path parses -- az://<account>/<container>/<path>, built by
 # upload._build_azure_store (#864). The abfs[s]:// and azure:// spellings put the
 # account and container in a different order, or in a host name, so they are
 # refused by name rather than mis-parsed as account-first.
-_COPYABLE_STORE_SCHEMES = ("s3", "gs", "az")
-_COPY_SCHEME_ALIASES = {"s3a": "s3", "gcs": "gs"}
-_HTTP_SCHEMES = ("http", "https")
-_UNPARSEABLE_AZURE_SCHEMES = ("abfs", "abfss", "azure")
+_COPY_SCHEME_FOR_FAMILY = {"s3": "s3", "gcs": "gs"}
+_AZURE_COPY_SCHEME = "az"
 
 # _setup_store_and_kwargs() folds this into the upload kwargs it returns alongside
 # the store. A streamed copy does not use those kwargs, so this only satisfies the
@@ -314,16 +427,16 @@ _COPY_CHUNK_CONCURRENCY = 12
 def _canonical_remote_url(url: str) -> tuple[str, str]:
     """Split a remote URL into (canonical scheme, canonical URL)."""
     scheme, separator, rest = url.partition("://")
-    scheme = scheme.lower()
-    canonical = _COPY_SCHEME_ALIASES.get(scheme, scheme)
+    canonical = _COPY_SCHEME_FOR_FAMILY.get(remote_family(url), scheme.lower())
     return canonical, f"{canonical}{separator}{rest}"
 
 
 def _check_copyable_scheme(param_name: str, url: str, writing: bool) -> None:
     """Reject a scheme copy_file cannot serve, before any store or I/O is built."""
     scheme, _ = _canonical_remote_url(url)
+    family = remote_family(url)
 
-    if scheme in _HTTP_SCHEMES:
+    if family == "http":
         if writing:
             raise InvalidParameterError(
                 param_name,
@@ -332,7 +445,7 @@ def _check_copyable_scheme(param_name: str, url: str, writing: bool) -> None:
             )
         return
 
-    if scheme in _UNPARSEABLE_AZURE_SCHEMES:
+    if family == "azure" and scheme != _AZURE_COPY_SCHEME:
         from geoparquet_io.core.upload import AZURE_URL_FORM
 
         raise InvalidParameterError(
@@ -341,7 +454,7 @@ def _check_copyable_scheme(param_name: str, url: str, writing: bool) -> None:
             f"{AZURE_URL_FORM}. Rewrite the URL in that form.",
         )
 
-    if scheme not in _COPYABLE_STORE_SCHEMES:
+    if family is None:
         raise InvalidParameterError(
             param_name,
             f"cannot copy '{scheme}://' URLs. gpio copies s3://, gs:// and az:// "
@@ -359,14 +472,14 @@ def _copy_http_source(url: str, dest_path: str, dest_is_remote: bool) -> None:
     gpio's store configuration is S3-endpoint plumbing, so HTTP(S) bypasses it.
 
     The destination is not opened until the server has answered with a success
-    status, so a 404 cannot leave a truncated or empty output behind.
+    status, so a 404 cannot leave a truncated or empty output behind. This is
+    one attempt over gpio's shared HTTP client; :func:`copy_file` runs it under
+    the one retry policy (``core/http_retry``), and a failed attempt's partial
+    local file is removed by :func:`_copy_destination` before the next.
     """
-    import httpx
+    from geoparquet_io.core.http_retry import get_shared_http_client
 
-    with (
-        httpx.Client(follow_redirects=True) as client,
-        client.stream("GET", url) as response,
-    ):
+    with get_shared_http_client().stream("GET", url) as response:
         response.raise_for_status()
 
         with _copy_destination(dest_path, dest_is_remote) as dest_handle:
@@ -493,8 +606,10 @@ def copy_file(source_path: str, dest_path: str, verbose: bool = False) -> None:
     # An http(s) source is a full URL, not a store plus key: it is streamed with
     # a plain GET of the URL verbatim, so a presigned query string survives and
     # nothing is percent-encoded a second time (#825).
-    if source_is_remote and _canonical_remote_url(source_path)[0] in _HTTP_SCHEMES:
-        _copy_http_source(source_path, dest_path, dest_is_remote)
+    if source_is_remote and remote_family(source_path) == "http":
+        from geoparquet_io.core.http_retry import run_with_retry
+
+        run_with_retry(functools.partial(_copy_http_source, source_path, dest_path, dest_is_remote))
         return
 
     import obstore as obs
@@ -551,8 +666,7 @@ def resolve_file_url(file_path, verbose=False):
         # with a misleading "not a valid GeoParquet file". Name the actual
         # limitation here, before anything is opened. (az:// still works as a
         # write destination -- uploads and copies go through obstore.)
-        scheme = file_path.split("://", 1)[0].lower()
-        if scheme in ("az", *_UNPARSEABLE_AZURE_SCHEMES):
+        if is_azure_url(file_path):
             raise InvalidParameterError(
                 "path",
                 f"cannot read '{file_path}': Azure Blob Storage is supported as a "
@@ -560,48 +674,12 @@ def resolve_file_url(file_path, verbose=False):
                 "Reading from Azure is not supported yet; download the file first.",
             )
         if verbose:
-            protocol = file_path.split("://")[0].upper() if "://" in file_path else "HTTP"
-            debug(f"Reading from {protocol}: {file_path}")
+            debug(f"Reading from {protocol_label(file_path)}: {file_path}")
         return file_path
 
     if not has_glob_pattern(file_path) and not os.path.exists(file_path):
         raise FileNotFoundGeoParquetError(file_path)
     return file_path
-
-
-def safe_file_url(file_path, verbose=False):
-    """
-    Prepare a file path for safe use in SQL queries.
-
-    .. deprecated:: superseded by
-       :func:`~geoparquet_io.core.duckdb_utils.sql_path`
-
-       No gpio caller uses this any more (#802). It returns a *bare* escaped
-       value that the caller must quote itself, which is the shape that made
-       the path escape someone else's problem and produced #718's crashes:
-       write ``FROM {sql_path(raw_path)}`` instead, or
-       :func:`resolve_file_url` when the value is not going into SQL at all.
-       It is kept only because the escape-exactly-once contract these tests
-       pin is worth stating in one place.
-
-    Resolves the path with :func:`resolve_file_url` -- which takes a remote URL
-    as already percent-encoded (#825) -- and escapes single quotes to prevent
-    SQL injection when paths are interpolated into queries. That escape is the
-    only transform applied to the value.
-
-    Escaping is **not** idempotent: the result is only ever interpolated into
-    SQL, never re-escaped and never handed back to a filesystem API. Pass the
-    raw path to helpers that escape their own arguments (everything in
-    ``duckdb_metadata``), and use :func:`resolve_file_url` for direct reads.
-
-    Args:
-        file_path: Local path or remote URL
-        verbose: Whether to log debug info
-
-    Returns:
-        str: Safe file path/URL with single quotes escaped for SQL
-    """
-    return _escape_sql_string(resolve_file_url(file_path, verbose))
 
 
 def _get_file_cache_key(parquet_file: str) -> tuple[str, float]:

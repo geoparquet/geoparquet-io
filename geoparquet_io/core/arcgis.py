@@ -14,7 +14,6 @@ import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import cast
 
 import pyarrow as pa
@@ -38,6 +37,7 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
     RemoteAccessError,
 )
+from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geo_metadata import (
     _compute_geometry_types,
     prune_geo_metadata_to_columns,
@@ -1872,11 +1872,7 @@ def convert_arcgis_to_geoparquet(
     """
     configure_verbose(verbose)
 
-    # Check if output file exists and overwrite is False
-    if not overwrite and Path(output_file).exists():
-        raise GeoParquetError(
-            f"Output file already exists: {output_file}. Use --overwrite to replace it."
-        )
+    handle_output_overwrite(output_file, overwrite, remove=False)
 
     # Build auth config
     auth = None

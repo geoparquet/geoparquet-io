@@ -76,7 +76,7 @@ from geoparquet_io.core.parquet_writer import (
 )
 from geoparquet_io.core.partition.reader import build_read_parquet_expr, require_parquet_files
 from geoparquet_io.core.remote import (
-    _sanitize_url_for_logging,
+    display_path,
     is_remote_url,
     needs_httpfs,
 )
@@ -1099,14 +1099,8 @@ def _print_dry_run_output(
 ) -> None:
     """Print dry run output."""
     warn("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n")
-    display_input = (
-        _sanitize_url_for_logging(input_parquet) if is_remote_url(input_parquet) else input_parquet
-    )
-    display_output = (
-        _sanitize_url_for_logging(output_parquet)
-        if is_remote_url(output_parquet)
-        else output_parquet
-    )
+    display_input = display_path(input_parquet)
+    display_output = display_path(output_parquet)
     info(f"-- Input: {display_input}")
     info(f"-- Output: {display_output}")
     info(f"-- Geometry column: {geometry_col}")

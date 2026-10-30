@@ -21,7 +21,7 @@ from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
 from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_query
-from geoparquet_io.core.remote import _sanitize_url_for_logging, is_remote_url
+from geoparquet_io.core.remote import display_path
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 if TYPE_CHECKING:
@@ -290,19 +290,9 @@ def _print_dry_run_header(
     it is confusing to read and wrong to copy-paste (#802).
     """
     warn("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n")
-    display_input = (
-        _sanitize_url_for_logging(input_path) if is_remote_url(input_path) else input_path
-    )
-    display_countries = (
-        _sanitize_url_for_logging(countries_path)
-        if is_remote_url(countries_path)
-        else countries_path
-    )
-    display_output = (
-        _sanitize_url_for_logging(output_parquet)
-        if is_remote_url(output_parquet)
-        else output_parquet
-    )
+    display_input = display_path(input_path)
+    display_countries = display_path(countries_path)
+    display_output = display_path(output_parquet)
     info(f"-- Input file: {display_input}")
     info(f"-- Countries file: {display_countries}")
     info(f"-- Output file: {display_output}")

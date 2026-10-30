@@ -32,7 +32,7 @@ from geoparquet_io.core.logging_config import debug, info, progress, success, wa
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_query
 from geoparquet_io.core.partition.reader import require_single_file
-from geoparquet_io.core.remote import _sanitize_url_for_logging, is_remote_url
+from geoparquet_io.core.remote import display_path
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 
@@ -303,17 +303,9 @@ def _print_dry_run_header(
     and wrong to copy-paste (#802).
     """
     warn("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n")
-    display_input = (
-        _sanitize_url_for_logging(input_path) if is_remote_url(input_path) else input_path
-    )
-    display_admin = (
-        _sanitize_url_for_logging(admin_source) if is_remote_url(admin_source) else admin_source
-    )
-    display_output = (
-        _sanitize_url_for_logging(output_parquet)
-        if is_remote_url(output_parquet)
-        else output_parquet
-    )
+    display_input = display_path(input_path)
+    display_admin = display_path(admin_source)
+    display_output = display_path(output_parquet)
     info(f"-- Input file: {display_input}")
     info(f"-- Admin dataset: {display_admin}")
     info(f"-- Output file: {display_output}")
