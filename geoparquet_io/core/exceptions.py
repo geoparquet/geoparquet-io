@@ -431,7 +431,8 @@ def _status_of(exc: BaseException) -> int | None:
 #: every "is it Parquet" question in gpio asks :func:`classify_failure` for
 #: :attr:`FailureKind.NOT_PARQUET` instead of keeping its own copy.
 _NOT_PARQUET_TEXT = re.compile(
-    r"no magic bytes found|not a parquet file|magic bytes not found|too small to be a parquet",
+    r"no magic bytes found|not a parquet file|magic bytes not found|too small to be a parquet"
+    r"|smaller than the minimum file footer",
     re.IGNORECASE,
 )
 

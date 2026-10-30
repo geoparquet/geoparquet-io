@@ -40,10 +40,13 @@ from geoparquet_io.core.duckdb_utils import (
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import (
+    FailureKind,
     GeometryError,
     GeoParquetError,
     InvalidParameterError,
     RemoteAccessError,
+    classify_failure,
+    not_parquet_file_error,
 )
 from geoparquet_io.core.file_utils import (
     is_partition_path,
@@ -2647,6 +2650,8 @@ def read_spatial_to_arrow(
             from geoparquet_io.core.curved_geometry import unsupported_wkb_error_message
 
             raise GeoParquetError(unsupported_wkb_error_message(input_file, layer, str(e))) from e
+        if classify_failure(e).kind is FailureKind.NOT_PARQUET:
+            raise not_parquet_file_error(input_file) from e
         refused = text_error(e)
         if refused is not None:
             raise refused from e
@@ -3542,6 +3547,8 @@ def convert_to_geoparquet(
             from geoparquet_io.core.curved_geometry import unsupported_wkb_error_message
 
             raise GeoParquetError(unsupported_wkb_error_message(input_file, layer, str(e))) from e
+        if classify_failure(e).kind is FailureKind.NOT_PARQUET:
+            raise not_parquet_file_error(input_file) from e
         refused = text_error(e)
         if refused is not None:
             raise refused from e

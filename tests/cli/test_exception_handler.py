@@ -423,3 +423,32 @@ def test_a_file_that_is_not_parquet_gets_one_answer_from_every_path(tmp_path):
         with _pytest.raises(GeoParquetError) as caught:
             reader(str(bad))
         assert caught.value.message == expected
+
+
+@pytest.mark.parametrize("content", [b"id,name\n1,x\n", b"PAR1"], ids=["text", "four-bytes"])
+def test_every_reader_and_command_words_a_non_parquet_file_alike(tmp_path, content):
+    """DuckDB's and PyArrow's phrasings, and every command that opens the file, agree."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+    from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_kv_metadata
+    from geoparquet_io.core.exceptions import not_parquet_file_error
+
+    bad = tmp_path / "data.parquet"
+    bad.write_bytes(content)
+    out = tmp_path / "out.parquet"
+    expected = not_parquet_file_error(str(bad)).message
+
+    for argv in (
+        ["inspect", "summary", str(bad)],
+        ["check", "all", str(bad)],
+        ["extract", "geoparquet", str(bad), str(out)],
+        ["convert", "geoparquet", str(bad), str(out)],
+    ):
+        result = CliRunner().invoke(cli, argv)
+        assert result.exit_code == 1, (argv, result.output)
+        assert f"Error: {expected}" in result.output, (argv, result.output)
+    for reader in (get_geo_metadata, get_kv_metadata):
+        with pytest.raises(GeoParquetError) as caught:
+            reader(str(bad))
+        assert caught.value.message == expected

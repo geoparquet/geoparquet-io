@@ -14,7 +14,7 @@ from geoparquet_io.cli._shared import (
     prepare_output,
 )
 from geoparquet_io.cli.decorators import (
-    GlobAwareCommand,
+    ParquetInputCommand,
     SingleFileCommand,
     any_extension_option,
     aws_profile_option,
@@ -69,7 +69,7 @@ def extract(ctx):
     init_group_context(ctx)
 
 
-@extract.command(name="geoparquet", cls=GlobAwareCommand)
+@extract.command(name="geoparquet", cls=ParquetInputCommand)
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
 @column_list_option(

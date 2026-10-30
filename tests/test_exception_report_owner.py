@@ -56,11 +56,13 @@ def _call_name(call: ast.Call) -> str | None:
     return None
 
 
-def _wrapped(arg: ast.AST) -> ast.AST:
+def _wrapped(arg: ast.AST, trusted: frozenset[str] = frozenset()) -> ast.AST:
     """The argument with every cleaned subtree removed.
 
     Cleaned: a ``sanitize_*`` / ``clean_error_text`` call, and the ``.reason`` /
-    ``.message`` of a gpio error, which ``GeoParquetError`` cleans at construction.
+    ``.message`` of a name bound by ``except <gpio error> as x``, which
+    ``GeoParquetError`` cleans at construction. The same attribute on any other
+    exception (``URLError.reason``) is raw text.
     """
 
     class _Strip(ast.NodeTransformer):
@@ -70,7 +72,11 @@ def _wrapped(arg: ast.AST) -> ast.AST:
             return self.generic_visit(node)
 
         def visit_Attribute(self, node):  # noqa: N802
-            if node.attr in CLEAN_ATTRS:
+            if (
+                node.attr in CLEAN_ATTRS
+                and isinstance(node.value, ast.Name)
+                and node.value.id in trusted
+            ):
                 return ast.Constant(value="")
             return self.generic_visit(node)
 
@@ -79,12 +85,18 @@ def _wrapped(arg: ast.AST) -> ast.AST:
     return _Strip().visit(copy.deepcopy(arg))
 
 
-def _reports(node: ast.AST, names: set[str], scope: str, found: list[tuple[str, int]]) -> None:
+def _reports(
+    node: ast.AST,
+    names: set[str],
+    scope: str,
+    found: list[tuple[str, int]],
+    trusted: frozenset[str] = frozenset(),
+) -> None:
     for call in (n for n in ast.walk(node) if isinstance(n, ast.Call)):
         if _call_name(call) not in REPORTERS:
             continue
         args = [*call.args, *(k.value for k in call.keywords)]
-        if any(names & _names(_wrapped(a)) for a in args):
+        if any(names & _names(_wrapped(a, trusted)) for a in args):
             found.append((scope, call.lineno))
 
 
@@ -95,6 +107,40 @@ def _exception_params(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
         if arg.arg in EXCEPTION_PARAMS or any(t in annotation for t in EXCEPTION_ANNOTATIONS):
             names.add(arg.arg)
     return names
+
+
+def _gpio_error_names() -> frozenset[str]:
+    """Names of ``GeoParquetError`` and every subclass defined in the package."""
+    bases: dict[str, set[str]] = {}
+    for path in PACKAGE.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.ClassDef):
+                bases.setdefault(node.name, set()).update(
+                    b.id if isinstance(b, ast.Name) else b.attr
+                    for b in node.bases
+                    if isinstance(b, (ast.Name, ast.Attribute))
+                )
+    known = {"GeoParquetError"}
+    grew = True
+    while grew:
+        grew = False
+        for name, parents in bases.items():
+            if name not in known and parents & known:
+                known.add(name)
+                grew = True
+    return frozenset(known)
+
+
+_GPIO_ERRORS = _gpio_error_names()
+
+
+def _is_gpio_error(handler_type: ast.expr | None) -> bool:
+    """Whether an ``except`` clause names only gpio error classes."""
+    if handler_type is None:
+        return False
+    nodes = handler_type.elts if isinstance(handler_type, ast.Tuple) else [handler_type]
+    names = [n.id if isinstance(n, ast.Name) else getattr(n, "attr", "") for n in nodes]
+    return bool(names) and all(name in _GPIO_ERRORS for name in names)
 
 
 def unsanitized_reports(source: str) -> list[tuple[str, int]]:
@@ -117,8 +163,9 @@ def unsanitized_reports(source: str) -> list[tuple[str, int]]:
                 if names:
                     _reports(child, names, inner, found)
             if isinstance(child, ast.ExceptHandler) and child.name:
+                trusted = frozenset({child.name}) if _is_gpio_error(child.type) else frozenset()
                 for stmt in child.body:
-                    _reports(stmt, {child.name}, scope, found)
+                    _reports(stmt, {child.name}, scope, found, trusted)
             visit(child, inner)
 
     visit(tree, "<module>")
@@ -169,11 +216,19 @@ def test_the_detector_flags_a_click_error_built_from_an_exception_argument():
     assert unsanitized_reports(clean) == []
 
 
-def test_the_detector_trusts_a_gpio_errors_cleaned_attributes():
-    ok = "def f(exc):\n    return click.BadParameter(exc.reason)\n"
-    still_raw = "def f(exc):\n    return click.BadParameter(str(exc))\n"
-    assert unsanitized_reports(ok) == []
-    assert unsanitized_reports(still_raw) == [("f", 2)]
+def test_the_detector_trusts_cleaned_attributes_only_on_a_gpio_error():
+    gpio = (
+        "def f():\n    try:\n        g()\n    except InvalidParameterError as exc:\n"
+        "        raise click.BadParameter(exc.reason)\n"
+    )
+    url_error = (
+        "def f():\n    try:\n        g()\n    except URLError as exc:\n"
+        "        raise click.BadParameter(exc.reason)\n"
+    )
+    by_param = "def f(exc):\n    return click.BadParameter(exc.reason)\n"
+    assert unsanitized_reports(gpio) == []
+    assert unsanitized_reports(url_error) == [("f", 5)]
+    assert unsanitized_reports(by_param) == [("f", 2)]
 
 
 def test_the_detector_flags_could_not_run_fed_a_raw_exception():

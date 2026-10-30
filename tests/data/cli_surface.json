@@ -6872,7 +6872,7 @@
      ]
     },
     "geoparquet": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [

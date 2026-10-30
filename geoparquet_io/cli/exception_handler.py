@@ -90,8 +90,12 @@ def cli_error_for(exc: BaseException, *, path: str | None = None) -> click.Click
     if extra is not None:
         return click.ClickException(f"{message}\n\n{extra}")
 
-    # Only with a file to name: a gpio error that already names it (and says what to do) is better as it is.
-    if path is not None and classify_failure(exc).kind is FailureKind.NOT_PARQUET:
+    # A raw library error names no file of its own: say it once, with the file the
+    # command was reading when it knows it. A gpio error already carries the answer.
+    if (
+        not isinstance(exc, GeoParquetError)
+        and classify_failure(exc).kind is FailureKind.NOT_PARQUET
+    ):
         return click.ClickException(not_parquet_file_error(path).message)
 
     if isinstance(exc, GeoParquetError):
@@ -162,7 +166,7 @@ def error_boundary(*, path: str | None = None, hint: str | None = None) -> Itera
     re-raised untouched, traceback intact. Both the root group and every command
     class wrap their ``invoke`` in this, so a command run on its own answers
     exactly as it does under the root; a command whose input file should be named in a non-Parquet answer sets
-    ``GlobAwareCommand.input_param`` (see ``ParquetInputCommand``).
+    ``GlobAwareCommand.input_params`` (see ``ParquetInputCommand``).
     """
     try:
         yield

@@ -222,6 +222,7 @@ def test_a_path_or_url_named_forbidden_cannot_decide_the_verdict():
         ),
         duckdb.InvalidInputException("File 'x' too small to be a Parquet file"),
         __import__("pyarrow").lib.ArrowInvalid("Parquet magic bytes not found in footer."),
+        OSError("Parquet file size is 4 bytes, smaller than the minimum file footer (8 bytes)"),
     ],
 )
 def test_one_not_parquet_predicate(exc):
