@@ -10,6 +10,7 @@ import math
 import click
 from click.core import ParameterSource
 
+from geoparquet_io.cli.exception_handler import cli_error_for, click_error_for
 from geoparquet_io.core.compression import (
     ACCEPTED_CODEC_NAMES,
     ALLOWED_CODECS,
@@ -27,7 +28,7 @@ from geoparquet_io.core.parquet_writer import (
 
 
 class ErrorBoundaryGroup(click.Group):
-    """Root group that turns a DuckDB failure into gpio's error line.
+    """Root group that turns a failure no gpio frame owned into gpio's error line.
 
     Failures reach this point with no gpio frame willing to own them, and used
     to leave a raw Python traceback on the terminal -- an out-of-spill-space
@@ -1002,8 +1003,8 @@ class GlobAwareCommand(click.Command):
     For commands that support glob patterns (like extract), it suggests quoting.
     For commands that don't (like convert), it suggests using gpio extract first.
 
-    This class also handles GeoParquetError exceptions from core functions,
-    converting them to user-friendly Click exceptions without stack traces.
+    GeoParquetError exceptions from core functions are translated here, by the
+    same ``cli_error_for`` the root ``ErrorBoundaryGroup`` uses.
 
     Usage:
         @cli.command(cls=GlobAwareCommand)
@@ -1029,15 +1030,18 @@ class GlobAwareCommand(click.Command):
     }
 
     def invoke(self, ctx):
-        """Invoke the command with user-friendly error handling."""
-        # Import here to avoid circular imports
-        from geoparquet_io.cli.exception_handler import handle_core_exception
+        """Invoke the command; a gpio error becomes the one translation's answer.
+
+        The root ``ErrorBoundaryGroup`` does this for the real CLI. A command run
+        on its own (embedding hosts, tests) gets the same answer, in the same
+        order, because both ask ``cli_error_for``.
+        """
         from geoparquet_io.core.exceptions import GeoParquetError
 
         try:
             return super().invoke(ctx)
         except GeoParquetError as e:
-            raise handle_core_exception(e) from None
+            raise (cli_error_for(e) or click_error_for(e)) from None
 
     def make_context(self, info_name, args, parent=None, **extra):
         """Detect shell-expanded glob patterns and provide helpful errors."""
@@ -1249,7 +1253,7 @@ def handle_directory_sub_partition(
             max_partitions=max_partitions,
         )
     except ValueError as e:
-        raise click.UsageError(sanitize_error_message(str(e))) from None
+        raise click_error_for(e) from None
 
     if result["errors"]:
         # Every per-file failure was caught and warned about, so without this the

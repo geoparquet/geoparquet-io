@@ -24,20 +24,16 @@ PACKAGE = pathlib.Path(__file__).resolve().parent.parent / "geoparquet_io"
 #: Where text reaches the user unredacted. ``warn``/``error`` are not here: the
 #: logging layer redacts credentials once (``logging_config``), so a caught
 #: exception can be interpolated into a log line without a call-site wrap.
-REPORTERS = {"echo", "print", "ClickException", "BadParameter", "UsageError"}
+REPORTERS = {"echo", "print", "ClickException", "BadParameter", "UsageError", "could_not_run"}
 #: Parameter names / annotations that mean "this function was handed an exception".
 EXCEPTION_PARAMS = {"e", "exc", "err", "error", "exception"}
 EXCEPTION_ANNOTATIONS = {"Exception", "BaseException"}
 OWNERS = {"core/exceptions.py", "cli/exception_handler.py"}
 # `type(e)` names a class, not text the exception carries.
-SANITIZERS = {"sanitize_error_message", "sanitize_url_for_logging", "type"}
+SANITIZERS = {"sanitize_error_message", "sanitize_url_for_logging", "error_text", "type"}
 
 #: ``relative path:function`` -> reason the exception text is safe to print.
-UNSANITIZED_REMAINDER: dict[str, str] = {
-    "cli/commands/extract.py:_check_bigquery_source": (
-        "InvalidParameterError.reason, sanitized at construction in core/exceptions"
-    ),
-}
+UNSANITIZED_REMAINDER: dict[str, str] = {}
 
 
 def _names(node: ast.AST) -> set[str]:
@@ -159,6 +155,11 @@ def test_the_detector_flags_a_click_error_built_from_an_exception_argument():
     assert unsanitized_reports(clean) == []
 
 
+def test_the_detector_flags_could_not_run_fed_a_raw_exception():
+    raw = "def f():\n    try:\n        g()\n    except Exception as e:\n        return could_not_run('x', str(e))\n"
+    assert unsanitized_reports(raw) == [("f", 5)]
+
+
 def test_logging_redacts_credentials_once(caplog):
     """``warn``/``error`` are the single point for logged exception text."""
     import logging
@@ -173,3 +174,18 @@ def test_logging_redacts_credentials_once(caplog):
     # URLs are otherwise intact: the line still names the file it is about.
     assert "s3://k:***@bucket/x.parquet" in caplog.text
     assert "s3://bucket/y.parquet" in caplog.text
+
+
+def test_logging_applies_the_one_error_policy(caplog):
+    """An Azure SAS ``sig=`` and an ANSI escape do not survive ``warn()``."""
+    import logging
+
+    from geoparquet_io.core.logging_config import warn
+
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        warn(
+            "could not read https://acct.blob.core.windows.net/c/x.parquet?sv=2020&sig=SASSECRET \x1b[2Kdone"
+        )
+    assert "SASSECRET" not in caplog.text
+    assert "\x1b" not in caplog.text
+    assert "https://acct.blob.core.windows.net/c/x.parquet" in caplog.text

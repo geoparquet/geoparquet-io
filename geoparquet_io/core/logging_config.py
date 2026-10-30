@@ -24,7 +24,7 @@ import logging
 import sys
 from contextlib import contextmanager
 
-from geoparquet_io.core.exceptions import redact_credentials
+from geoparquet_io.core.exceptions import clean_error_text
 
 # Package-level logger
 logger = logging.getLogger("geoparquet_io")
@@ -284,10 +284,10 @@ def warn(message: str) -> None:
 
     Use for: Non-critical issues, recommendations, deprecation notices.
 
-    Credential values (``api_key=...``, ``user:password@host``) are redacted here,
-    once, so a caller can interpolate a caught exception without cleaning it first.
+    Text goes through the one ``clean_error_text`` policy here, once (credential
+    values, query strings on URLs, control characters), so a caller can interpolate a caught exception without cleaning it first.
     """
-    logger.warning(redact_credentials(message))
+    logger.warning(clean_error_text(message))
 
 
 def error(message: str) -> None:
@@ -296,7 +296,7 @@ def error(message: str) -> None:
 
     Use for: Failed operations, validation failures, critical issues.
     """
-    logger.error(redact_credentials(message))
+    logger.error(clean_error_text(message))
 
 
 def info(message: str) -> None:

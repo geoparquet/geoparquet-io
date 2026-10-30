@@ -44,7 +44,7 @@ from geoparquet_io.core.exceptions import (
     FailureKind,
     RemoteAccessError,
     classify_failure,
-    fatal_status_message,
+    status_message,
 )
 from geoparquet_io.core.logging_config import warn
 
@@ -325,12 +325,12 @@ def status_error(
     ``exceptions.fatal_status_message``, anything else as ``HTTP error <n> <reason>``.
     ``detail`` is the server's own explanation (an error body), appended when given.
     """
-    status = response.status_code
-    message = fatal_status_message(status, subject="the service", credentials=credentials)
-    if message is None:
-        # Not str(exc): httpx spells out the full request URL there, and on
-        # ArcGIS the token rides in the query string.
-        message = f"HTTP error {status} {getattr(response, 'reason_phrase', '')}".rstrip()
+    message = status_message(
+        response.status_code,
+        subject="the service",
+        credentials=credentials,
+        reason=getattr(response, "reason_phrase", ""),
+    )
     if detail:
         message = f"{message}: {detail}"
     return RemoteAccessError(url, message)
@@ -444,28 +444,51 @@ def make_request_with_retry(
             "dict[str, Any] | bytes",
             run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay),
         )
-    except httpx.HTTPStatusError as e:
-        raise status_error(url, e.response, credentials) from _cause(e)
-    except RetryExhaustedError as e:
-        last = e.last_exception
-        if isinstance(last, httpx.HTTPStatusError):
-            status = last.response.status_code
-            if _is_page_refusal(status, batch_size):
-                # A 500/502/504 without a JSON body that survived every
-                # same-size retry on a *paged* request: ArcGIS Server answers
-                # a page it cannot serialize with HTTP 500 + an HTML error
-                # page on the GeoJSON path, and a proxy in front of it gives
-                # up with 502/504 (#1134). The page size is the one lever
-                # left, and it belongs to the caller's batch-size ladder.
-                raise BatchTooLargeError(
+    except (httpx.HTTPStatusError, RetryExhaustedError) as e:
+        error, cause = final_request_error(
+            url, e, max_retries=max_retries, credentials=credentials, batch_size=batch_size
+        )
+        raise error from cause
+
+
+def final_request_error(
+    url: str,
+    failure: BaseException,
+    *,
+    max_retries: int,
+    credentials: str,
+    batch_size: int | None = None,
+) -> tuple[RemoteAccessError | BatchTooLargeError, BaseException | None]:
+    """The user-facing error (and its chained cause) for a ``run_with_retry`` failure.
+
+    ``failure`` is what ``run_with_retry`` raised: an ``HTTPStatusError`` that was
+    not retryable, or a ``RetryExhaustedError``. The one tail every caller shares;
+    a caller that needs its own exception type re-wraps ``error.message``.
+    """
+    import httpx
+
+    if isinstance(failure, httpx.HTTPStatusError):
+        return status_error(url, failure.response, credentials), _cause(failure)
+    last = failure.last_exception if isinstance(failure, RetryExhaustedError) else failure
+    if isinstance(last, httpx.HTTPStatusError):
+        status = last.response.status_code
+        if _is_page_refusal(status, batch_size):
+            # A 500/502/504 without a JSON body that survived every same-size
+            # retry on a *paged* request: ArcGIS Server answers a page it cannot
+            # serialize with HTTP 500 + an HTML error page on the GeoJSON path,
+            # and a proxy in front of it gives up with 502/504 (#1134). The page
+            # size is the one lever left, and it belongs to the caller's
+            # batch-size ladder.
+            return (
+                BatchTooLargeError(
                     url=url,
                     batch_size=cast(int, batch_size),  # _is_page_refusal says it is set
                     reason=f"HTTP {status} persisted after {max_retries} attempts",
-                ) from last
-            raise status_error(url, last.response, credentials) from _cause(last)
-        raise RemoteAccessError(
-            url, f"Request failed after {max_retries} attempts: {last}"
-        ) from last
+                ),
+                last,
+            )
+        return status_error(url, last.response, credentials), _cause(last)
+    return RemoteAccessError(url, f"Request failed after {max_retries} attempts: {last}"), last
 
 
 def _is_page_refusal(status: int, batch_size: int | None) -> bool:

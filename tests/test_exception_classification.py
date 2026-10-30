@@ -201,10 +201,9 @@ def test_click_error_for_sanitizes_any_exception():
         ("something else", FailureClass(X)),
     ],
 )
-def test_duckdb_io_text_is_read_only_when_asked(message, expected):
+def test_duckdb_io_text_is_read_in_one_place(message, expected):
     exc = duckdb.IOException(message)
-    assert classify_failure(exc, duckdb_text=True) == expected
-    assert classify_failure(exc) == FailureClass(X)  # the default never reads the text
+    assert classify_failure(exc) == expected
 
 
 def test_a_path_or_url_named_forbidden_cannot_decide_the_verdict():
@@ -212,7 +211,7 @@ def test_a_path_or_url_named_forbidden_cannot_decide_the_verdict():
     exc = duckdb.IOException(
         "IO Error: Could not open GDAL dataset at: https://h/forbidden/timeout?q=%27404%20not%20found%27"
     )
-    assert classify_failure(exc, duckdb_text=True) == FailureClass(X)
+    assert classify_failure(exc) == FailureClass(X)
 
 
 @pytest.mark.parametrize(

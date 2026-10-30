@@ -35,6 +35,7 @@ from geoparquet_io.cli.decorators import (
     strict_option,
     verbose_option,
 )
+from geoparquet_io.cli.exception_handler import error_text
 from geoparquet_io.cli.fix_helpers import NoBackupConfirmation, handle_fix_common
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 from geoparquet_io.core.check_parquet_structure import CheckProfile
@@ -59,7 +60,6 @@ from geoparquet_io.core.check_verdict import (
     worst,
 )
 from geoparquet_io.core.duckdb_utils import is_interrupt
-from geoparquet_io.core.exceptions import sanitize_error_message
 from geoparquet_io.core.file_utils import is_same_file_path
 from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT
 from geoparquet_io.core.logging_config import configure_verbose
@@ -337,12 +337,11 @@ class MultiFileCheckRunner:
             self._raise_if_interrupt(e)
             if not self.is_multi_file:
                 raise
-            self.fix_failures.append((file_path, sanitize_error_message(str(e))))
+            self.fix_failures.append((file_path, error_text(e)))
             click.echo("\r" + " " * 80 + "\r", nl=False)
             click.echo(
                 click.style(
-                    f"  {FAILURE_GLYPH} {stage} failed: {Path(file_path).name} - "
-                    f"{sanitize_error_message(str(e))}",
+                    f"  {FAILURE_GLYPH} {stage} failed: {Path(file_path).name} - {error_text(e)}",
                     fg="red",
                 )
             )
@@ -402,7 +401,7 @@ class MultiFileCheckRunner:
                 raise
             if self.verbose:
                 click.echo(traceback.format_exc(), err=True)
-            return could_not_run(stage, str(e))
+            return could_not_run(stage, error_text(e))
 
     def _raise_if_interrupt(self, error: Exception) -> None:
         """Turn ``error`` into ``KeyboardInterrupt`` when it is Ctrl-C.
@@ -561,9 +560,8 @@ class MultiFileCheckRunner:
 def _boundary_renders(error: Exception) -> bool:
     """Whether the root group turns ``error`` into an ``Error:`` line of its own."""
     from geoparquet_io.cli.exception_handler import cli_error_for
-    from geoparquet_io.core.exceptions import GeoParquetError
 
-    return isinstance(error, GeoParquetError) or cli_error_for(error) is not None
+    return cli_error_for(error) is not None
 
 
 def _echo_no_fix(verdict: Verdict, result: dict, already_fine: str) -> None:
@@ -972,7 +970,7 @@ def check_all(
                 except Exception as e:
                     click.echo(
                         click.style(
-                            f"{FAILURE_GLYPH} PMTiles failed for {file_path}: {sanitize_error_message(str(e))}",
+                            f"{FAILURE_GLYPH} PMTiles failed for {file_path}: {error_text(e)}",
                             fg="red",
                         )
                     )

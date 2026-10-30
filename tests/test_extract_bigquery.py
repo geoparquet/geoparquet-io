@@ -20,7 +20,7 @@ import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
-from geoparquet_io.cli.main import extract
+from geoparquet_io.cli.main import cli, extract
 from geoparquet_io.core.duckdb_utils import fetch_one
 from tests.conftest import safe_unlink
 
@@ -2559,7 +2559,7 @@ class TestSqlCommandLine:
     """The CLI wiring: argument arity, and the mutual-exclusion rule."""
 
     def _invoke(self, args):
-        return CliRunner().invoke(extract, ["bigquery", *args])
+        return CliRunner().invoke(cli, ["extract", "bigquery", *args])
 
     def _invoke_captured(self, args):
         """Invoke with the core patched out; returns (result, call kwargs)."""
@@ -2852,8 +2852,9 @@ class TestEmptySqlIsNotAbsentSql:
     def test_cli_empty_sql_with_a_table_id_is_refused(self, tmp_path):
         with patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as conn:
             result = CliRunner().invoke(
-                extract,
+                cli,
                 [
+                    "extract",
                     "bigquery",
                     "--sql",
                     "",
@@ -2870,8 +2871,16 @@ class TestEmptySqlIsNotAbsentSql:
     def test_cli_empty_sql_with_one_positional_names_the_sql(self, tmp_path):
         with patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as conn:
             result = CliRunner().invoke(
-                extract,
-                ["bigquery", "--sql", "", "--project", "my-project", str(tmp_path / "o.parquet")],
+                cli,
+                [
+                    "extract",
+                    "bigquery",
+                    "--sql",
+                    "",
+                    "--project",
+                    "my-project",
+                    str(tmp_path / "o.parquet"),
+                ],
             )
         assert result.exit_code != 0
         assert not conn.called

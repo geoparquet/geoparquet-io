@@ -131,7 +131,7 @@ def sanitize_error_message(text: str, *, truncate: bool = True) -> str:
     return _CONTROL_CHARS.sub("", text)
 
 
-def _clean(text: str) -> str:
+def clean_error_text(text: str) -> str:
     """The one policy for text a gpio error carries: nothing truncated, nothing secret."""
     return sanitize_error_message(text, truncate=False)
 
@@ -144,7 +144,7 @@ class GeoParquetError(Exception):
         # interpolated into it (an httpx / OWSLib / DuckDB message that names
         # the request URL, credentials and all) is sanitized here, once, so
         # ``str(error)`` is safe for the CLI and the API alike (#1034).
-        self.message = _clean(message)
+        self.message = clean_error_text(message)
         super().__init__(self.message)
 
 
@@ -164,7 +164,7 @@ class InvalidParameterError(GeoParquetError):
 
     def __init__(self, param_name: str, reason: str) -> None:
         self.param_name = param_name
-        self.reason = _clean(reason)
+        self.reason = clean_error_text(reason)
         super().__init__(f"Invalid parameter '{param_name}': {self.reason}")
 
 
@@ -172,8 +172,8 @@ class RemoteAccessError(GeoParquetError):
     """Raised when remote file access (S3/GCS/Azure) fails."""
 
     def __init__(self, url: str, reason: str) -> None:
-        self.url = _clean(url)
-        self.reason = _clean(reason)
+        self.url = clean_error_text(url)
+        self.reason = clean_error_text(reason)
         super().__init__(f"Remote access error for {self.url}: {self.reason}")
 
 
@@ -380,9 +380,9 @@ class BatchTooLargeError(GeoParquetError):
     """
 
     def __init__(self, url: str, batch_size: int, reason: str) -> None:
-        self.url = _clean(url)
+        self.url = clean_error_text(url)
         self.batch_size = batch_size
-        self.reason = _clean(reason)
+        self.reason = clean_error_text(reason)
         super().__init__(f"Batch size {batch_size} too large for {self.url}: {self.reason}")
 
 
@@ -449,12 +449,12 @@ _NOT_PARQUET_TEXT = re.compile(
 #: A quoted run or a URL: user-chosen text inside a DuckDB message (the path, the
 #: layer, the SQL). Removed before :func:`_duckdb_io_verdict` reads the rest, so
 #: a file or table *named* "forbidden" cannot decide the verdict (#1020).
-_USER_TEXT_IN_MESSAGE = re.compile(r"'[^']*'|\"[^\"]*\"|[A-Za-z][A-Za-z0-9+.\-]*://\S+")
+_USER_TEXT_IN_MESSAGE = re.compile(r"'[^']*'|\"[^\"]*\"|" + _URL_IN_TEXT.pattern)
 _HTTP_STATUS_TEXT = re.compile(r"\(HTTP (\d{3})\)|\bHTTP(?: error)?[ :]+(\d{3})\b", re.IGNORECASE)
 
 
 def _duckdb_io_verdict(exc: BaseException) -> FailureClass | None:
-    """DuckDB's remote-read failure, read from its text -- opt-in, and only here.
+    """DuckDB's remote-read failure, read from its text -- the one place that is done.
 
     A remote ``read_parquet`` fails as a plain ``IOException`` whose only account
     of what happened is its message ("... (HTTP 403)", "Timeout was reached").
@@ -471,6 +471,8 @@ def _duckdb_io_verdict(exc: BaseException) -> FailureClass | None:
     if match:
         return FailureClass(FailureKind.HTTP_STATUS, int(match.group(1) or match.group(2)))
     lowered = text.lower()
+    if "unauthorized" in lowered:
+        return FailureClass(FailureKind.HTTP_STATUS, 401)
     if "forbidden" in lowered or "access denied" in lowered:
         return FailureClass(FailureKind.HTTP_STATUS, 403)
     if "not found" in lowered or "does not exist" in lowered:
@@ -491,7 +493,7 @@ def _is_not_parquet(exc: BaseException) -> bool:
     )
 
 
-def _classify_one(exc: BaseException, duckdb_text: bool = False) -> FailureClass:
+def _classify_one(exc: BaseException) -> FailureClass:
     import duckdb
 
     if isinstance(exc, (MemoryError, KeyboardInterrupt, SystemExit)):
@@ -517,10 +519,9 @@ def _classify_one(exc: BaseException, duckdb_text: bool = False) -> FailureClass
         return FailureClass(FailureKind.UNREACHABLE)
     if isinstance(exc, _MALFORMED_RESPONSE_TYPES) or _is_xml_syntax_error(exc):
         return FailureClass(FailureKind.MALFORMED_RESPONSE)
-    if duckdb_text:
-        verdict = _duckdb_io_verdict(exc)
-        if verdict is not None:
-            return verdict
+    verdict = _duckdb_io_verdict(exc)
+    if verdict is not None:
+        return verdict
     return FailureClass(FailureKind.UNKNOWN)
 
 
@@ -550,22 +551,22 @@ def _is_xml_syntax_error(exc: BaseException) -> bool:
     )
 
 
-def classify_failure(exc: BaseException, *, duckdb_text: bool = False) -> FailureClass:
+def classify_failure(exc: BaseException) -> FailureClass:
     """Classify a caught exception by its type and structured fields.
 
     The exception and then its ``__cause__`` / ``__context__`` chain are walked
     and the first recognised link decides, so a library error wrapped by
-    another still classifies. Message text is not read, with two bounded
-    exceptions: the Parquet-magic phrases (:attr:`FailureKind.NOT_PARQUET`), and,
-    only when ``duckdb_text=True``, the status/timeout wording of a DuckDB IO
-    failure with the user's own path/URL/SQL cut out (see
-    :func:`_duckdb_io_verdict`). Carto and WFS leave it off: their URLs carry user input.
+    another still classifies. Message text is read in two bounded places only:
+    the Parquet-magic phrases (:attr:`FailureKind.NOT_PARQUET`) and the
+    status/timeout wording of a DuckDB IO failure, which has no structured field
+    (see :func:`_duckdb_io_verdict`; the user's own path, URL and SQL are cut
+    out first, so the same exception classifies the same way everywhere).
     """
     seen: set[int] = set()
     cur: BaseException | None = exc
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
-        verdict = _classify_one(cur, duckdb_text)
+        verdict = _classify_one(cur)
         if verdict.kind is not FailureKind.UNKNOWN:
             return verdict
         cur = cur.__cause__ or cur.__context__
@@ -601,3 +602,14 @@ def fatal_status_message(status: int, *, subject: str, credentials: str) -> str 
     if status == 404:
         subject = subject[:1].upper() + subject[1:]
     return template.format(subject=subject, credentials=credentials).strip()
+
+
+def status_message(status: int, *, subject: str, credentials: str, reason: str = "") -> str:
+    """The sentence for any HTTP status: the fatal one, else ``HTTP error <n> <reason> for <subject>``.
+
+    The one wording every service shares; ``reason`` is the response's reason
+    phrase (never ``str(exc)``, which spells out the full request URL).
+    """
+    return fatal_status_message(status, subject=subject, credentials=credentials) or (
+        f"HTTP error {status} {reason}".rstrip() + f" for {subject}"
+    )

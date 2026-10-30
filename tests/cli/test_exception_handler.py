@@ -29,7 +29,7 @@ class TestExceptionHandler:
         exc = InvalidParameterError("resolution", "must be 1-15")
         click_exc = handle_core_exception(exc)
         assert isinstance(click_exc, click.BadParameter)
-        assert "resolution" in str(click_exc.message)
+        assert "resolution" in click_exc.format_message()  # the option is named once, by Click
 
     def test_converts_remote_access_error_to_click_exception(self):
         exc = RemoteAccessError("s3://bucket/file", "Access denied")
@@ -101,3 +101,47 @@ class TestExceptionHandler:
         except GeoParquetError as outer:
             error = cli_error_for(outer)
         assert error is not None and "TMPDIR" in error.message
+
+
+def test_a_wrapped_duckdb_error_keeps_its_hint_on_a_glob_aware_command():
+    """The standalone command and the root group answer in the same order (spill hint first)."""
+    import duckdb
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.decorators import GlobAwareCommand
+
+    @click.command(cls=GlobAwareCommand)
+    def boom():
+        try:
+            raise duckdb.OutOfMemoryException(
+                "Out of Memory Error: max_temp_directory_size reached"
+            )
+        except duckdb.Error as inner:
+            raise GeoParquetError("conversion failed") from inner
+
+    result = CliRunner().invoke(boom, [])
+    assert result.exit_code == 1
+    assert "TMPDIR" in result.output
+
+
+def test_the_where_hint_does_not_displace_the_taxonomy():
+    """A spill-space error under `process aggregate --where` keeps its disk-shortage line."""
+    import duckdb
+
+    from geoparquet_io.cli.exception_handler import click_error_for
+
+    exc = duckdb.OutOfMemoryException("Out of Memory Error: max_temp_directory_size reached")
+    error = click_error_for(exc, hint='This is most likely caused by --where "x"')
+    assert "TMPDIR" in error.message
+    assert "--where" in error.message
+
+
+def test_an_invalid_parameter_wrapped_for_the_cli_is_a_bad_parameter_on_a_bigquery_source():
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    result = CliRunner().invoke(
+        cli, ["extract", "bigquery", "--sql", "SELECT 1", "p.d.t", "o.parquet"]
+    )
+    assert result.exit_code == 2

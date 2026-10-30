@@ -69,6 +69,7 @@ from geoparquet_io.core.http_retry import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_RETRY_DELAY,
     RetryExhaustedError,
+    final_request_error,
     get_shared_http_client,
     make_request_with_retry,
     run_with_retry,
@@ -2337,13 +2338,11 @@ def _fetch_wfs_page(
 
     try:
         download = run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay)
-    except httpx.HTTPStatusError as e:
-        raise _wfs_status_error(url, e.response) from e
-    except RetryExhaustedError as e:
-        last = e.last_exception
-        if isinstance(last, httpx.HTTPStatusError):
-            raise _wfs_status_error(url, last.response) from last
-        raise WFSError(f"Failed to fetch WFS data after {max_retries} attempts: {last}") from last
+    except (httpx.HTTPStatusError, RetryExhaustedError) as e:
+        error, cause = final_request_error(
+            url, e, max_retries=max_retries, credentials=WFS_CREDENTIALS_HINT
+        )
+        raise WFSError(error.message) from cause
 
     tmp_dir, tmp_path = download.tmp_dir, download.tmp_path
     content_type, body_kind = download.content_type, download.body_kind

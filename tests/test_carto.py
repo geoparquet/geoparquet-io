@@ -1013,8 +1013,8 @@ class TestFatalStatusError:
             (404, "not found"),
             (401, "Authentication required"),
             (403, "Access denied"),
-            (400, "HTTP 400"),
-            (418, "HTTP 418"),
+            (400, "HTTP error 400"),
+            (418, "HTTP error 418"),
         ],
     )
     def test_client_errors_are_fatal(self, status, expected):
@@ -1050,7 +1050,7 @@ class TestFatalStatusError:
             self._status(400, detail=detail), "my_table", "GeoJSON", self._EXC
         )
         assert error is not None
-        assert "HTTP 400" in str(error)
+        assert "HTTP error 400" in str(error)
         assert detail in str(error)
 
     def test_a_local_failure_is_fatal_and_says_it_is_local(self):
@@ -1314,7 +1314,7 @@ class TestFailureClassificationUsesTheHttpStatus:
             )
 
         assert conn.attempts == 1
-        assert "HTTP 400" in str(excinfo.value)
+        assert "HTTP error 400" in str(excinfo.value)
         assert 'column "foo" does not exist' in str(excinfo.value)
 
     def test_a_200_from_the_probe_is_fatal_not_retried(self, monkeypatch, status_http_server):

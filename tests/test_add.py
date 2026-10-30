@@ -8,7 +8,7 @@ import duckdb
 import pytest
 from click.testing import CliRunner
 
-from geoparquet_io.cli.main import add
+from geoparquet_io.cli.main import add, cli
 from geoparquet_io.core.duckdb_utils import fetch_one
 from tests.conftest import BUILDINGS_TEST_FILE
 
@@ -781,7 +781,7 @@ class TestAddCommandErrorHandling:
         gpkg_file.write_text("Not a parquet file")
 
         runner = CliRunner()
-        result = runner.invoke(add, ["bbox", str(gpkg_file)])
+        result = runner.invoke(cli, ["add", "bbox", str(gpkg_file)])
 
         # Should fail with exit code 1
         assert result.exit_code == 1

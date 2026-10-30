@@ -213,22 +213,16 @@ def show_remote_read_message(file_path, verbose=False):
         info(f"Reading from {protocol} (network operations may take time)...")
 
 
-#: How to authenticate to each object store: the remedy the one 401/403 sentence names.
-_STORE_CREDENTIALS = (
-    (
-        ("s3://",),
-        "S3: check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or configure ~/.aws/credentials.",
-    ),
-    (
-        ("az://", "azure", "blob.core"),
-        "Azure: check AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_ACCOUNT_KEY, "
-        "or set AZURE_STORAGE_SAS_TOKEN for SAS token auth.",
-    ),
-    (
-        ("gs://", "gcs://"),
-        "GCS: check GOOGLE_APPLICATION_CREDENTIALS points to service account JSON.",
-    ),
+#: The remedy for a 401/403, per object store: a fact about the store, while *which*
+#: store a path is on is `is_s3_url` / `is_azure_url` / `is_gcs_url`'s decision.
+_S3_CREDENTIALS = (
+    "S3: check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or configure ~/.aws/credentials."
 )
+_AZURE_CREDENTIALS = (
+    "Azure: check AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_ACCOUNT_KEY, "
+    "or set AZURE_STORAGE_SAS_TOKEN for SAS token auth."
+)
+_GCS_CREDENTIALS = "GCS: check GOOGLE_APPLICATION_CREDENTIALS points to service account JSON."
 
 #: The guidance for the failures that are not an HTTP status, keyed by the kind
 #: ``classify_failure`` reports -- the same classification everything else uses.
@@ -250,10 +244,12 @@ _GENERIC_REMOTE_HINT = (
 
 
 def _store_credentials(file_path: str) -> str:
-    lowered = file_path.lower()
-    for markers, remedy in _STORE_CREDENTIALS:
-        if any(marker in lowered for marker in markers):
-            return remedy
+    if is_s3_url(file_path):
+        return _S3_CREDENTIALS
+    if is_azure_url(file_path):
+        return _AZURE_CREDENTIALS
+    if is_gcs_url(file_path):
+        return _GCS_CREDENTIALS
     return "The file may be private or require authentication."
 
 
@@ -269,7 +265,7 @@ def get_remote_error_hint(error: BaseException, file_path: str = "") -> str:
         the shared status sentence (:func:`~geoparquet_io.core.exceptions.fatal_status_message`)
         with the object store's own credential remedy.
     """
-    verdict = classify_failure(error, duckdb_text=True)
+    verdict = classify_failure(error)
     if verdict.kind is FailureKind.HTTP_STATUS and verdict.status is not None:
         message = fatal_status_message(
             verdict.status,

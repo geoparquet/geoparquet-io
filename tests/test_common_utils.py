@@ -997,3 +997,25 @@ class TestParseCrsStringToProjjson:
         result = parse_crs_string_to_projjson("OGC:CRS84")
         assert isinstance(result, dict)
         assert "id" in result
+
+
+class TestRemoteHintSchemes:
+    """The store decision is `is_s3_url` / `is_azure_url` / `is_gcs_url`, not a substring table."""
+
+    @pytest.mark.parametrize(
+        ("path", "needle"),
+        [
+            ("s3a://b/f.parquet", "AWS_ACCESS_KEY_ID"),
+            ("abfss://c@acct.dfs.core.windows.net/f.parquet", "AZURE_STORAGE_ACCOUNT_NAME"),
+            ("gcs://b/f.parquet", "GOOGLE_APPLICATION_CREDENTIALS"),
+        ],
+    )
+    def test_scheme_family_picks_the_remedy(self, path, needle):
+        hint = get_remote_error_hint(__import__("duckdb").IOException("HTTP 403"), path)
+        assert needle in hint
+
+    def test_a_path_that_merely_contains_azure_is_not_azure(self):
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("HTTP 403"), "https://example.com/azure/f.parquet"
+        )
+        assert "AZURE" not in hint

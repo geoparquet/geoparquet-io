@@ -35,7 +35,7 @@ from geoparquet_io.core.exceptions import (
     GeoParquetError,
     InvalidParameterError,
     classify_failure,
-    fatal_status_message,
+    status_message,
 )
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
@@ -72,6 +72,9 @@ PROBE_DETAIL_BYTES = 2048
 
 # Environment variable for API key
 CARTO_API_KEY_ENV = "CARTO_API_KEY"
+
+# What a 401/403 tells the user to fix.
+CARTO_CREDENTIALS_HINT = "Set the CARTO_API_KEY environment variable or check permissions."
 
 
 class CartoError(GeoParquetError):
@@ -873,13 +876,10 @@ def _fatal_status_error(
     code = status.code
     if code is None:  # pragma: no cover - _is_retryable already answered for no status
         return None
-    message = (
-        fatal_status_message(
-            code,
-            subject=f"table '{table_name}'",
-            credentials="Set the CARTO_API_KEY environment variable or check permissions.",
-        )
-        or f"Carto request for table '{table_name}' failed with HTTP {code}."
+    message = status_message(
+        code,
+        subject=f"table '{table_name}'",
+        credentials=CARTO_CREDENTIALS_HINT,
     )
     if status.detail:
         message += f" Carto said: {status.detail}"

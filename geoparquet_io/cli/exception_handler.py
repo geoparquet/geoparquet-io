@@ -28,12 +28,12 @@ def handle_core_exception(exc: GeoParquetError) -> click.ClickException:
     plain ``ClickException`` (exit 1) carrying its already-sanitized message.
     """
     if isinstance(exc, InvalidParameterError):
-        return click.BadParameter(exc.message, param_hint=exc.param_name)
+        return click.BadParameter(exc.reason, param_hint=exc.param_name)
     return click.ClickException(exc.message)
 
 
-def _error_text(exc: BaseException) -> str:
-    """The sanitized text of ``exc``, minus DuckDB's echo of the generated SQL.
+def error_text(exc: BaseException) -> str:
+    """The text of ``exc`` for the terminal: the one place it is worded. Sanitized of ``exc``, minus DuckDB's echo of the generated SQL.
 
     A DuckDB binder/parser error appends ``LINE n: <the SQL gpio built>`` and a
     caret; that excerpt buries the cause and is never the user's to act on.
@@ -87,7 +87,7 @@ def cli_error_for(exc: BaseException, *, path: str | None = None) -> click.Click
     if isinstance(exc, (click.ClickException, click.exceptions.Exit, click.Abort)):
         return None
 
-    message = _error_text(exc)
+    message = error_text(exc)
 
     # Running out of room to spill needs the line naming TMPDIR that DuckDB's own
     # message never mentions (#752); a community extension the registry has no
@@ -96,7 +96,8 @@ def cli_error_for(exc: BaseException, *, path: str | None = None) -> click.Click
     if extra is not None:
         return click.ClickException(f"{message}\n\n{extra}")
 
-    if classify_failure(exc).kind is FailureKind.NOT_PARQUET:
+    # Only with a file to name: a gpio error that already names it (and says what to do) is better as it is.
+    if path is not None and classify_failure(exc).kind is FailureKind.NOT_PARQUET:
         return click.ClickException(_not_parquet_message(path))
 
     if isinstance(exc, GeoParquetError):
@@ -119,6 +120,7 @@ def click_error_for(
     """
     import duckdb
 
-    if hint and isinstance(exc, duckdb.Error):
-        return click.ClickException(f"{_error_text(exc)}\n\n{hint}")
-    return cli_error_for(exc, path=path) or click.ClickException(_error_text(exc))
+    error = cli_error_for(exc, path=path) or click.ClickException(error_text(exc))
+    if hint and isinstance(exc, duckdb.Error) and type(error) is click.ClickException:
+        error.message = f"{error.message}\n\n{hint}"
+    return error
