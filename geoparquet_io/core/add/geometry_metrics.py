@@ -14,6 +14,7 @@ the command used to write without a word (#1193).
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from geoparquet_io.core.common import (
     add_computed_column,
@@ -274,18 +275,32 @@ def _add_metrics_file_based(
         if os.path.exists(temp_file):
             os.unlink(temp_file)
 
-    # Add Vecorel metadata and ensure required columns
+    # Add Vecorel metadata and ensure required columns. These rewrite the file
+    # in place, so they must keep writing at the caller's resolved settings —
+    # left to their own defaults they undid the level of everything above
+    # (DuckDB's 3 for the id column, pyarrow's 1 for the schema fix).
     if vecorel:
         from geoparquet_io.core.constants import ensure_vecorel_columns
 
-        _add_vecorel_metadata_to_file(output_parquet, verbose, memory_limit)
-        ensure_vecorel_columns(output_parquet, verbose)
+        _add_vecorel_metadata_to_file(
+            output_parquet, verbose, memory_limit, compression, compression_level
+        )
+        ensure_vecorel_columns(
+            output_parquet,
+            verbose,
+            compression=compression,
+            compression_level=compression_level,
+        )
 
     success(f"Added {AREA_COLUMN} and {PERIMETER_COLUMN} to: {output_parquet}")
 
 
 def _add_vecorel_metadata_to_file(
-    parquet_file: str, verbose: bool, memory_limit: str | None
+    parquet_file: str,
+    verbose: bool,
+    memory_limit: str | None,
+    compression: str = "ZSTD",
+    compression_level: int | None = None,
 ) -> None:
     """Add Vecorel schema metadata to an existing file via rewrite."""
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
@@ -314,6 +329,15 @@ def _add_vecorel_metadata_to_file(
     os.close(fd)
     os.unlink(temp_out)
 
+    # The caller's codec always goes through -- dropping it when the level is
+    # unset re-encoded a GZIP output as ZSTD on this one rewrite. An unset
+    # level stays None, the same "no COMPRESSION_LEVEL in the COPY" the
+    # command's other writes already mean by it (#1335 tracks what unset
+    # resolves to across the COPY paths).
+    level_kwargs: dict[str, Any] = {
+        "compression": compression,
+        "compression_level": compression_level,
+    }
     try:
         try:
             write_parquet_with_metadata(
@@ -323,6 +347,7 @@ def _add_vecorel_metadata_to_file(
                 original_metadata=metadata,
                 extra_kv_metadata=extra_kv,
                 verbose=verbose,
+                **level_kwargs,
                 # A whole-file rewrite to attach one sidecar key must not also
                 # change the geometry encoding. Without this witness auto mode
                 # read the carried `geo` key, which does not say whether the

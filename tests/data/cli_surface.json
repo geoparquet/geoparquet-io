@@ -13365,6 +13365,24 @@
        "type": "text"
       },
       {
+       "default": "True",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "repair_geometry",
+       "nargs": 1,
+       "opts": [
+        "--repair-geometry"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [
+        "--no-repair-geometry"
+       ],
+       "type": "boolean"
+      },
+      {
        "default": "None",
        "hidden": false,
        "is_flag": false,

@@ -81,16 +81,27 @@ class TestSampling:
             None,
         )
 
-    def test_exact_with_a_non_default_approx_is_rejected(self):
+    @pytest.mark.parametrize("approx", [25_000, 100_000])
+    def test_exact_with_a_typed_approx_is_rejected_whatever_its_value(self, approx):
+        # `--exact --approx 100000` used to pass silently because the conflict
+        # was detected by comparing --approx against its default (#951). Only
+        # the source matters now; the value is irrelevant.
         with pytest.raises(click.UsageError) as excinfo:
-            resolve_kdtree_options(8, None, 25_000, True, ParameterSource.COMMANDLINE)
+            resolve_kdtree_options(8, None, approx, True, ParameterSource.COMMANDLINE)
         assert str(excinfo.value) == "--approx and --exact are mutually exclusive"
 
-    def test_exact_with_a_typed_approx_equal_to_the_default_is_rejected(self):
-        # `--exact --approx 100000` used to pass silently because the conflict
-        # was detected by comparing --approx against its default (#951).
+    @pytest.mark.parametrize(
+        "source",
+        [ParameterSource.ENVIRONMENT, ParameterSource.DEFAULT_MAP, None],
+        ids=["environment", "default_map", "unknown"],
+    )
+    def test_exact_with_any_non_default_source_is_rejected(self, source):
+        # Fail-closed policy: anything but DEFAULT counts as a supplied
+        # --approx, including an unknown source (None). Neither command can
+        # produce these today (no envvar=, default_map or ctx.invoke callers);
+        # this pins the choice so a future caller gets it deliberately.
         with pytest.raises(click.UsageError) as excinfo:
-            resolve_kdtree_options(8, None, 100_000, True, ParameterSource.COMMANDLINE)
+            resolve_kdtree_options(8, None, 100_000, True, source)
         assert str(excinfo.value) == "--approx and --exact are mutually exclusive"
 
 
