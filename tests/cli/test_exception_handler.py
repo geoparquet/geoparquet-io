@@ -220,3 +220,77 @@ def test_an_invalid_parameter_wrapped_for_the_cli_is_a_bad_parameter_on_a_bigque
         cli, ["extract", "bigquery", "--sql", "SELECT 1", "p.d.t", "o.parquet"]
     )
     assert result.exit_code == 2
+
+
+def test_a_gpio_error_from_a_real_subcommand_answers_like_a_plain_command(monkeypatch, tmp_path):
+    """No translation in front of the boundary: no Usage preamble, one --verbose traceback."""
+    import logging
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.decorators import ErrorBoundaryGroup
+    from geoparquet_io.cli.main import cli
+
+    src = tmp_path / "in.parquet"
+    pq.write_table(pa.table({"id": [1]}), src)
+
+    def boom(*_a, **_k):
+        raise InvalidParameterError("tolerance", "must be positive")
+
+    monkeypatch.setattr(
+        __import__("sys").modules["geoparquet_io.cli.commands.process"], "simplify_file_impl", boom
+    )
+
+    @click.group(cls=ErrorBoundaryGroup)
+    def plain_root():
+        pass
+
+    @plain_root.command("run")
+    def run():
+        raise InvalidParameterError("tolerance", "must be positive")
+
+    class _Capture(logging.Handler):
+        def __init__(self):
+            super().__init__(logging.DEBUG)
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(record)
+
+    def invoke(group, argv):
+        handler = _Capture()
+        logger = logging.getLogger()  # the root: the CLI re-installs the package logger's handlers
+        old = logger.level
+        logger.setLevel(logging.DEBUG)
+        logger.addHandler(handler)
+        try:
+            result = CliRunner().invoke(group, argv)
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(old)
+        return result, [r for r in handler.records if r.exc_info]
+
+    real, real_traces = invoke(
+        cli,
+        [
+            "process",
+            "simplify",
+            str(src),
+            str(tmp_path / "o.parquet"),
+            "--tolerance",
+            "0.1",
+            "--verbose",
+        ],
+    )
+    plain, plain_traces = invoke(plain_root, ["run"])
+
+    assert real.exit_code == plain.exit_code == 2
+
+    def error_lines(result):
+        return [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
+
+    assert error_lines(real) == error_lines(plain) != []
+    assert "Usage:" not in real.output
+    assert len(real_traces) == len(plain_traces) == 1

@@ -3,7 +3,7 @@
 ``extract wfs`` / ``extract carto`` build error lines out of the exception
 that was caught, and the exception text of httpx / OWSLib / DuckDB embeds the
 full request URL -- query string, ``api_key=`` and all. Every message that
-reaches the user passes through ``sanitize_error_message`` once, at the owner.
+reaches the user passes through ``clean_error_text`` once, at the owner.
 """
 
 from __future__ import annotations

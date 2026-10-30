@@ -6,7 +6,7 @@ the exception straight into ``click.echo``, ``print``, a ``ClickException`` or
 the request URL, query string and credentials included. The owners are
 ``core.exceptions.clean_error_text`` (inside ``GeoParquetError`` and
 ``logging_config.warn``/``error``) and ``cli.exception_handler.error_text`` /
-``click_error_for``; ``sanitize_error_message`` is accepted too.
+``click_error_for``
 
 A site is flagged when it calls a reporter with an argument that mentions the
 exception and is not wrapped in one of those. ``warn``/``error`` are not
@@ -31,7 +31,6 @@ EXCEPTION_ANNOTATIONS = {"Exception", "BaseException"}
 OWNERS = {"core/exceptions.py", "cli/exception_handler.py"}
 # `type(e)` names a class, not text the exception carries.
 SANITIZERS = {
-    "sanitize_error_message",
     "sanitize_url_for_logging",
     "clean_error_text",
     "error_text",
@@ -131,7 +130,7 @@ def test_no_handler_reports_raw_exception_text_outside_the_owners():
     unexplained = {k: v for k, v in hits.items() if k not in UNSANITIZED_REMAINDER}
     assert not unexplained, (
         "except handlers that print/raise raw exception text; wrap it in "
-        "sanitize_error_message or raise a GeoParquetError: " + repr(unexplained)
+        "clean_error_text or raise a GeoParquetError: " + repr(unexplained)
     )
     stale = [k for k in UNSANITIZED_REMAINDER if k not in hits]
     assert not stale, f"remove from UNSANITIZED_REMAINDER (now clean): {stale}"
@@ -143,7 +142,7 @@ def test_the_detector_flags_a_raw_report_and_passes_a_sanitized_one():
     )
     safe = (
         "def f():\n    try:\n        g()\n    except OSError as e:\n"
-        "        click.echo(f'x {sanitize_error_message(str(e))}')\n"
+        "        click.echo(f'x {clean_error_text(str(e))}')\n"
     )
     assert unsanitized_reports(raw) == [("f", 5)]
     assert unsanitized_reports(safe) == []
@@ -153,9 +152,7 @@ def test_the_detector_flags_a_click_error_built_from_an_exception_argument():
     """No ``except`` body here: the helper is handed the exception."""
     by_name = "def to_click(exc):\n    return click.ClickException(exc.reason)\n"
     by_annotation = "def to_click(problem: Exception):\n    raise click.UsageError(str(problem))\n"
-    clean = (
-        "def to_click(exc):\n    return click.ClickException(sanitize_error_message(str(exc)))\n"
-    )
+    clean = "def to_click(exc):\n    return click.ClickException(clean_error_text(str(exc)))\n"
     assert unsanitized_reports(by_name) == [("to_click", 2)]
     assert unsanitized_reports(by_annotation) == [("to_click", 2)]
     assert unsanitized_reports(clean) == []

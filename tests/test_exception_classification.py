@@ -173,9 +173,9 @@ def test_a_gpio_error_arrives_sanitized():
     ],
 )
 def test_echoed_credential_pairs_are_redacted(text, kept):
-    from geoparquet_io.core.exceptions import sanitize_error_message
+    from geoparquet_io.core.exceptions import clean_error_text
 
-    assert sanitize_error_message(text) == kept
+    assert clean_error_text(text) == kept
 
 
 def test_click_error_for_sanitizes_any_exception():

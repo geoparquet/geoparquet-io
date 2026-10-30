@@ -63,6 +63,7 @@ from geoparquet_io.core.exceptions import (
     RemoteAccessError,
     classify_failure,
     fatal_status_message,
+    is_auth_status,
 )
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
@@ -332,7 +333,7 @@ def get_wfs_capabilities(service_url: str, version: str = "1.1.0"):
                 f"Invalid WFS response from: {clean_url}\n"
                 f"The server may not be a valid WFS service. Error: {e}"
             ) from e
-        if verdict.kind is FailureKind.HTTP_STATUS and verdict.status in (401, 403):
+        if verdict.kind is FailureKind.HTTP_STATUS and is_auth_status(verdict.status):
             raise WFSAuthenticationError(
                 clean_url,
                 verdict.status,

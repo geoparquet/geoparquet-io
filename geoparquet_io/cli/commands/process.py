@@ -24,8 +24,6 @@ from geoparquet_io.cli.decorators import (
     where_option,
 )
 from geoparquet_io.cli.exception_handler import click_error_for
-from geoparquet_io.core.crs_utils import UnresolvableCRSError
-from geoparquet_io.core.exceptions import InvalidParameterError, ValidationError
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5 as aggregate_by_a5_impl
 from geoparquet_io.core.process.aggregate.by_admin import (
     aggregate_by_admin as aggregate_by_admin_impl,
@@ -205,7 +203,7 @@ def process_overview(
                 )
             else:
                 create_overviews_impl(input_parquet, memory_limit=write_memory, **kwargs)
-        except (InvalidParameterError, ValueError, duckdb.Error) as exc:
+        except (ValueError, duckdb.Error) as exc:
             raise click_error_for(exc) from exc
 
 
@@ -301,13 +299,7 @@ def process_aggregate_a5(
                 bbox_column=bbox_column,
                 memory_limit=write_memory,
             )
-        except (
-            InvalidParameterError,
-            ValidationError,
-            UnresolvableCRSError,
-            ValueError,
-            duckdb.Error,
-        ) as exc:
+        except (ValueError, duckdb.Error) as exc:
             raise click_error_for(exc, hint=_where_hint(where)) from exc
 
 
@@ -391,13 +383,7 @@ def process_aggregate_h3(
                 bbox_column=bbox_column,
                 memory_limit=write_memory,
             )
-        except (
-            InvalidParameterError,
-            ValidationError,
-            UnresolvableCRSError,
-            ValueError,
-            duckdb.Error,
-        ) as exc:
+        except (ValueError, duckdb.Error) as exc:
             raise click_error_for(exc, hint=_where_hint(where)) from exc
 
 
@@ -499,13 +485,7 @@ def process_aggregate_admin(
                 bbox_column=bbox_column,
                 memory_limit=write_memory,
             )
-        except (
-            InvalidParameterError,
-            ValidationError,
-            UnresolvableCRSError,
-            ValueError,
-            duckdb.Error,
-        ) as exc:
+        except (ValueError, duckdb.Error) as exc:
             raise click_error_for(exc, hint=_where_hint(where)) from exc
 
 

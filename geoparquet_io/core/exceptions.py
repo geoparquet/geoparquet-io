@@ -87,7 +87,7 @@ _URL_USERINFO = re.compile(r"(://[^/\s:@'\"]+:)[^/\s@'\"]+@")
 def redact_credentials(text: str) -> str:
     """Replace credential values in free text, leaving everything else intact.
 
-    The single redaction both the error path (:func:`sanitize_error_message`)
+    The single redaction both the error path (`clean_error_text`)
     and the log path (``logging_config.warn`` / ``error``) use: ``name=value``
     / ``name: value`` credential pairs, and the password of ``scheme://user:pw@host``.
     URLs are otherwise untouched, so a log line still names the file it is about.
@@ -98,42 +98,31 @@ def redact_credentials(text: str) -> str:
     return _CREDENTIAL_PAIR.sub(lambda m: f"{m.group(1)}***", text)
 
 
-def sanitize_error_message(text: str, *, truncate: bool = True) -> str:
-    """Make a low-level error message safe to print as gpio's own error line.
+def clean_error_text(text: str) -> str:
+    """The one policy for text that reaches a user, a log line or a gpio error.
 
-    Two things can ride into an error message from outside gpio, and neither is
+    Three things can ride into an error message from outside gpio, and none is
     safe to echo verbatim:
 
-    * **Credentials.** DuckDB names the URL it failed on, query string and all
-      -- ``HTTP GET error on 'https://bucket/x.parquet?X-Amz-Signature=...'``.
-      A presigned URL carries its signature there, which is why
-      :func:`sanitize_url_for_logging` exists and is applied at ~25 sites. Every
-      URL in the text goes through it.
+    * **Credentials in URLs.** DuckDB names the URL it failed on, query string and
+      all -- ``HTTP GET error on 'https://bucket/x.parquet?X-Amz-Signature=...'``.
+      The query string (where a presigned URL's signature and an Azure SAS ``sig=``
+      ride) is removed; the rest of the URL is kept, because a gpio error that
+      names the destination on purpose must not elide it.
+    * **Echoed credential pairs.** ``api_key=...``, ``token: ...``,
+      ``password=...``, ``user:pw@host`` in the text itself (a server body quoting
+      the request) have their value replaced by ``***`` (:func:`redact_credentials`).
     * **Control characters.** DuckDB quotes the offending value back in a
       conversion or parse error, so a value a *file* chose reaches the terminal.
       ANSI escapes in it can rewrite the line, so an input could author a clean
-      ``Error:`` line of its own choosing. They are stripped; tab and newline
-      stay.
-    * **Echoed credential pairs.** ``api_key=...``, ``token: ...``,
-      ``password=...`` and the like in the text itself (a server body quoting
-      the request) have their value replaced by ``***``.
+      ``Error:`` line of its own choosing. They are stripped; tab and newline stay.
     """
     if not text:
         return text
-    if truncate:
-        text = _URL_IN_TEXT.sub(lambda m: sanitize_url_for_logging(m.group(0)), text)
-    else:
-        # A gpio error that names the destination on purpose keeps the whole
-        # path; only the query string (where credentials ride) goes.
-        text = _URL_IN_TEXT.sub(lambda m: m.group(0).split("?")[0], text)
+    text = _URL_IN_TEXT.sub(lambda m: m.group(0).split("?")[0], text)
     text = redact_credentials(text)
     text = _ANSI_ESCAPE.sub("", text)
     return _CONTROL_CHARS.sub("", text)
-
-
-def clean_error_text(text: str) -> str:
-    """The one policy for text a gpio error carries: nothing truncated, nothing secret."""
-    return sanitize_error_message(text, truncate=False)
 
 
 class GeoParquetError(Exception):
@@ -587,6 +576,11 @@ FATAL_STATUS_MESSAGES: dict[int, str] = {
     403: "Access denied to {subject}. {credentials}",
     404: "{subject} not found (404). Check the name and the URL.",
 }
+
+
+def is_auth_status(status: int | None) -> bool:
+    """Whether ``status`` means "this needs a credential" (401 or 403)."""
+    return status in (401, 403)
 
 
 def fatal_status_message(status: int, *, subject: str, credentials: str) -> str | None:

@@ -10,7 +10,7 @@ import math
 import click
 from click.core import ParameterSource
 
-from geoparquet_io.cli.exception_handler import click_error_for, error_boundary
+from geoparquet_io.cli.exception_handler import click_error_for, error_boundary, error_text
 from geoparquet_io.core.compression import (
     ACCEPTED_CODEC_NAMES,
     ALLOWED_CODECS,
@@ -19,7 +19,7 @@ from geoparquet_io.core.compression import (
     WriteContext,
     resolve_codec,
 )
-from geoparquet_io.core.exceptions import InvalidParameterError, sanitize_error_message
+from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
     SPATIAL_BAND_TOP_ROWS,
@@ -98,7 +98,7 @@ def parse_row_group_options(
     try:
         return bytes_to_mb(parse_size_string(row_group_size_mb))
     except ValueError as e:
-        raise click.UsageError(f"Invalid row group size: {sanitize_error_message(str(e))}") from e
+        raise click.UsageError(f"Invalid row group size: {error_text(e)}") from e
 
 
 # ``--approx``'s default. ``gpio add kdtree`` and ``gpio partition kdtree`` both
@@ -573,7 +573,7 @@ def _validate_write_memory(ctx, param, value):
     try:
         validate_memory_limit(value)
     except ValueError as e:
-        raise click.BadParameter(sanitize_error_message(str(e)), ctx=ctx, param=param) from None
+        raise click.BadParameter(error_text(e), ctx=ctx, param=param) from None
     return value
 
 
@@ -986,8 +986,8 @@ class GlobAwareCommand(click.Command):
     For commands that support glob patterns (like extract), it suggests quoting.
     For commands that don't (like convert), it suggests using gpio extract first.
 
-    GeoParquetError exceptions from core functions are translated here, by the
-    same ``cli_error_for`` the root ``ErrorBoundaryGroup`` uses.
+    Failures from core functions are translated here by ``error_boundary``, the
+    same boundary the root ``ErrorBoundaryGroup`` uses.
 
     Usage:
         @cli.command(cls=GlobAwareCommand)
@@ -1188,7 +1188,7 @@ def handle_directory_sub_partition(
     try:
         min_size_bytes = parse_size_string(min_size)
     except ValueError as e:
-        raise click.UsageError(sanitize_error_message(str(e))) from None
+        raise click.UsageError(error_text(e)) from None
 
     if preview:
         # --preview used to be accepted, ignored, and the originals deleted

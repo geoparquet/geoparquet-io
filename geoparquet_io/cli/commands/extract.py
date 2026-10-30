@@ -32,8 +32,8 @@ from geoparquet_io.cli.decorators import (
     verbose_option,
     write_strategy_option,
 )
+from geoparquet_io.cli.exception_handler import error_text
 from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT
-from geoparquet_io.core.exceptions import sanitize_error_message
 from geoparquet_io.core.extract import extract as extract_impl
 from geoparquet_io.core.file_utils import validate_parquet_extension
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
@@ -463,7 +463,7 @@ def extract_arcgis(
             bbox_tuple = tuple(parts)
         except ValueError as e:
             raise click.BadParameter(
-                f"Invalid bbox format: {sanitize_error_message(str(e))}. Use xmin,ymin,xmax,ymax"
+                f"Invalid bbox format: {error_text(e)}. Use xmin,ymin,xmax,ymax"
             ) from e
 
     with _activate_s3(ctx, aws_profile=aws_profile):
