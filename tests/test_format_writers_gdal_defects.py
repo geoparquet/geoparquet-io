@@ -137,3 +137,26 @@ def test_issue_1161_native_geoarrow_geometry_is_a_clear_error(tmp_path, fmt, suf
     assert "Re-encode it as WKB" in result.output
     assert "NULL geometry" not in result.output
     assert not out.exists()
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_failed_conversion_never_touches_a_pre_existing_output(tmp_path, overwrite):
+    bad = tmp_path / "bad.parquet"
+    con = duckdb.connect()
+    con.execute("LOAD spatial")
+    table = con.sql("SELECT i AS id, 'not wkb'::BLOB AS geometry FROM range(2) t(i)").arrow()
+    pq.write_table(table.read_all(), bad)
+    out = tmp_path / "out.fgb"
+    out.write_bytes(b"precious")
+    result = _run("flatgeobuf", bad, out, *(["--overwrite"] if overwrite else []))
+    assert result.exit_code != 0
+    assert out.read_bytes() == b"precious"
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(("tmp", ".gpio"))] == []
+
+
+def test_shapefile_converts_through_staging_and_leaves_no_stage_dir(with_geo, tmp_path):
+    out = tmp_path / "out.shp"
+    result = _run("shapefile", with_geo, out)
+    assert result.exit_code == 0, result.output
+    assert out.exists() and (tmp_path / "out.dbf").exists()
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".gpio")]

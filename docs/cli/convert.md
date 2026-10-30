@@ -86,7 +86,7 @@ gpio convert data.parquet output.gpkg
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--layer-name TEXT` | features | Layer name in GeoPackage |
+| `--layer-name TEXT` | output file name without extension | Layer name in GeoPackage |
 | `--overwrite` | false | Overwrite existing file |
 | `--verbose` | false | Show debug output |
 | `--aws-profile NAME` | none | AWS profile for S3 |
