@@ -115,6 +115,7 @@
     "partition_options_base",
     "prefix_option",
     "process_compression_options",
+    "refuse_together",
     "repair_geometry_option",
     "resolve_kdtree_options",
     "row_group_options",

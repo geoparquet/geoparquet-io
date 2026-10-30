@@ -10,7 +10,12 @@ import os
 import click
 
 from geoparquet_io.cli._shared import _activate_s3, create_default_group, init_group_context
-from geoparquet_io.cli.decorators import GlobAwareCommand, ParquetInputCommand, verbose_option
+from geoparquet_io.cli.decorators import (
+    GlobAwareCommand,
+    ParquetInputCommand,
+    refuse_together,
+    verbose_option,
+)
 from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.inspect import (
     display_metadata,
@@ -113,8 +118,7 @@ def _validate_parquet_input(file_path: str) -> None:
 
 def _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_files):
     """CLI wrapper for inspect summary - delegates to core function."""
-    if json_output and markdown_output:
-        raise click.UsageError("--json and --markdown are mutually exclusive")
+    refuse_together(("--json", json_output), ("--markdown", markdown_output))
 
     _validate_parquet_input(parquet_file)
 
@@ -138,8 +142,7 @@ def _inspect_preview_impl(
     parquet_file, count, mode, json_output, markdown_output, max_columns=None, no_truncate=False
 ):
     """CLI wrapper for inspect head/tail - delegates to core function."""
-    if json_output and markdown_output:
-        raise click.UsageError("--json and --markdown are mutually exclusive")
+    refuse_together(("--json", json_output), ("--markdown", markdown_output))
     if no_truncate and max_columns is not None:
         click.echo("Note: --no-truncate overrides --max-columns; showing all columns.")
         max_columns = None
@@ -162,8 +165,7 @@ def _inspect_preview_impl(
 
 def _inspect_stats_impl(parquet_file, json_output, markdown_output):
     """CLI wrapper for inspect stats - delegates to core function."""
-    if json_output and markdown_output:
-        raise click.UsageError("--json and --markdown are mutually exclusive")
+    refuse_together(("--json", json_output), ("--markdown", markdown_output))
 
     _validate_parquet_input(parquet_file)
 

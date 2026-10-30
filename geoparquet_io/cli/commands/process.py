@@ -18,6 +18,7 @@ from geoparquet_io.cli.decorators import (
     metric_nodata_option,
     overwrite_option,
     process_compression_options,
+    refuse_together,
     repair_geometry_option,
     row_group_options,
     show_sql_option,
@@ -801,8 +802,7 @@ def process_contour(
     """
     from geoparquet_io.core.process.raster.contour import contour_file
 
-    if levels is not None and interval is not None:
-        raise click.UsageError("--levels and --interval are mutually exclusive.")
+    refuse_together(("--levels", levels is not None), ("--interval", interval is not None), end=".")
     if levels is None and interval is None:
         raise click.UsageError("one of --levels or --interval is required.")
     level_list = _parse_float_csv(levels, "--levels")

@@ -6,6 +6,7 @@ and reduce code duplication.
 """
 
 import math
+from typing import Any
 
 import click
 from click.core import ParameterSource
@@ -87,8 +88,9 @@ def parse_row_group_options(
     Raises:
         click.UsageError: If both options are provided or if size string is invalid
     """
-    if row_group_size and row_group_size_mb:
-        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
+    refuse_together(
+        ("--row-group-size", row_group_size), ("--row-group-size-mb", row_group_size_mb)
+    )
 
     if not row_group_size_mb:
         return None
@@ -110,6 +112,22 @@ DEFAULT_KDTREE_APPROX = 100000
 # nor ``--auto``, and the floor for a non-positive ``--auto``. Both commands
 # quote it in ``--auto``'s help text, so they import it too.
 DEFAULT_KDTREE_TARGET_ROWS = 120000
+
+
+def refuse_together(first: tuple[str, Any], second: tuple[str, Any], *, end: str = "") -> None:
+    """Refuse two options given together, in the one wording every command uses.
+
+    Each argument is ``(flag, given)``; *given* is read for truth, so a caller
+    states what "given" means for its option (a set flag, a value that is not
+    ``None``, a source that is not ``ParameterSource.DEFAULT``).
+
+    Raises:
+        click.UsageError: ``"<first> and <second> are mutually exclusive<end>"``
+            when both were given.
+    """
+    (first_flag, first_given), (second_flag, second_given) = first, second
+    if first_given and second_given:
+        raise click.UsageError(f"{first_flag} and {second_flag} are mutually exclusive{end}")
 
 
 def resolve_kdtree_options(
@@ -150,8 +168,7 @@ def resolve_kdtree_options(
             ``--approx`` the user supplied, or a ``--partitions`` value that is
             not a power of two of at least 2.
     """
-    if sum([partitions is not None, auto is not None]) > 1:
-        raise click.UsageError("--partitions and --auto are mutually exclusive")
+    refuse_together(("--partitions", partitions is not None), ("--auto", auto is not None))
 
     if partitions is None and auto is None:
         auto = DEFAULT_KDTREE_TARGET_ROWS
@@ -159,8 +176,7 @@ def resolve_kdtree_options(
     if partitions is not None and (partitions < 2 or (partitions & (partitions - 1)) != 0):
         raise click.UsageError(f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}")
 
-    if exact and approx_source is not ParameterSource.DEFAULT:
-        raise click.UsageError("--approx and --exact are mutually exclusive")
+    refuse_together(("--approx", approx_source is not ParameterSource.DEFAULT), ("--exact", exact))
 
     sample_size = None if exact else approx
 
