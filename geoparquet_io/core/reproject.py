@@ -31,7 +31,7 @@ from geoparquet_io.core.crs_utils import (
     unknown_crs_error,
     unknown_crs_reason,
 )
-from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
+from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     fetch_one,
@@ -46,6 +46,7 @@ from geoparquet_io.core.geo_metadata import (
     _bbox_claimed_by_another_column,
     carried_geometry_column,
     sanitized_carried_geo,
+    sanitized_carried_geo_of_file,
     strip_derived_stats,
 )
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
@@ -370,7 +371,7 @@ def _warn_carried_bbox_structs(input_path: str, bbox_col: str | None) -> None:
     candidates = [name for name in bbox_shaped_struct_columns(schema_info) if name != bbox_col]
     if not candidates:
         return
-    geo_meta = get_geo_metadata(input_path)
+    geo_meta = sanitized_carried_geo_of_file(input_path)
     for name in candidates:
         if _bbox_claimed_by_another_column(geo_meta, name):
             continue

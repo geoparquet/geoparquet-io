@@ -306,6 +306,34 @@ def test_list_shaped_block_reads_absent_on_the_carried_file_readers(tmp_path):
     assert _should_promote_to_multi(path, "geometry") is False
 
 
+def test_list_shaped_block_reads_absent_and_warns_on_the_write_path_readers(tmp_path, caplog):
+    """The four write/transform readers of the fifth pass read sanitized: a
+    list-shaped block warns once with the path and decides as absent."""
+    from geoparquet_io.core.add.bbox import _explicitly_named_bbox_struct
+    from geoparquet_io.core.common import _declares_geoarrow_encoding
+    from geoparquet_io.core.derive_geo_from_file import _secondary_geometry_names
+    from geoparquet_io.core.reproject import _warn_carried_bbox_structs
+
+    path = _parquet_with_list_block(tmp_path)
+    calls = [
+        lambda: _warn_carried_bbox_structs(path, None),
+        lambda: _explicitly_named_bbox_struct(path, "bbox"),
+        lambda: _declares_geoarrow_encoding(path),
+        lambda: _secondary_geometry_names(path),
+    ]
+    answers = []
+    for call in calls:
+        reset_malformed_geo_warnings()
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            answers.append(call())
+        messages = _malformed(caplog.records)
+        assert len(messages) == 1 and path in messages[0], messages
+    assert answers[1] is True  # no other column claims the struct
+    assert answers[2] is False  # no GeoArrow encoding declared
+    assert answers[3] == ({}, {})  # no native secondary, no declared entries
+
+
 def test_list_shaped_block_is_reported_by_the_check_paths(tmp_path):
     """``check bbox`` reads the block raw and reports the missing version, not a
     crash; ``check all`` gets as far as DuckDB, whose Parquet reader refuses the

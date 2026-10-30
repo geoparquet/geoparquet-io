@@ -64,8 +64,8 @@ def detect_parquet_geometry_column(parquet_file: str, verbose: bool = False) -> 
     """
     import duckdb
 
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+    from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
     # Normalize path for consistent handling of URLs and local files
     raw_url = resolve_file_url(parquet_file, verbose=False)
@@ -74,8 +74,8 @@ def detect_parquet_geometry_column(parquet_file: str, verbose: bool = False) -> 
     # a string is somebody else's malformed block: `carried_column_name` names
     # the ignored key in a warning and answers None, so detection falls through
     # to the schema rather than handing `quote_identifier` a number (#887).
-    geo_meta = get_geo_metadata(parquet_file)
-    if geo_meta and isinstance(geo_meta, dict):
+    geo_meta = raw_geo_of_file(parquet_file).block
+    if geo_meta:
         primary = carried_column_name(geo_meta.get("primary_column"), source=str(parquet_file))
         if primary:
             if verbose:
@@ -156,9 +156,9 @@ def find_primary_geometry_column(parquet_file: str, verbose: bool = False) -> st
     Returns:
         str: Name of the primary geometry column (defaults to 'geometry')
     """
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+    from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
-    geo_meta = get_geo_metadata(parquet_file)
+    geo_meta = raw_geo_of_file(parquet_file).value
 
     if verbose and geo_meta:
         debug(f"Geo metadata: {_summarize_geo_metadata(geo_meta)}")

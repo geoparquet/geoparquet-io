@@ -20,7 +20,7 @@ again.
 import json
 from typing import Literal, TypedDict, cast
 
-from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
+from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.duckdb_utils import free_column_name
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.geo_metadata import (
@@ -31,6 +31,7 @@ from geoparquet_io.core.geo_metadata import (
     bbox_covering_problem,
     covering_supported,
     is_covering_path,
+    raw_geo_of_file,
 )
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns, schema_direct_children
@@ -187,7 +188,7 @@ def _check_bbox_metadata_covering(geo_meta, has_bbox_column, verbose, bbox_colum
     """Check if geo metadata contains proper bbox covering.
 
     Args:
-        geo_meta: Parsed geo metadata dict (from get_geo_metadata())
+        geo_meta: Parsed geo metadata dict (``raw_geo_of_file(...).value``)
         has_bbox_column: Whether a bbox column was found in schema
         verbose: Whether to print verbose output
         bbox_column_name: The bbox column actually present in the file. A
@@ -304,7 +305,7 @@ def check_bbox_structure(parquet_file, verbose=False) -> BboxInfo:
     # Find the primary's bbox column: the authoritative covering metadata on its
     # own entry first (spec-valid files may use non-conventional names), then the
     # one self-evident conventional name as the no-provenance fallback (#1171).
-    geo_meta = get_geo_metadata(parquet_file)
+    geo_meta = raw_geo_of_file(parquet_file).value
     bbox_column_name = None
     covering_column = _bbox_column_from_covering(geo_meta)
     if covering_column:

@@ -19,12 +19,12 @@ import pytest
 class TestPyArrowMetadataForLocalFiles:
     """Test that PyArrow is used for local file metadata reads."""
 
-    def test_get_geo_metadata_uses_pyarrow_for_local_files(self, places_test_file):
-        """Test that get_geo_metadata uses PyArrow for local files."""
-        from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+    def test_raw_geo_of_file_uses_pyarrow_for_local_files(self, places_test_file):
+        """Test that raw_geo_of_file uses PyArrow for local files."""
+        from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
         # Should work and return valid geo metadata
-        result = get_geo_metadata(places_test_file)
+        result = raw_geo_of_file(places_test_file).value
         assert result is not None
         assert isinstance(result, dict)
         # GeoParquet files have version in geo metadata
@@ -62,15 +62,15 @@ class TestPyArrowMetadataForLocalFiles:
 
     def test_local_file_metadata_is_fast(self, places_test_file):
         """Test that local file metadata reads are fast (< 50ms)."""
-        from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+        from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
         # Warm up (first call may load modules)
-        get_geo_metadata(places_test_file)
+        raw_geo_of_file(places_test_file)
 
         # Time multiple calls
         start = time.perf_counter()
         for _ in range(10):
-            get_geo_metadata(places_test_file)
+            raw_geo_of_file(places_test_file)
         elapsed = time.perf_counter() - start
 
         avg_ms = (elapsed / 10) * 1000
@@ -100,16 +100,16 @@ class TestDuckDBUsedForRemoteFiles:
         assert is_remote_url(None) is False
 
     @pytest.mark.network
-    def test_get_geo_metadata_uses_duckdb_for_s3(self):
+    def test_raw_geo_of_file_uses_duckdb_for_s3(self):
         """Test that S3 URLs use DuckDB path."""
-        from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+        from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
         # This is a public test file from Overture Maps
         s3_url = "s3://overturemaps-us-west-2/release/2024-01-17-alpha.0/theme=places/type=place/part-00000-*.parquet"
         # Just verify it doesn't crash - actual network test
         # In CI this might be skipped
         try:
-            result = get_geo_metadata(s3_url)
+            result = raw_geo_of_file(s3_url).value
             # May or may not have geo metadata
             assert result is None or isinstance(result, dict)
         except Exception:
@@ -162,16 +162,16 @@ class TestLazySpatialExtension:
         """Test that pure metadata reads don't require spatial extension."""
         from geoparquet_io.core.duckdb_metadata import (
             get_file_metadata,
-            get_geo_metadata,
             get_kv_metadata,
         )
+        from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
         # These functions read metadata only - should work without spatial
         # For local files, they use PyArrow so this is naturally satisfied
         kv = get_kv_metadata(places_test_file)
         assert b"geo" in kv
 
-        geo = get_geo_metadata(places_test_file)
+        geo = raw_geo_of_file(places_test_file).value
         assert geo is not None
 
         meta = get_file_metadata(places_test_file)
@@ -304,10 +304,10 @@ class TestPerformanceRegression:
         """Test that inspect metadata operations are fast."""
         from geoparquet_io.core.duckdb_metadata import (
             get_file_metadata,
-            get_geo_metadata,
             get_kv_metadata,
             get_schema_info,
         )
+        from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
         # Warm up
         get_kv_metadata(places_test_file)
@@ -316,7 +316,7 @@ class TestPerformanceRegression:
         start = time.perf_counter()
 
         kv = get_kv_metadata(places_test_file)
-        geo = get_geo_metadata(places_test_file)
+        geo = raw_geo_of_file(places_test_file).value
         meta = get_file_metadata(places_test_file)
         schema = get_schema_info(places_test_file)
 

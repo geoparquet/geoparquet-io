@@ -883,8 +883,8 @@ def _crs_from_geo_block(
 
     A write-path reader, so a malformed carried block goes through the
     sanitized carried decoder rather than being indexed as-is (#887).
-    ``get_geo_metadata`` itself stays unsanitized -- ``gpio check`` reads through
-    it and has to see the file as it really is.
+    The raw reader (``raw_geo_of_file``) stays unsanitized -- ``gpio check``
+    reads through it and has to see the file as it really is.
     """
     geo_meta = sanitized_carried_geo_of_file(parquet_file)
     if not geo_meta:
@@ -1144,7 +1144,7 @@ def extract_crs_from_parquet(parquet_file, verbose=False, geometry_column=None):
     first, and every command used to read it (#1232, #1248).
 
     ``parquet_file`` must be a **RAW** path/URL: every helper it reaches
-    (``get_geo_metadata``, ``get_schema_info``, ``resolve_crs_reference``)
+    (``sanitized_carried_geo_of_file``, ``get_schema_info``, ``resolve_crs_reference``)
     SQL-escapes its own argument, so a pre-escaped path is escaped twice and
     the existence check then fails on a file that is plainly there (#718).
 

@@ -438,9 +438,8 @@ def sanitize_geo_metadata(geo_meta, source: str | None = None):
     dict* goes through: the write paths, and the ``inspect`` displays
     (``inspect_utils.extract_geo_info`` / ``get_preview_data``,
     ``metadata_utils``). The read-only readers (:func:`read_raw_geo` and
-    ``duckdb_metadata.get_geo_metadata``, which decodes through it)
-    deliberately do *not* sanitize: ``gpio check`` has to see the file as it
-    really is.
+    :func:`raw_geo_of_file`, its file-level form) deliberately do *not*
+    sanitize: ``gpio check`` has to see the file as it really is.
 
     Args:
         geo_meta: A decoded ``geo`` block, or None.

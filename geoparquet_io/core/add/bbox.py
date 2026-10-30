@@ -12,7 +12,7 @@ from geoparquet_io.core.bbox_structure import (
     resolve_bbox_name,
 )
 from geoparquet_io.core.common import add_computed_column
-from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadata, get_schema_info
+from geoparquet_io.core.duckdb_metadata import get_column_names, get_schema_info
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, query_schema, quote_identifier
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
@@ -84,7 +84,9 @@ def _explicitly_named_bbox_struct(input_parquet: str, bbox_column_name: str) -> 
     """
     if bbox_column_name not in bbox_shaped_struct_columns(get_schema_info(input_parquet)):
         return False
-    return not _bbox_claimed_by_another_column(get_geo_metadata(input_parquet), bbox_column_name)
+    return not _bbox_claimed_by_another_column(
+        sanitized_carried_geo_of_file(input_parquet), bbox_column_name
+    )
 
 
 def _note_bbox_structs_computed_beside(

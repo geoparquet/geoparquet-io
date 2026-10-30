@@ -228,7 +228,6 @@
     "get_compression_info",
     "get_compression_stats",
     "get_file_metadata",
-    "get_geo_metadata",
     "get_kv_metadata",
     "get_native_geo_statistics",
     "get_native_geo_stats_by_row_group",

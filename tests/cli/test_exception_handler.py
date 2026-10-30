@@ -403,8 +403,9 @@ def test_a_file_that_is_not_parquet_gets_one_answer_from_every_path(tmp_path):
     from click.testing import CliRunner
 
     from geoparquet_io.cli.main import cli
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_kv_metadata
+    from geoparquet_io.core.duckdb_metadata import get_kv_metadata
     from geoparquet_io.core.exceptions import not_parquet_file_error
+    from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
     bad = tmp_path / "data.parquet"
     bad.write_text("id,name\n1,x\n")
@@ -419,7 +420,7 @@ def test_a_file_that_is_not_parquet_gets_one_answer_from_every_path(tmp_path):
         result = CliRunner().invoke(cli, [*argv, str(bad)])
         assert result.exit_code == 1, (argv, result.output)
         assert f"Error: {expected}" in result.output, (argv, result.output)
-    for reader in (get_geo_metadata, get_kv_metadata):
+    for reader in (raw_geo_of_file, get_kv_metadata):
         with _pytest.raises(GeoParquetError) as caught:
             reader(str(bad))
         assert caught.value.message == expected
@@ -431,8 +432,9 @@ def test_every_reader_and_command_words_a_non_parquet_file_alike(tmp_path, conte
     from click.testing import CliRunner
 
     from geoparquet_io.cli.main import cli
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_kv_metadata
+    from geoparquet_io.core.duckdb_metadata import get_kv_metadata
     from geoparquet_io.core.exceptions import not_parquet_file_error
+    from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
     bad = tmp_path / "data.parquet"
     bad.write_bytes(content)
@@ -448,7 +450,7 @@ def test_every_reader_and_command_words_a_non_parquet_file_alike(tmp_path, conte
         result = CliRunner().invoke(cli, argv)
         assert result.exit_code == 1, (argv, result.output)
         assert f"Error: {expected}" in result.output, (argv, result.output)
-    for reader in (get_geo_metadata, get_kv_metadata):
+    for reader in (raw_geo_of_file, get_kv_metadata):
         with pytest.raises(GeoParquetError) as caught:
             reader(str(bad))
         assert caught.value.message == expected

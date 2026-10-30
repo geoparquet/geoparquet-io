@@ -757,7 +757,7 @@ def _resolve_geometry_info(
     Two sources, in this order of preference:
 
     * the ``input_file`` witness, read through ``get_schema_info`` /
-      ``get_geo_metadata`` -- the richer one, since a logical type carries inline
+      ``sanitized_carried_geo_of_file`` -- the richer one, since a logical type carries inline
       PROJJSON and a GEOGRAPHY's edges, and the input's ``geo`` block also names
       the secondaries that are *not* native there;
     * failing that, the output query's own ``DESCRIBE``, which names every

@@ -10,10 +10,9 @@ from typing import Any
 from geoparquet_io.core.duckdb_metadata import (
     detect_geometry_columns,
     detect_native_geometry_columns,
-    get_geo_metadata,
 )
 from geoparquet_io.core.file_utils import _get_file_cache_key
-from geoparquet_io.core.geo_metadata import carried_version
+from geoparquet_io.core.geo_metadata import carried_version, raw_geo_of_file
 from geoparquet_io.core.logging_config import debug
 
 # LRU cache for detect_geoparquet_file_type results
@@ -94,7 +93,7 @@ def detect_geoparquet_file_type(parquet_file, verbose=False, con=None):
     }
 
     # Check for geo metadata (uses PyArrow for local files, DuckDB for remote)
-    geo_meta = get_geo_metadata(parquet_file, con=con)
+    geo_meta = raw_geo_of_file(parquet_file, con=con).value
     if geo_meta:
         result["has_geo_metadata"] = True
         if isinstance(geo_meta, dict) and "version" in geo_meta:

@@ -24,13 +24,17 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import NULL_CRS_HINT, is_default_crs, is_unknown_type_crs
 from geoparquet_io.core.duckdb_metadata import (
-    get_geo_metadata,
     get_schema_info,
     native_geo_type,
     parse_geometry_logical_type,
     resolve_crs_reference,
 )
-from geoparquet_io.core.geo_metadata import _DIMENSION_SUFFIXES, _GEOMETRY_TYPE_CODES, read_raw_geo
+from geoparquet_io.core.geo_metadata import (
+    _DIMENSION_SUFFIXES,
+    _GEOMETRY_TYPE_CODES,
+    read_raw_geo,
+    sanitized_carried_geo_of_file,
+)
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.parquet_writer import without_geometry_dictionary
@@ -153,7 +157,7 @@ def _geo_col_meta_from_stats(pf, col_index: int, logical: str, parquet_file: str
 def _secondary_geometry_names(input_file: str) -> tuple[dict[str, str], dict[str, dict]]:
     """(top-level native columns by logical type string, declared geo-block entries) of an input.
 
-    Read through ``get_schema_info`` and ``get_geo_metadata`` -- the pair
+    Read through ``get_schema_info`` and ``sanitized_carried_geo_of_file`` -- the pair
     ``write_funnels.collect_nonplanar_edges`` already asks this same question of,
     and the pair that resolves a remote URL, a ``dir/*.parquet`` glob and a hive
     directory (taking the first file's footer for a multi-file input, as every
@@ -174,11 +178,11 @@ def _secondary_geometry_names(input_file: str) -> tuple[dict[str, str], dict[str
             native[column["name"]] = logical
     declared: dict[str, dict] = {}
     try:
-        geo_meta = get_geo_metadata(input_file)
+        geo_meta = sanitized_carried_geo_of_file(input_file)
     except Exception as e:  # noqa: BLE001 - an unreadable `geo` key leaves the native half
         debug(f"Could not read the geo block of {input_file}: {e}")
         geo_meta = None
-    columns = geo_meta.get("columns") if isinstance(geo_meta, dict) else None
+    columns = geo_meta.get("columns") if geo_meta else None
     if isinstance(columns, dict):
         declared = {name: meta for name, meta in columns.items() if isinstance(meta, dict)}
     return native, declared
@@ -237,7 +241,7 @@ def derive_secondary_geometry_info(
     ``output_columns`` limits the answer to columns the write actually emits, so
     a projection cannot come out declaring a column it dropped. Best-effort: an
     unreadable input derives nothing rather than failing the write. The input is
-    read through ``get_schema_info``/``get_geo_metadata``, so a remote URL, a
+    read through ``get_schema_info``/``sanitized_carried_geo_of_file``, so a remote URL, a
     glob and a hive directory all answer (#1175).
 
     ``native_types`` is the same ``{column: logical type string}`` map read from

@@ -7,7 +7,7 @@
 gone. The readers left, which must agree:
 
 1. ``core/geo_metadata.py::read_raw_geo`` — the raw diagnostic decoder
-2. ``core/duckdb_metadata.py::get_geo_metadata`` — pyarrow fast path / DuckDB remote
+2. ``core/geo_metadata.py::raw_geo_of_file`` — pyarrow fast path / DuckDB remote
    (decodes through reader 1)
 3. ``core/common.py::get_parquet_metadata`` — the kv leg of the returned tuple,
    decoded here with reader 1
@@ -42,8 +42,7 @@ import pytest
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.crs_utils import CRS_ABSENT, crs_from_column_meta
-from geoparquet_io.core.duckdb_metadata import get_geo_metadata as read_duckdb
-from geoparquet_io.core.geo_metadata import read_raw_geo
+from geoparquet_io.core.geo_metadata import raw_geo_of_file, read_raw_geo
 from geoparquet_io.core.inspect_utils import _crs_are_equivalent
 from geoparquet_io.core.validate import (
     CheckStatus,
@@ -75,7 +74,7 @@ def _read_common_kv(path: Path, _metadata: dict | None) -> dict | None:
 
 READERS = {
     "geo_metadata.read_raw_geo": lambda path, md: read_raw_geo(md).value,
-    "duckdb_metadata.get_geo_metadata": lambda path, md: read_duckdb(str(path)),
+    "geo_metadata.raw_geo_of_file": lambda path, md: raw_geo_of_file(str(path)).value,
     "common.get_parquet_metadata[kv]": _read_common_kv,
 }
 

@@ -776,15 +776,15 @@ def _corrupt_geo_file(tmp_path, cause: str):
 
 
 @pytest.mark.parametrize("cause", ["JSON", "UTF-8"])
-def test_get_geo_metadata_tolerates_undecodable_bytes_on_both_paths(cause, tmp_path):
+def test_raw_geo_of_file_tolerates_undecodable_bytes_on_both_paths(cause, tmp_path):
     """Both readers give the answer invalid JSON already got: no usable metadata."""
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
     src = _corrupt_geo_file(tmp_path, cause)
-    assert get_geo_metadata(str(src)) is None  # PyArrow fast path
+    assert raw_geo_of_file(str(src)).value is None  # PyArrow fast path
     con = get_duckdb_connection()
-    assert get_geo_metadata(str(src), con=con) is None  # DuckDB path (remote files)
+    assert raw_geo_of_file(str(src), con=con).value is None  # DuckDB path (remote files)
 
 
 @pytest.mark.parametrize("version", ["1.1", "2.0"])
@@ -1474,8 +1474,8 @@ def test_add_bbox_metadata_table_survives_a_malformed_block(col, case, block):
 def test_add_bbox_metadata_file_survives_a_malformed_block(col, case, block, tmp_path):
     """The file path crashed with ``'str' object does not support item assignment``."""
     from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
     from geoparquet_io.core.exceptions import GeoParquetError
+    from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
     reset_malformed_geo_warnings()
     path = tmp_path / f"addbboxmeta_{col}_{case}.parquet"
@@ -1488,7 +1488,7 @@ def test_add_bbox_metadata_file_survives_a_malformed_block(col, case, block, tmp
         # Read the Parquet key-value block, not the Arrow schema: a fixture
         # written by pyarrow also carries an `ARROW:schema` key holding the
         # *original* metadata, and pyarrow prefers it on the way back in.
-        columns = get_geo_metadata(str(path))["columns"]
+        columns = raw_geo_of_file(str(path)).value["columns"]
         assert isinstance(columns, dict)
         assert columns[col]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
 
