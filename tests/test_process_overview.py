@@ -558,11 +558,11 @@ class TestGridRollupStubbed:
 
 class TestProbeWorstTileCounts:
     def test_counts_shrink_with_zoom(self):
-        from geoparquet_io.core.add.quadkey import register_quadkey_udf
+        from geoparquet_io.core.index_ops import get_index_spec, load_index
         from geoparquet_io.core.process.overview.levels import probe_worst_tile_counts
 
         con = duckdb.connect()
-        register_quadkey_udf(con)
+        load_index(con, get_index_spec("quadkey"))
         # Two nearby points, one far away, one beyond the WebMercator lat
         # domain (exercises the clamp).
         cells_sql = (
@@ -577,11 +577,11 @@ class TestProbeWorstTileCounts:
         con.close()
 
     def test_empty_input(self):
-        from geoparquet_io.core.add.quadkey import register_quadkey_udf
+        from geoparquet_io.core.index_ops import get_index_spec, load_index
         from geoparquet_io.core.process.overview.levels import probe_worst_tile_counts
 
         con = duckdb.connect()
-        register_quadkey_udf(con)
+        load_index(con, get_index_spec("quadkey"))
         counts = probe_worst_tile_counts(
             con, "SELECT NULL::DOUBLE AS lon, NULL::DOUBLE AS lat WHERE false", max_zoom=2
         )

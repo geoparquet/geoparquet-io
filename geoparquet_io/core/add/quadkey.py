@@ -6,20 +6,14 @@ import pyarrow as pa
 
 from geoparquet_io.core.constants import DEFAULT_QUADKEY_COLUMN_NAME, DEFAULT_QUADKEY_RESOLUTION
 from geoparquet_io.core.crs_utils import (
-    crs_string_from_geo_meta,
     get_crs_display_name,
     is_empty_crs_value,
-    source_crs_string,
     warn_empty_crs_once,
 )
 from geoparquet_io.core.exceptions import GeoParquetError
-from geoparquet_io.core.geo_metadata import sanitized_carried_geo, sanitized_carried_geo_of_file
 from geoparquet_io.core.index_ops import IndexSpec, add_index_column, add_index_table
 from geoparquet_io.core.logging_config import (
     debug,
-)
-from geoparquet_io.core.streaming import (
-    is_stdin,
 )
 
 
@@ -73,10 +67,7 @@ def _validate_crs_from_geo_metadata(
     Common helper used by file-based, streaming, and table-based paths.
 
     Args:
-        geo_meta: A *sanitized* geo block (``sanitized_carried_geo`` or
-            ``sanitize_geo_metadata``): this indexes ``columns`` and the
-            column's entry without shape checks, which on a raw block crashed
-            on six malformed shapes (#982)
+        geo_meta: Parsed geo metadata dict (from GeoParquet schema)
         geom_col: Name of the geometry column
         verbose: Whether to print debug output
         source_description: Description for error messages (e.g., "file", "stream", "table")
@@ -123,36 +114,6 @@ def _validate_crs_from_geo_metadata(
         debug("CRS validated as geographic (lat/lon coordinates)")
 
 
-def _validate_crs_for_quadkey(input_parquet: str, geom_col: str, verbose: bool) -> None:
-    """
-    Validate that the file's CRS is geographic (WGS84/CRS84).
-
-    Quadkeys require lat/lon coordinates. Raises ClickException if CRS is projected.
-    """
-
-    # Get CRS from GeoParquet metadata: sanitized, since the helper indexes it (#982)
-    geo_meta = sanitized_carried_geo_of_file(input_parquet)
-    _validate_crs_from_geo_metadata(geo_meta, geom_col, verbose, source_description="file")
-
-
-def _streaming_source_crs(
-    input_path: str, metadata: dict | None, geom_col: str, verbose: bool
-) -> str | None:
-    """Detect the streaming input's CRS as an ``"AUTH:CODE"`` transform string.
-
-    Returns ``None`` for CRS84/default/CRS-less input (no reprojection needed).
-
-    - File input streamed to stdout (``gpio add quadkey file.parquet -``): detect
-      from the file, covering both the GeoParquet ``geo`` metadata and the
-      parquet-geo native geometry type — same as the file-based path (#530).
-    - True stdin: detect from the ``geo`` metadata carried on the Arrow stream.
-    """
-    if not is_stdin(input_path):
-        return source_crs_string(input_path, verbose, geom_col)
-    geo_meta = sanitized_carried_geo(metadata)
-    return crs_string_from_geo_meta(geo_meta, geom_col)
-
-
 def _get_resolution_size(resolution):
     return f"resolution {resolution}"
 
@@ -171,6 +132,16 @@ SPEC = IndexSpec(
     4,
     None,
     _get_resolution_size,
+    label="quadkey",
+    column_option="--quadkey-column",
+    bbox_midpoint=True,
+    crs_validator=_validate_crs_from_geo_metadata,
+    prefix_partition=True,
+    coerce_resolution=True,
+    display_unit="zoom level",
+    multiple_files=True,
+    preview_sql=False,
+    report_count=False,
 )
 
 
@@ -215,7 +186,6 @@ def add_quadkey_table(
         ValueError: If resolution is not an integer between 0 and 23
         GeoParquetError: If CRS is detected as projected (quadkeys require lat/lon)
     """
-    # Validate resolution before any DuckDB operations
     return add_index_table(
         SPEC, table, quadkey_column_name, resolution, geometry_column, use_centroid=use_centroid
     )

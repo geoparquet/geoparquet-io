@@ -40,7 +40,17 @@ def _cell_expression(lon, lat, resolution):
 
 
 SPEC = IndexSpec(
-    "h3", DEFAULT_H3_COLUMN_NAME, 0, 15, _cell_expression, 122, 7, "h3", _get_resolution_size
+    "h3",
+    DEFAULT_H3_COLUMN_NAME,
+    0,
+    15,
+    _cell_expression,
+    122,
+    7,
+    "h3",
+    _get_resolution_size,
+    label="H3",
+    column_option="--h3-name",
 )
 from geoparquet_io.core.write_funnels import collect_nonplanar_edges
 
@@ -65,7 +75,6 @@ def add_h3_table(
     Returns:
         New table with H3 column added
     """
-    # Find geometry column
     return add_index_table(SPEC, table, h3_column_name, resolution, geometry_column)
 
 
@@ -114,7 +123,6 @@ def add_h3_column(
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         memory_limit: DuckDB memory limit for the write (e.g., '2GB', '512MB')
     """
-    # Configure logging verbosity
     return add_index_column(
         SPEC,
         input_parquet,

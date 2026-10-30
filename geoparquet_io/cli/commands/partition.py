@@ -24,6 +24,7 @@ from geoparquet_io.cli.decorators import (
     verbose_option,
 )
 from geoparquet_io.cli.exception_handler import click_error_for
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.partition.admin_hierarchical import (
     partition_by_admin_hierarchical as partition_admin_hierarchical_impl,
 )
@@ -288,7 +289,7 @@ def partition_string(
 )
 @click.option(
     "--resolution",
-    type=click.IntRange(0, 15),
+    type=click.IntRange(get_index_spec("h3").min_resolution, get_index_spec("h3").max_resolution),
     default=None,
     help="H3 resolution for partitioning (0-15). Required unless --auto is used.",
 )
@@ -428,7 +429,7 @@ def partition_h3(
 )
 @click.option(
     "--level",
-    type=click.IntRange(0, 30),
+    type=click.IntRange(get_index_spec("s2").min_resolution, get_index_spec("s2").max_resolution),
     default=None,
     help="S2 level for partitioning (0-30). Required unless --auto is used.",
 )
@@ -572,7 +573,7 @@ def partition_s2(
 )
 @click.option(
     "--resolution",
-    type=click.IntRange(0, 30),
+    type=click.IntRange(get_index_spec("a5").min_resolution, get_index_spec("a5").max_resolution),
     default=None,
     help="A5 resolution for partitioning (0-30). Required unless --auto is used.",
 )
@@ -848,13 +849,17 @@ def partition_kdtree(
 )
 @click.option(
     "--resolution",
-    type=click.IntRange(0, 23),
+    type=click.IntRange(
+        get_index_spec("quadkey").min_resolution, get_index_spec("quadkey").max_resolution
+    ),
     default=None,
     help="Resolution for auto-adding quadkey column (0-23). Required unless --auto is used.",
 )
 @click.option(
     "--partition-resolution",
-    type=click.IntRange(0, 23),
+    type=click.IntRange(
+        get_index_spec("quadkey").min_resolution, get_index_spec("quadkey").max_resolution
+    ),
     default=None,
     help="Resolution for partitioning as prefix length (0-23). Required unless --auto is used.",
 )

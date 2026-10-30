@@ -70,7 +70,7 @@ def readable_geoparquet(input_parquet: str):
     propagates untouched.
 
     Not every read of the input goes through here: ``preview_partition`` and the
-    index-adding pre-steps (``_ensure_h3_column`` and its siblings) open the file
+    index-adding pre-steps (``index_ops.ensure_index_column``) open the file
     themselves, so a non-conformant input reaching those still surfaces DuckDB's
     own wording. Widen the wrapper rather than restating the claim if that
     changes.

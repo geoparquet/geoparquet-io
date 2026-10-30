@@ -72,7 +72,20 @@ def _cell_expression(lon, lat, resolution):
 
 
 SPEC = IndexSpec(
-    "s2", DEFAULT_S2_COLUMN_NAME, 0, 30, _cell_expression, 6, 4, "geography", _get_level_size
+    "s2",
+    DEFAULT_S2_COLUMN_NAME,
+    0,
+    30,
+    _cell_expression,
+    6,
+    4,
+    "geography",
+    _get_level_size,
+    label="S2",
+    column_option="--s2-name",
+    unit="level",
+    extension_preflight=True,
+    wrap_auto_error=False,
 )
 
 
@@ -96,7 +109,6 @@ def add_s2_table(
     Returns:
         New table with S2 column added
     """
-    # Validate level
     return add_index_table(SPEC, table, s2_column_name, level, geometry_column)
 
 
@@ -144,7 +156,6 @@ def add_s2_column(
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         memory_limit: DuckDB memory limit for the write (e.g., '2GB', '512MB')
     """
-    # Configure logging verbosity
     return add_index_column(
         SPEC,
         input_parquet,

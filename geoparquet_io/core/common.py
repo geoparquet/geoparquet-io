@@ -206,17 +206,10 @@ def add_computed_column(
 
     # Check if column already exists (skip in dry-run or when replacing)
     if not dry_run:
-        from geoparquet_io.core.duckdb_metadata import get_column_names
+        from geoparquet_io.core.index_ops import ensure_index_column
 
-        # Only check for column collision if not replacing
         if not replace_column:
-            column_names = get_column_names(input_parquet)
-            if column_name in column_names:
-                raise InvalidParameterError(
-                    "column_name",
-                    f"Column '{column_name}' already exists in the file. "
-                    f"Please choose a different name.",
-                )
+            ensure_index_column(None, input_parquet, column_name, None, reject_existing=True)
 
         # Get metadata before processing
         metadata, _ = get_parquet_metadata(input_parquet, verbose)

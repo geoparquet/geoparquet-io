@@ -10,12 +10,12 @@ from click.testing import CliRunner
 
 from geoparquet_io.api import ops
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.geometry_detection import detect_geometry_column_from_names
 from geoparquet_io.core.index_ops import (
     calculate_index_resolution,
     clamp_resolution,
     ensure_index_column,
     get_index_spec,
-    resolve_standard_column,
 )
 from tests.test_spatial_index_golden import A5_BUILD_CELLS, GOLDEN, INDEX_SPECS, golden_fixture
 
@@ -122,8 +122,7 @@ def test_resolution_bounds(index):
 
 
 def test_standard_geometry_name_preserves_schema_spelling():
-    assert resolve_standard_column(["ID", "GeOmEtRy"]) == "GeOmEtRy"
-    assert resolve_standard_column(["BOUNDS"], ("bbox", "bounds")) == "BOUNDS"
+    assert detect_geometry_column_from_names(["ID", "GeOmEtRy"]) == "GeOmEtRy"
 
 
 @pytest.mark.parametrize("index", INDICES)

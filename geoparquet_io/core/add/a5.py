@@ -55,7 +55,17 @@ def _cell_expression(lon, lat, resolution):
 
 
 SPEC = IndexSpec(
-    "a5", DEFAULT_A5_COLUMN_NAME, 0, 30, _cell_expression, 6, 4, "a5", _get_resolution_size
+    "a5",
+    DEFAULT_A5_COLUMN_NAME,
+    0,
+    30,
+    _cell_expression,
+    6,
+    4,
+    "a5",
+    _get_resolution_size,
+    label="A5",
+    column_option="--a5-name",
 )
 from geoparquet_io.core.write_funnels import collect_nonplanar_edges
 
@@ -80,7 +90,6 @@ def add_a5_table(
     Returns:
         New table with A5 column added
     """
-    # Find geometry column
     return add_index_table(SPEC, table, a5_column_name, resolution, geometry_column)
 
 
@@ -129,7 +138,6 @@ def add_a5_column(
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         memory_limit: DuckDB memory limit for the write (e.g., '2GB', '512MB')
     """
-    # Configure logging verbosity
     return add_index_column(
         SPEC,
         input_parquet,

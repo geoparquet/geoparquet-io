@@ -25,6 +25,7 @@ from geoparquet_io.cli.decorators import (
     where_option,
 )
 from geoparquet_io.cli.exception_handler import click_error_for
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5 as aggregate_by_a5_impl
 from geoparquet_io.core.process.aggregate.by_admin import (
     aggregate_by_admin as aggregate_by_admin_impl,
@@ -224,7 +225,7 @@ def process_aggregate(ctx):
 @click.argument("output_parquet")
 @click.option(
     "--resolution",
-    type=click.IntRange(0, 30),
+    type=click.IntRange(get_index_spec("a5").min_resolution, get_index_spec("a5").max_resolution),
     default=None,
     help="A5 resolution (0-30). Required unless --auto.",
 )
@@ -308,7 +309,7 @@ def process_aggregate_a5(
 @click.argument("output_parquet")
 @click.option(
     "--resolution",
-    type=click.IntRange(0, 15),
+    type=click.IntRange(get_index_spec("h3").min_resolution, get_index_spec("h3").max_resolution),
     default=None,
     help="H3 resolution (0-15). Required unless --auto.",
 )

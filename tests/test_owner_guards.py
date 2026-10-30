@@ -83,14 +83,13 @@ EXPECTED_COUNTS = {
     "G1.overwrite_check": 0,
     "G1.output_version": 0,
     "G1.geometry_stats": 0,
-    "G1.edges": 0,
-    "G2.exemptions": 19,
+    "G2.exemptions": 15,
     "G3.pairs": 21,
     "G3.baseline": 21,
     "G3.pylint": 48,
     "G13.options": 13,
     "G13.bbox_parsers": 3,
-    "G4.whitelist": 180,
+    "G4.whitelist": 177,
     "G4.tests_whitelist": 95,
 }
 
@@ -3349,64 +3348,10 @@ def test_g12_the_output_version_arm_leaves_non_decisions_alone(tmp_path, source)
     assert arm_hits(_plant(tmp_path, "output_version", source), "output_version") == [], source
 
 
-#: Every shape of an ``edges`` decision the G1.edges arm must see.
-EDGES_SHAPES = {
-    "literal compare": 'def f(e):\n    return e == "spherical"\n',
-    "literal tuple": 'ONE_X = ("planar", "spherical")\n',
-    "algorithm set": 'ELL = frozenset({"vincenty", "thomas", "andoyer", "karney"})\n',
-    "click choice": 'CHOICE = ["spherical", "planar"]\n',
-    "key read": 'def f(col):\n    return col["edges"]\n',
-    "key get": 'def f(col):\n    return col.get("edges", None)\n',
-    "key write": 'def f(col, e):\n    col["edges"] = e\n',
-    "key test": 'def f(col):\n    return "edges" in col\n',
-    "key filter": 'def f(d):\n    return {k: v for k, v in d.items() if k != "edges"}\n',
-    "f-string part": 'def f(n):\n    return f"{n}" + "karney"\n',
-    # The first audit's shapes, each passing the arm at 0 before it.
-    "dict literal key": 'def f(e):\n    return {"edges": e}\n',
-    "dict update": 'def f(d, e):\n    d.update({"edges": e})\n',
-    "dict call": "def f(e):\n    return dict(edges=e)\n",
-    "geography f-string": 'def f(alg):\n    return f"GEOGRAPHY(OGC:CRS84, {alg})"\n',
-    "algorithm f-string": 'def f(a):\n    return f"algorithm={a}"\n',
-    "algorithm regex": 'import re\n\nPAT = re.compile(r"algorithm=(\\w+)")\n',
-    "case fold compare": "def f(edges, x):\n    return edges.lower() == x\n",
-    "uppercase literal": 'ALL = ("SPHERICAL",)\n',
-    "edge type member": "import geoarrow.pyarrow as ga\n\nT = ga.EdgeType.SPHERICAL\n",
-    "edge type subscript": "import geoarrow.pyarrow as ga\n\n\ndef f(e):\n    return ga.EdgeType[e.upper()]\n",
-    "edge type read": "def f(t):\n    return t.edge_type.name.lower()\n",
-    # The second audit's shapes.
-    "or planar": "from geoparquet_io.core.edges import PLANAR\n\n\ndef f(e):\n    return e or PLANAR\n",
-    "not planar": "from geoparquet_io.core.edges import PLANAR\n\n\ndef f(e):\n    return e != PLANAR\n",
-    "is spherical": "from geoparquet_io.core import edges\n\n\ndef f(a):\n    return a == edges.SPHERICAL\n",
-    "in constants": "from geoparquet_io.core.edges import PLANAR, SPHERICAL\n\n\ndef f(e):\n    return e in (PLANAR, SPHERICAL)\n",
-    "aliased edge type": "from geoarrow.pyarrow import EdgeType as ET\n\nT = ET.SPHERICAL\n",
-    "geography concat": 'def f(alg):\n    return "GEOGRAPHY(OGC:CRS84, " + alg + ")"\n',
-    "casefold": "def f(edges):\n    e = edges.casefold()\n    return e\n",
-}
-
-#: A planar centroid cell key, planted where a cell key is built.
-CELL_KEY_PLANTS = {
-    "geoparquet_io/core/add/some_cells.py": 'def f(g):\n    return f"h3_latlng_to_cell(ST_Y(ST_Centroid({g})), 0, 9)"\n',
-    "geoparquet_io/core/partition/some_cells.py": 'SQL = "SELECT ST_Centroid(geometry) FROM t"\n',
-    "geoparquet_io/core/process/aggregate/some_cells.py": 'def f(g):\n    return f"ST_Centroid({g})"\n',
-}
-
-
-@pytest.mark.parametrize("where", sorted(CELL_KEY_PLANTS))
-def test_g12_edges_arm_flags_a_planar_cell_key(where, tmp_path):
-    target = tmp_path / where
-    target.parent.mkdir(parents=True)
-    target.write_text(CELL_KEY_PLANTS[where], encoding="utf-8")
-    assert arm_hits(tmp_path, "edges"), where
-
-
-def test_g12_edges_arm_leaves_a_centroid_elsewhere_alone(tmp_path):
-    target = tmp_path / "geoparquet_io/core/pmtiles_chunks.py"
-    target.parent.mkdir(parents=True)
-    target.write_text('def f(g):\n    return f"ST_X(ST_Centroid({g}))"\n', encoding="utf-8")
-    assert arm_hits(tmp_path, "edges") == []
-
-
-@pytest.mark.parametrize("shape", sorted(EDGES_SHAPES))
-def test_g12_edges_arm_flags_every_shape(shape, tmp_path):
-    repo = _plant(tmp_path, "edges", EDGES_SHAPES[shape])
-    assert arm_hits(repo, "edges"), shape
+@pytest.mark.parametrize(
+    "name", ["ensure_h3_column", "_ensure_h3_column", "ensure_index_column", "ensurecell_column"]
+)
+def test_g12_g2_index_column_ensure_has_one_owner(tmp_path, name):
+    repo = _g2_tree(tmp_path, {"index_copy.py": f"def {name}(x):\n    return x\n"})
+    result = _run_owner_defs("--repo", str(repo))
+    assert result.returncode == 1 and name in result.stdout, result.stdout

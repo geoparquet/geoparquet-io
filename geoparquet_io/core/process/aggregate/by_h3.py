@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pyarrow as pa
 
+from geoparquet_io.core.add.h3 import SPEC
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.constants import DEFAULT_H3_COLUMN_NAME
 from geoparquet_io.core.process.aggregate.grid_common import (
@@ -16,14 +17,16 @@ from geoparquet_io.core.process.aggregate.grid_common import (
     aggregate_grid_table,
 )
 
+assert SPEC.extension is not None
+
 H3_SCHEME = GridScheme(
-    name="h3",
-    extension="h3",
-    min_resolution=0,
-    max_resolution=15,
-    default_column=DEFAULT_H3_COLUMN_NAME,
+    name=SPEC.name,
+    extension=SPEC.extension,
+    min_resolution=SPEC.min_resolution,
+    max_resolution=SPEC.max_resolution,
+    default_column=SPEC.column_name,
     # h3_latlng_to_cell_string takes (lat, lng) -> note Y before X.
-    key_template="h3_latlng_to_cell_string(ST_Y({pt}), ST_X({pt}), {res})",
+    key_template=SPEC.expression("ST_X({pt})", "ST_Y({pt})", "{res}"),
     # The WKB form parses straight to a GEOMETRY -- no WKT round trip. Every
     # vertex comes back wrapped into [-180, 180], so a cell straddling the
     # antimeridian arrives torn; the shared builder repairs it.

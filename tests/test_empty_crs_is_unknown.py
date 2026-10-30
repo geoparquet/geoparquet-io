@@ -222,11 +222,11 @@ class TestQuadkeyStdin:
 
     @pytest.mark.parametrize("value", ["", {}, [], 0], ids=repr)
     def test_streaming_source_crs_warns(self, value, caplog):
-        from geoparquet_io.core.add.quadkey import _streaming_source_crs
+        from geoparquet_io.core.stream_io import _detect_transform_source_crs
 
         metadata = {b"geo": json.dumps(_geo_block(value)).encode()}
         with caplog.at_level(logging.WARNING):
-            assert _streaming_source_crs("-", metadata, "geometry", False) is None
+            assert _detect_transform_source_crs("-", metadata, True) is None
         assert _empty_crs_warnings(caplog.records)
 
     @pytest.mark.parametrize("value", ["", {}, [], 0], ids=repr)

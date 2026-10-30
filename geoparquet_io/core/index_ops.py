@@ -17,7 +17,8 @@ from dataclasses import dataclass
 import mercantile
 
 from geoparquet_io.core.bbox_structure import get_bbox_advice
-from geoparquet_io.core.common import add_computed_column, get_parquet_metadata
+from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.compression import print_copy_dry_run
 from geoparquet_io.core.crs_utils import (
     crs_string_from_table,
     source_crs_string,
@@ -26,20 +27,19 @@ from geoparquet_io.core.crs_utils import (
 from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
+    fetch_one,
     get_duckdb_connection,
     load_community_extension,
-    query_schema,
     quote_identifier,
     register_arrow,
-    require_community_extension,
     sql_path,
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError, PartitionError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
-from geoparquet_io.core.geo_metadata import sanitized_carried_geo
+from geoparquet_io.core.geo_metadata import sanitized_carried_geo, sanitized_carried_geo_of_file
 from geoparquet_io.core.geometry_detection import (
-    STANDARD_GEOMETRY_NAMES,
+    detect_geometry_column_from_names,
     find_primary_geometry_column,
 )
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
@@ -73,30 +73,53 @@ class IndexSpec:
     column_name: str
     min_resolution: int
     max_resolution: int
-    expression: Callable[[str, str, int], str]
+    expression: Callable[[str, str, int | str], str]
     base_cells: int
     subdivision: int
     extension: str | None
     size: Callable[[int], str]
 
-    @property
-    def label(self):
-        return "quadkey" if self.name == "quadkey" else self.name.upper()
+    label: str = ""
+    unit: str = "resolution"
+    extension_preflight: bool = False
+    bbox_midpoint: bool = False
+    crs_validator: Callable | None = None
+    prefix_partition: bool = False
+    coerce_resolution: bool = False
+    wrap_auto_error: bool = True
+    column_option: str = ""
+    display_unit: str = ""
+    multiple_files: bool = False
+    preview_sql: bool = True
+    report_count: bool = True
 
-    @property
-    def unit(self):
-        return "level" if self.name == "s2" else "resolution"
+
+def preflight_index(spec, command, *, directory=False):
+    from geoparquet_io.core.duckdb_utils import require_community_extension
+
+    if spec.extension_preflight or (directory and spec.extension):
+        require_community_extension(spec.extension, feature=f"gpio {command} {spec.name}")
 
 
-def resolve_standard_column(columns, candidates=STANDARD_GEOMETRY_NAMES):
-    """Resolve common names case-insensitively, retaining schema spelling."""
-    names = {name.lower(): name for name in columns}
-    return next((names[name.lower()] for name in candidates if name.lower() in names), None)
+def validate_index_crs(spec, geo_meta, geom_col, source_crs, description, verbose=False):
+    """Apply the spec's CRS requirement only when no transform is available."""
+    if spec.crs_validator is not None and source_crs is None:
+        spec.crs_validator(geo_meta, geom_col, verbose, source_description=description)
 
 
-def load_index(con, spec):
+def table_bbox_column(spec, table, source_crs, use_centroid):
+    if not spec.bbox_midpoint or use_centroid or source_crs is not None:
+        return None
+    from geoparquet_io.core.arrow_geo_metadata import _detect_bbox_column_from_table
+
+    return _detect_bbox_column_from_table(table)
+
+
+def load_index(con, spec, verbose=False):
     if spec.extension:
-        kwargs = {"feature": "gpio add s2"} if spec.name == "s2" else {}
+        if verbose:
+            debug(f"Loading DuckDB extension: {spec.extension}")
+        kwargs = {"feature": f"gpio add {spec.name}"} if spec.extension_preflight else {}
         load_community_extension(con, spec.extension, **kwargs)
     else:
         con.create_function(
@@ -119,40 +142,33 @@ def index_expression(spec, geom_col, resolution, source_crs=None, bbox_col=None)
     return spec.expression(lon, lat, resolution)
 
 
-def validate_index_resolution(spec, resolution, table=False):
+def validate_index_resolution(spec, resolution, table=False, parameter=None):
     if not spec.min_resolution <= resolution <= spec.max_resolution:
         bounds = (
             f"must be between {spec.min_resolution} and {spec.max_resolution}, got {resolution}"
         )
         if table:
-            if spec.name == "quadkey":
-                raise ValueError(f"resolution must be between 0 and 23 inclusive, got {resolution}")
+            if spec.coerce_resolution:
+                raise ValueError(
+                    f"resolution must be between {spec.min_resolution} and {spec.max_resolution} inclusive, got {resolution}"
+                )
             raise ValueError(f"{spec.label} {spec.unit} {bounds}")
-        raise InvalidParameterError(spec.unit, bounds)
+        raise InvalidParameterError(parameter or spec.unit, bounds)
 
 
 def add_index_table(spec, table, column_name, resolution, geometry_column=None, use_centroid=False):
-    if spec.name == "quadkey":
+    if spec.coerce_resolution:
         resolution = int(resolution)
     validate_index_resolution(spec, resolution, table=True)
-    if spec.name == "s2":
-        require_community_extension("geography", feature="gpio add s2")
-    geom_col = geometry_column or find_geometry_column_from_table(table) or "geometry"
+    preflight_index(spec, "add")
+    geom_col = geometry_column or find_geometry_column_from_table(table)
+    if geom_col is None:
+        raise GeoParquetError("No geometry column found")
     source_crs = crs_string_from_table(table, geom_col)
-    bbox_col = None
-    if spec.name == "quadkey" and source_crs is None:
-        from geoparquet_io.core.add.quadkey import _validate_crs_from_geo_metadata
-
-        _validate_crs_from_geo_metadata(
-            sanitized_carried_geo(table.schema.metadata),
-            geom_col,
-            False,
-            source_description="table",
-        )
-        if not use_centroid:
-            bbox_col = resolve_standard_column(
-                table.column_names, ("bbox", "bounds", "bounding_box")
-            )
+    validate_index_crs(
+        spec, sanitized_carried_geo(table.schema.metadata), geom_col, source_crs, "table"
+    )
+    bbox_col = table_bbox_column(spec, table, source_crs, use_centroid)
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         con.execute("SET geometry_always_xy = true;")
@@ -189,6 +205,7 @@ def make_index_query(
     return f"SELECT *, {expression} AS {quote_identifier(column_name)} FROM {source}"
 
 
+@uses_aws_profile
 def add_index_column(
     spec,
     input_parquet,
@@ -209,57 +226,12 @@ def add_index_column(
     allow_schema_diff=False,
     hive_input=None,
 ):
-    if spec.name == "quadkey":
-        warn_planar_math_for_file("add_quadkey", input_parquet)
-        if (is_stdin(input_parquet) or should_stream_output(output_parquet)) and not dry_run:
-            return add_index_streaming(
-                spec,
-                input_parquet,
-                output_parquet,
-                column_name,
-                resolution,
-                verbose,
-                compression,
-                compression_level,
-                row_group_size_mb,
-                row_group_rows,
-                profile,
-                geoparquet_version,
-                memory_limit,
-                use_centroid=use_centroid,
-            )
-        return _write_quadkey_file(
-            input_parquet,
-            output_parquet,
-            column_name,
-            resolution,
-            use_centroid,
-            dry_run,
-            verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
-            overwrite,
-            memory_limit,
-            allow_schema_diff,
-            hive_input,
-        )
     configure_verbose(verbose)
-
     validate_index_resolution(spec, resolution)
-    if spec.name == "s2":
-        require_community_extension("geography", feature="gpio add s2")
-
+    preflight_index(spec, "add")
     warn_planar_math_for_file(f"add_{spec.name}", input_parquet)
-
-    # Check for streaming mode (stdin input or stdout output)
-    is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
-
-    if is_streaming and not dry_run:
-        add_index_streaming(
+    if (is_stdin(input_parquet) or should_stream_output(output_parquet)) and not dry_run:
+        return add_index_streaming(
             spec,
             input_parquet,
             output_parquet,
@@ -272,58 +244,103 @@ def add_index_column(
             row_group_rows,
             profile,
             geoparquet_version,
+            memory_limit,
+            use_centroid=use_centroid,
+        )
+    handle_output_overwrite(output_parquet, overwrite, input_parquet)
+    if not spec.multiple_files:
+        require_single_file(input_parquet, f"add {spec.name}")
+    validate_profile_for_urls(profile, input_parquet, output_parquet)
+    geom_col = find_primary_geometry_column(input_parquet, verbose)
+    input_path = resolve_file_url(input_parquet, verbose)
+    source_crs = source_crs_string(input_parquet, verbose, geom_col)
+
+    validate_index_crs(
+        spec, sanitized_carried_geo_of_file(input_parquet), geom_col, source_crs, "file", verbose
+    )
+    bbox_col = None
+    if spec.bbox_midpoint and not use_centroid and source_crs is None:
+        advice = get_bbox_advice(input_parquet, "bounds_calculation", verbose)
+        bbox_col = advice["bbox_column_name"] if advice["has_bbox_column"] else None
+        if advice["needs_warning"] and not bbox_col:
+            warn(advice["message"] + f" - using geometry centroid for {spec.label} calculation")
+            for suggestion in advice["suggestions"]:
+                info(f"Tip: {suggestion}")
+    if dry_run:
+        warn("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n")
+        display_input = display_path(input_path)
+        display_output = display_path(output_parquet)
+        info(f"-- Input file: {display_input}")
+        info(f"-- Output file: {display_output}")
+        info(f"-- Geometry column: {geom_col}")
+        info(f"-- New column: {column_name}")
+        if spec.preview_sql:
+            info(
+                f"-- Description: {spec.label} cell ID at {spec.unit} {resolution} (~{spec.size(resolution)})"
+            )
+            query = make_index_query(
+                spec,
+                _index_from_clause(input_path, allow_schema_diff, hive_input),
+                geom_col,
+                column_name,
+                resolution,
+                source_crs,
+                bbox_col,
+            )
+            info("-- Main query:")
+            print_copy_dry_run(query, output_parquet, compression, compression_level)
+        else:
+            info(f"-- Resolution ({spec.display_unit or spec.unit}): {resolution}")
+            info(f"-- Calculation method: {'bbox midpoint' if bbox_col else 'geometry centroid'}")
+        return
+    ensure_index_column(spec, input_parquet, column_name, resolution, reject_existing=True)
+    metadata, _ = get_parquet_metadata(input_parquet, verbose)
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
+    try:
+        con.execute("SET geometry_always_xy = true;")
+        load_index(con, spec, verbose=verbose)
+        query = make_index_query(
+            spec,
+            _index_from_clause(input_path, allow_schema_diff, hive_input),
+            geom_col,
+            column_name,
+            resolution,
+            source_crs,
+            bbox_col,
+        )
+        if spec.report_count:
+            count = fetch_one(
+                con.execute(
+                    f"SELECT COUNT(*) FROM {_index_from_clause(input_path, allow_schema_diff, hive_input)}"
+                )
+            )[0]
+            progress(f"Processing {count:,} features...")
+        progress(
+            f"Adding {spec.label} column '{column_name}' ({spec.display_unit or spec.unit} {resolution})..."
+        )
+        write_parquet_with_metadata(
+            con,
+            query,
+            output_parquet,
+            original_metadata=metadata,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            verbose=verbose,
+            profile=profile,
+            geoparquet_version=geoparquet_version,
+            custom_metadata={
+                "covering": {spec.name: {"column": column_name, spec.unit: resolution}}
+            },
+            input_file=input_parquet,
             memory_limit=memory_limit,
         )
-        return
-
-    # File-based mode
-    # Check if output file exists and handle overwrite (fixes issue #278)
-    handle_output_overwrite(output_parquet, overwrite, input_parquet)
-
-    # Check for partition input (not supported)
-    require_single_file(input_parquet, f"add {spec.name}")
-
-    # Get geometry column for the SQL expression
-    geom_col = find_primary_geometry_column(input_parquet, verbose)
-
-    # Cell keying expects lon/lat degrees (#525).
-    geom_ref = transform_geom_sql(
-        quote_identifier(geom_col), source_crs_string(input_parquet, verbose, geom_col)
+    finally:
+        con.close()
+    success(
+        f"Successfully added {spec.label} column '{column_name}' ({spec.display_unit or spec.unit} {resolution}) to: {output_parquet}"
     )
-
-    sql_expression = spec.expression(
-        f"ST_X(ST_Centroid({geom_ref}))", f"ST_Y(ST_Centroid({geom_ref}))", resolution
-    )
-    index_metadata = {"covering": {spec.name: {"column": column_name, spec.unit: resolution}}}
-
-    if not dry_run:
-        progress(f"Adding {spec.label} column '{column_name}' ({spec.unit} {resolution})...")
-
-    # Use the generic helper
-    add_computed_column(
-        input_parquet=input_parquet,
-        output_parquet=output_parquet,
-        column_name=column_name,
-        sql_expression=sql_expression,
-        extensions=[spec.extension],
-        dry_run=dry_run,
-        verbose=verbose,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        dry_run_description=f"{spec.label} cell ID at {spec.unit} {resolution} (~{spec.size(resolution)})",
-        custom_metadata=index_metadata,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
-        memory_limit=memory_limit,
-    )
-
-    if not dry_run:
-        success(
-            f"Successfully added {spec.label} column '{column_name}' "
-            f"({spec.unit} {resolution}) to: {output_parquet}"
-        )
 
 
 def add_index_streaming(
@@ -347,46 +364,31 @@ def add_index_streaming(
 
     if should_stream_output(output_path):
         verbose = False
-    if spec.name == "quadkey":
-        validate_index_resolution(spec, resolution)
-    stream_output = spec.name != "quadkey" and should_stream_output(output_path)
+    validate_index_resolution(spec, resolution)
+    stream_output = should_stream_output(output_path)
     with open_input(input_path, verbose=verbose, stream_output=stream_output) as (
         source,
         metadata,
         is_stream,
         con,
     ):
-        if spec.name == "quadkey":
-            con.execute("SET geometry_always_xy = true;")
-        load_index(con, spec)
-        columns = query_schema(con, f"SELECT * FROM {source}").names
-        geom_col = resolve_standard_column(columns) or "geometry"
-        bbox_col = None
-        if spec.name == "quadkey":
-            from geoparquet_io.core.add.quadkey import (
-                _streaming_source_crs,
-                _validate_crs_from_geo_metadata,
-            )
-
-            source_crs = _streaming_source_crs(input_path, metadata, geom_col, verbose)
-            if source_crs is None:
-                _validate_crs_from_geo_metadata(
-                    sanitized_carried_geo(metadata),
-                    geom_col,
-                    verbose,
-                    source_description="stream",
-                )
-                if not use_centroid:
-                    bbox_col = resolve_standard_column(columns, ("bbox", "bounds", "bounding_box"))
-        else:
-            source_crs = _detect_transform_source_crs(input_path, metadata, is_stream)
-            if verbose:
-                debug(f"Using geometry column: {geom_col}")
+        con.execute("SET geometry_always_xy = true;")
+        load_index(con, spec, verbose=verbose)
+        schema = con.sql(f"SELECT * FROM {source} LIMIT 0").arrow().read_all()
+        geom_col = detect_geometry_column_from_names(schema.column_names)
+        if geom_col is None:
+            raise GeoParquetError("No geometry column found")
+        source_crs = _detect_transform_source_crs(input_path, metadata, is_stream)
+        validate_index_crs(
+            spec, sanitized_carried_geo(metadata), geom_col, source_crs, "stream", verbose
+        )
+        schema = schema.replace_schema_metadata(metadata)
+        bbox_col = table_bbox_column(spec, schema, source_crs, use_centroid)
         query = make_index_query(
             spec, source, geom_col, column_name, resolution, source_crs, bbox_col
         )
-        if verbose and spec.name == "quadkey":
-            debug(f"Streaming quadkey query: {query}")
+        if verbose:
+            debug(f"Streaming {spec.label} query: {query}")
         write_output(
             con,
             query,
@@ -402,14 +404,14 @@ def add_index_streaming(
             memory_limit=memory_limit,
         )
     if not should_stream_output(output_path):
-        unit = "zoom level" if spec.name == "quadkey" else spec.unit
+        unit = spec.display_unit or spec.unit
         success(
             f"Successfully added {spec.label} column '{column_name}' "
             f"({unit} {resolution}) to: {output_path}"
         )
 
 
-def _quadkey_from_clause(path: str, allow_schema_diff: bool, hive_input: bool | None) -> str:
+def _index_from_clause(path: str, allow_schema_diff: bool, hive_input: bool | None) -> str:
     """The FROM target for the add, RAW path escaped exactly once by sql_path.
 
     Options are attached only when a caller asked for them, so the ordinary
@@ -428,175 +430,33 @@ def _quadkey_from_clause(path: str, allow_schema_diff: bool, hive_input: bool | 
     return f"read_parquet({sql_path(path)}, {', '.join(options)})"
 
 
-@uses_aws_profile
-def _write_quadkey_file(
-    input_parquet: str,
-    output_parquet: str | None,
-    quadkey_column_name: str,
-    resolution: int,
-    use_centroid: bool,
-    dry_run: bool,
-    verbose: bool,
-    compression: str | None,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
-    overwrite: bool,
-    memory_limit: str | None,
-    allow_schema_diff: bool = False,
-    hive_input: bool | None = None,
-) -> None:
-    """Write quadkey using its bbox and multi-file policies."""
-    from geoparquet_io.core.add.quadkey import _validate_crs_for_quadkey
-
-    configure_verbose(verbose)
-
-    # Check if output file exists and handle overwrite (fixes issue #278)
-    handle_output_overwrite(output_parquet, overwrite)
-
-    # Validate resolution
-    if not 0 <= resolution <= 23:
-        raise InvalidParameterError("resolution", f"must be between 0 and 23, got {resolution}")
-
-    # Validate profile is only used with S3
-    validate_profile_for_urls(profile, input_parquet, output_parquet)
-
-    # RAW path: shown to the user in the dry-run header below, and escaped at
-    # the SQL boundary by sql_path (#802).
-    input_file_path = resolve_file_url(input_parquet, verbose)
-
-    # Get geometry column
-    geom_col = find_primary_geometry_column(input_parquet, verbose)
-
-    # Quadkeys require lon/lat degrees. Reproject a known non-CRS84 CRS (#525);
-    # otherwise keep the guard (rejects projected input we can't identify, and
-    # passes through default/unknown which is assumed WGS84).
-    source_crs = source_crs_string(input_parquet, verbose, geom_col)
-    needs_transform = source_crs is not None
-    if not needs_transform:
-        _validate_crs_for_quadkey(input_parquet, geom_col, verbose)
-
-    # Check if column already exists (skip in dry-run)
-    if not dry_run:
-        column_names = get_column_names(input_parquet)
-        if quadkey_column_name in column_names:
-            raise GeoParquetError(
-                f"Column '{quadkey_column_name}' already exists in the file. "
-                f"Please choose a different name."
-            )
-
-    # Determine whether to use bbox or centroid. A stored bbox column is in the
-    # input CRS, so it can't be used when we need to reproject — fall back to the
-    # (reprojected) centroid in that case.
-    use_bbox = False
-    bbox_col = None
-    if not use_centroid and not needs_transform:
-        bbox_advice = get_bbox_advice(input_parquet, "bounds_calculation", verbose)
-        if bbox_advice["has_bbox_column"]:
-            use_bbox = True
-            bbox_col = bbox_advice["bbox_column_name"]
-            if verbose:
-                debug(f"Using bbox column '{bbox_col}' for quadkey calculation")
-        elif bbox_advice["needs_warning"]:
-            warn(bbox_advice["message"] + " - using geometry centroid for quadkey calculation")
-            for suggestion in bbox_advice["suggestions"]:
-                info(f"Tip: {suggestion}")
-
-    # Dry-run mode header
-    if dry_run:
-        warn("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n")
-        display_input = display_path(input_file_path)
-        display_output = display_path(output_parquet)
-        info(f"-- Input file: {display_input}")
-        info(f"-- Output file: {display_output}")
-        info(f"-- Geometry column: {geom_col}")
-        info(f"-- New column: {quadkey_column_name}")
-        info(f"-- Resolution (zoom level): {resolution}")
-        method = "bbox midpoint" if use_bbox else "geometry centroid"
-        info(f"-- Calculation method: {method}")
-        return
-
-    # Get metadata before processing
-    metadata, _ = get_parquet_metadata(input_parquet, verbose)
-
-    if verbose:
-        debug(f"Adding quadkey column '{quadkey_column_name}' at resolution {resolution}...")
-
-    # Create DuckDB connection with httpfs if needed
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
-    # Ensure ST_Transform (CRS-aware keying) emits lon/lat order.
-    con.execute("SET geometry_always_xy = true;")
-
-    try:
-        spec = get_index_spec("quadkey")
-        load_index(con, spec)
-        source = _quadkey_from_clause(input_file_path, allow_schema_diff, hive_input)
-        query = make_index_query(
-            spec,
-            source,
-            geom_col,
-            quadkey_column_name,
-            resolution,
-            source_crs,
-            bbox_col if use_bbox else None,
-        )
-
-        if verbose:
-            debug(f"Query: {query}")
-
-        if not dry_run:
-            progress(f"Adding quadkey column '{quadkey_column_name}' (zoom level {resolution})...")
-
-        # Prepare quadkey metadata for GeoParquet spec
-        quadkey_metadata = {
-            "covering": {"quadkey": {"column": quadkey_column_name, "resolution": resolution}}
-        }
-
-        # Write output with metadata
-        write_parquet_with_metadata(
-            con,
-            query,
-            output_parquet,
-            original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            custom_metadata=quadkey_metadata,
-            # The precondition: this query is `SELECT *` plus the quadkey
-            # column, so the rows it writes are `input_parquet`'s own.
-            input_file=input_parquet,
-            memory_limit=memory_limit,
-        )
-
-        success(
-            f"Successfully added quadkey column '{quadkey_column_name}' "
-            f"(zoom level {resolution}) to: {output_parquet}"
-        )
-
-    finally:
-        con.close()
-
-
 def ensure_index_column(
-    spec, input_parquet, column_name, resolution, verbose=False, use_centroid=False, profile=None
+    spec,
+    input_parquet,
+    column_name,
+    resolution,
+    verbose=False,
+    use_centroid=False,
+    profile=None,
+    *,
+    reject_existing=False,
 ):
     """Return (working path, resolved column, temporary path), reusing existing cells."""
     columns = get_column_names(input_parquet)
-    resolved = resolve_standard_column(columns, (column_name,))
+    resolved = next((c for c in columns if c.lower() == column_name.lower()), None)
+    if reject_existing:
+        if resolved:
+            raise InvalidParameterError(
+                "column_name",
+                f"Column '{column_name}' already exists in the file. Please choose a different name.",
+            )
+        return None
     if resolved:
         if verbose:
             debug(f"Using existing {spec.label} column '{resolved}'")
         return input_parquet, resolved, None
     if verbose:
-        debug(
-            f"{spec.label.capitalize() if spec.name == 'quadkey' else spec.label} column '{column_name}' not found. Adding it now..."
-        )
+        debug(f"{spec.label} column '{column_name}' not found. Adding it now...")
     temp = os.path.join(
         tempfile.gettempdir(),
         f"{spec.name}_enriched_{uuid.uuid4().hex}_{os.path.basename(input_parquet)}",
@@ -612,12 +472,10 @@ def ensure_index_column(
             compression=None,
             compression_level=None,
             use_centroid=use_centroid,
-            profile=profile if spec.name == "quadkey" else None,
+            profile=profile,
         )
         if verbose:
-            debug(
-                f"{spec.label.capitalize() if spec.name == 'quadkey' else spec.label} column added successfully at {spec.unit} {resolution}"
-            )
+            debug(f"{spec.label} column added successfully at {spec.unit} {resolution}")
         return temp, column_name, temp
     except Exception as e:
         if os.path.exists(temp):
@@ -637,6 +495,7 @@ def calculate_index_resolution(
     min_resolution=None,
     max_resolution=None,
     verbose=False,
+    probe=None,
 ):
     """Global fallback model; retain each index's pre-consolidation cell counts."""
     minimum = spec.min_resolution if min_resolution is None else min_resolution
@@ -651,16 +510,17 @@ def calculate_index_resolution(
                 f"adjusting target to {max_partitions}"
             )
         target = max_partitions
+    if probe is not None:
+        probed = probe(target, minimum, maximum)
+        if probed is not None:
+            return probed
     estimate = 0
     if target >= spec.base_cells:
-        if spec.name == "h3":
-            estimate = round(math.log(target / spec.base_cells) / math.log(spec.subdivision))
-        else:
-            estimate = round(math.log2(target / spec.base_cells) / 2)
+        estimate = round(math.log(target / spec.base_cells) / math.log(spec.subdivision))
     resolution = clamp_resolution(estimate, minimum, maximum)
     if verbose:
         count = spec.base_cells * spec.subdivision**resolution
-        label = "Quadkey" if spec.name == "quadkey" else spec.label
+        label = spec.label.capitalize()
         info(
             f"{label} auto-resolution: {resolution} "
             f"(~{count:.0f} partitions, ~{total_rows / count:.0f} rows/partition)"
@@ -747,12 +607,8 @@ def partition_index(
     )
     from geoparquet_io.core.streaming import read_stdin_to_temp_file
 
-    if spec.name == "s2":
-        if auto and resolution is not None:
-            raise InvalidParameterError("auto", "cannot specify both --auto and --level")
-        if not auto and resolution is None:
-            raise InvalidParameterError("level", "must specify either --level or --auto")
-        require_community_extension("geography", feature="gpio partition s2")
+    validate_partition_arguments(spec, resolution, partition_resolution, auto)
+    preflight_index(spec, "partition")
     configure_verbose(verbose)
 
     # Handle stdin input first (before resolution calculation)
@@ -763,24 +619,12 @@ def partition_index(
         stdin_temp_file = read_stdin_to_temp_file(verbose)
         actual_input = stdin_temp_file
 
-    if spec.name == "quadkey":
-        if auto and (resolution is not None or partition_resolution is not None):
-            raise InvalidParameterError(
-                "auto", "cannot specify --resolution or --partition-resolution with --auto"
-            )
-        if not auto and (resolution is None or partition_resolution is None):
-            raise InvalidParameterError(
-                "resolution",
-                "must specify either --auto or both --resolution and --partition-resolution",
-            )
-    else:
-        if auto and resolution is not None:
-            raise InvalidParameterError("auto", f"cannot specify both --auto and --{spec.unit}")
-        if not auto and resolution is None:
-            raise InvalidParameterError(spec.unit, f"must specify either --{spec.unit} or --auto")
-
-    if spec.name == "s2":
+    try:
         raise_if_no_rows(actual_input)
+    except Exception:
+        if stdin_temp_file and os.path.exists(stdin_temp_file):
+            os.remove(stdin_temp_file)
+        raise
 
     # Calculate auto resolution if requested
     if auto:
@@ -795,7 +639,7 @@ def partition_index(
                 verbose=verbose,
                 profile=profile,
             )
-            if spec.name == "quadkey":
+            if spec.prefix_partition:
                 partition_resolution = resolution
                 info(f"Auto-calculated quadkey zoom level: {resolution}")
             else:
@@ -803,27 +647,23 @@ def partition_index(
         except Exception as e:
             if stdin_temp_file and os.path.exists(stdin_temp_file):
                 os.remove(stdin_temp_file)
-            if spec.name == "s2":
+            if not spec.wrap_auto_error:
                 raise
             raise PartitionError(f"Auto-resolution calculation failed: {str(e)}") from e
 
-    # Validate resolved resolution
-    if not spec.min_resolution <= resolution <= spec.max_resolution:
+    try:
+        validate_index_resolution(spec, resolution)
+        if spec.prefix_partition:
+            validate_partition_resolutions(resolution, partition_resolution, spec)
+    except Exception:
         if stdin_temp_file and os.path.exists(stdin_temp_file):
             os.remove(stdin_temp_file)
-        validate_index_resolution(spec, resolution)
-
-    if spec.name == "quadkey":
-        validate_partition_resolutions(resolution, partition_resolution)
+        raise
 
     if keep_column is None:
         keep_column = hive
 
     try:
-        # Nothing to partition: stop before rewriting the whole input just
-        # to add an index column to it (#823).
-        raise_if_no_rows(actual_input)
-
         working_parquet, column_name, temp_file = ensure_index_column(
             spec, actual_input, column_name, resolution, verbose, use_centroid, profile
         )
@@ -838,7 +678,7 @@ def partition_index(
                     os.remove(temp_file)
             return
 
-        if spec.name == "quadkey":
+        if spec.prefix_partition:
             progress(
                 f"Partitioning by quadkey at resolution {partition_resolution} (column: '{column_name}')"
             )
@@ -885,15 +725,29 @@ def partition_index(
             os.remove(stdin_temp_file)
 
 
-def validate_partition_resolutions(resolution, partition_resolution):
-    """Validate resolution parameters."""
-    if not 0 <= resolution <= 23:
-        raise InvalidParameterError("resolution", f"must be between 0 and 23, got {resolution}")
-    if not 0 <= partition_resolution <= 23:
-        raise InvalidParameterError(
-            "partition_resolution",
-            f"must be between 0 and 23, got {partition_resolution}",
-        )
+def validate_partition_arguments(spec, resolution, partition_resolution=None, auto=False):
+    if spec.prefix_partition:
+        if auto and (resolution is not None or partition_resolution is not None):
+            raise InvalidParameterError(
+                "auto", "cannot specify --resolution or --partition-resolution with --auto"
+            )
+        if not auto and (resolution is None or partition_resolution is None):
+            raise InvalidParameterError(
+                "resolution",
+                "must specify either --auto or both --resolution and --partition-resolution",
+            )
+    else:
+        if auto and resolution is not None:
+            raise InvalidParameterError("auto", f"cannot specify both --auto and --{spec.unit}")
+        if not auto and resolution is None:
+            raise InvalidParameterError(spec.unit, f"must specify either --{spec.unit} or --auto")
+
+
+def validate_partition_resolutions(resolution, partition_resolution, spec=None):
+    """Validate the column and prefix resolutions using the index bounds."""
+    spec = spec or get_index_spec("quadkey")
+    validate_index_resolution(spec, resolution)
+    validate_index_resolution(spec, partition_resolution, parameter="partition_resolution")
     if partition_resolution > resolution:
         raise InvalidParameterError(
             "partition_resolution",

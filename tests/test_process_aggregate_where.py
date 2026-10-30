@@ -243,14 +243,17 @@ def test_auto_empty_filter_result_names_the_filter(tmp_path):
 def test_probe_distinct_cell_counts_respects_where(tmp_path):
     from geoparquet_io.core.add.quadkey import register_quadkey_udf
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-    from geoparquet_io.core.partition.auto_resolution import _probe_distinct_cell_counts
+    from geoparquet_io.core.index_ops import get_index_spec, load_index
+    from geoparquet_io.core.partition.auto_resolution import (
+        _probe_distinct_cell_counts,
+    )
 
     src = tmp_path / "f.parquet"
     # Two far-apart points -> 2 distinct quadkeys; filter selects one.
     _write_points_geoparquet(src, [(10.0, 50.0, "wheat", 4.0), (-120.0, 40.0, "corn", 1.0)])
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        register_quadkey_udf(con)
+        load_index(con, get_index_spec("quadkey"))
         counts_all = _probe_distinct_cell_counts(con, str(src), "quadkey", "geometry", "", [5])
         counts_filtered = _probe_distinct_cell_counts(
             con, str(src), "quadkey", "geometry", "", [5], where="crop = 'wheat'"
@@ -270,7 +273,10 @@ def test_probe_filters_beneath_the_sample(tmp_path):
     """
     from geoparquet_io.core.add.quadkey import register_quadkey_udf
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-    from geoparquet_io.core.partition.auto_resolution import _probe_distinct_cell_counts
+    from geoparquet_io.core.index_ops import get_index_spec, load_index
+    from geoparquet_io.core.partition.auto_resolution import (
+        _probe_distinct_cell_counts,
+    )
 
     src = tmp_path / "f.parquet"
     # 100 wheat rows at 100 distinct locations + 900 corn rows stacked on one spot.
@@ -280,7 +286,7 @@ def test_probe_filters_beneath_the_sample(tmp_path):
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        register_quadkey_udf(con)
+        load_index(con, get_index_spec("quadkey"))
         counts = _probe_distinct_cell_counts(
             con,
             str(src),

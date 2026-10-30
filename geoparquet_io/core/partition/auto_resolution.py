@@ -13,7 +13,6 @@ from geoparquet_io.core.crs_utils import source_crs_string, transform_geom_sql
 from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     get_duckdb_connection,
-    load_community_extension,
     quote_identifier,
     sql_path,
     uses_aws_profile,
@@ -209,11 +208,7 @@ def _probe_extent_resolution(
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
         # Ensure ST_Transform (CRS-aware probing) emits lon/lat order.
         con.execute("SET geometry_always_xy = true;")
-        index_extension = get_index_spec(spatial_index_type).extension
-        if index_extension:
-            load_community_extension(con, index_extension)
-        if spatial_index_type == "quadkey":
-            load_index(con, get_index_spec("quadkey"))
+        load_index(con, get_index_spec(spatial_index_type))
 
         geom_col = find_primary_geometry_column(input_parquet, verbose)
         # Reproject a known non-CRS84 input to lon/lat before centroiding, so the
@@ -348,28 +343,19 @@ def calculate_auto_resolution(
         raise ValueError("Input file has no rows")
 
     spec = get_index_spec(spatial_index_type)
-    if min_resolution is None:
-        min_resolution = spec.min_resolution
-    if max_resolution is None:
-        max_resolution = spec.max_resolution
 
-    # Extent-aware probe (issue #524): size the resolution to the data's actual
-    # extent instead of assuming uniform global coverage. Falls back to the
-    # global-formula estimate below if the data can't be probed.
-    target_partitions = min(total_rows / target_rows_per_partition, max_partitions)
-    probed = _probe_extent_resolution(
-        input_parquet=input_parquet,
-        spatial_index_type=spatial_index_type,
-        target_partitions=target_partitions,
-        min_resolution=min_resolution,
-        max_resolution=max_resolution,
-        total_rows=total_rows,
-        verbose=verbose,
-        profile=profile,
-        where=where,
-    )
-    if probed is not None:
-        return probed
+    def probe(target, minimum, maximum):
+        return _probe_extent_resolution(
+            input_parquet=input_parquet,
+            spatial_index_type=spatial_index_type,
+            target_partitions=target,
+            min_resolution=minimum,
+            max_resolution=maximum,
+            total_rows=total_rows,
+            verbose=verbose,
+            profile=profile,
+            where=where,
+        )
 
     return calculate_index_resolution(
         spec,
@@ -379,9 +365,5 @@ def calculate_auto_resolution(
         min_resolution,
         max_resolution,
         verbose,
+        probe=probe,
     )
-
-
-def _register_quadkey_udf(con) -> None:
-    """Compatibility entry point for overview; registration belongs to index_ops."""
-    load_index(con, get_index_spec("quadkey"))

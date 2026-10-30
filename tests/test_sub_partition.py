@@ -1053,7 +1053,7 @@ class TestApiDirectorySubPartition:
         from pathlib import Path
 
         from geoparquet_io.api import ops
-        from geoparquet_io.core.exceptions import PartitionError
+        from geoparquet_io.core.exceptions import InvalidParameterError, PartitionError
 
         large, small = self._seed(temp_partition_dir)
         originals = {path: Path(path).read_bytes() for path in (large, small)}
@@ -1076,7 +1076,7 @@ class TestApiDirectorySubPartition:
             result = cli_runner.invoke(partition, args)
             assert result.exit_code != 0
         else:
-            with pytest.raises(PartitionError):
+            with pytest.raises(InvalidParameterError if auto else PartitionError):
                 ops.sub_partition_by_quadkey(
                     temp_partition_dir,
                     min_size=threshold,
@@ -1392,3 +1392,30 @@ class TestSubPartitionFrontDoorParity:
             api_call = fake.call_args.kwargs
 
         assert api_call == cli_call
+
+
+@pytest.mark.parametrize("option", ["resolution", "partition_resolution"])
+def test_quadkey_auto_rejects_explicit_resolution_at_both_front_doors(tmp_path, option):
+    """Reject contradictory arguments before planning or touching directory inputs."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.api import ops
+    from geoparquet_io.core.exceptions import InvalidParameterError
+
+    with pytest.raises(InvalidParameterError, match="cannot specify"):
+        ops.sub_partition_by_quadkey(tmp_path, min_size="1B", auto=True, **{option: 6})
+    result = CliRunner().invoke(
+        partition,
+        [
+            "quadkey",
+            str(tmp_path),
+            "--min-size",
+            "1B",
+            "--auto",
+            "--" + option.replace("_", "-"),
+            "6",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "cannot specify" in result.output
+    assert list(tmp_path.iterdir()) == []

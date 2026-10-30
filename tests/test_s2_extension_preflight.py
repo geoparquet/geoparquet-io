@@ -15,7 +15,7 @@ from unittest import mock
 import pyarrow as pa
 import pytest
 
-from geoparquet_io.core import index_ops
+from geoparquet_io.core import duckdb_utils
 from geoparquet_io.core.add import s2 as add_s2_module
 from geoparquet_io.core.exceptions import ExtensionUnavailableError
 from geoparquet_io.core.partition import by_s2 as partition_s2_module
@@ -36,7 +36,7 @@ class TestAddS2Preflight:
         """The extension error wins over the missing input: the check runs first."""
         output = str(tmp_path / "out.parquet")
 
-        with mock.patch.object(index_ops, "require_community_extension", _unavailable):
+        with mock.patch.object(duckdb_utils, "require_community_extension", _unavailable):
             with pytest.raises(ExtensionUnavailableError) as exc_info:
                 add_s2_module.add_s2_column(MISSING_INPUT, output)
 
@@ -47,7 +47,7 @@ class TestAddS2Preflight:
         """The table API fails on the preflight, not inside DuckDB."""
         table = pa.table({"geometry": pa.array([], type=pa.binary())})
 
-        with mock.patch.object(index_ops, "require_community_extension", _unavailable):
+        with mock.patch.object(duckdb_utils, "require_community_extension", _unavailable):
             with pytest.raises(ExtensionUnavailableError) as exc_info:
                 add_s2_module.add_s2_table(table)
 
@@ -55,7 +55,7 @@ class TestAddS2Preflight:
 
     def test_add_s2_preflight_names_geography_and_a_way_forward(self, tmp_path):
         """The message identifies the extension and how to get S2 working today."""
-        with mock.patch.object(index_ops, "require_community_extension", _unavailable):
+        with mock.patch.object(duckdb_utils, "require_community_extension", _unavailable):
             with pytest.raises(ExtensionUnavailableError) as exc_info:
                 add_s2_module.add_s2_column(MISSING_INPUT, str(tmp_path / "out.parquet"))
 
@@ -69,7 +69,7 @@ class TestAddS2Preflight:
         """Argument validation stays first: a bad level is a user error, not a build gap."""
         from geoparquet_io.core.exceptions import InvalidParameterError
 
-        with mock.patch.object(index_ops, "require_community_extension", _unavailable):
+        with mock.patch.object(duckdb_utils, "require_community_extension", _unavailable):
             with pytest.raises(InvalidParameterError):
                 add_s2_module.add_s2_column(
                     MISSING_INPUT, str(tmp_path / "out.parquet"), s2_level=99
@@ -83,7 +83,7 @@ class TestPartitionS2Preflight:
         """The extension error wins over the missing input: the check runs first."""
         output_folder = str(tmp_path / "parts")
 
-        with mock.patch.object(index_ops, "require_community_extension", _unavailable):
+        with mock.patch.object(duckdb_utils, "require_community_extension", _unavailable):
             with pytest.raises(ExtensionUnavailableError) as exc_info:
                 partition_s2_module.partition_by_s2(MISSING_INPUT, output_folder, level=10)
 
@@ -94,7 +94,7 @@ class TestPartitionS2Preflight:
         """--auto with --level is a user error and must be reported as one."""
         from geoparquet_io.core.exceptions import InvalidParameterError
 
-        with mock.patch.object(index_ops, "require_community_extension", _unavailable):
+        with mock.patch.object(duckdb_utils, "require_community_extension", _unavailable):
             with pytest.raises(InvalidParameterError):
                 partition_s2_module.partition_by_s2(
                     MISSING_INPUT, str(tmp_path / "parts"), level=10, auto=True

@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 from pathlib import Path
 
 from geoparquet_io.core.duckdb_metadata import get_row_count
+from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.index_ops import (
+    get_index_spec,
+    preflight_index,
+    validate_partition_arguments,
+)
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
@@ -14,27 +21,7 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
-from geoparquet_io.core.partition.by_a5 import partition_by_a5
 from geoparquet_io.core.sizing import bytes_to_mb
-
-# Community extensions a partition type cannot run without, checked once before
-# the file loop so an unavailable one is reported once instead of per file.
-_REQUIRED_EXTENSIONS: dict[str, tuple[tuple[str, str], ...]] = {
-    "a5": (("a5", "gpio partition a5"),),
-    "h3": (("h3", "gpio partition h3"),),
-    "s2": (("geography", "gpio partition s2"),),
-}
-
-# The index column each partition type creates when nobody names one, keyed by
-# type, with the CLI option that would have named it. Directory mode uses the
-# default and writes one sibling directory per file, so a custom name is
-# refused rather than silently dropped (#790) -- through either front door.
-SUB_PARTITION_COLUMN_OPTIONS: dict[str, tuple[str, str]] = {
-    "h3": ("--h3-name", "h3_cell"),
-    "s2": ("--s2-name", "s2_cell"),
-    "a5": ("--a5-name", "a5_cell"),
-    "quadkey": ("--quadkey-column", "quadkey"),
-}
 
 
 def offending_single_file_only_options(
@@ -59,7 +46,8 @@ def offending_single_file_only_options(
         The labels that were supplied and cannot be honoured, in the order they
         should be reported. Empty when there is nothing to refuse.
     """
-    option, default = SUB_PARTITION_COLUMN_OPTIONS.get(partition_type, (None, None))
+    spec = get_index_spec(partition_type)
+    option, default = spec.column_option, spec.column_name
     label = column_label or option
 
     offending = []
@@ -172,14 +160,18 @@ def quadkey_resolution_error(
     Returns:
         The message to report, or None when the combination is usable.
     """
-    if auto or (resolution is not None and partition_resolution is not None):
-        return None
-
-    return (
-        f"must specify either {auto_label} or both {labels[0]} and {labels[1]} -- "
-        "quadkey builds its cell column at one resolution and splits the "
-        "directories on a prefix of it."
-    )
+    try:
+        validate_partition_arguments(
+            get_index_spec("quadkey"), resolution, partition_resolution, auto
+        )
+    except InvalidParameterError as exc:
+        message = str(exc)
+        return (
+            message.replace("--partition-resolution", labels[1])
+            .replace("--resolution", labels[0])
+            .replace("--auto", auto_label)
+        )
+    return None
 
 
 def find_large_files(
@@ -266,45 +258,13 @@ def sub_partition_directory(
     Returns:
         dict with keys: processed, skipped, errors
     """
-    from geoparquet_io.core.duckdb_utils import require_community_extension
-    from geoparquet_io.core.partition.by_h3 import partition_by_h3
-    from geoparquet_io.core.partition.by_quadkey import partition_by_quadkey
-    from geoparquet_io.core.partition.by_s2 import partition_by_s2
-
     configure_verbose(verbose)
-
-    # Map partition types to their functions and resolution param names
-    partition_funcs = {
-        "a5": (partition_by_a5, "resolution"),
-        "h3": (partition_by_h3, "resolution"),
-        "s2": (partition_by_s2, "level"),
-        "quadkey": (partition_by_quadkey, "resolution"),
-    }
-
-    if partition_type not in partition_funcs:
-        raise ValueError(
-            f"Unknown partition type: {partition_type}. "
-            f"Must be one of: {list(partition_funcs.keys())}"
-        )
-
-    func, res_param = partition_funcs[partition_type]
-
-    # Handle resolution/level parameter
+    spec = get_index_spec(partition_type)
+    module = importlib.import_module(f"geoparquet_io.core.partition.by_{spec.name}")
+    partition = getattr(module, f"partition_by_{spec.name}")
     res_value = resolution if resolution is not None else level
-    if partition_type == "quadkey":
-        # Quadkey wants two numbers, and wanted them per file before this ran
-        # once here (#854).
-        missing = quadkey_resolution_error(resolution, partition_resolution, auto=auto)
-        if missing:
-            raise ValueError(missing)
-    elif not auto and res_value is None:
-        raise ValueError(f"Must specify resolution/level or auto for {partition_type} partitioning")
-
-    # Preflight once, not once per file: a missing community extension fails
-    # every file identically, and reporting it per file buried the real reason
-    # under N copies of the same paragraph (#737, #778).
-    for extension, feature in _REQUIRED_EXTENSIONS.get(partition_type, ()):
-        require_community_extension(extension, feature=feature)
+    validate_partition_arguments(spec, res_value, partition_resolution, auto)
+    preflight_index(spec, "partition", directory=True)
 
     large_files = find_large_files(directory, min_size_bytes)
 
@@ -346,18 +306,10 @@ def sub_partition_directory(
                 "max_partitions": max_partitions,
             }
 
-            # Add resolution parameter with correct name
-            if res_value is not None:
-                kwargs[res_param] = res_value
-
-            if partition_type == "quadkey":
-                # The two options only this partitioner has. Forwarding them is
-                # the whole of #854: without partition_resolution every file
-                # failed, and use_centroid was silently ignored.
-                kwargs["partition_resolution"] = partition_resolution
-                kwargs["use_centroid"] = use_centroid
-
-            func(**kwargs)
+            kwargs[spec.unit] = res_value
+            if spec.prefix_partition:
+                kwargs.update(partition_resolution=partition_resolution, use_centroid=use_centroid)
+            partition(**kwargs)
 
             if in_place:
                 # Validate output before deleting original
