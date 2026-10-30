@@ -47,7 +47,7 @@ def _owner_reports(caps: DuckDBCapabilities) -> Iterator[DuckDBCapabilities]:
     value leaks into another test.
     """
     original = duckdb_utils._capabilities_for
-    duckdb_utils._capabilities_for = lambda version, result_complete: caps
+    duckdb_utils._capabilities_for = lambda version: caps
     duckdb_capabilities.cache_clear()
     try:
         yield duckdb_capabilities()
@@ -59,8 +59,7 @@ def _owner_reports(caps: DuckDBCapabilities) -> Iterator[DuckDBCapabilities]:
 @contextmanager
 def pretend_duckdb_version(version: str) -> Iterator[DuckDBCapabilities]:
     """Make the owner report what ``version`` implies, for the duration of the block."""
-    implied = duckdb_utils._capabilities_for(version, duckdb_capabilities().result_complete)
-    with _owner_reports(implied) as caps:
+    with _owner_reports(duckdb_utils._capabilities_for(version)) as caps:
         yield caps
 
 
@@ -189,15 +188,6 @@ def test_without_cache_clear_a_patched_version_is_not_seen(monkeypatch):
 # --- complete_without_fetch -------------------------------------------------------
 
 
-def test_result_complete_probe_matches_the_installed_client():
-    con = duckdb.connect()
-    try:
-        has_complete = callable(getattr(con.execute("SELECT 1"), "complete", None))
-    finally:
-        con.close()
-    assert duckdb_capabilities().result_complete is has_complete
-
-
 def test_complete_without_fetch_leaves_the_connection_usable():
     """After closing an open multi-row result, the connection takes relation reads."""
     con = duckdb.connect()
@@ -223,25 +213,33 @@ def test_complete_without_fetch_keeps_a_write(tmp_path):
         con.close()
 
 
-@pytest.mark.parametrize("result_complete", [True, False], ids=["duckdb-2.0", "duckdb-1.5"])
-def test_complete_without_fetch_follows_the_owner(result_complete):
-    """complete() is called where the owner says results have it; no row is ever fetched.
-
-    The stand-in always has ``complete``: whether it is called is the owner's
-    ``result_complete``, not a per-object probe.
-    """
+@pytest.mark.parametrize("has_complete", [True, False], ids=["duckdb-2.0", "duckdb-1.5"])
+def test_complete_without_fetch_never_fetches(has_complete):
+    """complete() is called where the result has it, and no row is ever fetched."""
     calls: list[str] = []
 
     class Result:
         def fetchone(self):
             calls.append("fetchone")
 
-        def complete(self):
-            calls.append("complete")
+    result = Result()
+    if has_complete:
+        result.complete = lambda: calls.append("complete")
+    complete_without_fetch(result)
+    assert calls == (["complete"] if has_complete else [])
 
-    with pretend_duckdb_capabilities(result_complete=result_complete):
-        complete_without_fetch(Result())
-    assert calls == (["complete"] if result_complete else [])
+
+@pytest.mark.parametrize("version", ["1.5.6", "2.0.0"])
+def test_fetch_one_reads_a_sqlite_cursor_on_every_client(version):
+    """GeoPackage metadata is read with ``fetch_one`` on a sqlite3 cursor (no ``complete()``)."""
+    import sqlite3
+
+    con = sqlite3.connect(":memory:")
+    try:
+        with pretend_duckdb_version(version):
+            assert fetch_one(con.execute("SELECT 1, 'a'")) == (1, "a")
+    finally:
+        con.close()
 
 
 # --- routed call sites read the owner ---------------------------------------------

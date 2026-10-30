@@ -392,11 +392,6 @@ class DuckDBCapabilities:
             :class:`ExtensionUnavailableError` and the benchmark environment
             block, ``core/benchmark.py:get_environment_info``).
         major, minor: Parsed from ``version``; ``None`` when not numeric.
-        result_complete: An ``execute()`` result has ``complete()`` (2.0),
-            the method :func:`complete_without_fetch` (and so
-            :func:`fetch_one`) calls to close a result that would otherwise
-            stay open. Probed on a short-lived in-memory connection, not
-            inferred from the version.
         is_v2: ``major >= 2``.
         core_geometry: DuckDB's core ships GEOMETRY and the serialize /
             deserialize functions, so read-only inspect paths skip the spatial
@@ -414,14 +409,13 @@ class DuckDBCapabilities:
     version: str
     major: int | None
     minor: int | None
-    result_complete: bool
     is_v2: bool
     core_geometry: bool
     native_geojson_writer: bool
     a5_from_query_farm: bool
 
 
-def _capabilities_for(version: str, result_complete: bool) -> DuckDBCapabilities:
+def _capabilities_for(version: str) -> DuckDBCapabilities:
     """The capabilities a given version string implies (pure; no DuckDB call)."""
     major, minor = _parse_duckdb_version(version)
     is_v2 = major is not None and major >= 2
@@ -429,23 +423,11 @@ def _capabilities_for(version: str, result_complete: bool) -> DuckDBCapabilities
         version=version,
         major=major,
         minor=minor,
-        result_complete=result_complete,
         is_v2=is_v2,
         core_geometry=is_v2,
         native_geojson_writer=is_v2,
         a5_from_query_farm=is_v2,
     )
-
-
-def _probe_result_complete() -> bool:
-    """Whether an ``execute()`` result has ``complete()``, on a throwaway connection."""
-    import duckdb
-
-    con = duckdb.connect()
-    try:
-        return callable(getattr(con.execute("SELECT 1"), "complete", None))
-    finally:
-        con.close()
 
 
 @functools.cache
@@ -459,7 +441,7 @@ def duckdb_capabilities() -> DuckDBCapabilities:
     """
     import duckdb
 
-    return _capabilities_for(str(duckdb.__version__), _probe_result_complete())
+    return _capabilities_for(str(duckdb.__version__))
 
 
 def complete_without_fetch(result) -> None:
@@ -473,11 +455,16 @@ def complete_without_fetch(result) -> None:
     leaves nothing open. DuckDB 1.5 has no such method and needs none: the
     next statement replaces the result there.
 
-    Decided once, by :attr:`DuckDBCapabilities.result_complete` (probed on a
-    real result), not per object.
+    Decided per object, and this is the only place that asks: :func:`fetch_one`
+    (the result API guard's required spelling for a one-row read) is also
+    handed ``sqlite3`` cursors -- GeoPackage metadata in ``format_writers`` --
+    which have no ``complete()`` on any DuckDB, so a client-wide answer would
+    make every such read raise on 2.0. (A ``result_complete`` capability field
+    was tried and removed for exactly that reason.)
     """
-    if duckdb_capabilities().result_complete:
-        result.complete()
+    complete = getattr(result, "complete", None)
+    if complete is not None:
+        complete()
 
 
 def resolve_load_spatial(load_spatial: bool | None) -> bool:
