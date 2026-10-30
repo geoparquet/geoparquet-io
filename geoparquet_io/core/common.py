@@ -651,13 +651,9 @@ def add_computed_column(
         # Show formatted query with COPY wrapper
         from geoparquet_io.core.compression import COMPRESSION_RANGES
 
-        compression_desc = compression
-        if compression in COMPRESSION_RANGES and compression_level:
-            compression_desc = f"{compression}:{compression_level}"
-
-        duckdb_compression = (
-            compression.lower() if compression != "UNCOMPRESSED" else "uncompressed"
-        )
+        takes_level = compression in COMPRESSION_RANGES and compression_level
+        compression_desc = f"{compression}:{compression_level}" if takes_level else compression
+        duckdb_compression = compression.lower()  # "UNCOMPRESSED" lowers to "uncompressed"
         display_query = f"""COPY ({query.strip()})
 TO {sql_path(output_parquet)}
 (FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
