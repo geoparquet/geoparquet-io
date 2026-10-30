@@ -50,6 +50,9 @@ from geoparquet_io.core.http_retry import (
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
+# What a 401/403 tells the user to fix: the options that carry an ArcGIS credential.
+ARCGIS_CREDENTIALS_HINT = "Use --token or --username/--password."
+
 # ArcGIS Online token endpoint
 ARCGIS_ONLINE_TOKEN_URL = "https://www.arcgis.com/sharing/rest/generateToken"
 
@@ -327,7 +330,12 @@ def generate_token(
         "expiration": 60,  # 60 minutes
     }
 
-    result = cast("dict", make_request_with_retry("POST", token_url, data=data, timeout=timeout))
+    result = cast(
+        "dict",
+        make_request_with_retry(
+            "POST", token_url, data=data, timeout=timeout, credentials=ARCGIS_CREDENTIALS_HINT
+        ),
+    )
     result = _handle_arcgis_response(result, "Token generation")
 
     if "token" not in result:
@@ -485,7 +493,12 @@ def get_layer_info(
         debug(f"Fetching layer info from {service_url}")
 
     params = _add_token_to_params({"f": "json"}, token)
-    data = cast("dict", make_request_with_retry("GET", service_url, params=params, timeout=timeout))
+    data = cast(
+        "dict",
+        make_request_with_retry(
+            "GET", service_url, params=params, timeout=timeout, credentials=ARCGIS_CREDENTIALS_HINT
+        ),
+    )
     data = _handle_arcgis_response(data, "Layer info")
 
     # Get feature count (using the WHERE and bbox filters)
@@ -553,7 +566,12 @@ def get_feature_count(
 
     params = _add_token_to_params(params, token)
 
-    data = cast("dict", make_request_with_retry("GET", query_url, params=params, timeout=timeout))
+    data = cast(
+        "dict",
+        make_request_with_retry(
+            "GET", query_url, params=params, timeout=timeout, credentials=ARCGIS_CREDENTIALS_HINT
+        ),
+    )
     data = _handle_arcgis_response(data, "Feature count")
 
     count = _checked_feature_count(data, query_url)
@@ -635,7 +653,14 @@ def fetch_features_page(
 
     data = cast(
         "dict",
-        make_request_with_retry("GET", query_url, params=params, timeout=timeout, batch_size=limit),
+        make_request_with_retry(
+            "GET",
+            query_url,
+            params=params,
+            timeout=timeout,
+            credentials=ARCGIS_CREDENTIALS_HINT,
+            batch_size=limit,
+        ),
     )
 
     # A successful page has no "error" key in either GeoJSON or EsriJSON. ArcGIS

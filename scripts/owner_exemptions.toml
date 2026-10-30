@@ -97,7 +97,7 @@ reason = "stdin spooled to a temp file; private write outside the facade, T2c"
 [[G1.tid251]]
 path = "geoparquet_io/core/wfs.py"
 name = "httpx"
-count = 4
+count = 3
 reason = "permanent: WFS request, feature count, streaming page download and startIndex probe use httpx for its exception types and stream; retries run through http_retry (T4a)"
 [[G1.tid251]]
 path = "geoparquet_io/core/carto.py"

@@ -43,7 +43,6 @@ def _is_network_call(node: ast.AST) -> bool:
     func = node.func
     if isinstance(func, ast.Name):
         return func.id in {
-            "_get_shared_http_client",
             "get_shared_http_client",
             "get_duckdb_connection",
         }

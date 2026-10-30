@@ -415,8 +415,10 @@ def sanitize_geo_metadata(geo_meta):
     treated the way an absent one is: the malformed parts are dropped so fresh
     metadata gets built from the table, and one warning names what was wrong.
 
-    This is the single shape check every write-path reader of the raw block goes
-    through. The read-only readers (``parse_geo_metadata``,
+    This is the single shape check every reader of the raw block that *assumes a
+    dict* goes through: the write paths, and the ``inspect`` displays
+    (``inspect_utils.extract_geo_info`` / ``get_preview_data``,
+    ``metadata_utils``). The raw readers (``parse_geo_metadata``,
     ``crs_utils.parse_geo_metadata_from_schema``,
     ``duckdb_metadata.get_geo_metadata``) deliberately do *not* sanitize:
     ``gpio check`` has to see the file as it really is.

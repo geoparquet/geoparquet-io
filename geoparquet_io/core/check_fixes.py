@@ -189,7 +189,7 @@ def _rewrite_through_staging(
             )
         except duckdb.IOException as e:
             if is_remote_url(parquet_file):
-                hints = get_remote_error_hint(str(e), parquet_file)
+                hints = get_remote_error_hint(e, parquet_file)
                 raise RemoteAccessError(parquet_file, f"{hints}\n\nOriginal error: {str(e)}") from e
             raise
         finally:

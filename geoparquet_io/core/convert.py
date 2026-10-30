@@ -40,10 +40,13 @@ from geoparquet_io.core.duckdb_utils import (
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import (
+    FailureKind,
     GeometryError,
     GeoParquetError,
     InvalidParameterError,
     RemoteAccessError,
+    classify_failure,
+    not_parquet_file_error,
 )
 from geoparquet_io.core.file_utils import (
     is_partition_path,
@@ -2035,6 +2038,32 @@ def _convert_tabular_path(
     return query, (None if skip_bbox else bbox_name), order_by, geometry_name
 
 
+def _is_unsupported_wkb_error(e: BaseException) -> bool:
+    """DuckDB's one message for a WKB type it cannot parse (curves, the surface family).
+
+    DuckDB gives no structured field for it, so this is the single place the
+    string is read; every curve fallback and curve message asks here.
+    """
+    return "Unsupported geometry type in WKB" in str(e)
+
+
+def _conversion_failure(e: Exception, input_file, layer, prefix: str) -> Exception:
+    """The error a failed read/convert surfaces as: the specific answer, else ``<prefix>: <text>``.
+
+    Specific answers, in order: a WKB type DuckDB cannot parse (name the types and
+    the remedy -- reached when nothing parsed the geometry early enough to
+    linearize it, e.g. ``--skip-hilbert`` skips the bounds pass), a file that is
+    not Parquet, and a refused text encoding.
+    """
+    if _is_unsupported_wkb_error(e):
+        from geoparquet_io.core.curved_geometry import unsupported_wkb_error_message
+
+        return GeoParquetError(unsupported_wkb_error_message(input_file, layer, str(e)))
+    if classify_failure(e).kind is FailureKind.NOT_PARQUET:
+        return not_parquet_file_error(input_file)
+    return text_error(e) or GeoParquetError(f"{prefix}: {e}")
+
+
 def _is_linearizable_curve_error(e, *, is_parquet, linearize_curves):
     """True when ``e`` is DuckDB refusing WKB that gpio may try to linearize.
 
@@ -2044,7 +2073,7 @@ def _is_linearizable_curve_error(e, *, is_parquet, linearize_curves):
     bounds pass, the Arrow read and the retry in ``convert_to_geoparquet``
     share it so they stay in step if that string ever changes.
     """
-    return not is_parquet and linearize_curves and "Unsupported geometry type in WKB" in str(e)
+    return not is_parquet and linearize_curves and _is_unsupported_wkb_error(e)
 
 
 def _bounds_with_curve_fallback(
@@ -2619,7 +2648,7 @@ def read_spatial_to_arrow(
     except duckdb.IOException as e:
         error_msg = str(e)
         if is_remote_url(input_file):
-            hints = get_remote_error_hint(error_msg, input_file)
+            hints = get_remote_error_hint(e, input_file)
             raise RemoteAccessError(
                 input_file, f"Failed to read remote file. {hints}. Original error: {error_msg}"
             ) from e
@@ -2634,14 +2663,7 @@ def read_spatial_to_arrow(
         raise
 
     except Exception as e:
-        if "Unsupported geometry type in WKB" in str(e):
-            from geoparquet_io.core.curved_geometry import unsupported_wkb_error_message
-
-            raise GeoParquetError(unsupported_wkb_error_message(input_file, layer, str(e))) from e
-        refused = text_error(e)
-        if refused is not None:
-            raise refused from e
-        raise GeoParquetError(f"Reading failed: {str(e)}") from e
+        raise _conversion_failure(e, input_file, layer, "Reading failed") from e
 
     finally:
         con.close()
@@ -3500,7 +3522,7 @@ def convert_to_geoparquet(
         con.close()
         error_msg = str(e)
         if is_remote_url(input_file):
-            hints = get_remote_error_hint(error_msg, input_file)
+            hints = get_remote_error_hint(e, input_file)
             raise RemoteAccessError(
                 input_file, f"Failed to read remote file. {hints}. Original error: {error_msg}"
             ) from e
@@ -3526,17 +3548,7 @@ def convert_to_geoparquet(
 
     except Exception as e:
         con.close()
-        if "Unsupported geometry type in WKB" in str(e):
-            # Reached when nothing parsed the geometry early enough to linearize
-            # it (e.g. --skip-hilbert skips the bounds pass): at least name the
-            # offending types and the remedy instead of DuckDB's raw error.
-            from geoparquet_io.core.curved_geometry import unsupported_wkb_error_message
-
-            raise GeoParquetError(unsupported_wkb_error_message(input_file, layer, str(e))) from e
-        refused = text_error(e)
-        if refused is not None:
-            raise refused from e
-        raise GeoParquetError(f"Conversion failed: {str(e)}") from e
+        raise _conversion_failure(e, input_file, layer, "Conversion failed") from e
 
     finally:
         con.close()

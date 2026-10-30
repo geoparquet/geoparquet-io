@@ -16,6 +16,7 @@ Key features:
 from __future__ import annotations
 
 import json
+import os
 import re
 import tempfile
 import time
@@ -23,7 +24,7 @@ import xml.etree.ElementTree as ET  # nosec B405 - the one parse here (_is_empty
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import duckdb
@@ -56,14 +57,24 @@ from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
     sql_path,
 )
+from geoparquet_io.core.exceptions import (
+    FailureKind,
+    GeoParquetError,
+    RemoteAccessError,
+    classify_failure,
+    fatal_status_message,
+    is_auth_status,
+)
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_RETRY_DELAY,
-    DEFAULT_TIMEOUT,
     RetryExhaustedError,
+    final_request_error,
     get_shared_http_client,
+    make_request_with_retry,
     run_with_retry,
+    status_error,
 )
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -76,11 +87,22 @@ from geoparquet_io.core.logging_config import (
 from geoparquet_io.core.reproject import reproject_table
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
-# Maximum JSON object size for DuckDB parsing (1GB)
+# Bounds for DuckDB's ``maximum_object_size`` when parsing a GeoJSON response.
+# A FeatureCollection is one JSON object, so the limit must reach the payload's
+# own size; but DuckDB's reader allocates a multiple of the limit per active
+# reader, so a fixed 1 GiB ran small responses out of memory on modest hosts
+# (#1344). The limit is sized per response, with a floor, and capped at 1 GiB.
+_MIN_JSON_OBJECT_SIZE = 16 * 1024 * 1024
 _MAX_JSON_OBJECT_SIZE = 1073741824
 
 
-class WFSError(Exception):
+def _json_object_size_for(path: str) -> int:
+    """``maximum_object_size`` for the downloaded response at ``path``."""
+    size = os.path.getsize(path)
+    return min(_MAX_JSON_OBJECT_SIZE, max(_MIN_JSON_OBJECT_SIZE, size))
+
+
+class WFSError(GeoParquetError):
     """Exception raised for WFS-related errors."""
 
     pass
@@ -178,83 +200,9 @@ class WFSLayerInfo:
 # asks for one feature. Both are passed per request, never only to the shared
 # client, which keeps the timeout of whichever caller built it (#1184).
 _PAGE_TIMEOUT = 600.0
+#: What a 401/403 tells the user to fix: WFS has no credential flags, the key rides in the URL.
+WFS_CREDENTIALS_HINT = "Check the credentials in the URL."
 _PROBE_TIMEOUT = 30.0
-
-
-def _make_request(
-    url: str,
-    params: dict | None = None,
-    max_retries: int = DEFAULT_MAX_RETRIES,
-    retry_delay: float = DEFAULT_RETRY_DELAY,
-    accept: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
-) -> bytes:
-    """
-    Make HTTP GET request with retry logic.
-
-    Returns raw bytes to handle both JSON and XML responses.
-
-    Args:
-        url: Request URL
-        params: Query parameters
-        max_retries: Number of retry attempts
-        retry_delay: Base delay between retries (exponential backoff)
-        accept: Accept header value (e.g., "application/json")
-        timeout: Request timeout in seconds
-
-    Returns:
-        Response content as bytes
-    """
-    import httpx
-
-    headers = {
-        "Accept-Encoding": "gzip, deflate",
-    }
-    if accept:
-        headers["Accept"] = accept
-
-    # Build full URL for logging
-    request_desc = url
-    if params:
-        param_summary = ", ".join(f"{k}={v}" for k, v in list(params.items())[:5])
-        if len(params) > 5:
-            param_summary += f", ... ({len(params)} params)"
-        request_desc = f"{url}?{param_summary}"
-
-    def attempt() -> bytes:
-        debug(f"HTTP GET: {request_desc[:100]}{'...' if len(request_desc) > 100 else ''}")
-        start_time = time.time()
-        client = get_shared_http_client(timeout=timeout)
-        # The timeout rides on the request, not just the client: the shared
-        # client keeps the timeout of whichever caller built it first, so a
-        # client-level timeout alone would cap every later caller (#1184).
-        response = client.get(url, params=params, headers=headers, timeout=timeout)
-        elapsed = time.time() - start_time
-        response.raise_for_status()
-        content = bytes(response.content)
-        debug(f"HTTP OK: {len(content):,} bytes in {elapsed:.1f}s")
-        return content
-
-    try:
-        return bytes(run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay))
-    except httpx.HTTPStatusError as e:
-        status = e.response.status_code
-        if status == 401:
-            raise WFSAuthenticationError(
-                url, 401, "Authentication required. WFS server requires credentials."
-            ) from e
-        if status == 403:
-            raise WFSAuthenticationError(
-                url, 403, "Access denied. Check your permissions for this WFS service."
-            ) from e
-        if status == 404:
-            raise WFSError(f"WFS service not found (404). Check the URL: {url}") from e
-        raise WFSError(f"HTTP error {status}: {e}") from e
-    except RetryExhaustedError as e:
-        last = e.last_exception
-        if isinstance(last, httpx.HTTPStatusError):
-            raise WFSError(f"HTTP error {last.response.status_code}: {last}") from last
-        raise WFSError(f"Request failed after {max_retries} attempts: {last}") from e
 
 
 def _clean_service_url(url: str) -> str:
@@ -374,16 +322,29 @@ def get_wfs_capabilities(service_url: str, version: str = "1.1.0"):
         wfs = WebFeatureService(url=clean_url, version=version)
         return wfs
     except Exception as e:
-        error_msg = str(e).lower()
-        if "connection" in error_msg or "timeout" in error_msg:
+        # Classified by exception type and status (`exceptions.classify_failure`),
+        # never by the message: OWSLib's text embeds the request URL, so the
+        # user's own layer name or filter could decide the verdict (#1034).
+        verdict = classify_failure(e)
+        if verdict.kind in (FailureKind.UNREACHABLE, FailureKind.TIMEOUT):
             raise WFSError(f"Could not connect to WFS service: {clean_url}\nError: {e}") from e
-        elif "xml" in error_msg or "parse" in error_msg:
+        if verdict.kind is FailureKind.MALFORMED_RESPONSE:
             raise WFSError(
                 f"Invalid WFS response from: {clean_url}\n"
                 f"The server may not be a valid WFS service. Error: {e}"
             ) from e
-        else:
-            raise WFSError(f"Failed to get WFS capabilities: {e}") from e
+        if is_auth_status(verdict.status):
+            raise WFSAuthenticationError(
+                clean_url,
+                verdict.status,
+                fatal_status_message(
+                    verdict.status,
+                    subject="the WFS service",
+                    credentials=WFS_CREDENTIALS_HINT,
+                )
+                or "",
+            ) from e
+        raise WFSError(f"Failed to get WFS capabilities: {e}") from e
 
 
 # WFS versions in preference order (newest first)
@@ -1698,8 +1659,13 @@ def _get_feature_count(
     url = _merge_query_params(clean_url, params)
 
     try:
-        content = _make_request(url)
-    except (WFSError, httpx.HTTPError, OSError) as e:
+        # The one HTTP owner: gzip, shared client, retry policy and the
+        # 401/403/404 wording all live in `http_retry`.
+        content = cast(
+            bytes,
+            make_request_with_retry("GET", url, parse_json=False, credentials=WFS_CREDENTIALS_HINT),
+        )
+    except (WFSError, RemoteAccessError, httpx.HTTPError, OSError) as e:
         # Expected failure modes: the service is down, unreachable, rejecting us,
         # or timing out. Degrade to "count unknown" rather than aborting the
         # extraction, but say so — a silent None disables auto-tiling and
@@ -1882,7 +1848,9 @@ def _probe_properties_type(
         )
     except duckdb.BinderException as e:
         # Missing 'properties' key in feature struct (malformed GeoJSON per RFC 7946)
-        if "properties" in str(e):
+        # DuckDB: `Could not find key "properties" in struct` -- the exact phrase,
+        # not any binder error whose SQL excerpt happens to quote `.properties`.
+        if 'Could not find key "properties" in struct' in str(e):
             props_type = "MISSING"
         else:
             raise
@@ -2281,7 +2249,9 @@ def _download_wfs_page(url: str, accept: str, tmp_dir: tempfile.TemporaryDirecto
                 raise WFSError(
                     f"Server rejected paginated request (startIndex limit): {body.strip()}"
                 )
-            raise WFSError(f"WFS request failed with HTTP 400: {body[:500]}")
+            raise WFSError(
+                status_error(url, response, WFS_CREDENTIALS_HINT, detail=body[:500]).message
+            )
         response.raise_for_status()
 
         # Dispatch on the content-type the server actually sent. HTML and
@@ -2366,13 +2336,11 @@ def _fetch_wfs_page(
 
     try:
         download = run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay)
-    except httpx.HTTPStatusError as e:
-        raise WFSError(f"WFS request failed with HTTP {e.response.status_code}") from e
-    except RetryExhaustedError as e:
-        last = e.last_exception
-        if isinstance(last, httpx.HTTPStatusError):
-            raise WFSError(f"WFS request failed with HTTP {last.response.status_code}") from last
-        raise WFSError(f"Failed to fetch WFS data after {max_retries} attempts: {last}") from last
+    except (httpx.HTTPStatusError, RetryExhaustedError) as e:
+        error, cause = final_request_error(
+            url, e, max_retries=max_retries, credentials=WFS_CREDENTIALS_HINT
+        )
+        raise WFSError(error.message) from cause
 
     tmp_dir, tmp_path = download.tmp_dir, download.tmp_path
     content_type, body_kind = download.content_type, download.body_kind
@@ -2402,13 +2370,15 @@ def _fetch_wfs_page(
             return _with_server_crs(empty, server_crs)
 
         # Detect property type and build extraction query
-        props_type, can_unnest_props = _probe_properties_type(con, tmp_path, _MAX_JSON_OBJECT_SIZE)
+        props_type, can_unnest_props = _probe_properties_type(
+            con, tmp_path, _json_object_size_for(tmp_path)
+        )
         if not can_unnest_props:
             debug(f"Properties type is {props_type}, cannot unnest - returning geometry-only table")
 
         parse_start = time.time()
         query = _build_wfs_feature_query(
-            tmp_path, extract_fid, can_unnest_props, _MAX_JSON_OBJECT_SIZE
+            tmp_path, extract_fid, can_unnest_props, _json_object_size_for(tmp_path)
         )
 
         result = con.sql(query)

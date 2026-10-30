@@ -87,6 +87,7 @@
     "DEFAULT_KDTREE_TARGET_ROWS",
     "ErrorBoundaryGroup",
     "GlobAwareCommand",
+    "ParquetInputCommand",
     "SingleFileCommand",
     "aggregate_memory_option",
     "allow_schema_diff_option",
@@ -104,7 +105,6 @@
     "geoparquet_version_option",
     "grid_aggregate_options",
     "handle_directory_sub_partition",
-    "handle_geoparquet_errors",
     "linearize_curves_options",
     "metric_nodata_option",
     "output_format_options",
@@ -127,9 +127,10 @@
     "write_strategy_option"
   ],
   "geoparquet_io.cli.exception_handler": [
-    "F",
     "cli_error_for",
-    "core_exception_handler",
+    "click_error_for",
+    "error_boundary",
+    "error_text",
     "handle_core_exception"
   ],
   "geoparquet_io.core.column_selection": [
@@ -303,6 +304,9 @@
   "geoparquet_io.core.exceptions": [
     "BatchTooLargeError",
     "ExtensionUnavailableError",
+    "FATAL_STATUS_MESSAGES",
+    "FailureClass",
+    "FailureKind",
     "FileNotFoundGeoParquetError",
     "GeoParquetError",
     "GeometryError",
@@ -311,9 +315,15 @@
     "PartitionError",
     "RemoteAccessError",
     "ValidationError",
+    "classify_failure",
+    "clean_error_text",
+    "fatal_status_message",
+    "is_auth_status",
     "is_unpublished_extension_error",
-    "sanitize_error_message",
+    "not_parquet_file_error",
+    "redact_credentials",
     "sanitize_url_for_logging",
+    "status_message",
     "unpublished_extension_hint"
   ],
   "geoparquet_io.core.extract": [
@@ -430,6 +440,7 @@
     "resolve_geometry_read"
   ],
   "geoparquet_io.core.http_retry": [
+    "DEFAULT_CREDENTIALS_HINT",
     "DEFAULT_MAX_RETRIES",
     "DEFAULT_RETRY_DELAY",
     "DEFAULT_TIMEOUT",
@@ -439,6 +450,7 @@
     "RetryExhaustedError",
     "RetryVerdict",
     "classify_httpx_error",
+    "final_request_error",
     "get_shared_http_client",
     "is_retryable_status",
     "make_request_with_retry",
@@ -446,7 +458,8 @@
     "reset_http_client",
     "response_retry_after",
     "retry_wait",
-    "run_with_retry"
+    "run_with_retry",
+    "status_error"
   ],
   "geoparquet_io.core.json_output": [
     "dumps_json",

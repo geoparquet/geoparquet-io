@@ -14,7 +14,7 @@ from geoparquet_io.cli._shared import (
     prepare_output,
 )
 from geoparquet_io.cli.decorators import (
-    GlobAwareCommand,
+    ParquetInputCommand,
     SingleFileCommand,
     any_extension_option,
     aws_profile_option,
@@ -22,7 +22,6 @@ from geoparquet_io.cli.decorators import (
     compression_options,
     dry_run_option,
     geoparquet_version_option,
-    handle_geoparquet_errors,
     output_format_options,
     overwrite_option,
     parse_row_group_options,
@@ -33,6 +32,7 @@ from geoparquet_io.cli.decorators import (
     verbose_option,
     write_strategy_option,
 )
+from geoparquet_io.cli.exception_handler import error_text
 from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT
 from geoparquet_io.core.extract import extract as extract_impl
 from geoparquet_io.core.file_utils import validate_parquet_extension
@@ -69,7 +69,7 @@ def extract(ctx):
     init_group_context(ctx)
 
 
-@extract.command(name="geoparquet", cls=GlobAwareCommand)
+@extract.command(name="geoparquet", cls=ParquetInputCommand)
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
 @column_list_option(
@@ -462,7 +462,9 @@ def extract_arcgis(
                 raise ValueError("bbox must have exactly 4 values")
             bbox_tuple = tuple(parts)
         except ValueError as e:
-            raise click.BadParameter(f"Invalid bbox format: {e}. Use xmin,ymin,xmax,ymax") from e
+            raise click.BadParameter(
+                f"Invalid bbox format: {error_text(e)}. Use xmin,ymin,xmax,ymax"
+            ) from e
 
     with _activate_s3(ctx, aws_profile=aws_profile):
         convert_arcgis_to_geoparquet(
@@ -537,23 +539,15 @@ def _check_bigquery_source(
     sql: str | None,
     project: str | None,
 ) -> None:
-    """Re-raise the core's source verdict as a plain CLI error.
+    """Check the source rule; the core's ``InvalidParameterError`` reaches the root group.
 
     The rule itself lives in core, so the Python API enforces the same one.
-    What this adds is presentation: ``InvalidParameterError`` renders through
-    ``handle_core_exception`` as "Invalid value for 'project': Invalid
-    parameter 'project': ...", which says the same thing three times. The
-    reason alone is already a complete sentence written for a user.
     """
-    from geoparquet_io.core.exceptions import InvalidParameterError
     from geoparquet_io.core.extract_bigquery import _validate_sql_source
 
-    try:
-        # The query-shaping options are checked separately, off the parameter
-        # source rather than the value, so none are passed here.
-        _validate_sql_source(table_id, sql, project, {})
-    except InvalidParameterError as exc:
-        raise click.ClickException(exc.reason) from None
+    # The query-shaping options are checked separately, off the parameter
+    # source rather than the value, so none are passed here.
+    _validate_sql_source(table_id, sql, project, {})
 
 
 def _reject_query_shaping_with_sql(ctx: click.Context, sql: str | None) -> None:
@@ -588,7 +582,6 @@ def _reject_query_shaping_with_sql(ctx: click.Context, sql: str | None) -> None:
 
 
 @extract.command(name="bigquery")
-@handle_geoparquet_errors
 @click.argument("table_id", metavar="[TABLE_ID]", required=False, default=None)
 @click.argument("output_file", type=click.Path(), required=False, default=None)
 @click.option(
@@ -849,7 +842,6 @@ def _deprecated_version_callback(ctx, param, value):
 
 
 @extract.command(name="wfs")
-@handle_geoparquet_errors
 @click.argument("service_url")
 @click.argument("typename", required=False)
 @click.argument("output_file", required=False, type=click.Path())
@@ -1034,7 +1026,6 @@ def extract_wfs_cmd(
             --limit 10000 --skip-hilbert --skip-bbox
     """
     from geoparquet_io.core.wfs import (
-        WFSError,
         convert_wfs_layers_to_directory,
         convert_wfs_to_geoparquet,
         list_available_layers,
@@ -1047,15 +1038,12 @@ def extract_wfs_cmd(
 
     # If no typename, list available layers
     if typename is None:
-        try:
-            # Handle auto version negotiation for listing
-            if wfs_version == "auto":
-                negotiated_version, _ = negotiate_wfs_version(service_url)
-                layers = list_available_layers(service_url, version=negotiated_version)
-            else:
-                layers = list_available_layers(service_url, version=wfs_version)
-        except WFSError as e:
-            raise click.ClickException(str(e)) from None
+        # Handle auto version negotiation for listing
+        if wfs_version == "auto":
+            negotiated_version, _ = negotiate_wfs_version(service_url)
+            layers = list_available_layers(service_url, version=negotiated_version)
+        else:
+            layers = list_available_layers(service_url, version=wfs_version)
 
         if not layers:
             click.echo("No layers found in WFS service.")
@@ -1122,70 +1110,66 @@ def extract_wfs_cmd(
                 "Expected: xmin,ymin,xmax,ymax (e.g., -122.5,37.5,-122.0,38.0)"
             ) from e
 
-    try:
-        if is_multi_layer:
-            # Multi-layer parallel extraction
-            convert_wfs_layers_to_directory(
-                service_url=service_url,
-                typenames=typenames,
-                output_dir=output_file,
-                parallel_layers=parallel_layers,
-                max_workers=workers,
-                page_size=page_size,
-                version=wfs_version,
-                bbox=bbox_tuple,
-                bbox_mode=bbox_mode,
-                output_crs=output_crs,
-                limit=limit,
-                axis_order=axis_order,
-                strict_crs=strict_crs,
-                skip_hilbert=skip_hilbert,
-                skip_bbox=skip_bbox,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_mb,
-                row_group_rows=row_group_size,
-                geoparquet_version=geoparquet_version,
-                overwrite=overwrite,
-                verbose=verbose,
-                auto_tile=auto_tile,
-                sort_by=sort_by,
-                repair_geometry=repair_geometry,
-            )
-        else:
-            # Single layer extraction
-            convert_wfs_to_geoparquet(
-                service_url=service_url,
-                typename=typenames[0],
-                output_file=output_file,
-                version=wfs_version,
-                bbox=bbox_tuple,
-                bbox_mode=bbox_mode,
-                output_crs=output_crs,
-                limit=limit,
-                max_workers=workers,
-                page_size=page_size,
-                axis_order=axis_order,
-                strict_crs=strict_crs,
-                skip_hilbert=skip_hilbert,
-                skip_bbox=skip_bbox,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_mb,
-                row_group_rows=row_group_size,
-                geoparquet_version=geoparquet_version,
-                overwrite=overwrite,
-                verbose=verbose,
-                auto_tile=auto_tile,
-                sort_by=sort_by,
-                repair_geometry=repair_geometry,
-            )
-    except WFSError as e:
-        raise click.ClickException(str(e)) from None
+    if is_multi_layer:
+        # Multi-layer parallel extraction
+        convert_wfs_layers_to_directory(
+            service_url=service_url,
+            typenames=typenames,
+            output_dir=output_file,
+            parallel_layers=parallel_layers,
+            max_workers=workers,
+            page_size=page_size,
+            version=wfs_version,
+            bbox=bbox_tuple,
+            bbox_mode=bbox_mode,
+            output_crs=output_crs,
+            limit=limit,
+            axis_order=axis_order,
+            strict_crs=strict_crs,
+            skip_hilbert=skip_hilbert,
+            skip_bbox=skip_bbox,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_mb,
+            row_group_rows=row_group_size,
+            geoparquet_version=geoparquet_version,
+            overwrite=overwrite,
+            verbose=verbose,
+            auto_tile=auto_tile,
+            sort_by=sort_by,
+            repair_geometry=repair_geometry,
+        )
+    else:
+        # Single layer extraction
+        convert_wfs_to_geoparquet(
+            service_url=service_url,
+            typename=typenames[0],
+            output_file=output_file,
+            version=wfs_version,
+            bbox=bbox_tuple,
+            bbox_mode=bbox_mode,
+            output_crs=output_crs,
+            limit=limit,
+            max_workers=workers,
+            page_size=page_size,
+            axis_order=axis_order,
+            strict_crs=strict_crs,
+            skip_hilbert=skip_hilbert,
+            skip_bbox=skip_bbox,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_mb,
+            row_group_rows=row_group_size,
+            geoparquet_version=geoparquet_version,
+            overwrite=overwrite,
+            verbose=verbose,
+            auto_tile=auto_tile,
+            sort_by=sort_by,
+            repair_geometry=repair_geometry,
+        )
 
 
 @extract.command(name="carto")
-@handle_geoparquet_errors
 @click.argument("url")
 @click.argument("table_name")
 @click.argument("output_file", type=click.Path())
@@ -1315,7 +1299,7 @@ def extract_carto_cmd(
             --include-cols "parcel_number,market_value,the_geom" \\
             --limit 10000
     """
-    from geoparquet_io.core.carto import CartoError, convert_carto_to_geoparquet
+    from geoparquet_io.core.carto import convert_carto_to_geoparquet
 
     # Validate .parquet extension
     validate_parquet_extension(output_file, any_extension)
@@ -1338,28 +1322,25 @@ def extract_carto_cmd(
             ) from e
 
     with _activate_s3(ctx, aws_profile=aws_profile):
-        try:
-            convert_carto_to_geoparquet(
-                url=url,
-                table_name=table_name,
-                output_file=output_file,
-                where=where,
-                bbox=bbox_tuple,
-                limit=limit,
-                include_cols=include_cols,
-                exclude_cols=exclude_cols,
-                timeout=float(timeout),
-                skip_hilbert=skip_hilbert,
-                skip_bbox=skip_bbox,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_mb,
-                row_group_rows=row_group_size,
-                geoparquet_version=geoparquet_version,
-                overwrite=overwrite,
-                verbose=verbose,
-                repair_geometry=repair_geometry,
-                geometry=geometry,
-            )
-        except CartoError as e:
-            raise click.ClickException(str(e)) from None
+        convert_carto_to_geoparquet(
+            url=url,
+            table_name=table_name,
+            output_file=output_file,
+            where=where,
+            bbox=bbox_tuple,
+            limit=limit,
+            include_cols=include_cols,
+            exclude_cols=exclude_cols,
+            timeout=float(timeout),
+            skip_hilbert=skip_hilbert,
+            skip_bbox=skip_bbox,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_mb,
+            row_group_rows=row_group_size,
+            geoparquet_version=geoparquet_version,
+            overwrite=overwrite,
+            verbose=verbose,
+            repair_geometry=repair_geometry,
+            geometry=geometry,
+        )

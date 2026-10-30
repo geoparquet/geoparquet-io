@@ -25,6 +25,7 @@ from geoparquet_io.cli.decorators import (
     show_sql_option,
     verbose_option,
 )
+from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.add.a5 import add_a5_column as add_a5_column_impl
 from geoparquet_io.core.add.bbox import add_bbox_column as add_bbox_column_impl
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata as add_bbox_metadata_impl
@@ -502,7 +503,7 @@ def add_bbox(
                 memory_limit=write_memory,
             )
         except StreamingError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None
 
 
 @add.command(name="bbox-metadata", cls=SingleFileCommand)
@@ -663,7 +664,7 @@ def add_h3(
                 memory_limit=write_memory,
             )
         except StreamingError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None
 
 
 @add.command(name="a5", cls=SingleFileCommand)
@@ -738,7 +739,7 @@ def add_a5(
                 memory_limit=write_memory,
             )
         except StreamingError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None
 
 
 @add.command(name="s2", cls=SingleFileCommand)
@@ -813,7 +814,7 @@ def add_s2(
                 memory_limit=write_memory,
             )
         except StreamingError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None
 
 
 @add.command(name="kdtree", cls=SingleFileCommand)
@@ -1009,4 +1010,4 @@ def add_quadkey(
                 memory_limit=write_memory,
             )
         except StreamingError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None

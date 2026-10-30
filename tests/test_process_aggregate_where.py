@@ -319,18 +319,19 @@ def test_where_error_message_names_the_where_option():
     """An invalid clause must point at --where, not dump the generated SQL (#612)."""
     import duckdb as _duckdb
 
-    from geoparquet_io.cli.commands.process import _aggregate_error
+    from geoparquet_io.cli.commands.process import _where_hint
+    from geoparquet_io.cli.exception_handler import click_error_for
 
     exc = _duckdb.Error(
         'Binder Error: Referenced column "yr" not found in FROM clause!\n'
         "LINE 1: SELECT * EXCLUDE (...) FROM read_parquet('x.parquet') WHERE (yr = 2025)"
     )
-    err = _aggregate_error(exc, "yr = 2025")
+    err = click_error_for(exc, hint=_where_hint("yr = 2025"))
     assert "--where" in str(err)
     assert "yr = 2025" in str(err)
     assert "LINE 1" not in str(err)
     # Non-DuckDB errors pass through untouched.
-    assert str(_aggregate_error(ValueError("plain"), "yr = 2025")) == "plain"
+    assert str(click_error_for(ValueError("plain"), hint=_where_hint("yr = 2025"))) == "plain"
 
 
 # ---------------------------------------------------------------------------

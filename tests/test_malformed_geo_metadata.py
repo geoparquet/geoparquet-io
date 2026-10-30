@@ -2275,3 +2275,19 @@ def test_no_command_dies_with_a_raw_exception_on_a_malformed_block(case, block, 
 
     assert set(crashed) == KNOWN_UNGUARDED.get(case, set()), crashed
     assert leaked_from_duckdb == {}
+
+
+@pytest.mark.parametrize("block", [[1], "text", 5], ids=["list", "string", "number"])
+def test_inspect_readers_treat_a_non_object_geo_block_as_absent(tmp_path, block):
+    """``extract_geo_info`` and ``get_preview_data`` assumed a dict and raised AttributeError."""
+    from geoparquet_io.core.inspect_utils import extract_geo_info, get_preview_data
+
+    path = _file_with_geo(tmp_path, "notdict.parquet", block)
+
+    info = extract_geo_info(path)  # used to raise AttributeError
+    assert info["has_geo_metadata"] is False
+
+    # DuckDB itself refuses to read such a file; what matters is that gpio's own
+    # dict assumption no longer raises AttributeError ahead of that clean refusal.
+    with pytest.raises(duckdb.InvalidInputException):
+        get_preview_data(path, head=1)

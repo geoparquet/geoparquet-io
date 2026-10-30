@@ -16,7 +16,10 @@ from geoparquet_io.core.aws_credentials import (
     resolve_aws_credentials,
     resolve_aws_region,
 )
-from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
+from geoparquet_io.core.exceptions import (
+    InvalidParameterError,
+    RemoteAccessError,
+)
 from geoparquet_io.core.logging_config import error, progress, success
 
 
@@ -400,6 +403,7 @@ def _upload_one_file(
     source: Path,
     prefix: str,
     stop_requested: threading.Event | None = None,
+    stop_on_error: bool = True,
     **kwargs,
 ) -> tuple[Path, Exception | None]:
     """Upload a single file and return result tuple for parallel processing.
@@ -434,7 +438,7 @@ def _upload_one_file(
         # own file is free to pick up the next one while this thread is still
         # inside error(), and everything it picks up in that window gets past
         # the guard above and is attempted after the run was meant to stop.
-        if stop_requested is not None:
+        if stop_requested is not None and stop_on_error:
             stop_requested.set()
         error(f"{file_path.name}: {e}")
         return file_path, e
@@ -473,28 +477,47 @@ def _upload_directory_sync(
     total_size_mb = total_size / (1024 * 1024)
     progress(f"Found {len(files)} file(s) to upload ({total_size_mb:.2f} MB total)")
 
-    stop_requested = threading.Event() if fail_fast else None
+    # Always present: a fail-fast error sets it, and so does Ctrl-C (#1031).
+    stop_requested = threading.Event()
     results: list[tuple[Path, Exception | None]] = []
     cancelled: list[Path] = []
+    interrupted = False
     with ThreadPoolExecutor(max_workers=max_files) as executor:
         futures = {
             executor.submit(
-                _upload_one_file, store, f, source, prefix, stop_requested=stop_requested, **kwargs
+                _upload_one_file,
+                store,
+                f,
+                source,
+                prefix,
+                stop_requested=stop_requested,
+                stop_on_error=fail_fast,
+                **kwargs,
             ): f
             for f in files
         }
         pending = set(futures)
 
-        for future in as_completed(futures):
-            pending.discard(future)
-            result = future.result()
-            results.append(result)
-            if fail_fast and result[1] is not None:
-                cancelled = _drain_remaining_uploads(futures, pending, results)
-                break
+        try:
+            for future in as_completed(futures):
+                pending.discard(future)
+                result = future.result()
+                results.append(result)
+                if fail_fast and result[1] is not None:
+                    cancelled = _drain_remaining_uploads(futures, pending, results)
+                    break
+        except KeyboardInterrupt:
+            # `with ThreadPoolExecutor` would otherwise wait for every queued
+            # file. In-flight uploads finish (their bytes cannot be recalled);
+            # nothing new starts. The summary still prints, then Ctrl-C goes on.
+            stop_requested.set()
+            cancelled = _drain_remaining_uploads(futures, pending, results)
+            interrupted = True
 
     counts = _classify_upload_results(results, cancelled)
     _print_upload_summary(counts, len(files))
+    if interrupted:
+        raise KeyboardInterrupt
     _raise_if_upload_incomplete(destination, counts, len(files))
 
 
@@ -568,7 +591,12 @@ def _upload_single_file(
     store, kwargs = _setup_store_and_kwargs(
         bucket_url, profile, chunk_concurrency, chunk_size, s3_endpoint, s3_region, s3_use_ssl
     )
-    _upload_file_sync(store, source, target_key, **kwargs)
+    try:
+        _upload_file_sync(store, source, target_key, **kwargs)
+    except Exception as e:
+        # The directory path reports the same failure as an `Error:` line; a
+        # bare obstore RuntimeError would escape as a traceback (#1031).
+        raise RemoteAccessError(destination, f"upload of {source.name} failed: {e}") from e
 
 
 def _upload_directory(

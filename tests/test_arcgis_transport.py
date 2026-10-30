@@ -545,7 +545,7 @@ def test_retries_are_exhausted_and_then_reported(monkeypatch):
     [
         (401, "Authentication required"),
         (403, "Access denied"),
-        (404, "Service not found"),
+        (404, "service not found"),
         (418, "HTTP error 418"),
     ],
 )

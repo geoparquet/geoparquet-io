@@ -468,7 +468,7 @@ def _str_order_file_based(
             success(f"Wrote data without STR ordering to: {output_parquet}")
     except duckdb.IOException as exc:
         if is_remote_url(input_parquet):
-            hints = get_remote_error_hint(str(exc), input_parquet)
+            hints = get_remote_error_hint(exc, input_parquet)
             raise RemoteAccessError(input_parquet, f"{hints}\n\nOriginal error: {exc}") from exc
         raise
     finally:

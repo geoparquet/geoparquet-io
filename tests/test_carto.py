@@ -25,7 +25,6 @@ from geoparquet_io.core.carto import (
     _fatal_status_error,
     _fetch_with_retry,
     _geometry_column_from_fields,
-    _status_from_duckdb_error,
     _validate_carto_url,
     _validate_table_name,
     carto_to_table,
@@ -999,29 +998,6 @@ def status_http_server():
         thread.join(timeout=5)
 
 
-class TestStatusFromDuckdbError:
-    """``duckdb.HTTPException.status_code`` is used only when it is a real status."""
-
-    def test_a_plain_exception_carries_no_status(self):
-        assert _status_from_duckdb_error(RuntimeError("IO Error: 404 not found")) is None
-
-    def test_a_real_status_is_read(self):
-        exc = RuntimeError("boom")
-        exc.status_code = 503
-        assert _status_from_duckdb_error(exc) == 503
-
-    def test_zero_is_not_a_status(self):
-        """DuckDB reports status_code 0 when the request produced no status."""
-        exc = RuntimeError("boom")
-        exc.status_code = 0
-        assert _status_from_duckdb_error(exc) is None
-
-    def test_a_non_integer_status_is_ignored(self):
-        exc = RuntimeError("boom")
-        exc.status_code = "404"
-        assert _status_from_duckdb_error(exc) is None
-
-
 class TestFatalStatusError:
     """Which classified failures are fatal, and which are the retryable class."""
 
@@ -1035,10 +1011,10 @@ class TestFatalStatusError:
         ("status", "expected"),
         [
             (404, "not found"),
-            (401, "Unauthorized"),
-            (403, "forbidden"),
-            (400, "HTTP 400"),
-            (418, "HTTP 418"),
+            (401, "Authentication required"),
+            (403, "Access denied"),
+            (400, "HTTP error 400"),
+            (418, "HTTP error 418"),
         ],
     )
     def test_client_errors_are_fatal(self, status, expected):
@@ -1074,7 +1050,7 @@ class TestFatalStatusError:
             self._status(400, detail=detail), "my_table", "GeoJSON", self._EXC
         )
         assert error is not None
-        assert "HTTP 400" in str(error)
+        assert "HTTP error 400" in str(error)
         assert detail in str(error)
 
     def test_a_local_failure_is_fatal_and_says_it_is_local(self):
@@ -1144,8 +1120,8 @@ class TestFailureClassificationIgnoresTheUsersSql:
         assert conn.attempts == 3, f"{note}: retries were lost"
         assert "Failed to fetch data from Carto after 3 attempts" in message, note
         assert "not found" not in message, note
-        assert "Unauthorized" not in message, note
-        assert "forbidden" not in message, note
+        assert "Authentication required" not in message, note
+        assert "Access denied" not in message, note
 
     def test_a_real_dead_port_fetch_retries_end_to_end(self, monkeypatch):
         """The issue's reproduction, with DuckDB and GDAL actually in the loop.
@@ -1197,7 +1173,7 @@ class TestFailureClassificationUsesTheHttpStatus:
 
     @pytest.mark.parametrize(
         ("status", "expected"),
-        [(404, "not found"), (401, "Unauthorized"), (403, "forbidden")],
+        [(404, "not found"), (401, "Authentication required"), (403, "Access denied")],
     )
     def test_a_real_client_error_fails_fast_with_the_right_message(
         self, monkeypatch, status_http_server, status, expected
@@ -1338,7 +1314,7 @@ class TestFailureClassificationUsesTheHttpStatus:
             )
 
         assert conn.attempts == 1
-        assert "HTTP 400" in str(excinfo.value)
+        assert "HTTP error 400" in str(excinfo.value)
         assert 'column "foo" does not exist' in str(excinfo.value)
 
     def test_a_200_from_the_probe_is_fatal_not_retried(self, monkeypatch, status_http_server):

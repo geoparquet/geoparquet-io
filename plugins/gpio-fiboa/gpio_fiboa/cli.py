@@ -7,7 +7,6 @@ import click
 from geoparquet_io.cli.decorators import (
     compression_options,
     geoparquet_version_option,
-    handle_geoparquet_errors,
     overwrite_option,
     row_group_options,
     verbose_option,
@@ -81,7 +80,6 @@ def fiboa():
 @geoparquet_version_option
 @overwrite_option
 @verbose_option
-@handle_geoparquet_errors
 def improve(
     input_file: str,
     output_file: str,
@@ -163,7 +161,6 @@ def improve(
 @fiboa.command()
 @click.argument("input_file")
 @verbose_option
-@handle_geoparquet_errors
 def describe(input_file: str, verbose: bool) -> None:
     """Describe a GeoParquet file's fiboa compliance.
 

@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote, urlparse
 
-import duckdb
 import pyarrow as pa
 
 from geoparquet_io.core.column_selection import (
@@ -31,7 +30,13 @@ from geoparquet_io.core.duckdb_utils import (
     validate_where_clause,
     where_condition_fragment,
 )
-from geoparquet_io.core.exceptions import InvalidParameterError, sanitize_error_message
+from geoparquet_io.core.exceptions import (
+    FailureKind,
+    GeoParquetError,
+    InvalidParameterError,
+    classify_failure,
+    status_message,
+)
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
     DEFAULT_MAX_RETRIES,
@@ -65,38 +70,14 @@ STATUS_PROBE_TIMEOUT = 30.0  # seconds
 # not short from becoming a download.
 PROBE_DETAIL_BYTES = 2048
 
-# Failures that happened on this machine, not at the server: the query never
-# produced a response to classify, so there is nothing to probe for and no
-# retry that could help. Everything else that reaches the classifier is an
-# I/O failure whose status is worth asking about.
-_LOCAL_FAILURES: tuple[type[BaseException], ...] = (
-    duckdb.OutOfMemoryException,
-    duckdb.InterruptException,
-    duckdb.BinderException,
-    duckdb.CatalogException,
-    duckdb.ParserException,
-    duckdb.InvalidInputException,
-    MemoryError,
-)
-
 # Environment variable for API key
 CARTO_API_KEY_ENV = "CARTO_API_KEY"
 
-# The fatal HTTP statuses, and what each one means for a Carto extraction.
-# Keyed on the status the transport reported -- never on text found in an
-# exception message, which embeds the request URL and so the user's own SQL
-# (#1020).
-_FATAL_STATUS_HINTS = {
-    404: ("Table '{table}' not found. Check the table name and ensure it is publicly accessible."),
-    401: (
-        "Unauthorized access to table '{table}'. "
-        "Set CARTO_API_KEY environment variable or check permissions."
-    ),
-    403: "Access forbidden to table '{table}'. Check permissions.",
-}
+# What a 401/403 tells the user to fix.
+CARTO_CREDENTIALS_HINT = "Set the CARTO_API_KEY environment variable or check permissions."
 
 
-class CartoError(Exception):
+class CartoError(GeoParquetError):
     """Carto-specific error."""
 
     pass
@@ -708,7 +689,7 @@ def _resolve_table_crs(
     except CartoError as e:
         raise CartoError(
             f"Carto: could not read the SRID of '{table_name}'.{_CARTO_GEOMETRY_COLUMN}, so "
-            f"the output cannot be tagged with a CRS: {sanitize_error_message(str(e))}"
+            f"the output cannot be tagged with a CRS: {e}"
         ) from e
     if not srids:
         debug("No non-NULL geometry to read an SRID from; tagging OGC:CRS84")
@@ -767,24 +748,6 @@ def _create_empty_geoparquet_table(
     return _with_geo_metadata(table, geoparquet_version, crs or _crs84())
 
 
-def _status_from_duckdb_error(exc: BaseException) -> int | None:
-    """Read the HTTP status off a DuckDB exception, when it carries a usable one.
-
-    ``duckdb.HTTPException`` exposes ``status_code``, but reports 0 whenever the
-    request produced no status of its own -- including, in practice, some auth
-    failures -- so 0 is read as "no status" rather than as a code. The
-    ``ST_Read`` path raises a plain ``IOException`` that carries no status at
-    all; :func:`_probe_request_status` is how that one gets a number.
-
-    Returns:
-        The status, or None when the exception does not carry a real one.
-    """
-    code = getattr(exc, "status_code", None)
-    if isinstance(code, int) and not isinstance(code, bool) and code > 0:
-        return code
-    return None
-
-
 def _probe_request_status(full_url: str, timeout: float) -> _CartoStatus:
     """Ask the server what status this exact request gets.
 
@@ -826,7 +789,7 @@ def _probe_request_status(full_url: str, timeout: float) -> _CartoStatus:
         # A probe that times out is a probe that could not answer -- no status,
         # the retryable class. It is *not* evidence that the data request timed
         # out: that verdict comes from the data request's own clock in
-        # `_classify_fetch_failure`. The first version read a probe timeout as
+        # `_carto_status_of`. The first version read a probe timeout as
         # one, and Windows runners, where a SYN to a closed loopback port is
         # dropped rather than refused, reported "Request timed out ... try
         # --limit" for a connection that was never made.
@@ -852,28 +815,27 @@ def _read_probe_detail(response) -> str | None:
         payload = None
     if isinstance(payload, dict) and isinstance(payload.get("error"), list):
         text = "; ".join(str(item) for item in payload["error"])
-    return sanitize_error_message(text) or None
+    return text or None
 
 
-def _classify_fetch_failure(
+def _carto_status_of(
     exc: BaseException, full_url: str, timeout: float, elapsed: float = 0.0
 ) -> _CartoStatus:
-    """Decide what a failed fetch attempt was, without reading the message.
+    """What a failed fetch attempt was, per ``exceptions.classify_failure``.
 
-    In order: a failure that happened here rather than at the server is local;
-    an attempt that ran out the whole ``timeout`` timed out, whatever the
-    message says, and is not probed (the probe would re-run the query that was
-    already too heavy); a status DuckDB itself reported is used as-is (the CSV
-    path goes through httpfs, which has one); and only the ``ST_Read`` path,
-    whose exception carries no status at all, is probed.
+    The type-keyed verdict is the owner's. This adds only what Carto needs on
+    top of it: an attempt that ran out the whole ``timeout`` timed out whatever
+    the exception says (and is not probed -- the probe would re-run the query
+    that was already too heavy), and the ``ST_Read`` path, whose exception
+    carries no status at all, is probed for one.
     """
-    if isinstance(exc, _LOCAL_FAILURES):
+    verdict = classify_failure(exc)
+    if verdict.kind is FailureKind.LOCAL:
         return _CartoStatus(None, False, local=True)
     if elapsed >= timeout:
         return _CartoStatus(None, True)
-    code = _status_from_duckdb_error(exc)
-    if code is not None:
-        return _CartoStatus(code, False)
+    if verdict.kind is FailureKind.HTTP_STATUS:
+        return _CartoStatus(verdict.status, False)
     return _probe_request_status(full_url, timeout)
 
 
@@ -899,7 +861,7 @@ def _fatal_status_error(
     """
     if _is_retryable(status):
         return None
-    reason = sanitize_error_message(str(exc))
+    reason = exc
     if status.local:
         return CartoError(
             f"Reading table '{table_name}' from Carto failed before any response could be "
@@ -914,11 +876,10 @@ def _fatal_status_error(
     code = status.code
     if code is None:  # pragma: no cover - _is_retryable already answered for no status
         return None
-    hint = _FATAL_STATUS_HINTS.get(code)
-    message = (
-        hint.format(table=table_name)
-        if hint is not None
-        else f"Carto request for table '{table_name}' failed with HTTP {code}."
+    message = status_message(
+        code,
+        subject=f"table '{table_name}'",
+        credentials=CARTO_CREDENTIALS_HINT,
     )
     if status.detail:
         message += f" Carto said: {status.detail}"
@@ -996,7 +957,7 @@ def _fetch_with_retry(
         # Classify on the HTTP status the transport reported -- never on the
         # exception message, which embeds full_url and therefore the user's
         # own table name, WHERE clause and LIMIT (#1020).
-        status = _classify_fetch_failure(exc, full_url, timeout, elapsed=time.monotonic() - started)
+        status = _carto_status_of(exc, full_url, timeout, elapsed=time.monotonic() - started)
         fatal = _fatal_status_error(status, table_name, fmt_param, exc)
         if fatal is not None:
             raise fatal from exc
@@ -1023,8 +984,7 @@ def _fetch_with_retry(
         # The DuckDB message names the URL it failed on, key and all; sanitized
         # rather than echoed.
         raise CartoError(
-            f"Failed to fetch data from Carto after {max_retries} attempts: "
-            f"{sanitize_error_message(str(last))}"
+            f"Failed to fetch data from Carto after {max_retries} attempts: {last}"
         ) from last
 
 
@@ -1063,7 +1023,7 @@ def carto_to_table(
         include_cols: Comma-separated column names to include
         exclude_cols: Comma-separated column names to exclude (applied after fetch)
         api_key: API key for authenticated requests (or set CARTO_API_KEY env var)
-        timeout: Request timeout in seconds (default: 120)
+        timeout: Request timeout in seconds (default: ``CARTO_REQUEST_TIMEOUT``)
         max_retries: Number of retry attempts for transient failures (default: 3)
         geoparquet_version: GeoParquet version for metadata (default: "1.1.0")
         verbose: Enable verbose output
@@ -1354,7 +1314,7 @@ def convert_carto_to_geoparquet(
         include_cols: Comma-separated columns to include
         exclude_cols: Comma-separated columns to exclude
         api_key: API key for authenticated requests (or set CARTO_API_KEY env var)
-        timeout: Request timeout in seconds (default: 120)
+        timeout: Request timeout in seconds (default: ``CARTO_REQUEST_TIMEOUT``)
         max_retries: Number of retry attempts (default: 3)
         skip_hilbert: Skip Hilbert curve sorting (geometry tables only)
         skip_bbox: Skip adding bbox column (geometry tables only)

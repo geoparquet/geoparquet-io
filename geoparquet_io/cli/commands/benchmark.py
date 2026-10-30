@@ -7,7 +7,7 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 
 import click
 
-from geoparquet_io.cli.decorators import handle_geoparquet_errors, verbose_option
+from geoparquet_io.cli.decorators import verbose_option
 from geoparquet_io.core.logging_config import configure_verbose
 
 
@@ -28,7 +28,6 @@ def benchmark():
 
 
 @benchmark.command("compare")
-@handle_geoparquet_errors
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option(
     "--iterations",
@@ -121,7 +120,6 @@ def benchmark_compare(
 
 
 @benchmark.command("suite")
-@handle_geoparquet_errors
 @click.option(
     "--operations",
     type=click.Choice(["core", "full"]),
@@ -244,7 +242,6 @@ def benchmark_suite(
 
 
 @benchmark.command("explain")
-@handle_geoparquet_errors
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option(
     "--query",
@@ -312,7 +309,6 @@ def benchmark_explain(
 
 
 @benchmark.command("report")
-@handle_geoparquet_errors
 @click.argument("result_files", nargs=-1, type=click.Path(exists=True))
 @click.option(
     "--format",

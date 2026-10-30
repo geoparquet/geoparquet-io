@@ -24,6 +24,8 @@ import logging
 import sys
 from contextlib import contextmanager
 
+from geoparquet_io.core.exceptions import clean_error_text
+
 # Package-level logger
 logger = logging.getLogger("geoparquet_io")
 
@@ -281,8 +283,11 @@ def warn(message: str) -> None:
     Log a warning message (displayed in yellow in CLI).
 
     Use for: Non-critical issues, recommendations, deprecation notices.
+
+    Text goes through the one ``clean_error_text`` policy here, once (credential
+    values, query strings on URLs, control characters), so a caller can interpolate a caught exception without cleaning it first.
     """
-    logger.warning(message)
+    logger.warning(clean_error_text(message))
 
 
 def error(message: str) -> None:
@@ -291,7 +296,7 @@ def error(message: str) -> None:
 
     Use for: Failed operations, validation failures, critical issues.
     """
-    logger.error(message)
+    logger.error(clean_error_text(message))
 
 
 def info(message: str) -> None:

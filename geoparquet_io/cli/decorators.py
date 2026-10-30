@@ -5,12 +5,12 @@ This module provides reusable decorators to ensure consistency across commands
 and reduce code duplication.
 """
 
-import functools
 import math
 
 import click
 from click.core import ParameterSource
 
+from geoparquet_io.cli.exception_handler import click_error_for, error_boundary, error_text
 from geoparquet_io.core.compression import (
     ACCEPTED_CODEC_NAMES,
     ALLOWED_CODECS,
@@ -28,7 +28,7 @@ from geoparquet_io.core.parquet_writer import (
 
 
 class ErrorBoundaryGroup(click.Group):
-    """Root group that turns a DuckDB failure into gpio's error line.
+    """Root group that turns a failure no gpio frame owned into gpio's error line.
 
     Failures reach this point with no gpio frame willing to own them, and used
     to leave a raw Python traceback on the terminal -- an out-of-spill-space
@@ -40,7 +40,7 @@ class ErrorBoundaryGroup(click.Group):
     :data:`~geoparquet_io.core.duckdb_utils.INPUT_FILE_DUCKDB_ERRORS`.
 
     This belongs on the *root* group rather than on a decorator, because every
-    command can hit those failures: ``handle_geoparquet_errors`` is applied to
+    command can hit those failures: a per-command decorator was applied to
     four command modules, and ``gpio sort hilbert`` -- the worked example in the
     docs -- is not one of them. ``Group.invoke`` is the single funnel every
     subcommand passes through, so a command added tomorrow inherits this, and
@@ -61,48 +61,8 @@ class ErrorBoundaryGroup(click.Group):
     """
 
     def invoke(self, ctx):
-        from geoparquet_io.cli.exception_handler import cli_error_for
-        from geoparquet_io.core.logging_config import get_logger
-
-        try:
+        with error_boundary():
             return super().invoke(ctx)
-        except Exception as exc:
-            error = cli_error_for(exc)
-            if error is None:
-                raise
-            # The traceback is hidden, not discarded: --verbose prints it, which
-            # is what a gpio bug that surfaces as a DuckDB error needs. That
-            # holds because `verbose_option` raises the package logger to DEBUG
-            # as the flag is parsed -- before the command body runs, so before
-            # anything can fail on the way to a core function's own
-            # `configure_verbose` call.
-            get_logger(__name__).debug(
-                "Converted a low-level failure to an error line", exc_info=exc
-            )
-            raise error from exc
-
-
-def handle_geoparquet_errors(func):
-    """
-    Decorator to convert GeoParquetError exceptions to user-friendly Click errors.
-
-    Catches GeoParquetError from core functions and converts them to
-    appropriate click exceptions (BadParameter for invalid params, ClickException
-    for general errors) for clean error display without stack traces.
-    """
-
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        # Import here to avoid circular imports
-        from geoparquet_io.cli.exception_handler import handle_core_exception
-        from geoparquet_io.core.exceptions import GeoParquetError
-
-        try:
-            return func(*args, **kwargs)
-        except GeoParquetError as e:
-            raise handle_core_exception(e) from None
-
-    return wrapper
 
 
 def parse_row_group_options(
@@ -138,7 +98,7 @@ def parse_row_group_options(
     try:
         return bytes_to_mb(parse_size_string(row_group_size_mb))
     except ValueError as e:
-        raise click.UsageError(f"Invalid row group size: {e}") from e
+        raise click.UsageError(f"Invalid row group size: {error_text(e)}") from e
 
 
 # ``--approx``'s default. ``gpio add kdtree`` and ``gpio partition kdtree`` both
@@ -613,7 +573,7 @@ def _validate_write_memory(ctx, param, value):
     try:
         validate_memory_limit(value)
     except ValueError as e:
-        raise click.BadParameter(str(e), ctx=ctx, param=param) from None
+        raise click.BadParameter(error_text(e), ctx=ctx, param=param) from None
     return value
 
 
@@ -1026,8 +986,8 @@ class GlobAwareCommand(click.Command):
     For commands that support glob patterns (like extract), it suggests quoting.
     For commands that don't (like convert), it suggests using gpio extract first.
 
-    This class also handles GeoParquetError exceptions from core functions,
-    converting them to user-friendly Click exceptions without stack traces.
+    Failures from core functions are translated here by ``error_boundary``, the
+    same boundary the root ``ErrorBoundaryGroup`` uses.
 
     Usage:
         @cli.command(cls=GlobAwareCommand)
@@ -1052,16 +1012,22 @@ class GlobAwareCommand(click.Command):
         "inspect": "summary",
     }
 
-    def invoke(self, ctx):
-        """Invoke the command with user-friendly error handling."""
-        # Import here to avoid circular imports
-        from geoparquet_io.cli.exception_handler import handle_core_exception
-        from geoparquet_io.core.exceptions import GeoParquetError
+    #: The parameters that may name the input file; the first one the command has
+    #: is the file a non-Parquet answer names. Empty: the answer names no file.
+    input_params: tuple[str, ...] = ()
 
-        try:
+    def invoke(self, ctx):
+        """Invoke the command inside the same boundary the root group uses."""
+        path = next(
+            (
+                ctx.params[name]
+                for name in self.input_params
+                if isinstance(ctx.params.get(name), str)
+            ),
+            None,
+        )
+        with error_boundary(path=path):
             return super().invoke(ctx)
-        except GeoParquetError as e:
-            raise handle_core_exception(e) from None
 
     def make_context(self, info_name, args, parent=None, **extra):
         """Detect shell-expanded glob patterns and provide helpful errors."""
@@ -1118,6 +1084,16 @@ class GlobAwareCommand(click.Command):
                 parts = parts[:-1]
 
         return " ".join(parts)
+
+
+class ParquetInputCommand(GlobAwareCommand):
+    """A :class:`GlobAwareCommand` whose input is the ``parquet_file`` (or ``input_file``) argument.
+
+    A file that is not Parquet is answered by name ("The file 'x.parquet' has a
+    .parquet extension but is not a valid Parquet file...").
+    """
+
+    input_params = ("parquet_file", "input_file")
 
 
 class SingleFileCommand(GlobAwareCommand):
@@ -1234,7 +1210,7 @@ def handle_directory_sub_partition(
     try:
         min_size_bytes = parse_size_string(min_size)
     except ValueError as e:
-        raise click.UsageError(str(e)) from None
+        raise click.UsageError(error_text(e)) from None
 
     if preview:
         # --preview used to be accepted, ignored, and the originals deleted
@@ -1273,7 +1249,7 @@ def handle_directory_sub_partition(
             max_partitions=max_partitions,
         )
     except ValueError as e:
-        raise click.UsageError(str(e)) from None
+        raise click_error_for(e) from None
 
     if result["errors"]:
         # Every per-file failure was caught and warned about, so without this the

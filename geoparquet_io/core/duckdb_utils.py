@@ -229,10 +229,10 @@ def _extract_bucket_name(path: str) -> str:
 
 def _needs_s3_auth(exception: Exception) -> bool:
     """Detect if exception indicates S3 bucket requires authentication."""
-    error_str = str(exception).lower()
-    # 403 without credentials means we need to authenticate
-    auth_indicators = ["403", "forbidden", "access denied", "unauthorized"]
-    return any(ind in error_str for ind in auth_indicators)
+    from geoparquet_io.core.exceptions import classify_failure, is_auth_status
+
+    # 401/403 without credentials means we need to authenticate
+    return is_auth_status(classify_failure(exception).status)
 
 
 def _add_bucket_needing_auth(bucket: str) -> None:

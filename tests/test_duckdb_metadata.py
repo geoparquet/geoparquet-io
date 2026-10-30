@@ -335,7 +335,7 @@ class TestGeoParquetErrorExceptions:
 
             # Verify error message is informative
             error_msg = str(exc_info.value)
-            assert "Not a valid GeoParquet file" in error_msg
+            assert "is not a valid Parquet file" in error_msg
             assert temp_path in error_msg
             assert "gpio convert" in error_msg
 
@@ -359,7 +359,7 @@ class TestGeoParquetErrorExceptions:
 
             # Verify error message mentions read issue
             error_msg = str(exc_info.value)
-            assert "Cannot read file" in error_msg or "Not a valid GeoParquet file" in error_msg
+            assert "Cannot read file" in error_msg or "is not a valid Parquet file" in error_msg
             assert temp_path in error_msg
 
             # Verify the original exception is chained
@@ -391,7 +391,7 @@ class TestGeoParquetErrorExceptions:
 
             # Verify error message is informative
             error_msg = str(exc_info.value)
-            assert "Not a valid Parquet file" in error_msg
+            assert "is not a valid Parquet file" in error_msg
             assert temp_path in error_msg
             assert "gpio convert" in error_msg
 
@@ -417,7 +417,7 @@ class TestGeoParquetErrorExceptions:
             error_msg = str(exc_info.value)
             assert (
                 "Cannot read file" in error_msg
-                or "Not a valid Parquet file" in error_msg
+                or "is not a valid Parquet file" in error_msg
                 or "Invalid Parquet file" in error_msg
             )
             assert temp_path in error_msg

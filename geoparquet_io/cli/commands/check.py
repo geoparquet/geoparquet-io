@@ -28,14 +28,14 @@ from click.core import ParameterSource
 
 from geoparquet_io.cli._shared import _activate_s3, create_default_group, init_group_context
 from geoparquet_io.cli.decorators import (
-    GlobAwareCommand,
+    ParquetInputCommand,
     check_partition_options,
     enable_verbose_logging,
-    handle_geoparquet_errors,
     overwrite_option,
     strict_option,
     verbose_option,
 )
+from geoparquet_io.cli.exception_handler import error_text
 from geoparquet_io.cli.fix_helpers import NoBackupConfirmation, handle_fix_common
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 from geoparquet_io.core.check_parquet_structure import CheckProfile
@@ -337,11 +337,12 @@ class MultiFileCheckRunner:
             self._raise_if_interrupt(e)
             if not self.is_multi_file:
                 raise
-            self.fix_failures.append((file_path, str(e)))
+            self.fix_failures.append((file_path, error_text(e)))
             click.echo("\r" + " " * 80 + "\r", nl=False)
             click.echo(
                 click.style(
-                    f"  {FAILURE_GLYPH} {stage} failed: {Path(file_path).name} - {e}", fg="red"
+                    f"  {FAILURE_GLYPH} {stage} failed: {Path(file_path).name} - {error_text(e)}",
+                    fg="red",
                 )
             )
             return None
@@ -400,7 +401,7 @@ class MultiFileCheckRunner:
                 raise
             if self.verbose:
                 click.echo(traceback.format_exc(), err=True)
-            return could_not_run(stage, str(e))
+            return could_not_run(stage, error_text(e))
 
     def _raise_if_interrupt(self, error: Exception) -> None:
         """Turn ``error`` into ``KeyboardInterrupt`` when it is Ctrl-C.
@@ -559,9 +560,8 @@ class MultiFileCheckRunner:
 def _boundary_renders(error: Exception) -> bool:
     """Whether the root group turns ``error`` into an ``Error:`` line of its own."""
     from geoparquet_io.cli.exception_handler import cli_error_for
-    from geoparquet_io.core.exceptions import GeoParquetError
 
-    return isinstance(error, GeoParquetError) or cli_error_for(error) is not None
+    return cli_error_for(error) is not None
 
 
 def _echo_no_fix(verdict: Verdict, result: dict, already_fine: str) -> None:
@@ -733,7 +733,7 @@ def _echo_spec_result(spec_result, spec_details: bool) -> None:
         )
 
 
-@check.command(name="all", cls=GlobAwareCommand)
+@check.command(name="all", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--verbose",
@@ -970,7 +970,8 @@ def check_all(
                 except Exception as e:
                     click.echo(
                         click.style(
-                            f"{FAILURE_GLYPH} PMTiles failed for {file_path}: {e}", fg="red"
+                            f"{FAILURE_GLYPH} PMTiles failed for {file_path}: {error_text(e)}",
+                            fg="red",
                         )
                     )
 
@@ -1034,7 +1035,7 @@ def _echo_pushdown(pushdown: dict | None) -> None:
         click.echo("  ℹ️  A single row group: nothing for a spatial filter to skip")
 
 
-@check.command(name="spatial", cls=GlobAwareCommand)
+@check.command(name="spatial", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--random-sample-size",
@@ -1156,7 +1157,7 @@ def check_spatial(
         runner.finish()
 
 
-@check.command(name="compression", cls=GlobAwareCommand)
+@check.command(name="compression", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--verbose",
@@ -1266,7 +1267,7 @@ def _bbox_fix_action(needs_column: bool, needs_metadata: bool) -> str:
     return "Rewrote the bbox column"
 
 
-@check.command(name="bbox", cls=GlobAwareCommand)
+@check.command(name="bbox", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--verbose",
@@ -1448,7 +1449,7 @@ def check_bbox_cmd(
         runner.finish()
 
 
-@check.command(name="row-group", cls=GlobAwareCommand)
+@check.command(name="row-group", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--verbose",
@@ -1559,7 +1560,6 @@ def check_row_group_cmd(
 
 
 @check.command(name="stac")
-@handle_geoparquet_errors
 @click.argument("stac_file")
 @verbose_option
 @strict_option
@@ -1595,7 +1595,7 @@ def check_stac_cmd(ctx, stac_file, verbose, strict):
         exit_for_verdict(check_stac(stac_file, verbose), strict=strict)
 
 
-@check.command(name="spec", cls=GlobAwareCommand)
+@check.command(name="spec", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--geoparquet-version",
@@ -1700,7 +1700,7 @@ def check_spec(
         exit_for_verdict(verdict, strict=strict)
 
 
-@check.command(name="optimization", cls=GlobAwareCommand)
+@check.command(name="optimization", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--verbose",

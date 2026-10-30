@@ -23,6 +23,7 @@ from geoparquet_io.cli.decorators import (
     show_sql_option,
     verbose_option,
 )
+from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.partition.admin_hierarchical import (
     partition_by_admin_hierarchical as partition_admin_hierarchical_impl,
 )
@@ -274,7 +275,7 @@ def partition_string(
                 memory_limit=write_memory,
             )
         except StreamingError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None
 
 
 @partition.command(name="h3", cls=SingleFileCommand)
