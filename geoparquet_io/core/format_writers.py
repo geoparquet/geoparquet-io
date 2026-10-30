@@ -93,6 +93,18 @@ def _reject_stdin_input(input_path: str, description: str, command: str, output:
 #: Every file a Shapefile can own beside its ``.shp``.
 SHAPEFILE_SIDECARS = (".shx", ".dbf", ".prj", ".cpg", ".sbn", ".sbx", ".qix", ".fix", ".shp.xml")
 
+
+def shapefile_members(shapefile_path: str | Path) -> list[Path]:
+    """The files on disk that belong to the Shapefile at ``shapefile_path``.
+
+    The ``.shp`` and every sidecar in :data:`SHAPEFILE_SIDECARS` that shares its
+    stem. Matched on the end of the name, because ``.shp.xml`` has suffix ``.xml``.
+    """
+    shp = Path(shapefile_path)
+    names = {f"{shp.stem}{ext}".lower() for ext in (".shp", *SHAPEFILE_SIDECARS)}
+    return sorted(f for f in shp.parent.iterdir() if f.name.lower() in names)
+
+
 # Format configuration for GDAL-based writers
 GDAL_FORMATS = {
     "geopackage": {
@@ -924,12 +936,7 @@ def create_shapefile_zip(shapefile_path: str | Path, verbose: bool = False) -> P
     stem = shapefile_path.stem
     parent = shapefile_path.parent
 
-    # Find all files with the same stem
-    sidecar_files = list(parent.glob(f"{stem}.*"))
-
-    # Filter to only shapefile-related extensions
-    shapefile_extensions = {".shp", ".shx", ".dbf", ".prj", ".cpg", ".sbn", ".sbx"}
-    sidecar_files = [f for f in sidecar_files if f.suffix.lower() in shapefile_extensions]
+    sidecar_files = shapefile_members(shapefile_path)
 
     if not sidecar_files:
         raise FileNotFoundGeoParquetError(str(shapefile_path), "no shapefile components found")

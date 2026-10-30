@@ -184,3 +184,20 @@ def test_interrupted_write_leaves_no_staging_directory(tmp_path):
             Path(staged).write_bytes(b"partial")
             raise KeyboardInterrupt
     assert list(tmp_path.iterdir()) == []
+
+
+def test_shapefile_zip_contains_every_sidecar(tmp_path):
+    from zipfile import ZipFile
+
+    from geoparquet_io.core.format_writers import SHAPEFILE_SIDECARS, create_shapefile_zip
+
+    shp = tmp_path / "roads.shp"
+    shp.write_bytes(b"x")
+    for ext in SHAPEFILE_SIDECARS:
+        (tmp_path / f"roads{ext}").write_bytes(b"x")
+    (tmp_path / "roads.txt").write_bytes(b"not part of it")
+    archive = create_shapefile_zip(shp)
+    with ZipFile(archive) as z:
+        assert sorted(z.namelist()) == sorted(
+            ["roads.shp", *(f"roads{ext}" for ext in SHAPEFILE_SIDECARS)]
+        )

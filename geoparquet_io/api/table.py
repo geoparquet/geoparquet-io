@@ -1769,9 +1769,9 @@ class Table:
             # Clean up shapefile sidecars if remote
             if is_remote and format == "shapefile":
                 # Remove all sidecar files (.shx, .dbf, .prj, etc.)
-                stem = output_path.stem
-                parent = output_path.parent
-                for sidecar in parent.glob(f"{stem}.*"):
+                from geoparquet_io.core.format_writers import shapefile_members
+
+                for sidecar in shapefile_members(output_path):
                     sidecar.unlink(missing_ok=True)
 
     def _table_to_temp_parquet(self) -> Path:
