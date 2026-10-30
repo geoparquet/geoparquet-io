@@ -176,13 +176,6 @@
       "reviewed_by": "claude-code (DuckDB 2.0 call-site migration, no doc-visible change)"
     },
     {
-      "code_file": "geoparquet_io/core/extract.py",
-      "doc_target": "docs/guide/extract.md",
-      "reviewed_at": "2026-10-29T23:46:28.162774+00:00",
-      "code_commit_at_review": "f326bfc",
-      "reviewed_by": "claude-code (DuckDB 2.0 call-site migration, no doc-visible change)"
-    },
-    {
       "code_file": "geoparquet_io/core/hilbert_order.py",
       "doc_target": "docs/guide/sort.md",
       "reviewed_at": "2026-10-29T23:46:28.271021+00:00",
@@ -208,6 +201,13 @@
       "doc_target": "CLAUDE.md#Key Patterns",
       "reviewed_at": "2026-10-30T19:29:47.741803+00:00",
       "code_commit_at_review": "166debd",
+      "reviewed_by": "claude"
+    },
+    {
+      "code_file": "geoparquet_io/core/extract.py",
+      "doc_target": "docs/guide/extract.md",
+      "reviewed_at": "2026-10-30T20:57:05.809492+00:00",
+      "code_commit_at_review": "ee876eb",
       "reviewed_by": "claude"
     }
   ]
