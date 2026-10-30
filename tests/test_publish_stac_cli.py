@@ -86,7 +86,7 @@ class TestPublishStacItem:
             ["publish", "stac", places_test_file, str(out), "--bucket", BUCKET, "--overwrite"],
         )
         assert result.exit_code == 0, result.output
-        assert "Overwriting existing STAC Item" in result.output
+        assert "Overwriting existing file" in result.output
         assert json.loads(out.read_text())["id"] == "places_test"
 
     @pytest.mark.parametrize("existing", ["not json at all", '{"type": "Collection"}'])
@@ -233,7 +233,7 @@ class TestPublishStacCollection:
             ["publish", "stac", str(parts), str(out), "--bucket", BUCKET, "--overwrite"],
         )
         assert result.exit_code == 0, result.output
-        assert "Overwriting existing STAC Collection" in result.output
+        assert "Overwriting existing file" in result.output
         assert json.loads((out / "collection.json").read_text())["id"] == "parts"
 
     def test_existing_item_next_to_parquet_refused_without_overwrite(

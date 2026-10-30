@@ -50,8 +50,16 @@ class NoBackupConfirmation:
 
 
 def validate_remote_file_modification(parquet_file, fix_output, overwrite):
-    """Refuse an in-place fix of a remote file without --overwrite (the one
-    overwrite policy, ``handle_output_overwrite``), warning that it has no backup."""
+    """Check where a fix writes against the one overwrite policy
+    (``handle_output_overwrite``) before anything is rewritten.
+
+    A ``--fix-output`` that is another file is an output like any other: an
+    existing one is refused without --overwrite. An in-place fix of a remote
+    file is refused without --overwrite, with a warning that it has no backup.
+    Returns whether *parquet_file* is remote.
+    """
+    if fix_output and not is_same_file_path(fix_output, parquet_file):
+        handle_output_overwrite(fix_output, overwrite, parquet_file, remove=False)
     is_remote = is_remote_url(parquet_file)
     if not is_remote or fix_output:
         return is_remote

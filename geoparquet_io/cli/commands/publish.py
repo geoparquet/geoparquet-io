@@ -22,12 +22,12 @@ from geoparquet_io.core.upload import upload as upload_impl
 
 
 # STAC commands
-def _check_existing_stac(path, shown, kind: str, overwrite: bool) -> None:
+def _check_existing_stac(path, shown, overwrite: bool) -> None:
     """Refuse to replace any existing output without --overwrite (the one
     overwrite policy, whatever the file holds), and say so when replacing it."""
     handle_output_overwrite(str(path), overwrite, remove=False)
     if Path(path).exists():
-        click.echo(click.style(f"⚠️  Overwriting existing STAC {kind}: {shown}", fg="yellow"))
+        click.echo(click.style(f"⚠️  Overwriting existing file: {shown}", fg="yellow"))
 
 
 def _handle_stac_item(
@@ -48,7 +48,7 @@ def _handle_stac_item(
         click.echo(f"Generating STAC Item for {input_path}")
 
     output_path = Path(output)
-    _check_existing_stac(output_path, output, "Item", overwrite)
+    _check_existing_stac(output_path, output, overwrite)
 
     item_dict = generate_stac_item(str(input_path), bucket, public_url, item_id, verbose)
     write_stac_json(item_dict, output, verbose)
@@ -86,7 +86,7 @@ def _handle_stac_collection(
         output_path = input_path_obj
         collection_file = output_path / "collection.json"
 
-    _check_existing_stac(collection_file, collection_file, "Collection", overwrite)
+    _check_existing_stac(collection_file, collection_file, overwrite)
 
     collection_dict, item_dicts = generate_stac_collection(
         str(input_path), bucket, public_url, collection_id, verbose

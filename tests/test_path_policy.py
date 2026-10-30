@@ -480,3 +480,31 @@ def test_a_writer_already_exists_error_is_the_refusal_only_without_the_switch(
         format_writers.write_gdal_format(
             str(PLACES), str(tmp_path / "o.gpkg"), "geopackage", overwrite=overwrite
         )
+
+
+# ---------------------------------------------------------------------------
+# A fix's --fix-output is an output like any other
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("command", ["bbox", "all"])
+def test_an_existing_fix_output_is_refused_without_overwrite(command, tmp_path):
+    """Failed on the base and the round-2 tip: the fix replaced the file, exit 0."""
+    src = tmp_path / "in.parquet"
+    shutil.copy(DATA / "buildings_test.parquet", src)
+    out = tmp_path / "existing.parquet"
+    out.write_bytes(b"precious")
+    result = _run("check", command, src, "--fix", "--fix-output", out)
+    assert result.exit_code == 1, _explain(result)
+    assert "Output file already exists" in result.output, _explain(result)
+    assert out.read_bytes() == b"precious"
+
+
+def test_an_existing_fix_output_is_replaced_with_overwrite(tmp_path):
+    src = tmp_path / "in.parquet"
+    shutil.copy(DATA / "buildings_test.parquet", src)
+    out = tmp_path / "existing.parquet"
+    out.write_bytes(b"precious")
+    result = _run("check", "bbox", src, "--fix", "--fix-output", out, "--overwrite")
+    assert result.exit_code == 0, _explain(result)
+    assert pq.read_metadata(out).num_rows > 0

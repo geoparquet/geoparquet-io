@@ -556,7 +556,9 @@ def resolve_object_store(url: str) -> tuple[object, str]:
     verbatim by :func:`_copy_http_source` instead.
 
     Args:
-        url: Remote URL for a scheme in ``_COPYABLE_STORE_SCHEMES`` (or an alias)
+        url: Remote URL of an object-store family; an alias spelling
+            (``s3a://``, ``gcs://``) is read under ``remote.STORE_SCHEME_FOR_FAMILY``
+            via ``canonical_store_url``
 
     Returns:
         Tuple of (obstore store, key within that store)
