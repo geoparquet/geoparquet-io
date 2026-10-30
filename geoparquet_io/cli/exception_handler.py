@@ -122,5 +122,5 @@ def click_error_for(
 
     error = cli_error_for(exc, path=path) or click.ClickException(error_text(exc))
     if hint and isinstance(exc, duckdb.Error) and type(error) is click.ClickException:
-        error.message = f"{error.message}\n\n{hint}"
+        return click.ClickException(f"{error.message}\n\n{hint}")
     return error
