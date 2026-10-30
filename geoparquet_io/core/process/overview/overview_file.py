@@ -42,6 +42,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
+from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.geo_metadata import (
     OVERVIEW_LEVEL_COLUMN,
     OVERVIEWS_KEY,
@@ -350,6 +351,7 @@ def write_overview_file(
     the output directory and moved into place, so a failure leaves nothing at
     ``output_path``. Returns the output path.
     """
+    compression_level = resolve_process_compression_level(compression, compression_level)
     _validate(levels, output_path)
     files = [pq.ParquetFile(lv.path) for lv in levels]
     try:

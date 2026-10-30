@@ -677,6 +677,7 @@ Both commands support the standard output options:
 --metric-nodata "-999"    # NoData sentinel(s) mapped to NULL in --metric columns
 --write-memory 8GB        # Memory limit for the aggregation
 --compression SNAPPY      # Output compression (default: ZSTD)
+--compression-level 15    # Output compression level (default: 9 for process)
 --geoparquet-version 1.1  # GeoParquet spec version
 --show-sql                # Print the generated DuckDB SQL
 --verbose                 # Detailed progress output
