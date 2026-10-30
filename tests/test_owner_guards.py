@@ -1083,6 +1083,50 @@ def _decodes_carried_geo(m: _Module, node: ast.AST) -> bool:
     return False
 
 
+#: The spelled-out metadata versions a block declares.
+_METADATA_VERSIONS = frozenset({"1.0.0", "1.1.0", "2.0.0"})
+#: The writer's own version keys (``--geoparquet-version`` values). Not
+#: ``parquet-geo-only``: bound to a geometry-free write it names "no ``geo``
+#: key", which ``apply_output_kv_metadata`` owns, not a version.
+_SHORT_VERSIONS = _VERSION_SPELLINGS - _METADATA_VERSIONS - {"parquet-geo-only"}
+#: Prefixes a declared version is sniffed with.
+_VERSION_PREFIXES = frozenset({"1.", "2.", "1.0", "1.1", "2.0"})
+#: Names a decoded ``geo`` block goes by.
+_GEO_BLOCK_NAME = re.compile(r"(?i)geo|meta|block")
+
+
+def _names_a_version(node: ast.AST) -> bool:
+    """A name or attribute with ``version`` in it, a ``resolve_*version*()`` call,
+    or ``x.get("<...version...>")``."""
+    if _names_an_output_version(node):
+        return True
+    if isinstance(node, ast.Name):
+        return "version" in node.id.lower()
+    if isinstance(node, ast.Attribute):
+        return "version" in node.attr.lower()
+    if _is_get_call(node):
+        key = node.args[0]
+        return isinstance(key, ast.Constant) and "version" in str(key.value).lower()
+    return False
+
+
+def _names_a_geo_block(node: ast.AST) -> bool:
+    return isinstance(node, ast.Name) and bool(_GEO_BLOCK_NAME.search(node.id))
+
+
+def _is_get_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and bool(node.args)
+    )
+
+
+def _is_short_version(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value in _SHORT_VERSIONS
+
+
 def _find_output_version(m: _Module) -> Iterator[Hit]:
     """An output GeoParquet version decided outside ``parquet_writer`` (#1367 concept 1).
 
@@ -1111,22 +1155,105 @@ def _find_output_version(m: _Module) -> Iterator[Hit]:
 
 
 def _output_version_node(m: _Module, node: ast.AST) -> bool:
-    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
-        first, *rest = node.values
-        return _names_an_output_version(first) and any(_version_fallback(r) for r in rest)
+    return any(shape(m, node) for shape in _OUTPUT_VERSION_SHAPES)
+
+
+def _version_or_fallback(m: _Module, node: ast.AST) -> bool:
+    """``geoparquet_version or "1.1"``, ``version or DEFAULT_GEOPARQUET_VERSION``,
+    ``info.get("geo_version") or "1.0.0"``: a second default."""
+    if not (isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or)):
+        return False
+    first, *rest = node.values
+    return _names_a_version(first) and any(_version_fallback(r) for r in rest)
+
+
+def _version_key_read(m: _Module, node: ast.AST) -> bool:
+    """``block["version"]`` off a decoder or a geo-named block (a parameter
+    included), and ``.get("version")`` off a write-path decoder."""
     if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
-        return _is_version_key(node.slice) and _decodes_carried_geo(m, node.value)
-    if not isinstance(node, ast.Call):
+        return _is_version_key(node.slice) and (
+            _decodes_carried_geo(m, node.value) or _names_a_geo_block(node.value)
+        )
+    if not (_is_get_call(node) and _is_version_key(node.args[0])):
         return False
-    func = node.func
-    if not (isinstance(func, ast.Attribute) and func.attr == "get" and node.args):
+    return _decodes_carried_geo(m, node.func.value)
+
+
+def _version_get_default(m: _Module, node: ast.AST) -> bool:
+    """``.get("version", "1.1.0")``, ``.get("metadata_version", "1.1.0")``,
+    ``GEOPARQUET_VERSIONS.get(v, ...)``: a version an unknown key falls back to."""
+    if not _is_get_call(node):
         return False
-    if not _is_version_key(node.args[0]):
-        return False
-    default = node.args[1] if len(node.args) > 1 else None
-    return _decodes_carried_geo(m, func.value) or (
-        default is not None and _version_fallback(default)
-    )
+    receiver = node.func.value
+    if (m.dotted(receiver) or "").rsplit(".", 1)[-1] == "GEOPARQUET_VERSIONS":
+        return True
+    key = node.args[0]
+    keyed = isinstance(key, ast.Constant) and key.value in ("version", "metadata_version")
+    return keyed and len(node.args) > 1 and _version_fallback(node.args[1])
+
+
+def _version_literal_bound(m: _Module, node: ast.AST) -> bool:
+    """A version spelled out as a decision: assigned to a version name, or the
+    default of a ``*version*`` parameter."""
+    if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        return any(_names_a_version(t) for t in targets) and _is_short_version(node.value)
+    if isinstance(node, ast.arguments):
+        positional = node.posonlyargs + node.args
+        pairs = list(
+            zip(positional[len(positional) - len(node.defaults) :], node.defaults, strict=True)
+        )
+        pairs += [
+            (a, d) for a, d in zip(node.kwonlyargs, node.kw_defaults, strict=True) if d is not None
+        ]
+        return any("version" in a.arg.lower() and _is_short_version(d) for a, d in pairs)
+    return False
+
+
+def _version_literal_compared(m: _Module, node: ast.AST) -> bool:
+    """``geo_version == "1.0.0"``, ``geo_version.startswith("1.")``: a GeoParquet
+    version tested against a spelling, which is the owner's map
+    (``version_for_file_type``, ``writable_geoparquet_version``).
+
+    Only an operand named for GeoParquet (``geo``/``geoparquet`` in the name)
+    counts: a bare ``version`` there is WFS's or stac-geoparquet's protocol
+    version, and ``gpio check``/``validate`` test the version an input
+    declares against the spec under their own names.
+    """
+    if isinstance(node, ast.Compare):
+        sides = (node.left, *node.comparators)
+        literal = any(isinstance(x, ast.Constant) and x.value in _METADATA_VERSIONS for x in sides)
+        return literal and any(_names_a_geo_version(x) for x in sides)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "startswith"
+        and node.args
+    ):
+        arg = node.args[0]
+        prefix = isinstance(arg, ast.Constant) and arg.value in _VERSION_PREFIXES
+        return prefix and _names_a_geo_version(node.func.value)
+    return False
+
+
+def _names_a_geo_version(node: ast.AST) -> bool:
+    if isinstance(node, ast.BoolOp):  # (geo_version or "").startswith(...)
+        return _names_a_geo_version(node.values[0])
+    if _is_get_call(node) or isinstance(node, ast.Subscript):  # info["geo_version"] == ...
+        key = node.args[0] if isinstance(node, ast.Call) else node.slice
+        name = str(key.value) if isinstance(key, ast.Constant) else ""
+    else:
+        name = node.id if isinstance(node, ast.Name) else getattr(node, "attr", "")
+    return "version" in name.lower() and "geo" in name.lower()
+
+
+_OUTPUT_VERSION_SHAPES = (
+    _version_or_fallback,
+    _version_key_read,
+    _version_get_default,
+    _version_literal_bound,
+    _version_literal_compared,
+)
 
 
 #: ``in`` and ``not in``.
@@ -2736,6 +2863,19 @@ OUTPUT_VERSION_COPIES = [
     "v = geoparquet_version or DEFAULT_GEOPARQUET_VERSION\n",
     'v = geo.get("version", "1.1.0")\n',
     'def advice(p):\n    geo = sanitized_carried_geo_of_file(p)\n    return geo.get("version", "")\n',
+    # The first audit's probes (each passed the first arm at 0):
+    'v = version or "1.1"\n',
+    'v = info.get("geo_version") or "1.0.0"\n',
+    "shown = geo_version or '2.0'\n",
+    'def read(geo_meta):\n    return geo_meta["version"]\n',
+    'gp_version = "1.1"\n',
+    'if geo_version == "1.0.0":\n    pass\n',
+    'def copy_to(path, geoparquet_version: str = "1.1"):\n    return path\n',
+    'def copy_to(path, *, geoparquet_version="2.0"):\n    return path\n',
+    'cfg = GEOPARQUET_VERSIONS.get(v, GEOPARQUET_VERSIONS["1.1"])\n',
+    'mv = cfg.get("metadata_version", "1.1.0")\n',
+    'keep = (declared_geo_version or "").startswith("1.0")\n',
+    'native = file_info["geo_version"].startswith("2.")\n',
 ]
 #: ...and the readers it must leave alone: reporting a declared version,
 #: protocol versions, and a call to the owner.
@@ -2746,7 +2886,12 @@ OUTPUT_VERSION_NON_DECISIONS = [
     "v = resolve_output_geoparquet_version(req, input_file=p)\n",
     'def stac(payload):\n    return payload["version"]\n',
     "label = version or 'unknown'\n",
-    "shown = geo_version or '2.0'\n",
+    "cfg = GEOPARQUET_VERSIONS[v]\n",
+    'mv = cfg["metadata_version"]\n',
+    'if version == "1.0.0":\n    pass\n',
+    'output_version = "parquet-geo-only"\n',
+    'native = wfs_version.startswith("2.")\n',
+    'def show(payload):\n    return payload["version"]\n',
     'def block(v):\n    return {"version": v or "1.1.0", "primary_column": "geometry"}\n',
 ]
 

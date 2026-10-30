@@ -282,6 +282,14 @@ reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 "is_geographic*" = ["geoparquet_io/core/crs_utils.py"]
 "*crs_equal*" = ["geoparquet_io/core/crs_utils.py"]
 "resolve_*version*" = ["geoparquet_io/core/parquet_writer.py"]
+# T2b audit: the rest of the output-version family. `*_geoparquet_version*`
+# rather than `*geoparquet_version*`: the bare name is the public
+# `Table.geoparquet_version` property and `geoparquet_version_option` is the CLI
+# flag, neither a decision, and the rules allow no new exemption for them.
+"*_geoparquet_version*" = ["geoparquet_io/core/parquet_writer.py"]
+"version_for_*" = ["geoparquet_io/core/parquet_writer.py"]
+"_version_of_*" = ["geoparquet_io/core/parquet_writer.py"]
+"*version_upgrade*" = ["geoparquet_io/core/parquet_writer.py"]
 # Covering *builders* only. The wider *covering* also caught 19 checks,
 # predicates, lookups and repairs that read a covering and are not copies of
 # build_bbox_covering (T0b audit), so the family is narrowed to the builder shapes.
