@@ -609,14 +609,14 @@ def auto_version_upgrade(input_file: str) -> str | None:
     return target
 
 
-def declared_geoparquet_version(geo_meta: Mapping) -> object:
-    """The ``version`` a decoded ``geo`` block declares, exactly as declared ("" when absent).
+def declared_geoparquet_version(geo_meta: Mapping, default: object = "") -> object:
+    """The ``version`` a decoded ``geo`` block declares, exactly as declared (*default* when absent).
 
-    For a refusal or a piece of advice that names the *input's* version
-    (``add bbox-metadata`` refusing a 1.0 file, ``add bbox``'s advice); never
-    for choosing the output's, which is :func:`resolve_output_geoparquet_version`.
+    For reporting the *input's* version -- ``gpio inspect`` printing it, ``add
+    bbox-metadata`` refusing a 1.0 file, ``add bbox``'s advice; never for
+    choosing the output's, which is :func:`resolve_output_geoparquet_version`.
     """
-    return geo_meta.get("version", "")
+    return geo_meta.get("version", default)
 
 
 def preserved_geoparquet_version(file_type: str, declared: str | None) -> str | None:

@@ -1021,9 +1021,6 @@ def _row_group_policy_node(node: ast.AST, strings: set[int]) -> bool:
 #: The output version's owners: the decision in ``parquet_writer``, the version
 #: table (``GEOPARQUET_VERSIONS``) and the carried-block decoder in ``geo_metadata``.
 _VERSION_OWNERS = ("geoparquet_io/core/parquet_writer.py", "geoparquet_io/core/geo_metadata.py")
-#: ``gpio inspect``'s two modules print the decoded block, version included, and
-#: write nothing: reporting what an input declares is not deciding an output.
-_VERSION_REPORTERS = ("geoparquet_io/core/inspect_utils.py", "geoparquet_io/core/metadata_utils.py")
 #: Every spelling of a GeoParquet version a write can declare or be asked for.
 _VERSION_SPELLINGS = frozenset(
     {"1.0", "1.1", "2.0", "1.1-geoarrow", "parquet-geo-only", "1.0.0", "1.1.0", "2.0.0"}
@@ -1101,10 +1098,9 @@ def _find_output_version(m: _Module) -> Iterator[Hit]:
     ``Table.write``) or in ``.get("version", "1.1.0")``.
 
     Reporting the *input's* declared version is not a write decision: ``gpio
-    check`` reads it through ``read_raw_geo``/``raw_geo_of_file``, ``gpio
-    inspect`` (``_VERSION_REPORTERS``) prints the decoded block, and a write
-    command that names it in a refusal or advice asks the owner's
-    ``declared_geoparquet_version``. WFS and stac-geoparquet protocol versions
+    check`` reads it through ``read_raw_geo``/``raw_geo_of_file``, and ``gpio
+    inspect`` or a write command naming it in a refusal or advice asks the
+    owner's ``declared_geoparquet_version``. WFS and stac-geoparquet protocol versions
     pass too.
     A ``version`` inside a ``geo`` block literal (one with ``primary_column`` or
     ``columns``) is block composition, which T3e's arm owns.
@@ -1287,7 +1283,7 @@ ARMS = {
     "row_group_policy": Arm(_find_row_group_policy, _ROW_GROUP_OWNER),
     "scheme_test": Arm(_find_scheme_test, ("geoparquet_io/core/remote.py",), needs_repo=True),
     "overwrite_check": Arm(_find_overwrite_check, ("geoparquet_io/core/file_utils.py",)),
-    "output_version": Arm(_find_output_version, _VERSION_OWNERS + _VERSION_REPORTERS),
+    "output_version": Arm(_find_output_version, _VERSION_OWNERS),
 }
 
 

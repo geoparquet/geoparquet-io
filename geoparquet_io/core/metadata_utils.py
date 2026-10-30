@@ -25,6 +25,7 @@ from geoparquet_io.core.duckdb_metadata import (
 from geoparquet_io.core.geo_metadata import is_covering_path, sanitized_carried_geo_of_file
 from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.parquet_schema import root_schema_columns
+from geoparquet_io.core.parquet_writer import declared_geoparquet_version
 from geoparquet_io.core.sizing import format_size
 
 
@@ -647,7 +648,7 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
 
         # Version
         if "version" in geo_meta:
-            console.print(f"Version: [cyan]{geo_meta['version']}[/cyan]")
+            console.print(f"Version: [cyan]{declared_geoparquet_version(geo_meta)}[/cyan]")
 
         # Primary column
         if "primary_column" in geo_meta:

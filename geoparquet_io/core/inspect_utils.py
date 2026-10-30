@@ -50,6 +50,7 @@ from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.metadata_utils import (
     extract_bbox_from_row_group_stats,
 )
+from geoparquet_io.core.parquet_writer import declared_geoparquet_version
 from geoparquet_io.core.remote import is_remote_url, needs_httpfs
 from geoparquet_io.core.sizing import format_size
 
@@ -343,7 +344,7 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
     # Extract GeoParquet metadata
     geoparquet_info = {}
     if geo_meta:
-        version = geo_meta.get("version")
+        version = declared_geoparquet_version(geo_meta, default=None)
         primary_column = geo_meta.get("primary_column", "geometry")
         columns_meta = geo_meta.get("columns", {})
 
