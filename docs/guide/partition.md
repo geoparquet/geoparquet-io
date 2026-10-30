@@ -65,15 +65,13 @@ Auto-resolution analyzes your dataset and calculates the optimal spatial index r
     import geoparquet_io as gpio
 
     # H3 with ~100K rows per partition (default)
-    gpio.read('input.parquet').partition_by_h3('output/', auto=True)
+    gpio.read("input.parquet").partition_by_h3("output/", auto=True)
 
     # Quadkey with partition limit
-    gpio.read('input.parquet').partition_by_quadkey(
-        'output/', auto=True, max_partitions=1000
-    )
+    gpio.read("input.parquet").partition_by_quadkey("output/", auto=True, max_partitions=1000)
 
     # A5 targeting smaller partitions
-    gpio.read('input.parquet').partition_by_a5('output/', auto=True, target_rows=50000)
+    gpio.read("input.parquet").partition_by_a5("output/", auto=True, target_rows=50000)
     ```
 
 ### How auto-resolution is chosen
@@ -130,21 +128,14 @@ Partition by string column values or prefixes:
     import geoparquet_io as gpio
 
     # Partition by full column values
-    gpio.read('input.parquet').partition_by_string('output/', column='category')
+    gpio.read("input.parquet").partition_by_string("output/", column="category")
 
     # Partition by first 2 characters
-    gpio.read('input.parquet').partition_by_string(
-        'output/',
-        column='mgrs_code',
-        chars=2
-    )
+    gpio.read("input.parquet").partition_by_string("output/", column="mgrs_code", chars=2)
 
     # Hive-style with options
-    gpio.read('input.parquet').partition_by_string(
-        'output/',
-        column='region',
-        hive=True,
-        overwrite=True
+    gpio.read("input.parquet").partition_by_string(
+        "output/", column="region", hive=True, overwrite=True
     )
     ```
 
@@ -186,17 +177,14 @@ Partition by H3 hexagonal cells:
 
     # Partition by H3 (flat files by default, like the CLI; pass hive=True for key=value/)
     # A resolution is required -- or ask gpio to size one with auto=True.
-    gpio.read('input.parquet').partition_by_h3('output/', resolution=7)
+    gpio.read("input.parquet").partition_by_h3("output/", resolution=7)
 
     # Let gpio pick the resolution from the data
-    gpio.read('input.parquet').partition_by_h3('output/', auto=True)
+    gpio.read("input.parquet").partition_by_h3("output/", auto=True)
 
     # With options
-    gpio.read('input.parquet').partition_by_h3(
-        'output/',
-        resolution=8,
-        compression='ZSTD',
-        overwrite=True
+    gpio.read("input.parquet").partition_by_h3(
+        "output/", resolution=8, compression="ZSTD", overwrite=True
     )
     ```
 
@@ -234,13 +222,13 @@ Use `--auto` to let gpio calculate the optimal H3 resolution:
     import geoparquet_io as gpio
 
     # Auto-select resolution for ~100k rows per partition (default)
-    gpio.read('input.parquet').partition_by_h3('output/', auto=True)
+    gpio.read("input.parquet").partition_by_h3("output/", auto=True)
 
     # Target 50k rows per partition
-    gpio.read('input.parquet').partition_by_h3('output/', auto=True, target_rows=50000)
+    gpio.read("input.parquet").partition_by_h3("output/", auto=True, target_rows=50000)
 
     # Limit maximum partitions created
-    gpio.read('input.parquet').partition_by_h3('output/', auto=True, max_partitions=5000)
+    gpio.read("input.parquet").partition_by_h3("output/", auto=True, max_partitions=5000)
     ```
 
 Auto-resolution probes your data's actual extent (see [How auto-resolution is chosen](#how-auto-resolution-is-chosen)) to pick the H3 resolution that targets your specified rows per partition, while respecting the `--max-partitions` constraint.
@@ -285,18 +273,13 @@ community extension, which gpio installs on first use; see
 
     # Partition by S2 (flat files by default, like the CLI; pass hive=True for key=value/)
     # A level is required -- or ask gpio to size one with auto=True.
-    gpio.read('input.parquet').partition_by_s2('output/', level=10)
+    gpio.read("input.parquet").partition_by_s2("output/", level=10)
 
     # Let gpio pick the level from the data
-    gpio.read('input.parquet').partition_by_s2('output/', auto=True)
+    gpio.read("input.parquet").partition_by_s2("output/", auto=True)
 
     # With options
-    gpio.read('input.parquet').partition_by_s2(
-        'output/',
-        level=10,
-        compression='ZSTD',
-        overwrite=True
-    )
+    gpio.read("input.parquet").partition_by_s2("output/", level=10, compression="ZSTD", overwrite=True)
     ```
 
 **Column behavior:**
@@ -333,13 +316,13 @@ Use `--auto` to let gpio calculate the optimal S2 level:
     import geoparquet_io as gpio
 
     # Auto-select level for ~100k rows per partition (default)
-    gpio.read('input.parquet').partition_by_s2('output/', auto=True)
+    gpio.read("input.parquet").partition_by_s2("output/", auto=True)
 
     # Target 50k rows per partition
-    gpio.read('input.parquet').partition_by_s2('output/', auto=True, target_rows=50000)
+    gpio.read("input.parquet").partition_by_s2("output/", auto=True, target_rows=50000)
 
     # Limit maximum partitions created
-    gpio.read('input.parquet').partition_by_s2('output/', auto=True, max_partitions=5000)
+    gpio.read("input.parquet").partition_by_s2("output/", auto=True, max_partitions=5000)
     ```
 
 Auto-resolution probes your data's actual extent (see [How auto-resolution is chosen](#how-auto-resolution-is-chosen)) to pick the S2 level that targets your specified rows per partition, while respecting the `--max-partitions` constraint.
@@ -382,10 +365,10 @@ Partition by A5 spatial cells:
 
     # Partition by A5 (flat files by default, like the CLI; pass hive=True for key=value/)
     # A resolution is required -- or ask gpio to size one with auto=True.
-    gpio.read('input.parquet').partition_by_a5('output/', resolution=12)
+    gpio.read("input.parquet").partition_by_a5("output/", resolution=12)
 
     # Let gpio pick the resolution from the data
-    gpio.read('input.parquet').partition_by_a5('output/', auto=True)
+    gpio.read("input.parquet").partition_by_a5("output/", auto=True)
     ```
 
 **Column behavior:**
@@ -422,13 +405,13 @@ Use `--auto` to let gpio calculate the optimal A5 resolution:
     import geoparquet_io as gpio
 
     # Auto-select resolution for ~100k rows per partition (default)
-    gpio.read('input.parquet').partition_by_a5('output/', auto=True)
+    gpio.read("input.parquet").partition_by_a5("output/", auto=True)
 
     # Target 50k rows per partition
-    gpio.read('input.parquet').partition_by_a5('output/', auto=True, target_rows=50000)
+    gpio.read("input.parquet").partition_by_a5("output/", auto=True, target_rows=50000)
 
     # Limit maximum partitions created
-    gpio.read('input.parquet').partition_by_a5('output/', auto=True, max_partitions=5000)
+    gpio.read("input.parquet").partition_by_a5("output/", auto=True, max_partitions=5000)
     ```
 
 Auto-resolution probes your data's actual extent (see [How auto-resolution is chosen](#how-auto-resolution-is-chosen)) to pick the A5 resolution that targets your specified rows per partition, while respecting the `--max-partitions` constraint.
@@ -470,20 +453,14 @@ Partition by Bing Maps quadkey tiles:
     import geoparquet_io as gpio
 
     # Both resolutions are required -- or ask gpio to size them with auto=True.
-    gpio.read('input.parquet').partition_by_quadkey(
-        'output/', resolution=13, partition_resolution=8
-    )
+    gpio.read("input.parquet").partition_by_quadkey("output/", resolution=13, partition_resolution=8)
 
     # Let gpio pick both from the data
-    gpio.read('input.parquet').partition_by_quadkey('output/', auto=True)
+    gpio.read("input.parquet").partition_by_quadkey("output/", auto=True)
 
     # With options
-    gpio.read('input.parquet').partition_by_quadkey(
-        'output/',
-        resolution=13,
-        partition_resolution=10,
-        compression='ZSTD',
-        overwrite=True
+    gpio.read("input.parquet").partition_by_quadkey(
+        "output/", resolution=13, partition_resolution=10, compression="ZSTD", overwrite=True
     )
     ```
 
@@ -521,17 +498,13 @@ Use `--auto` to let gpio calculate the optimal quadkey zoom level:
     import geoparquet_io as gpio
 
     # Auto-select zoom level for ~100k rows per partition (default)
-    gpio.read('input.parquet').partition_by_quadkey('output/', auto=True)
+    gpio.read("input.parquet").partition_by_quadkey("output/", auto=True)
 
     # Target 50k rows per partition
-    gpio.read('input.parquet').partition_by_quadkey(
-        'output/', auto=True, target_rows=50000
-    )
+    gpio.read("input.parquet").partition_by_quadkey("output/", auto=True, target_rows=50000)
 
     # Limit maximum partitions created
-    gpio.read('input.parquet').partition_by_quadkey(
-        'output/', auto=True, max_partitions=5000
-    )
+    gpio.read("input.parquet").partition_by_quadkey("output/", auto=True, max_partitions=5000)
     ```
 
 Auto-resolution probes your data's actual extent (see [How auto-resolution is chosen](#how-auto-resolution-is-chosen)) to pick the quadkey zoom level that targets your specified rows per partition, while respecting the `--max-partitions` constraint.
@@ -570,11 +543,11 @@ Partition by balanced spatial partitions:
     import geoparquet_io as gpio
 
     # Auto mode: size the tree from the row count, like the bare CLI call
-    gpio.read('input.parquet').partition_by_kdtree('output/', auto=True, overwrite=True)
+    gpio.read("input.parquet").partition_by_kdtree("output/", auto=True, overwrite=True)
 
     # A different target, still auto
-    gpio.read('input.parquet').partition_by_kdtree(
-        'output/', auto=True, target_rows=50000, overwrite=True
+    gpio.read("input.parquet").partition_by_kdtree(
+        "output/", auto=True, target_rows=50000, overwrite=True
     )
     ```
 
@@ -583,14 +556,14 @@ Partition by balanced spatial partitions:
     import geoparquet_io as gpio
 
     # 64 partitions (2^6)
-    gpio.read('input.parquet').partition_by_kdtree('output/', iterations=6)
+    gpio.read("input.parquet").partition_by_kdtree("output/", iterations=6)
 
     # With options
-    gpio.read('input.parquet').partition_by_kdtree(
-        'output/',
+    gpio.read("input.parquet").partition_by_kdtree(
+        "output/",
         iterations=5,  # 32 partitions
         hive=True,
-        overwrite=True
+        overwrite=True,
     )
     ```
 
@@ -658,18 +631,11 @@ This command performs **two operations**:
     import geoparquet_io as gpio
 
     # Partition by country using GAUL dataset
-    gpio.read('input.parquet').partition_by_admin(
-        'output/',
-        dataset='gaul',
-        levels=['country']
-    )
+    gpio.read("input.parquet").partition_by_admin("output/", dataset="gaul", levels=["country"])
 
     # Hive-style partitioning
-    gpio.read('input.parquet').partition_by_admin(
-        'output/',
-        dataset='gaul',
-        levels=['country'],
-        hive=True
+    gpio.read("input.parquet").partition_by_admin(
+        "output/", dataset="gaul", levels=["country"], hive=True
     )
     ```
 
@@ -702,18 +668,13 @@ Partition by multiple administrative levels:
     import geoparquet_io as gpio
 
     # Multi-level hierarchical
-    gpio.read('input.parquet').partition_by_admin(
-        'output/',
-        dataset='gaul',
-        levels=['continent', 'country', 'department'],
-        hive=True
+    gpio.read("input.parquet").partition_by_admin(
+        "output/", dataset="gaul", levels=["continent", "country", "department"], hive=True
     )
 
     # Using Overture Maps dataset
-    gpio.read('input.parquet').partition_by_admin(
-        'output/',
-        dataset='overture',
-        levels=['country', 'region']
+    gpio.read("input.parquet").partition_by_admin(
+        "output/", dataset="overture", levels=["country", "region"]
     )
     ```
 
@@ -743,10 +704,7 @@ output files (not just encoded in the folder names).
     ```python
     import geoparquet_io as gpio
 
-    gpio.read('input.parquet').partition_by_admin(
-        'output/',
-        vecorel=True
-    )
+    gpio.read("input.parquet").partition_by_admin("output/", vecorel=True)
     ```
 
 ### Datasets
@@ -887,15 +845,15 @@ Every one of them returns the same dict -- `{'output_dir': str, 'file_count': in
 import pyarrow.parquet as pq
 from geoparquet_io.api import ops
 
-table = pq.read_table('input.parquet')
+table = pq.read_table("input.parquet")
 
 # An explicit resolution, or auto=True -- neither front end guesses one for you
-stats = ops.partition_by_h3(table, 'output/', resolution=7)
-stats = ops.partition_by_a5(table, 'output/', auto=True, target_rows=50000)
+stats = ops.partition_by_h3(table, "output/", resolution=7)
+stats = ops.partition_by_a5(table, "output/", auto=True, target_rows=50000)
 
 # Non-spatial schemes return the same dict
-stats = ops.partition_by_string(table, 'output/', column='region', hive=True)
-stats = ops.partition_by_admin(table, 'output/', levels=['country'])
+stats = ops.partition_by_string(table, "output/", column="region", hive=True)
+stats = ops.partition_by_admin(table, "output/", levels=["country"])
 
 print(f"Created {stats['file_count']} files")
 ```

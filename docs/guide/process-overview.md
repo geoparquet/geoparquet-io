@@ -34,12 +34,13 @@ The input's scheme (`a5_cell` / `h3_cell` / `admin_code`) and base level are det
     from geoparquet_io.api import ops
 
     # File-based: writes one sibling per level, returns [(level, path), ...]
-    ops.create_overviews('cells.parquet', levels=[4, 7])
+    ops.create_overviews("cells.parquet", levels=[4, 7])
 
     # In-memory: roll a single level with the Table API
     import geoparquet_io as gpio
-    coarse = gpio.read('cells.parquet').overview(4)
-    coarse.write('cells_r4.parquet')
+
+    coarse = gpio.read("cells.parquet").overview(4)
+    coarse.write("cells_r4.parquet")
     ```
 
 Outputs are written next to the input (override with `--output-dir`):
@@ -100,7 +101,7 @@ probe with an explicit plan of `level:minzoom` pairs:
     ```python
     from geoparquet_io.api import ops
 
-    ops.create_pmtiles_pyramid('cells.parquet', 'out.pmtiles', bands='5:0,8:6,10:9')
+    ops.create_pmtiles_pyramid("cells.parquet", "out.pmtiles", bands="5:0,8:6,10:9")
     ```
 
 Each entry says which zoom a level starts at; ends follow from the next entry
@@ -158,7 +159,7 @@ some of the fine cells and drop the rest, not their sum.
     ```python
     from geoparquet_io.api import ops
 
-    ops.create_overview_file('cells.parquet', 'pyramid.parquet', levels='8,7,6')
+    ops.create_overview_file("cells.parquet", "pyramid.parquet", levels="8,7,6")
     ```
 
 ### Sizing the levels (`--cell-detail`, `--gsd`)

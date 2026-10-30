@@ -120,6 +120,11 @@ def parse_retry_after(value: str | None, *, now: datetime | None = None) -> floa
     return seconds
 
 
+def response_retry_after(response: Any) -> float | None:
+    """The capped ``Retry-After`` of an httpx response; the one place the header is read."""
+    return parse_retry_after(response.headers.get("Retry-After"))
+
+
 def _json_error_envelope(response: httpx.Response) -> dict[str, Any] | None:
     """The ArcGIS ``{"error": {...}}`` body of an error response, if it has one."""
     try:
@@ -246,7 +251,7 @@ def classify_httpx_error(exc: BaseException) -> RetryVerdict:
         status = exc.response.status_code
         return RetryVerdict(
             is_retryable_status(status),
-            retry_after=parse_retry_after(exc.response.headers.get("Retry-After")),
+            retry_after=response_retry_after(exc.response),
             description=f"HTTP {status}",
         )
     if isinstance(exc, httpx.TimeoutException):
@@ -428,7 +433,7 @@ def make_request_with_retry(
         last = e.last_exception
         if isinstance(last, httpx.HTTPStatusError):
             status = last.response.status_code
-            if batch_size is not None and status in PAGE_REFUSAL_STATUSES:
+            if _is_page_refusal(status, batch_size):
                 # A 500/502/504 without a JSON body that survived every
                 # same-size retry on a *paged* request: ArcGIS Server answers
                 # a page it cannot serialize with HTTP 500 + an HTML error
@@ -437,7 +442,7 @@ def make_request_with_retry(
                 # left, and it belongs to the caller's batch-size ladder.
                 raise BatchTooLargeError(
                     url=url,
-                    batch_size=batch_size,
+                    batch_size=cast(int, batch_size),  # _is_page_refusal says it is set
                     reason=f"HTTP {status} persisted after {max_retries} attempts",
                 ) from last
             raise _status_error(url, last) from _cause(last)

@@ -120,6 +120,7 @@ When writing tests that create temporary files and use DuckDB to read them:
 3. **Use `safe_rmtree` for directories**:
    ```python
    from tests.conftest import safe_rmtree
+
    safe_rmtree(temp_dir)  # Retries with delays for Windows
    ```
 

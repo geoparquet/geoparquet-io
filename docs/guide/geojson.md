@@ -110,10 +110,7 @@ For a simpler PMTiles workflow, use the built-in `gpio pmtiles` command. It prov
     from geoparquet_io.api import ops
 
     # Basic usage
-    ops.create_pmtiles(
-        input_path="buildings.parquet",
-        output_path="buildings.pmtiles"
-    )
+    ops.create_pmtiles(input_path="buildings.parquet", output_path="buildings.pmtiles")
 
     # With filtering (no manual piping needed)
     ops.create_pmtiles(
@@ -121,22 +118,14 @@ For a simpler PMTiles workflow, use the built-in `gpio pmtiles` command. It prov
         output_path="tiles.pmtiles",
         bbox="-122.5,37.5,-122.0,38.0",
         where="population > 10000",
-        include_cols="name,type,height"
+        include_cols="name,type,height",
     )
 
     # With CRS override (for incorrect metadata)
-    ops.create_pmtiles(
-        input_path="data.parquet",
-        output_path="tiles.pmtiles",
-        src_crs="EPSG:3857"
-    )
+    ops.create_pmtiles(input_path="data.parquet", output_path="tiles.pmtiles", src_crs="EPSG:3857")
 
     # Add layer metadata to the output PMTiles based on the values of column 'owner'
-    ops.create_pmtiles(
-        input_path="data.parquet",
-        output_path="tiles.pmtiles",
-        layer_by_column="owner"
-    )
+    ops.create_pmtiles(input_path="data.parquet", output_path="tiles.pmtiles", layer_by_column="owner")
     ```
 
 The command handles the entire pipeline internally (reprojection → filtering → conversion → tippecanoe) with optimal settings.
@@ -217,7 +206,7 @@ required with it (see below).
     ```python
     from geoparquet_io.api import ops
 
-    ops.create_pmtiles('buildings.parquet', 'out.pmtiles', chunks='2x2', max_zoom=14)
+    ops.create_pmtiles("buildings.parquet", "out.pmtiles", chunks="2x2", max_zoom=14)
     ```
 
 **The input is split once, on disk.** One DuckDB pass — the same single-scan
@@ -291,10 +280,8 @@ temp files of the `gpio` processes feeding it all follow:
     ```python
     from geoparquet_io.api import ops
 
-    ops.create_pmtiles('buildings.parquet', 'out.pmtiles', temporary_directory='scratch')
-    ops.create_pmtiles_pyramid(
-        'cells.parquet', 'pyramid.pmtiles', temporary_directory='scratch'
-    )
+    ops.create_pmtiles("buildings.parquet", "out.pmtiles", temporary_directory="scratch")
+    ops.create_pmtiles_pyramid("cells.parquet", "pyramid.pmtiles", temporary_directory="scratch")
     ```
 
 Without the flag, `TMPDIR` is the knob — the same one every other gpio command
@@ -339,13 +326,13 @@ Levels come from [`gpio process overview`](process-overview.md) — existing `_r
     ```python
     from geoparquet_io.api import ops
 
-    ops.create_pmtiles_pyramid('cells.parquet', 'cells.pmtiles')
+    ops.create_pmtiles_pyramid("cells.parquet", "cells.pmtiles")
 
     ops.create_pmtiles_pyramid(
-        'cells.parquet',
-        'pyramid.pmtiles',
+        "cells.parquet",
+        "pyramid.pmtiles",
         include_features=True,
-        features_source='buildings.parquet',
+        features_source="buildings.parquet",
         max_zoom=8,
     )
     ```
@@ -460,11 +447,7 @@ gpio convert reproject data.parquet - --dst-crs EPSG:4326 | \
     from geoparquet_io.api import ops
 
     # Automatically reproject from EPSG:3857 to WGS84
-    ops.create_pmtiles(
-        input_path="data.parquet",
-        output_path="tiles.pmtiles",
-        src_crs="EPSG:3857"
-    )
+    ops.create_pmtiles(input_path="data.parquet", output_path="tiles.pmtiles", src_crs="EPSG:3857")
     ```
 
 ### How the source CRS is read
@@ -522,17 +505,13 @@ To write a standard GeoJSON FeatureCollection, specify an output file:
     import geoparquet_io as gpio
 
     # Write to GeoJSON file
-    gpio.read('data.parquet').to_geojson('output.geojson')
+    gpio.read("data.parquet").to_geojson("output.geojson")
 
     # With options
-    gpio.read('data.parquet').to_geojson(
-        'output.geojson',
-        precision=5,
-        write_bbox=True
-    )
+    gpio.read("data.parquet").to_geojson("output.geojson", precision=5, write_bbox=True)
 
     # Get as string (no file output)
-    geojson_str = gpio.read('data.parquet').to_geojson()
+    geojson_str = gpio.read("data.parquet").to_geojson()
     ```
 
 File output is generated directly from query results as RFC 7946-compliant GeoJSON; no GDAL is involved.

@@ -34,11 +34,11 @@ The `inspect` command provides quick, human-readable summaries of GeoParquet fil
     import geoparquet_io as gpio
 
     # Print summary to stdout
-    gpio.read('data.parquet').info()
+    gpio.read("data.parquet").info()
 
     # Get as dictionary
-    info = gpio.read('data.parquet').info(verbose=False)
-    print(info['rows'], info['bounds'])
+    info = gpio.read("data.parquet").info(verbose=False)
+    print(info["rows"], info["bounds"])
     ```
 
 Shows:
@@ -70,7 +70,7 @@ Shows:
     ```python
     import geoparquet_io as gpio
 
-    table = gpio.read('data.parquet')
+    table = gpio.read("data.parquet")
 
     # First 10 rows (default)
     first_10 = table.head()
@@ -130,19 +130,19 @@ gpio inspect head data.parquet --json
     ```python
     import geoparquet_io as gpio
 
-    table = gpio.read('data.parquet')
+    table = gpio.read("data.parquet")
 
     # Get column statistics as dictionary
     stats = table.stats()
 
     # Access stats for a specific column
-    print(stats['population']['min'])
-    print(stats['population']['max'])
-    print(stats['population']['nulls'])
-    print(stats['population']['unique'])
+    print(stats["population"]["min"])
+    print(stats["population"]["max"])
+    print(stats["population"]["nulls"])
+    print(stats["population"]["unique"])
 
     # Geometry columns have null counts only
-    print(stats['geometry']['nulls'])
+    print(stats["geometry"]["nulls"])
     ```
 
 ### Compression Ratios
@@ -160,7 +160,7 @@ gpio inspect head data.parquet --json
     ```python
     from geoparquet_io.api import ops
 
-    stats = ops.compression_stats('data.parquet')
+    stats = ops.compression_stats("data.parquet")
     for col in stats:
         print(f"{col['column_name']}: {col['compression']} ratio={col['ratio']:.2f}")
     ```
@@ -186,20 +186,20 @@ Output includes a "Compression Ratios" table showing which columns benefit most 
     ```python
     import geoparquet_io as gpio
 
-    table = gpio.read('data.parquet')
+    table = gpio.read("data.parquet")
 
     # Get full metadata as dictionary
     meta = table.metadata()
 
     # Access specific metadata
-    print(meta['geoparquet_version'])
-    print(meta['geometry_column'])
-    print(meta['crs'])
-    print(meta['bounds'])
+    print(meta["geoparquet_version"])
+    print(meta["geometry_column"])
+    print(meta["crs"])
+    print(meta["bounds"])
 
     # Get full geo metadata (from 'geo' key)
-    geo_meta = meta.get('geo_metadata', {})
-    print(geo_meta.get('columns', {}).get('geometry', {}))
+    geo_meta = meta.get("geo_metadata", {})
+    print(geo_meta.get("columns", {}).get("geometry", {}))
 
     # Include raw Parquet schema metadata
     full_meta = table.metadata(include_parquet_metadata=True)
@@ -287,12 +287,14 @@ View bounding box statistics for each row group to verify spatial locality:
     ```python
     from geoparquet_io.api.ops import get_row_group_geo_stats
 
-    stats = get_row_group_geo_stats('hilbert_sorted.parquet')
+    stats = get_row_group_geo_stats("hilbert_sorted.parquet")
 
     for rg in stats:
-        print(f"RG {rg['row_group_id']}: {rg['num_rows']} rows, "
-              f"bbox=[{rg['xmin']:.2f}, {rg['ymin']:.2f}, "
-              f"{rg['xmax']:.2f}, {rg['ymax']:.2f}]")
+        print(
+            f"RG {rg['row_group_id']}: {rg['num_rows']} rows, "
+            f"bbox=[{rg['xmin']:.2f}, {rg['ymin']:.2f}, "
+            f"{rg['xmax']:.2f}, {rg['ymax']:.2f}]"
+        )
     ```
 
 This is useful for:
@@ -328,11 +330,11 @@ For multi-layer formats (GeoPackage, FileGDB), list available layers:
     import geoparquet_io as gpio
 
     # List layers in a multi-layer file
-    layers = gpio.list_layers('multi.gpkg')
+    layers = gpio.list_layers("multi.gpkg")
     print(layers)  # ['buildings', 'roads', 'parcels']
 
     # Read a specific layer
-    table = gpio.read('multi.gpkg', layer='buildings')
+    table = gpio.read("multi.gpkg", layer="buildings")
     ```
 
 Returns layer names for files with 2+ layers. Single-layer files return nothing.
@@ -373,7 +375,7 @@ gpio inspect meta data.parquet --json
     import geoparquet_io as gpio
 
     # Read all partitions into a single Table
-    table = gpio.read_partition('partitions/')
+    table = gpio.read_partition("partitions/")
 
     # Get info about combined data
     table.info()

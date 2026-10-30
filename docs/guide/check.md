@@ -15,7 +15,7 @@ The `check` commands validate GeoParquet files against [best practices](https://
     ```python
     import geoparquet_io as gpio
 
-    table = gpio.read('myfile.parquet')
+    table = gpio.read("myfile.parquet")
     result = table.check()
 
     if result.passed():
@@ -349,8 +349,8 @@ metadata only.
         print(warning)
 
     # Wider sample, and the per-row report behind the verdict
-    report = table.check_bbox(sample_rows=50000).to_dict()['bbox_values']
-    print(report['undersized_rows'], report['undersized_examples'])
+    report = table.check_bbox(sample_rows=50000).to_dict()["bbox_values"]
+    print(report["undersized_rows"], report["undersized_examples"])
     ```
 
 **Tolerance.** Exact equality is the wrong test — a bbox that has been through a
@@ -748,7 +748,7 @@ exit `2` for warnings only; it no longer does.
     ```python
     from geoparquet_io import validate_stac
 
-    result = validate_stac('output.json')
+    result = validate_stac("output.json")
     if result.passed():
         print("Valid STAC!")
     ```

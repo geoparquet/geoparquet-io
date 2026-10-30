@@ -230,11 +230,9 @@ import geoparquet_io as gpio
 # Equivalent to:
 # gpio extract --bbox "..." input.parquet | gpio add bbox - | gpio sort hilbert - output.parquet
 
-gpio.read('input.parquet') \
-    .extract(bbox=(-0.5, 9.8, 0.5, 11.0)) \
-    .add_bbox() \
-    .sort_hilbert() \
-    .write('output.parquet')
+gpio.read("input.parquet").extract(bbox=(-0.5, 9.8, 0.5, 11.0)).add_bbox().sort_hilbert().write(
+    "output.parquet"
+)
 ```
 
 ### Performance Comparison

@@ -8,7 +8,7 @@ Python API examples demonstrating common operations.
 import geoparquet_io as gpio
 
 # Read a GeoParquet file
-table = gpio.read('data.parquet')
+table = gpio.read("data.parquet")
 
 # Get basic info
 print(f"Rows: {table.num_rows}")
@@ -27,14 +27,10 @@ table.info()
 import geoparquet_io as gpio
 
 # Add bbox column
-gpio.read('input.parquet') \
-    .add_bbox() \
-    .write('output.parquet')
+gpio.read("input.parquet").add_bbox().write("output.parquet")
 
 # With custom column name
-gpio.read('input.parquet') \
-    .add_bbox(column_name='bounds') \
-    .write('output.parquet')
+gpio.read("input.parquet").add_bbox(column_name="bounds").write("output.parquet")
 ```
 
 ## Hilbert Curve Sorting
@@ -43,15 +39,10 @@ gpio.read('input.parquet') \
 import geoparquet_io as gpio
 
 # Sort for spatial locality
-gpio.read('input.parquet') \
-    .sort_hilbert() \
-    .write('sorted.parquet')
+gpio.read("input.parquet").sort_hilbert().write("sorted.parquet")
 
 # Add bbox and sort in one chain
-gpio.read('input.parquet') \
-    .add_bbox() \
-    .sort_hilbert() \
-    .write('optimized.parquet')
+gpio.read("input.parquet").add_bbox().sort_hilbert().write("optimized.parquet")
 ```
 
 ## Adding Spatial Indices
@@ -60,33 +51,21 @@ gpio.read('input.parquet') \
 import geoparquet_io as gpio
 
 # Add H3 hexagonal cells
-gpio.read('input.parquet') \
-    .add_h3(resolution=9) \
-    .write('with_h3.parquet')
+gpio.read("input.parquet").add_h3(resolution=9).write("with_h3.parquet")
 
 # Add A5 cells
-gpio.read('input.parquet') \
-    .add_a5(resolution=15) \
-    .write('with_a5.parquet')
+gpio.read("input.parquet").add_a5(resolution=15).write("with_a5.parquet")
 
 # Add S2 spherical cells
-gpio.read('input.parquet') \
-    .add_s2(level=13) \
-    .write('with_s2.parquet')
+gpio.read("input.parquet").add_s2(level=13).write("with_s2.parquet")
 
 # Add quadkey tiles
-gpio.read('input.parquet') \
-    .add_quadkey(resolution=12) \
-    .write('with_quadkey.parquet')
+gpio.read("input.parquet").add_quadkey(resolution=12).write("with_quadkey.parquet")
 
 # Add multiple indices
-gpio.read('input.parquet') \
-    .add_bbox() \
-    .add_h3(resolution=9) \
-    .add_a5(resolution=13) \
-    .add_quadkey(resolution=12) \
-    .sort_hilbert() \
-    .write('enriched.parquet')
+gpio.read("input.parquet").add_bbox().add_h3(resolution=9).add_a5(resolution=13).add_quadkey(
+    resolution=12
+).sort_hilbert().write("enriched.parquet")
 ```
 
 ## Filtering Data
@@ -95,33 +74,27 @@ gpio.read('input.parquet') \
 import geoparquet_io as gpio
 
 # Limit rows
-table = gpio.read('input.parquet').extract(limit=1000)
+table = gpio.read("input.parquet").extract(limit=1000)
 
 # Select specific columns
-table = gpio.read('input.parquet').extract(columns=['name', 'geometry'])
+table = gpio.read("input.parquet").extract(columns=["name", "geometry"])
 
 # Exclude columns (unknown names raise instead of being ignored)
-table = gpio.read('input.parquet').extract(exclude_columns=['placemaker_url'])
+table = gpio.read("input.parquet").extract(exclude_columns=["placemaker_url"])
 
 # Spatial filter by bounding box
-table = gpio.read('input.parquet').extract(
-    bbox=(-122.5, 37.5, -122.0, 38.0)
-)
+table = gpio.read("input.parquet").extract(bbox=(-122.5, 37.5, -122.0, 38.0))
 
 # SQL WHERE clause
-table = gpio.read('input.parquet').extract(
-    where="population > 10000"
-)
+table = gpio.read("input.parquet").extract(where="population > 10000")
 
 # Combined filtering
-gpio.read('input.parquet') \
-    .extract(
-        bbox=(-122.5, 37.5, -122.0, 38.0),
-        columns=['name', 'population', 'geometry'],
-        where="population > 1000",
-        limit=5000
-    ) \
-    .write('filtered.parquet')
+gpio.read("input.parquet").extract(
+    bbox=(-122.5, 37.5, -122.0, 38.0),
+    columns=["name", "population", "geometry"],
+    where="population > 1000",
+    limit=5000,
+).write("filtered.parquet")
 ```
 
 ## Converting from Other Formats
@@ -130,21 +103,16 @@ gpio.read('input.parquet') \
 import geoparquet_io as gpio
 
 # Convert GeoPackage
-gpio.convert('data.gpkg') \
-    .add_bbox() \
-    .sort_hilbert() \
-    .write('output.parquet')
+gpio.convert("data.gpkg").add_bbox().sort_hilbert().write("output.parquet")
 
 # Convert Shapefile
-gpio.convert('data.shp').write('output.parquet')
+gpio.convert("data.shp").write("output.parquet")
 
 # Convert CSV with lat/lon
-gpio.convert('data.csv', lat_column='lat', lon_column='lon') \
-    .write('output.parquet')
+gpio.convert("data.csv", lat_column="lat", lon_column="lon").write("output.parquet")
 
 # Convert CSV with WKT geometry
-gpio.convert('data.csv', wkt_column='geometry') \
-    .write('output.parquet')
+gpio.convert("data.csv", wkt_column="geometry").write("output.parquet")
 ```
 
 ## Partitioning Data
@@ -153,15 +121,15 @@ gpio.convert('data.csv', wkt_column='geometry') \
 import geoparquet_io as gpio
 
 # Partition by H3 cells
-stats = gpio.read('input.parquet') \
-    .add_h3(resolution=9) \
-    .partition_by_h3('output/', resolution=6)
+stats = gpio.read("input.parquet").add_h3(resolution=9).partition_by_h3("output/", resolution=6)
 print(f"Created {stats['file_count']} files")
 
 # Partition by quadkey
-stats = gpio.read('input.parquet') \
-    .add_quadkey() \
-    .partition_by_quadkey('output/', resolution=13, partition_resolution=4)
+stats = (
+    gpio.read("input.parquet")
+    .add_quadkey()
+    .partition_by_quadkey("output/", resolution=13, partition_resolution=4)
+)
 print(f"Created {stats['file_count']} files")
 ```
 
@@ -171,13 +139,13 @@ print(f"Created {stats['file_count']} files")
 import geoparquet_io as gpio
 
 # Read from partitioned directory
-table = gpio.read_partition('partitioned_output/')
+table = gpio.read_partition("partitioned_output/")
 
 # Read with glob pattern
-table = gpio.read_partition('data/quadkey=*/*.parquet')
+table = gpio.read_partition("data/quadkey=*/*.parquet")
 
 # Allow schema differences across partitions
-table = gpio.read_partition('output/', allow_schema_diff=True)
+table = gpio.read_partition("output/", allow_schema_diff=True)
 ```
 
 ## Compression Options
@@ -192,19 +160,15 @@ Example usage:
 import geoparquet_io as gpio
 
 # ZSTD (recommended, default)
-gpio.read('input.parquet') \
-    .add_bbox() \
-    .write('output.parquet', compression='ZSTD')
+gpio.read("input.parquet").add_bbox().write("output.parquet", compression="ZSTD")
 
 # GZIP for wide compatibility
-gpio.read('input.parquet') \
-    .add_bbox() \
-    .write('output.parquet', compression='GZIP', compression_level=6)
+gpio.read("input.parquet").add_bbox().write(
+    "output.parquet", compression="GZIP", compression_level=6
+)
 
 # LZ4 for fast decompression
-gpio.read('input.parquet') \
-    .add_bbox() \
-    .write('output.parquet', compression='LZ4')
+gpio.read("input.parquet").add_bbox().write("output.parquet", compression="LZ4")
 ```
 
 ## Cloud Storage
@@ -213,22 +177,15 @@ gpio.read('input.parquet') \
 import geoparquet_io as gpio
 
 # Upload to S3
-gpio.read('input.parquet') \
-    .add_bbox() \
-    .sort_hilbert() \
-    .upload('s3://bucket/data.parquet')
+gpio.read("input.parquet").add_bbox().sort_hilbert().upload("s3://bucket/data.parquet")
 
 # With AWS profile
-gpio.read('input.parquet') \
-    .upload('s3://bucket/data.parquet', profile='my-aws-profile')
+gpio.read("input.parquet").upload("s3://bucket/data.parquet", profile="my-aws-profile")
 
 # S3-compatible storage (MinIO, source.coop)
-gpio.read('input.parquet') \
-    .upload(
-        's3://bucket/data.parquet',
-        s3_endpoint='minio.example.com:9000',
-        s3_use_ssl=False
-    )
+gpio.read("input.parquet").upload(
+    "s3://bucket/data.parquet", s3_endpoint="minio.example.com:9000", s3_use_ssl=False
+)
 ```
 
 ## Advanced: Direct Core Function Access
@@ -246,7 +203,7 @@ add_bbox_column(
     bbox_name="bbox",
     verbose=True,
     compression="ZSTD",
-    compression_level=15
+    compression_level=15,
 )
 
 # Hilbert sorting (file-based)
@@ -255,7 +212,7 @@ hilbert_order(
     output_parquet="sorted.parquet",
     geometry_column="geometry",
     add_bbox=True,
-    verbose=True
+    verbose=True,
 )
 ```
 

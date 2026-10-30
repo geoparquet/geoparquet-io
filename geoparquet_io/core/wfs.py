@@ -56,14 +56,14 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_RETRY_DELAY,
+    DEFAULT_TIMEOUT,
     RetryExhaustedError,
     run_with_retry,
 )
 from geoparquet_io.core.http_retry import (
     get_shared_http_client as _get_shared_http_client_base,
-)
-from geoparquet_io.core.http_retry import (
-    reset_http_client as _reset_http_client_base,
 )
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -174,8 +174,6 @@ class WFSLayerInfo:
     sortable_attribute: str | None = None
 
 
-# Default timeout for HTTP requests (seconds)
-DEFAULT_TIMEOUT = 60.0
 # A GetFeature page can take minutes on a large layer; the startIndex probe
 # asks for one feature. Both are passed per request, never only to the shared
 # client, which keeps the timeout of whichever caller built it (#1184).
@@ -183,21 +181,16 @@ _PAGE_TIMEOUT = 600.0
 _PROBE_TIMEOUT = 30.0
 
 
-def _get_shared_http_client(timeout: float = DEFAULT_TIMEOUT):
+def _get_shared_http_client(timeout: float):
     """Get shared HTTP client from http_retry module."""
     return _get_shared_http_client_base(timeout=timeout)
-
-
-def _reset_http_client():
-    """Reset shared HTTP client from http_retry module."""
-    _reset_http_client_base()
 
 
 def _make_request(
     url: str,
     params: dict | None = None,
-    max_retries: int = 3,
-    retry_delay: float = 1.0,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    retry_delay: float = DEFAULT_RETRY_DELAY,
     accept: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> bytes:
@@ -2319,8 +2312,8 @@ def _download_wfs_page(url: str, accept: str, tmp_dir: tempfile.TemporaryDirecto
 def _fetch_wfs_page(
     url: str,
     extract_fid: bool = False,
-    max_retries: int = 3,
-    retry_delay: float = 2.0,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    retry_delay: float = DEFAULT_RETRY_DELAY,
     output_format: str | None = None,
 ) -> pa.Table:
     """

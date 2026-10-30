@@ -1732,4 +1732,4 @@ class TestCartoRetriesThroughTheSharedOwner:
 
         assert table.num_rows == 2
         assert seen, "the fetch did not go through http_retry.run_with_retry"
-        assert slept == [2.0]  # carto's DEFAULT_RETRY_DELAY, one step
+        assert slept == [1.0]  # http_retry.DEFAULT_RETRY_DELAY, one step

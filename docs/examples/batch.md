@@ -8,6 +8,7 @@ Process multiple GeoParquet files efficiently using the Python API.
 from pathlib import Path
 import geoparquet_io as gpio
 
+
 def process_directory(input_dir: str, output_dir: str):
     """Process all parquet files in a directory."""
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -15,12 +16,10 @@ def process_directory(input_dir: str, output_dir: str):
     for input_file in Path(input_dir).glob("*.parquet"):
         output_file = Path(output_dir) / input_file.name
 
-        gpio.read(input_file) \
-            .add_bbox() \
-            .sort_hilbert() \
-            .write(output_file)
+        gpio.read(input_file).add_bbox().sort_hilbert().write(output_file)
 
         print(f"Processed {input_file.name}")
+
 
 # Usage
 process_directory("input/", "output/")
@@ -35,23 +34,23 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 import geoparquet_io as gpio
 
+
 def process_file(args: tuple) -> tuple:
     """Process a single file."""
     input_file, output_dir = args
     output_file = Path(output_dir) / input_file.name
 
     try:
-        gpio.read(input_file) \
-            .add_bbox() \
-            .sort_hilbert() \
-            .write(output_file)
+        gpio.read(input_file).add_bbox().sort_hilbert().write(output_file)
         return (True, input_file.name, None)
     except Exception as e:
         return (False, input_file.name, str(e))
 
+
 def parallel_process(input_dir: str, output_dir: str, max_workers: int = None):
     """Process files in parallel."""
     import os
+
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     files = list(Path(input_dir).glob("*.parquet"))
@@ -61,8 +60,7 @@ def parallel_process(input_dir: str, output_dir: str, max_workers: int = None):
         max_workers = os.cpu_count() or 4
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(process_file, args): args[0]
-                   for args in args_list}
+        futures = {executor.submit(process_file, args): args[0] for args in args_list}
 
         for future in as_completed(futures):
             success, filename, error = future.result()
@@ -70,6 +68,7 @@ def parallel_process(input_dir: str, output_dir: str, max_workers: int = None):
                 print(f"Done: {filename}")
             else:
                 print(f"Failed: {filename}: {error}")
+
 
 # Usage
 parallel_process("input/", "output/")
@@ -84,6 +83,7 @@ from pathlib import Path
 from tqdm import tqdm
 import geoparquet_io as gpio
 
+
 def process_with_progress(input_dir: str, output_dir: str):
     """Process files with progress bar."""
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -93,10 +93,8 @@ def process_with_progress(input_dir: str, output_dir: str):
     for input_file in tqdm(files, desc="Processing files"):
         output_file = Path(output_dir) / input_file.name
 
-        gpio.read(input_file) \
-            .add_bbox() \
-            .sort_hilbert() \
-            .write(output_file)
+        gpio.read(input_file).add_bbox().sort_hilbert().write(output_file)
+
 
 # Usage
 process_with_progress("input/", "output/")
@@ -110,6 +108,7 @@ Convert multiple Shapefiles or GeoPackages:
 from pathlib import Path
 import geoparquet_io as gpio
 
+
 def convert_directory(input_dir: str, output_dir: str, pattern: str = "*.shp"):
     """Convert vector files to optimized GeoParquet."""
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -117,12 +116,10 @@ def convert_directory(input_dir: str, output_dir: str, pattern: str = "*.shp"):
     for input_file in Path(input_dir).glob(pattern):
         output_file = Path(output_dir) / f"{input_file.stem}.parquet"
 
-        gpio.convert(input_file) \
-            .add_bbox() \
-            .sort_hilbert() \
-            .write(output_file)
+        gpio.convert(input_file).add_bbox().sort_hilbert().write(output_file)
 
         print(f"Converted {input_file.name} -> {output_file.name}")
+
 
 # Convert Shapefiles
 convert_directory("shapefiles/", "parquet/", "*.shp")
@@ -139,15 +136,16 @@ Upload processed files to S3:
 from pathlib import Path
 import geoparquet_io as gpio
 
+
 def upload_directory(input_dir: str, s3_bucket: str, profile: str = None):
     """Upload all parquet files to S3."""
     for input_file in Path(input_dir).glob("*.parquet"):
         destination = f"s3://{s3_bucket}/{input_file.name}"
 
-        gpio.read(input_file) \
-            .upload(destination, profile=profile)
+        gpio.read(input_file).upload(destination, profile=profile)
 
         print(f"Uploaded {input_file.name}")
+
 
 # Usage
 upload_directory("output/", "my-bucket/data/", profile="my-aws")
@@ -160,6 +158,7 @@ Apply different transformations based on file characteristics:
 ```python
 from pathlib import Path
 import geoparquet_io as gpio
+
 
 def smart_process(input_dir: str, output_dir: str):
     """Apply different processing based on file size/content."""
@@ -179,6 +178,7 @@ def smart_process(input_dir: str, output_dir: str):
         result.write(output_file)
         print(f"Processed {input_file.name} ({table.num_rows:,} rows)")
 
+
 # Usage
 smart_process("input/", "output/")
 ```
@@ -193,11 +193,9 @@ import logging
 import geoparquet_io as gpio
 
 # Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
 
 def robust_process(input_dir: str, output_dir: str):
     """Process files with comprehensive error handling."""
@@ -212,10 +210,7 @@ def robust_process(input_dir: str, output_dir: str):
         output_file = Path(output_dir) / input_file.name
 
         try:
-            gpio.read(input_file) \
-                .add_bbox() \
-                .sort_hilbert() \
-                .write(output_file)
+            gpio.read(input_file).add_bbox().sort_hilbert().write(output_file)
 
             success_count += 1
             logger.info(f"Processed: {input_file.name}")
@@ -235,6 +230,7 @@ def robust_process(input_dir: str, output_dir: str):
 
     return success_count, errors
 
+
 # Usage
 success, errors = robust_process("input/", "output/")
 ```
@@ -247,6 +243,7 @@ For file-based operations without loading into memory:
 from pathlib import Path
 from geoparquet_io.core.add.bbox import add_bbox_column
 from geoparquet_io.core.hilbert_order import hilbert_order
+
 
 def batch_process_core_api(input_dir: str, output_dir: str):
     """Process using core API (file-based operations)."""
@@ -261,20 +258,17 @@ def batch_process_core_api(input_dir: str, output_dir: str):
             input_parquet=str(input_file),
             output_parquet=str(temp_file),
             bbox_name="bbox",
-            verbose=False
+            verbose=False,
         )
 
         # Sort by Hilbert curve
-        hilbert_order(
-            input_parquet=str(temp_file),
-            output_parquet=str(output_file),
-            verbose=False
-        )
+        hilbert_order(input_parquet=str(temp_file), output_parquet=str(output_file), verbose=False)
 
         # Clean up temp file
         temp_file.unlink()
 
         print(f"Processed {input_file.name}")
+
 
 # Usage
 batch_process_core_api("input/", "output/")

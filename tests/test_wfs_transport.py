@@ -597,7 +597,7 @@ def test_a_5xx_page_is_retried_by_the_page_fetcher_then_reported(monkeypatch):
     with pytest.raises(WFSError, match="HTTP 503"):
         _fetch_wfs_page(SERVICE)
     assert len(http.requests) == 3
-    assert http.sleeps == [2.0, 4.0]
+    assert http.sleeps == [1.0, 2.0]
 
 
 def test_a_4xx_page_is_not_retried_by_the_page_fetcher(monkeypatch):
@@ -615,7 +615,7 @@ def test_a_transient_page_failure_resets_the_pool_and_retries(monkeypatch):
 
     assert _fetch_wfs_page(SERVICE).num_rows == 3
     assert http.resets == 1
-    assert http.sleeps == [2.0]  # the page fetcher's own retry_delay default
+    assert http.sleeps == [1.0]  # the shared default retry_delay
 
 
 def test_a_page_that_never_arrives_names_the_attempt_count(monkeypatch):
@@ -625,7 +625,7 @@ def test_a_page_that_never_arrives_names_the_attempt_count(monkeypatch):
     with pytest.raises(WFSError, match="after 3 attempts"):
         _fetch_wfs_page(SERVICE)
     assert len(http.requests) == 3
-    assert http.sleeps == [2.0, 4.0]
+    assert http.sleeps == [1.0, 2.0]
 
 
 @pytest.mark.parametrize("content_type", ["text/html", "text/plain", "application/xhtml+xml"])
@@ -1125,4 +1125,4 @@ def test_extract_wfs_retries_a_503_through_the_shared_owner(monkeypatch, tmp_pat
     assert result.exit_code == 0, result.output
     assert pq.read_metadata(out).num_rows == 6
     assert seen, "the page was fetched without going through http_retry.run_with_retry"
-    assert http.sleeps == [2.0]  # the page fetcher's retry_delay, one doubling step
+    assert http.sleeps == [1.0]  # the shared default retry_delay

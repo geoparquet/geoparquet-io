@@ -80,17 +80,16 @@ Credentials from SSO, assume-role and `credential_process` are short-lived. gpio
     import geoparquet_io as gpio
 
     # Use default credentials (from ~/.aws/credentials [default] or IAM role)
-    gpio.read('s3://bucket/input.parquet').add_bbox().write('output.parquet')
+    gpio.read("s3://bucket/input.parquet").add_bbox().write("output.parquet")
 
     # Use a named AWS profile
-    gpio.read('s3://bucket/input.parquet').add_bbox().upload(
-        's3://bucket/output.parquet',
-        profile='production'
+    gpio.read("s3://bucket/input.parquet").add_bbox().upload(
+        "s3://bucket/output.parquet", profile="production"
     )
 
     # Or set AWS_PROFILE environment variable
-    os.environ['AWS_PROFILE'] = 'production'
-    gpio.read('s3://bucket/input.parquet').add_bbox().upload('s3://bucket/output.parquet')
+    os.environ["AWS_PROFILE"] = "production"
+    gpio.read("s3://bucket/input.parquet").add_bbox().upload("s3://bucket/output.parquet")
     ```
 
 **Note:** The `--aws-profile` flag is available on all commands. It applies to that one command only and does not change `AWS_PROFILE` in your environment.
@@ -161,16 +160,11 @@ All commands support S3-compatible endpoints (MinIO, Cloudflare R2, source.coop,
     import geoparquet_io as gpio
 
     # Read from source.coop
-    table = gpio.read_partition(
-        's3://bucket/data/',
-        s3_endpoint='data.source.coop'
-    )
+    table = gpio.read_partition("s3://bucket/data/", s3_endpoint="data.source.coop")
 
     # Upload to MinIO
-    gpio.read('data.parquet').upload(
-        's3://bucket/file.parquet',
-        s3_endpoint='minio.example.com:9000',
-        s3_use_ssl=False
+    gpio.read("data.parquet").upload(
+        "s3://bucket/file.parquet", s3_endpoint="minio.example.com:9000", s3_use_ssl=False
     )
     ```
 
@@ -217,16 +211,15 @@ Or use the Python API for zero-copy streaming:
 import geoparquet_io as gpio
 
 # Process in memory, then upload
-table = gpio.read('input.parquet') \
-    .extract(bbox=(-122.5, 37.5, -122.0, 38.0)) \
-    .add_bbox() \
-    .sort_hilbert()
+table = (
+    gpio.read("input.parquet").extract(bbox=(-122.5, 37.5, -122.0, 38.0)).add_bbox().sort_hilbert()
+)
 ```
 
 <!-- doctest: skip="needs cloud credentials" -->
 ```python
 # Upload directly (writes temp file, uploads, cleans up)
-table.upload('s3://bucket/output.parquet', profile='prod')
+table.upload("s3://bucket/output.parquet", profile="prod")
 ```
 
 See [Command Piping](piping.md) for more streaming patterns.

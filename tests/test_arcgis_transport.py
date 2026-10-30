@@ -472,7 +472,7 @@ def test_a_page_surfaces_an_esri_error_envelope(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_a_503_is_retried_with_linear_backoff(monkeypatch):
+def test_a_503_is_retried_with_exponential_backoff(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(_is_count, error_reply(503), error_reply(503), json_reply({"count": 3}))
 
@@ -522,12 +522,12 @@ def test_an_http_date_retry_after_is_honoured_and_capped(monkeypatch):
     assert http.sleeps == [MAX_RETRY_AFTER]
 
 
-def test_an_unreadable_retry_after_degrades_to_linear_backoff(monkeypatch):
+def test_an_unreadable_retry_after_degrades_to_the_plain_backoff(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(_is_count, error_reply(429, retry_after="soon"), json_reply({"count": 1}))
 
     assert get_feature_count(SERVICE) == 1
-    assert http.sleeps == [1.0]  # retry_delay * (attempt + 1)
+    assert http.sleeps == [1.0]  # retry_delay * 2**attempt
 
 
 def test_retries_are_exhausted_and_then_reported(monkeypatch):

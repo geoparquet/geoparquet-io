@@ -29,8 +29,8 @@ Then sub-partition whatever came out too large:
     from geoparquet_io.api import ops
 
     result = ops.sub_partition_by_h3(
-        'by_country/',
-        min_size='100MB',
+        "by_country/",
+        min_size="100MB",
         resolution=7,
         in_place=True,
     )
@@ -102,7 +102,7 @@ they are reached through `--min-size`.
     ```python
     from geoparquet_io.api import ops
 
-    ops.sub_partition_by_h3('by_country/', min_size='100MB', resolution=7, in_place=True)
+    ops.sub_partition_by_h3("by_country/", min_size="100MB", resolution=7, in_place=True)
     ```
 
 === "A5"
@@ -120,8 +120,8 @@ they are reached through `--min-size`.
     from geoparquet_io.api import ops
 
     result = ops.sub_partition_by_a5(
-        'by_country/',
-        min_size='1B',
+        "by_country/",
+        min_size="1B",
         resolution=4,
         in_place=True,
     )
@@ -143,8 +143,8 @@ they are reached through `--min-size`.
     from geoparquet_io.api import ops
 
     result = ops.sub_partition_by_s2(
-        'by_country/',
-        min_size='1B',
+        "by_country/",
+        min_size="1B",
         level=4,
         in_place=True,
     )
@@ -168,8 +168,8 @@ they are reached through `--min-size`.
     from geoparquet_io.api import ops
 
     result = ops.sub_partition_by_quadkey(
-        'by_country/',
-        min_size='1B',
+        "by_country/",
+        min_size="1B",
         resolution=6,
         partition_resolution=3,
         in_place=True,
@@ -195,8 +195,8 @@ from geoparquet_io.core.exceptions import PartitionError
 
 try:
     result = ops.sub_partition_by_a5(
-        'by_country/',
-        min_size='1B',       # a byte count works too: min_size=1
+        "by_country/",
+        min_size="1B",  # a byte count works too: min_size=1
         resolution=4,
         in_place=True,
     )
@@ -206,7 +206,7 @@ except PartitionError as exc:
     result = exc.result
     print(f"{len(result['errors'])} file(s) kept their original")
 
-for candidate in result['candidates']:
+for candidate in result["candidates"]:
     print(f"{candidate['path']} -> {candidate['output_dir']}/")
 ```
 
@@ -235,13 +235,13 @@ nothing is deleted, even when `--in-place` is also passed.
     from geoparquet_io.api import ops
 
     plan = ops.sub_partition_by_h3(
-        'by_country/',
-        min_size='1B',
+        "by_country/",
+        min_size="1B",
         resolution=7,
         preview=True,
     )
-    for candidate in plan['candidates']:
-        size_mb = candidate['size_bytes'] / (1024 * 1024)
+    for candidate in plan["candidates"]:
+        size_mb = candidate["size_bytes"] / (1024 * 1024)
         print(f"{candidate['path']} ({size_mb:.1f}MB) -> {candidate['output_dir']}/")
     ```
 

@@ -88,10 +88,10 @@ Add precomputed bounding boxes for faster spatial queries:
     ```python
     import geoparquet_io as gpio
 
-    gpio.read('input.parquet').add_bbox().write('output.parquet')
+    gpio.read("input.parquet").add_bbox().write("output.parquet")
 
     # Custom column name
-    gpio.read('input.parquet').add_bbox(column_name='bounds').write('output.parquet')
+    gpio.read("input.parquet").add_bbox(column_name="bounds").write("output.parquet")
     ```
 
 Creates a struct column with `{xmin, ymin, xmax, ymax}` for each feature, plus the `covering` metadata that points at it. Because gpio computes the column from the geometry in the same statement, it can declare the covering. For a column gpio did not compute, the only name it will vouch for is a struct column called exactly `bbox` — the universal convention every 1.0-era writer emitted before `covering` existed, which any write carries forward with a covering. Any other name (`bounds`, `extent`, `tile_bbox`) is left undeclared, since a covering asserts a relationship gpio cannot verify from a column name; `gpio add bbox-metadata` is where you assert it deliberately. Inventing one is the only thing the name rule governs: a covering that *already exists* — one gpio just computed under `--bbox-name bounds`, or one GDAL wrote over `geometry_bbox` — is somebody's assertion already, and every write carries it forward whatever the column is called. The `covering` key is not part of the GeoParquet 2.0 specification text — it was introduced in 1.1 and removed in 2.0 in favour of the native statistics. 2.0 readers must tolerate unknown fields, so a covering stays legal to carry, and [geoparquet#302](https://github.com/opengeospatial/geoparquet/pull/302) *proposes* reinstating it as an option (still open at time of writing). The motivation is real either way: native statistics prune whole row groups, while a bbox column's page index also prunes pages within one.
@@ -216,13 +216,13 @@ If your file already has a bbox column but lacks covering metadata (e.g., from e
     import geoparquet_io as gpio
 
     # Add bbox column, then add covering metadata
-    table = gpio.read('input.parquet')
+    table = gpio.read("input.parquet")
     table_with_bbox = table.add_bbox().add_bbox_metadata()
-    table_with_bbox.write('output.parquet')
+    table_with_bbox.write("output.parquet")
 
     # Or just add metadata if bbox column already exists
-    table = gpio.read('file_with_bbox.parquet')
-    table.add_bbox_metadata().write('output.parquet')
+    table = gpio.read("file_with_bbox.parquet")
+    table.add_bbox_metadata().write("output.parquet")
     ```
 
 #### Declaring a column gpio will not vouch for
@@ -247,8 +247,8 @@ evidence:
     ```python
     import geoparquet_io as gpio
 
-    table = gpio.read('gdal_written.parquet')
-    table.add_bbox_metadata(bbox_column='geometry_bbox').write('output.parquet')
+    table = gpio.read("gdal_written.parquet")
+    table.add_bbox_metadata(bbox_column="geometry_bbox").write("output.parquet")
     ```
 
 Naming a column is an assertion about its values, so three things stay refused.
@@ -289,7 +289,7 @@ each fence, so the examples execute in the docs lane rather than being skipped.
     from geoparquet_io.api import ops
 
     # The file form patches the footer of a file already on disk
-    ops.add_stac_metadata('items.parquet', 'collection.json')
+    ops.add_stac_metadata("items.parquet", "collection.json")
     ```
 
     <!-- doctest: setup="cp input.parquet items.parquet", setup="printf %s '{@type@:@Collection@,@id@:@PSScene@,@stac_version@:@1.1.0@,@description@:@PlanetScope scenes@,@license@:@proprietary@,@extent@:{@spatial@:{@bbox@:[[-180,-90,180,90]]},@temporal@:{@interval@:[[null,null]]}},@links@:[]}' | tr @ '\042' > collection.json" -->
@@ -297,8 +297,8 @@ each fence, so the examples execute in the docs lane rather than being skipped.
     import geoparquet_io as gpio
 
     # Or set it before the file is written
-    table = gpio.read('items.parquet')
-    table.add_stac_metadata('collection.json').write('out.parquet')
+    table = gpio.read("items.parquet")
+    table.add_stac_metadata("collection.json").write("out.parquet")
     ```
 
 The value written is:
@@ -386,10 +386,10 @@ Add [H3](https://h3geo.org/) hexagonal cell IDs based on geometry centroids:
     ```python
     import geoparquet_io as gpio
 
-    gpio.read('input.parquet').add_h3(resolution=9).write('output.parquet')
+    gpio.read("input.parquet").add_h3(resolution=9).write("output.parquet")
 
     # Custom column name
-    gpio.read('input.parquet').add_h3(column_name='h3_index', resolution=13).write('output.parquet')
+    gpio.read("input.parquet").add_h3(column_name="h3_index", resolution=13).write("output.parquet")
     ```
 
 **Resolution guide:**
@@ -433,10 +433,10 @@ which gpio installs on first use:
     ```python
     import geoparquet_io as gpio
 
-    gpio.read('input.parquet').add_s2(level=13).write('output.parquet')
+    gpio.read("input.parquet").add_s2(level=13).write("output.parquet")
 
     # Custom column name
-    gpio.read('input.parquet').add_s2(column_name='s2_index', level=18).write('output.parquet')
+    gpio.read("input.parquet").add_s2(column_name="s2_index", level=18).write("output.parquet")
     ```
 
 S2 uses Google's Spherical Geometry library which divides the Earth's surface into a hierarchy of cells using quadtree subdivision. Unlike H3's hexagonal grid, S2 cells are variable quads that provide hierarchical spatial indexing.
@@ -503,10 +503,10 @@ Add [A5](https://a5geo.org/) spatial cell IDs based on geometry centroids.
     ```python
     import geoparquet_io as gpio
 
-    gpio.read('input.parquet').add_a5(resolution=15).write('output.parquet')
+    gpio.read("input.parquet").add_a5(resolution=15).write("output.parquet")
 
     # Custom column name
-    gpio.read('input.parquet').add_a5(column_name='a5_index', resolution=12).write('output.parquet')
+    gpio.read("input.parquet").add_a5(column_name="a5_index", resolution=12).write("output.parquet")
     ```
 
 **Options:**
@@ -547,18 +547,16 @@ Add balanced spatial partition IDs using KD-tree:
     import geoparquet_io as gpio
 
     # Auto mode: size the tree from the row count, like the bare CLI call
-    gpio.read('input.parquet').add_kdtree(auto=True).write('output.parquet')
+    gpio.read("input.parquet").add_kdtree(auto=True).write("output.parquet")
 
     # A different target, still auto
-    gpio.read('input.parquet').add_kdtree(
-        auto=True, target_rows=50000
-    ).write('output.parquet')
+    gpio.read("input.parquet").add_kdtree(auto=True, target_rows=50000).write("output.parquet")
 
     # Custom column name and an explicit iteration count
-    gpio.read('input.parquet').add_kdtree(
-        column_name='partition_id',
-        iterations=5  # 2^5 = 32 partitions
-    ).write('output.parquet')
+    gpio.read("input.parquet").add_kdtree(
+        column_name="partition_id",
+        iterations=5,  # 2^5 = 32 partitions
+    ).write("output.parquet")
     ```
 
 !!! warning "Breaking change for the Python API: the implicit `iterations=9` is gone"
@@ -620,10 +618,10 @@ Add geodesic area and perimeter measurements to each feature:
     from geoparquet_io.core.add.geometry_metrics import add_geometry_metrics
 
     # Add area and perimeter columns
-    add_geometry_metrics('input.parquet', 'output.parquet')
+    add_geometry_metrics("input.parquet", "output.parquet")
 
     # Without Vecorel schema metadata
-    add_geometry_metrics('input.parquet', 'output.parquet', vecorel=False)
+    add_geometry_metrics("input.parquet", "output.parquet", vecorel=False)
     ```
 
 Calculates two columns using WGS84 spheroid-based calculations:
@@ -685,13 +683,13 @@ The join is a streaming `LEFT JOIN` so it scales to very large inputs (hundreds 
 
     # Add all GAUL levels (continent, country, department) -- the default,
     # exactly like the CLI with no --dataset/--levels
-    table = gpio.read('input.parquet')
+    table = gpio.read("input.parquet")
     enriched = table.add_admin_divisions()
-    enriched.write('output.parquet')
+    enriched.write("output.parquet")
 
     # Or name the levels explicitly
-    enriched = table.add_admin_divisions(dataset='gaul', levels=['country'])
-    enriched.write('output.parquet')
+    enriched = table.add_admin_divisions(dataset="gaul", levels=["country"])
+    enriched.write("output.parquet")
     ```
 
 ### Multi-Level Admin Divisions
@@ -721,18 +719,13 @@ Add multiple hierarchical administrative levels:
     import geoparquet_io as gpio
 
     # Add multiple levels
-    table = gpio.read('buildings.parquet')
-    enriched = table.add_admin_divisions(
-        dataset='gaul',
-        levels=['continent', 'country', 'department']
-    )
-    enriched.write('output.parquet')
+    table = gpio.read("buildings.parquet")
+    enriched = table.add_admin_divisions(dataset="gaul", levels=["continent", "country", "department"])
+    enriched.write("output.parquet")
 
     # Overture dataset, pinning the pre-1.4 column prefix
     enriched = table.add_admin_divisions(
-        dataset='overture',
-        levels=['country', 'region'],
-        prefix='overture'
+        dataset="overture", levels=["country", "region"], prefix="overture"
     )
     ```
 
@@ -758,13 +751,9 @@ Use `--vecorel` for output that follows the [Vecorel administrative division ext
     ```python
     import geoparquet_io as gpio
 
-    table = gpio.read('input.parquet')
-    enriched = table.add_admin_divisions(
-        dataset='overture',
-        levels=['country', 'region'],
-        vecorel=True
-    )
-    enriched.write('output.parquet')
+    table = gpio.read("input.parquet")
+    enriched = table.add_admin_divisions(dataset="overture", levels=["country", "region"], vecorel=True)
+    enriched.write("output.parquet")
     ```
 
 The `--vecorel` flag:
@@ -830,10 +819,9 @@ Admin datasets (GAUL, Overture) are automatically cached locally on first use:
     from geoparquet_io.core.admin_datasets import get_cache_dir, clear_cache
 
     # Default: uses cached datasets automatically
-    gpio.read('input.parquet').add_admin_divisions(
-        dataset='overture',
-        levels=['country', 'region']
-    ).write('output.parquet')
+    gpio.read("input.parquet").add_admin_divisions(
+        dataset="overture", levels=["country", "region"]
+    ).write("output.parquet")
 
     # Check cache location (~/.geoparquet-io/cache/admin/)
     cache_dir = get_cache_dir()
@@ -841,7 +829,9 @@ Admin datasets (GAUL, Overture) are automatically cached locally on first use:
 
     # Clear all cached admin datasets
     result = clear_cache(confirm=True)
-    print(f"Cleared {result['files_deleted']} files, {result['bytes_freed'] / 1024 / 1024:.2f} MB freed")
+    print(
+        f"Cleared {result['files_deleted']} files, {result['bytes_freed'] / 1024 / 1024:.2f} MB freed"
+    )
     ```
 
 !!! tip "When to clear cache"

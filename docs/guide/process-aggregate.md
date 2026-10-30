@@ -71,12 +71,12 @@ Rules of thumb:
     ```python
     import geoparquet_io as gpio
 
-    result = gpio.read('buildings.parquet').aggregate_a5(
+    result = gpio.read("buildings.parquet").aggregate_a5(
         resolution=10,
         metric="avg:height,max:height",
         metric_nodata="-999",
     )
-    result.write('cells.parquet')
+    result.write("cells.parquet")
     ```
 
 ### Percent of the cell covered (`pct_cell`)
@@ -104,11 +104,11 @@ Compute the per-feature area first with
     ```python
     import geoparquet_io as gpio
 
-    result = gpio.read('fields.parquet').aggregate_a5(
+    result = gpio.read("fields.parquet").aggregate_a5(
         resolution=7,
         metric="pct_cell:metrics:area",
     )
-    result.write('coverage.parquet')
+    result.write("coverage.parquet")
     ```
 
 Where the denominator comes from:
@@ -190,10 +190,10 @@ Specify a resolution explicitly or let gpio choose one automatically:
     import geoparquet_io as gpio
 
     # Explicit resolution
-    result = gpio.read('fields.parquet').aggregate_a5(resolution=8)
+    result = gpio.read("fields.parquet").aggregate_a5(resolution=8)
 
     # Write the result
-    result.write('cells.parquet')
+    result.write("cells.parquet")
     ```
 
 ### Metric Rollups
@@ -219,11 +219,11 @@ Aggregate numeric columns with `--metric` (`func:column`, comma-separated; bare 
     ```python
     import geoparquet_io as gpio
 
-    result = gpio.read('fields.parquet').aggregate_a5(
+    result = gpio.read("fields.parquet").aggregate_a5(
         resolution=8,
         metric="area_ha,avg:yield,max:price",
     )
-    result.write('cells.parquet')
+    result.write("cells.parquet")
     ```
 
 ### Category Breakdowns
@@ -255,21 +255,21 @@ Use `--breakdown` to pivot a categorical column into per-category count columns 
     ```python
     import geoparquet_io as gpio
 
-    result = gpio.read('fields.parquet').aggregate_a5(
+    result = gpio.read("fields.parquet").aggregate_a5(
         resolution=8,
         metric="sum:area_ha",
         breakdown="crop_type",
         breakdown_limit=10,
     )
-    result.write('cells.parquet')
+    result.write("cells.parquet")
 
     # Weighted pivot: total area per crop type, not a count of fields
-    weighted = gpio.read('fields.parquet').aggregate_a5(
+    weighted = gpio.read("fields.parquet").aggregate_a5(
         resolution=8,
         breakdown="crop_type",
         breakdown_metric="sum:area_ha",
     )
-    weighted.write('cells_weighted.parquet')
+    weighted.write("cells_weighted.parquet")
     ```
 
 ### Row Filtering
@@ -302,11 +302,11 @@ Use `--where` to aggregate only a subset of rows — a year, a category, a confi
     ```python
     import geoparquet_io as gpio
 
-    result = gpio.read('fields.parquet').aggregate_a5(
+    result = gpio.read("fields.parquet").aggregate_a5(
         resolution=6,
-        where="year(\"determination:datetime\") = 2025",
+        where='year("determination:datetime") = 2025',
     )
-    result.write('cells.parquet')
+    result.write("cells.parquet")
     ```
 
 On a hive-partitioned input (`year=2025/...`), the partition columns are part of the scan, so `--where "year = 2025"` filters on them and DuckDB prunes the partitions it does not need. Partition columns never appear in the aggregated output.
@@ -360,12 +360,12 @@ resolutions, where keying by centroid is already an approximation.
     ```python
     import geoparquet_io as gpio
 
-    result = gpio.read('buildings.parquet').aggregate_a5(
+    result = gpio.read("buildings.parquet").aggregate_a5(
         resolution=10,
         metric="avg:height",
         bucket_point="bbox",
     )
-    result.write('cells.parquet')
+    result.write("cells.parquet")
     ```
 
 !!! note "`--auto` still probes the geometry column"
@@ -406,18 +406,18 @@ Control what geometry each output row carries with `--out-geometry`:
     import geoparquet_io as gpio
 
     # Centroid geometry
-    result = gpio.read('fields.parquet').aggregate_a5(
+    result = gpio.read("fields.parquet").aggregate_a5(
         resolution=8,
         out_geometry="centroid",
     )
-    result.write('cells.parquet')
+    result.write("cells.parquet")
 
     # No geometry (plain Parquet)
-    result = gpio.read('fields.parquet').aggregate_a5(
+    result = gpio.read("fields.parquet").aggregate_a5(
         resolution=8,
         out_geometry="none",
     )
-    result.write('cells_stats.parquet')
+    result.write("cells_stats.parquet")
     ```
 
 ### Re-joining Geometry Later
@@ -443,7 +443,7 @@ When `--out-geometry none` is used, the output is a plain (non-geo) Parquet file
     ```python
     import geoparquet_io as gpio
 
-    stats = gpio.read('fields.parquet').aggregate_a5(
+    stats = gpio.read("fields.parquet").aggregate_a5(
         resolution=8, metric="sum:area_ha", out_geometry="none"
     )
     # stats is a plain (non-geo) Table; use .to_arrow() for DuckDB joins
@@ -474,14 +474,12 @@ Combining all three kinds of statistics. The output cell carries `count`, `sum_a
 
     <!-- doctest: skip="aggregates 'area_ha', a column the sample data does not have" -->
     ```python
-    gpio.read('fields.parquet') \
-        .aggregate_a5(
-            resolution=8,
-            metric="sum:area_ha,avg:yield",
-            breakdown="crop_type",
-            breakdown_limit=15,
-        ) \
-        .write('cells.parquet')
+    gpio.read("fields.parquet").aggregate_a5(
+        resolution=8,
+        metric="sum:area_ha,avg:yield",
+        breakdown="crop_type",
+        breakdown_limit=15,
+    ).write("cells.parquet")
     ```
 
 ---
@@ -513,13 +511,11 @@ The differences are that H3 uses Uber's hexagonal grid, its resolution range is
 
     <!-- doctest: skip="aggregates 'area_ha', a column the sample data does not have" -->
     ```python
-    gpio.read('fields.parquet') \
-        .aggregate_h3(
-            resolution=8,
-            metric="sum:area_ha",
-            breakdown="crop_type",
-        ) \
-        .write('cells.parquet')
+    gpio.read("fields.parquet").aggregate_h3(
+        resolution=8,
+        metric="sum:area_ha",
+        breakdown="crop_type",
+    ).write("cells.parquet")
     ```
 
 ---
@@ -548,12 +544,12 @@ Aggregate into administrative regions (countries or sub-national regions) using 
     import geoparquet_io as gpio
 
     # Country level
-    result = gpio.read('fields.parquet').aggregate_admin(level="country")
-    result.write('by_country.parquet')
+    result = gpio.read("fields.parquet").aggregate_admin(level="country")
+    result.write("by_country.parquet")
 
     # Region level
-    result = gpio.read('fields.parquet').aggregate_admin(level="region")
-    result.write('by_region.parquet')
+    result = gpio.read("fields.parquet").aggregate_admin(level="region")
+    result.write("by_region.parquet")
     ```
 
 The bucket id columns in admin output are `admin_code` (ISO country/region code) and `admin_name`. Features that fall outside all known admin regions are placed in an `unassigned` bucket.
@@ -583,13 +579,11 @@ The same `--metric` and `--breakdown` options are available for admin aggregatio
 
     <!-- doctest: skip="aggregates 'area_ha', a column the sample data does not have" -->
     ```python
-    gpio.read('fields.parquet') \
-        .aggregate_admin(
-            level="country",
-            metric="sum:area_ha,avg:yield",
-            breakdown="crop_type",
-        ) \
-        .write('by_country.parquet')
+    gpio.read("fields.parquet").aggregate_admin(
+        level="country",
+        metric="sum:area_ha,avg:yield",
+        breakdown="crop_type",
+    ).write("by_country.parquet")
     ```
 
 ### Output Geometry for Admin
@@ -611,10 +605,10 @@ The same `--out-geometry polygon|centroid|both|none` options apply. With `none`,
     ```python
     import geoparquet_io as gpio
 
-    stats = gpio.read('fields.parquet').aggregate_admin(
+    stats = gpio.read("fields.parquet").aggregate_admin(
         level="country", metric="sum:area_ha", out_geometry="none"
     )
-    stats.write('country_stats.parquet')
+    stats.write("country_stats.parquet")
     ```
 
 ---
@@ -709,12 +703,12 @@ and the job's cgroup kills it first. `--write-memory` overrides the default:
     ```python
     import geoparquet_io as gpio
 
-    result = gpio.read('fields.parquet').aggregate_a5(
+    result = gpio.read("fields.parquet").aggregate_a5(
         resolution=7,
         metric="sum:area",
         memory_limit="8GB",
     )
-    result.write('cells.parquet')
+    result.write("cells.parquet")
     ```
 
 `gpio process overview` takes the same flag.

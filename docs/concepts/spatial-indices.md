@@ -268,20 +268,18 @@ gpio partition admin input.parquet output_dir/ --dataset gaul --levels country
 import geoparquet_io as gpio
 
 # Partition by H3
-gpio.read('input.parquet') \
-    .add_h3(resolution=9) \
-    .partition_by_h3('output/', resolution=6)
+gpio.read("input.parquet").add_h3(resolution=9).partition_by_h3("output/", resolution=6)
 
 # Partition by quadkey
-gpio.read('input.parquet') \
-    .add_quadkey(resolution=12) \
-    .partition_by_quadkey('output/', resolution=12, partition_resolution=4)
+gpio.read("input.parquet").add_quadkey(resolution=12).partition_by_quadkey(
+    "output/", resolution=12, partition_resolution=4
+)
 
 # Partition by A5
-gpio.read('input.parquet').partition_by_a5('output/', resolution=12)
+gpio.read("input.parquet").partition_by_a5("output/", resolution=12)
 
 # Partition by S2
-gpio.read('input.parquet').partition_by_s2('output/', level=10)
+gpio.read("input.parquet").partition_by_s2("output/", level=10)
 ```
 
 Note: Auto-resolution (`--auto`) is currently only available via CLI. Python API support is planned.

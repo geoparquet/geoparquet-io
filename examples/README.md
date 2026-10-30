@@ -127,17 +127,19 @@ import pyarrow.parquet as pq
 from shapely.geometry import Point
 import struct
 
+
 # Create WKB for a simple point
 def point_to_wkb(x, y):
     """Convert coordinates to WKB format."""
     # WKB format: byte order (1) + type (4) + x (8) + y (8)
-    return struct.pack('<BId d', 1, 1, x, y)
+    return struct.pack("<BId d", 1, 1, x, y)
+
 
 # Create sample data
 data = {
-    'id': range(100),
-    'name': [f'Feature {i}' for i in range(100)],
-    'geometry': [point_to_wkb(i * 0.1, i * 0.1) for i in range(100)]
+    "id": range(100),
+    "name": [f"Feature {i}" for i in range(100)],
+    "geometry": [point_to_wkb(i * 0.1, i * 0.1) for i in range(100)],
 }
 
 table = pa.table(data)
@@ -146,21 +148,15 @@ table = pa.table(data)
 geo_metadata = {
     "version": "1.0.0",
     "primary_column": "geometry",
-    "columns": {
-        "geometry": {
-            "encoding": "WKB",
-            "geometry_types": ["Point"]
-        }
-    }
+    "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
 }
 
 import json
-table = table.replace_schema_metadata({
-    b"geo": json.dumps(geo_metadata).encode()
-})
+
+table = table.replace_schema_metadata({b"geo": json.dumps(geo_metadata).encode()})
 
 # Write file
-pq.write_table(table, 'input.parquet')
+pq.write_table(table, "input.parquet")
 print("✓ Created input.parquet")
 ```
 

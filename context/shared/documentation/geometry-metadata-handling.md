@@ -22,13 +22,13 @@ When `geoarrow-pyarrow` is imported, it registers custom PyArrow extension types
 
 **Without geoarrow-pyarrow:**
 ```python
-field.metadata[b'ARROW:extension:metadata']  # Contains {"crs": {...}}
+field.metadata[b"ARROW:extension:metadata"]  # Contains {"crs": {...}}
 field.type  # Just binary or large_binary
 ```
 
 **With geoarrow-pyarrow:**
 ```python
-field.metadata[b'ARROW:extension:metadata']  # Empty or missing!
+field.metadata[b"ARROW:extension:metadata"]  # Empty or missing!
 field.type  # WkbType with .crs attribute
 field.type.crs.to_json_dict()  # Contains the CRS
 ```

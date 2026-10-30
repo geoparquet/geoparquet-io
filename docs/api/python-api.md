@@ -22,11 +22,9 @@ gpio provides a fluent Python API for GeoParquet transformations. This API offer
 import geoparquet_io as gpio
 
 # Read, transform, and write in a fluent chain
-gpio.read('input.parquet') \
-    .add_bbox() \
-    .add_quadkey(resolution=12) \
-    .sort_hilbert() \
-    .write('output.parquet')
+gpio.read("input.parquet").add_bbox().add_quadkey(resolution=12).sort_hilbert().write(
+    "output.parquet"
+)
 ```
 
 ## Reading Data
@@ -37,7 +35,7 @@ Use `gpio.read()` to load a GeoParquet file:
 import geoparquet_io as gpio
 
 # Read a file
-table = gpio.read('places.parquet')
+table = gpio.read("places.parquet")
 
 # Access properties
 print(f"Rows: {table.num_rows}")
@@ -55,23 +53,18 @@ Read from MinIO, Cloudflare R2, source.coop, and other S3-compatible services:
     import geoparquet_io as gpio
 
     # Read from source.coop
-    table = gpio.read_partition(
-        's3://bucket/data/*.parquet',
-        s3_endpoint='data.source.coop'
-    )
+    table = gpio.read_partition("s3://bucket/data/*.parquet", s3_endpoint="data.source.coop")
 
     # Read from MinIO (no SSL)
     table = gpio.read_partition(
-        's3://bucket/data/',
-        s3_endpoint='minio.local:9000',
-        s3_use_ssl=False,
-        aws_profile='minio-dev'
+        "s3://bucket/data/", s3_endpoint="minio.local:9000", s3_use_ssl=False, aws_profile="minio-dev"
     )
 
     # Environment variables also work
     import os
-    os.environ['AWS_ENDPOINT_URL'] = 'https://data.source.coop'
-    table = gpio.read_partition('s3://bucket/data/')
+
+    os.environ["AWS_ENDPOINT_URL"] = "https://data.source.coop"
+    table = gpio.read_partition("s3://bucket/data/")
     ```
 
 === "CLI"
@@ -97,11 +90,7 @@ For uploads to S3-compatible storage:
 === "Python"
 
     ```python
-    table.upload(
-        's3://bucket/output.parquet',
-        s3_endpoint='minio.local:9000',
-        s3_use_ssl=False
-    )
+    table.upload("s3://bucket/output.parquet", s3_endpoint="minio.local:9000", s3_use_ssl=False)
     ```
 
 === "CLI"
@@ -120,33 +109,28 @@ Use `Table.from_bigquery()` to read directly from BigQuery tables. The `table_id
 import geoparquet_io as gpio
 
 # Basic read
-table = gpio.Table.from_bigquery('myproject.geodata.buildings')
+table = gpio.Table.from_bigquery("myproject.geodata.buildings")
 
 # With filtering
 table = gpio.Table.from_bigquery(
-    'myproject.geodata.buildings',
+    "myproject.geodata.buildings",
     where="area_sqm > 1000",
-    columns=['id', 'name', 'geography'],
-    limit=10000
+    columns=["id", "name", "geography"],
+    limit=10000,
 )
 
 # With spatial filtering (bbox)
-table = gpio.Table.from_bigquery(
-    'myproject.geodata.buildings',
-    bbox="-122.52,37.70,-122.35,37.82"
-)
+table = gpio.Table.from_bigquery("myproject.geodata.buildings", bbox="-122.52,37.70,-122.35,37.82")
 
 # With explicit credentials
 table = gpio.Table.from_bigquery(
-    'myproject.geodata.buildings',
-    credentials_file='/path/to/service-account.json'
+    "myproject.geodata.buildings", credentials_file="/path/to/service-account.json"
 )
 
 # Chain with other operations
-gpio.Table.from_bigquery('myproject.geodata.buildings', limit=10000) \
-    .add_bbox() \
-    .sort_hilbert() \
-    .write('output.parquet')
+gpio.Table.from_bigquery(
+    "myproject.geodata.buildings", limit=10000
+).add_bbox().sort_hilbert().write("output.parquet")
 ```
 
 **Bbox filtering modes:**
@@ -156,23 +140,19 @@ When using `bbox`, control where filtering happens with `bbox_mode`:
 ```python
 # Server-side filtering (best for large tables)
 table = gpio.Table.from_bigquery(
-    'myproject.geodata.global_buildings',
-    bbox="-122.52,37.70,-122.35,37.82",
-    bbox_mode="server"
+    "myproject.geodata.global_buildings", bbox="-122.52,37.70,-122.35,37.82", bbox_mode="server"
 )
 
 # Local filtering (best for small tables)
 table = gpio.Table.from_bigquery(
-    'myproject.geodata.city_parks',
-    bbox="-122.52,37.70,-122.35,37.82",
-    bbox_mode="local"
+    "myproject.geodata.city_parks", bbox="-122.52,37.70,-122.35,37.82", bbox_mode="local"
 )
 
 # Custom threshold for auto mode (default: 500000)
 table = gpio.Table.from_bigquery(
-    'myproject.geodata.buildings',
+    "myproject.geodata.buildings",
     bbox="-122.52,37.70,-122.35,37.82",
-    bbox_threshold=100000  # Use server for tables > 100K rows
+    bbox_threshold=100000,  # Use server for tables > 100K rows
 )
 ```
 
@@ -195,8 +175,8 @@ table = gpio.Table.from_bigquery(
           WHERE acquired_at >= TIMESTAMP('2025-09-01')
         ) WHERE rn = 1
     """,
-    project='myproject',
-    geography_column='geometry',
+    project="myproject",
+    geography_column="geometry",
 )
 ```
 
@@ -231,37 +211,31 @@ Use `gpio.extract_arcgis()` to download features from ArcGIS REST Feature Servic
 import geoparquet_io as gpio
 
 # Basic read from public service
-table = gpio.extract_arcgis(
-    'https://services.arcgis.com/.../FeatureServer/0'
-)
+table = gpio.extract_arcgis("https://services.arcgis.com/.../FeatureServer/0")
 
 # With server-side filtering
 table = gpio.extract_arcgis(
-    'https://services.arcgis.com/.../FeatureServer/0',
+    "https://services.arcgis.com/.../FeatureServer/0",
     where="STATE_NAME = 'California'",
     bbox=(-122.5, 37.5, -122.0, 38.0),
-    include_cols='NAME,POPULATION,STATE_NAME',
-    limit=10000
+    include_cols="NAME,POPULATION,STATE_NAME",
+    limit=10000,
 )
 
 # With authentication
 table = gpio.extract_arcgis(
-    'https://services.arcgis.com/.../FeatureServer/0',
-    token='your_arcgis_token'
+    "https://services.arcgis.com/.../FeatureServer/0", token="your_arcgis_token"
 )
 
 # With username/password authentication
 table = gpio.extract_arcgis(
-    'https://services.arcgis.com/.../FeatureServer/0',
-    username='myuser',
-    password='mypassword'
+    "https://services.arcgis.com/.../FeatureServer/0", username="myuser", password="mypassword"
 )
 
 # Chain with other operations
 gpio.extract_arcgis(
-    'https://services.arcgis.com/.../FeatureServer/0',
-    limit=10000
-).add_bbox().sort_hilbert().write('output.parquet')
+    "https://services.arcgis.com/.../FeatureServer/0", limit=10000
+).add_bbox().sort_hilbert().write("output.parquet")
 ```
 
 **Parameters:**
@@ -300,13 +274,13 @@ Create a Table from a WFS layer:
 from geoparquet_io.api import Table
 
 table = Table.from_wfs(
-    'https://geo.example.com/wfs',
-    'cities',
-    version='auto',       # WFS version (auto, 2.0.0, 1.1.0, 1.0.0)
+    "https://geo.example.com/wfs",
+    "cities",
+    version="auto",  # WFS version (auto, 2.0.0, 1.1.0, 1.0.0)
     bbox=(-122.5, 37.5, -122.0, 38.0),  # Optional filter
-    limit=1000,           # Max features
-    max_workers=2,        # Parallel requests
-    axis_order='auto',    # Bbox axis order (auto, xy, latlon)
+    limit=1000,  # Max features
+    max_workers=2,  # Parallel requests
+    axis_order="auto",  # Bbox axis order (auto, xy, latlon)
 )
 ```
 
@@ -317,7 +291,7 @@ Functional API returning PyArrow Table:
 ```python
 from geoparquet_io.api import ops
 
-table = ops.from_wfs('https://geo.example.com/wfs', 'cities', limit=100)
+table = ops.from_wfs("https://geo.example.com/wfs", "cities", limit=100)
 ```
 
 **Parameters:**
@@ -346,7 +320,7 @@ Functional API for A5 grid aggregation. Returns a PyArrow Table.
 from geoparquet_io.api import ops
 import pyarrow.parquet as pq
 
-table = pq.read_table('fields.parquet')
+table = pq.read_table("fields.parquet")
 result = ops.aggregate_a5(
     table,
     resolution=8,
@@ -371,7 +345,7 @@ Functional API for H3 grid aggregation (resolution 0–15). Returns a PyArrow Ta
 from geoparquet_io.api import ops
 import pyarrow.parquet as pq
 
-table = pq.read_table('fields.parquet')
+table = pq.read_table("fields.parquet")
 result = ops.aggregate_h3(
     table,
     resolution=8,
@@ -388,7 +362,7 @@ Functional API for admin region aggregation. Returns a PyArrow Table.
 from geoparquet_io.api import ops
 import pyarrow.parquet as pq
 
-table = pq.read_table('fields.parquet')
+table = pq.read_table("fields.parquet")
 result = ops.aggregate_admin(table, level="country", metric="sum:area_ha")
 ```
 
@@ -400,11 +374,11 @@ Extract multiple WFS layers in parallel to a directory:
 from geoparquet_io.api import ops
 
 results = ops.from_wfs_layers(
-    'https://geo.example.com/wfs',
-    ['cities', 'roads', 'buildings'],
-    './output/',
+    "https://geo.example.com/wfs",
+    ["cities", "roads", "buildings"],
+    "./output/",
     parallel_layers=3,
-    max_workers=2
+    max_workers=2,
 )
 # Returns: {'cities': Path('output/cities.parquet'), ...}
 ```
@@ -448,7 +422,7 @@ The `Table` class wraps a PyArrow Table and provides chainable transformation me
     on a poorly laid-out file now fails, as it did on the command line.
 
 ```python
-table = gpio.read('data.parquet')
+table = gpio.read("data.parquet")
 
 # Get CRS
 print(table.crs)  # e.g., {'id': {'authority': 'EPSG', 'code': 4326}, ...}
@@ -478,8 +452,8 @@ table.info()
 
 # Get as dictionary
 info_dict = table.info(verbose=False)
-print(info_dict['rows'])  # 766
-print(info_dict['crs'])   # None or CRS dict
+print(info_dict["rows"])  # 766
+print(info_dict["crs"])  # None or CRS dict
 ```
 
 #### `head(n=10)` / `tail(n=10)`
@@ -511,13 +485,13 @@ Calculate column statistics.
 stats = table.stats()
 
 # Access stats for a column
-print(stats['population']['min'])     # Minimum value
-print(stats['population']['max'])     # Maximum value
-print(stats['population']['nulls'])   # Null count
-print(stats['population']['unique'])  # Approximate unique count
+print(stats["population"]["min"])  # Minimum value
+print(stats["population"]["max"])  # Maximum value
+print(stats["population"]["nulls"])  # Null count
+print(stats["population"]["unique"])  # Approximate unique count
 
 # Geometry columns have only null counts
-print(stats['geometry']['nulls'])
+print(stats["geometry"]["nulls"])
 ```
 
 #### `metadata(include_parquet_metadata=False)`
@@ -528,14 +502,14 @@ Get GeoParquet and schema metadata.
 meta = table.metadata()
 
 # Access metadata
-print(meta['geoparquet_version'])  # e.g., '1.1.0'
-print(meta['geometry_column'])     # e.g., 'geometry'
-print(meta['crs'])                 # CRS dict or None
-print(meta['bounds'])              # (xmin, ymin, xmax, ymax)
-print(meta['columns'])             # List of column info dicts
+print(meta["geoparquet_version"])  # e.g., '1.1.0'
+print(meta["geometry_column"])  # e.g., 'geometry'
+print(meta["crs"])  # CRS dict or None
+print(meta["bounds"])  # (xmin, ymin, xmax, ymax)
+print(meta["columns"])  # List of column info dicts
 
 # Full geo metadata from 'geo' key
-geo_meta = meta.get('geo_metadata', {})
+geo_meta = meta.get("geo_metadata", {})
 
 # Include raw Parquet schema metadata
 full_meta = table.metadata(include_parquet_metadata=True)
@@ -556,10 +530,10 @@ make that conversion safe.
 
 ```python
 # Write to file
-table.to_geojson('output.geojson')
+table.to_geojson("output.geojson")
 
 # With options
-table.to_geojson('output.geojson', precision=5, write_bbox=True)
+table.to_geojson("output.geojson", precision=5, write_bbox=True)
 
 # Get as string (no file output)
 geojson_str = table.to_geojson()
@@ -570,9 +544,9 @@ geojson_str = table.to_geojson()
 Add a bounding box struct column computed from geometry.
 
 ```python
-table = gpio.read('input.parquet').add_bbox()
+table = gpio.read("input.parquet").add_bbox()
 # or with custom name
-table = gpio.read('input.parquet').add_bbox(column_name='bounds')
+table = gpio.read("input.parquet").add_bbox(column_name="bounds")
 ```
 
 #### `add_quadkey(column_name='quadkey', resolution=13, use_centroid=False)`
@@ -581,13 +555,13 @@ Add a quadkey column based on geometry location.
 
 ```python
 # Default resolution (13)
-table = gpio.read('input.parquet').add_quadkey()
+table = gpio.read("input.parquet").add_quadkey()
 
 # Custom resolution
-table = gpio.read('input.parquet').add_quadkey(resolution=10)
+table = gpio.read("input.parquet").add_quadkey(resolution=10)
 
 # Force centroid calculation even if bbox exists
-table = gpio.read('input.parquet').add_quadkey(use_centroid=True)
+table = gpio.read("input.parquet").add_quadkey(use_centroid=True)
 ```
 
 #### `add_h3(column_name='h3_cell', resolution=9)`
@@ -596,13 +570,13 @@ Add an H3 hexagonal cell column based on geometry location.
 
 ```python
 # Default resolution (9, ~100m cells)
-table = gpio.read('input.parquet').add_h3()
+table = gpio.read("input.parquet").add_h3()
 
 # Lower resolution for larger cells
-table = gpio.read('input.parquet').add_h3(resolution=6)
+table = gpio.read("input.parquet").add_h3(resolution=6)
 
 # Custom column name
-table = gpio.read('input.parquet').add_h3(column_name='hex_id', resolution=8)
+table = gpio.read("input.parquet").add_h3(column_name="hex_id", resolution=8)
 ```
 
 #### `add_s2(column_name='s2_cell', level=13)`
@@ -611,13 +585,13 @@ Add an S2 spherical cell column based on geometry location.
 
 ```python
 # Default level (13, ~1.2 km² cells)
-table = gpio.read('input.parquet').add_s2()
+table = gpio.read("input.parquet").add_s2()
 
 # Lower level for larger cells
-table = gpio.read('input.parquet').add_s2(level=10)
+table = gpio.read("input.parquet").add_s2(level=10)
 
 # Custom column name
-table = gpio.read('input.parquet').add_s2(column_name='s2_index', level=15)
+table = gpio.read("input.parquet").add_s2(column_name="s2_index", level=15)
 ```
 
 #### `add_a5(column_name='a5_cell', resolution=15)`
@@ -626,13 +600,13 @@ Add an A5 cell column based on geometry location.
 
 ```python
 # Default resolution (15)
-table = gpio.read('input.parquet').add_a5()
+table = gpio.read("input.parquet").add_a5()
 
 # Lower resolution for larger cells
-table = gpio.read('input.parquet').add_a5(resolution=10)
+table = gpio.read("input.parquet").add_a5(resolution=10)
 
 # Custom column name
-table = gpio.read('input.parquet').add_a5(column_name='a5_index', resolution=12)
+table = gpio.read("input.parquet").add_a5(column_name="a5_index", resolution=12)
 ```
 
 #### `add_geometry_metrics(vecorel=True)`
@@ -641,10 +615,10 @@ Add geodesic area (m²) and perimeter (m) columns using WGS84 spheroid calculati
 
 ```python
 # Add metrics with Vecorel metadata (default)
-table = gpio.read('input.parquet').add_geometry_metrics()
+table = gpio.read("input.parquet").add_geometry_metrics()
 
 # Without Vecorel metadata
-table = gpio.read('input.parquet').add_geometry_metrics(vecorel=False)
+table = gpio.read("input.parquet").add_geometry_metrics(vecorel=False)
 ```
 
 Adds `metrics:area` and `metrics:perimeter` columns. With `vecorel=True` (default), also writes Vecorel schema metadata and ensures `id`/`geometry` are present and non-nullable.
@@ -656,19 +630,18 @@ Defaults match the CLI (`gpio add admin-divisions`).
 
 ```python
 # Every level the dataset provides -- GAUL continent, country, department
-table = gpio.read('input.parquet').add_admin_divisions()
+table = gpio.read("input.parquet").add_admin_divisions()
 
 # A single level from the default GAUL dataset
-table = gpio.read('input.parquet').add_admin_divisions(levels=['country'])
+table = gpio.read("input.parquet").add_admin_divisions(levels=["country"])
 
 # Overture dataset with multiple levels
-table = gpio.read('input.parquet').add_admin_divisions(
-    dataset='overture',
-    levels=['country', 'region']
+table = gpio.read("input.parquet").add_admin_divisions(
+    dataset="overture", levels=["country", "region"]
 )
 
 # Vecorel-compliant output (forces Overture with country,region)
-table = gpio.read('input.parquet').add_admin_divisions(vecorel=True)
+table = gpio.read("input.parquet").add_admin_divisions(vecorel=True)
 ```
 
 **Parameters:**
@@ -692,16 +665,16 @@ raises `InvalidParameterError`.
 
 ```python
 # Auto: sized from the row count, targeting ~120k rows per cell
-table = gpio.read('input.parquet').add_kdtree(auto=True)
+table = gpio.read("input.parquet").add_kdtree(auto=True)
 
 # Auto with a different target
-table = gpio.read('input.parquet').add_kdtree(auto=True, target_rows=50000)
+table = gpio.read("input.parquet").add_kdtree(auto=True, target_rows=50000)
 
 # An explicit count
-table = gpio.read('input.parquet').add_kdtree(iterations=6)  # 64 partitions
+table = gpio.read("input.parquet").add_kdtree(iterations=6)  # 64 partitions
 
 # More partitions with larger sample
-table = gpio.read('input.parquet').add_kdtree(iterations=12, sample_size=500000)
+table = gpio.read("input.parquet").add_kdtree(iterations=12, sample_size=500000)
 ```
 
 #### `sort_hilbert()`
@@ -709,7 +682,7 @@ table = gpio.read('input.parquet').add_kdtree(iterations=12, sample_size=500000)
 Reorder rows using Hilbert curve ordering for better spatial locality.
 
 ```python
-table = gpio.read('input.parquet').sort_hilbert()
+table = gpio.read("input.parquet").sort_hilbert()
 ```
 
 #### `sort_str(tile_size=49152)`
@@ -721,8 +694,8 @@ put in a row group and expect a coarse response - see
 [the sort guide](../guide/sort.md#what-row-group-size-does-here).
 
 ```python
-table = gpio.read('input.parquet').sort_str(tile_size=49152)
-table.write('output.parquet', row_group_rows=49152)
+table = gpio.read("input.parquet").sort_str(tile_size=49152)
+table.write("output.parquet", row_group_rows=49152)
 ```
 
 #### `sort_column(column_name, descending=False)`
@@ -731,10 +704,10 @@ Sort rows by a specified column.
 
 ```python
 # Sort by name ascending
-table = gpio.read('input.parquet').sort_column('name')
+table = gpio.read("input.parquet").sort_column("name")
 
 # Sort by population descending
-table = gpio.read('input.parquet').sort_column('population', descending=True)
+table = gpio.read("input.parquet").sort_column("population", descending=True)
 ```
 
 #### `sort_quadkey(column_name='quadkey', resolution=13, use_centroid=False, remove_column=False)`
@@ -743,13 +716,13 @@ Sort rows by quadkey for spatial locality. If no quadkey column exists, one is a
 
 ```python
 # Sort by quadkey (auto-adds column if needed)
-table = gpio.read('input.parquet').sort_quadkey()
+table = gpio.read("input.parquet").sort_quadkey()
 
 # Sort and remove the quadkey column afterward
-table = gpio.read('input.parquet').sort_quadkey(remove_column=True)
+table = gpio.read("input.parquet").sort_quadkey(remove_column=True)
 
 # Use existing quadkey column
-table = gpio.read('input.parquet').sort_quadkey(column_name='my_quadkey')
+table = gpio.read("input.parquet").sort_quadkey(column_name="my_quadkey")
 ```
 
 #### `reproject(target_crs='EPSG:4326', source_crs=None, assume_crs84=False)`
@@ -758,13 +731,10 @@ Reproject geometry to a different coordinate reference system.
 
 ```python
 # Reproject to WGS84 (auto-detects source CRS from metadata)
-table = gpio.read('input.parquet').reproject(target_crs='EPSG:4326')
+table = gpio.read("input.parquet").reproject(target_crs="EPSG:4326")
 
 # Reproject with explicit source CRS
-table = gpio.read('input.parquet').reproject(
-    target_crs='EPSG:3857',
-    source_crs='EPSG:4326'
-)
+table = gpio.read("input.parquet").reproject(target_crs="EPSG:3857", source_crs="EPSG:4326")
 ```
 
 A geometry column's `crs` may be **omitted** (defaults to OGC:CRS84) or set to
@@ -774,16 +744,14 @@ WGS84, use `assume_crs84=True` to treat them as OGC:CRS84 and write the default
 (the `crs` key is omitted on output, no coordinates are changed):
 
 ```python
-table = gpio.read('unknown_crs.parquet').reproject(assume_crs84=True)
+table = gpio.read("unknown_crs.parquet").reproject(assume_crs84=True)
 ```
 
 If you know the real CRS of a file whose CRS is unknown, pass it as
 `source_crs` instead. A `srid:0` Parquet type reads as unknown the same way.
 
 ```python
-table = gpio.read('unknown_crs.parquet').reproject(
-    target_crs='EPSG:4326', source_crs='EPSG:5070'
-)
+table = gpio.read("unknown_crs.parquet").reproject(target_crs="EPSG:4326", source_crs="EPSG:5070")
 ```
 
 Without that, `Table.write()` keeps an unknown CRS unknown. A 1.0 or 1.1
@@ -803,19 +771,19 @@ geometry and bbox columns.
 
 ```python
 # Select specific columns
-table = gpio.read('input.parquet').extract(columns=['name', 'address'])
+table = gpio.read("input.parquet").extract(columns=["name", "address"])
 
 # Exclude columns
-table = gpio.read('input.parquet').extract(exclude_columns=['placemaker_url'])
+table = gpio.read("input.parquet").extract(exclude_columns=["placemaker_url"])
 
 # Limit rows
-table = gpio.read('input.parquet').extract(limit=1000)
+table = gpio.read("input.parquet").extract(limit=1000)
 
 # Spatial filter
-table = gpio.read('input.parquet').extract(bbox=(-122.5, 37.5, -122.0, 38.0))
+table = gpio.read("input.parquet").extract(bbox=(-122.5, 37.5, -122.0, 38.0))
 
 # SQL WHERE clause
-table = gpio.read('input.parquet').extract(where="population > 10000")
+table = gpio.read("input.parquet").extract(where="population > 10000")
 ```
 
 #### `write(path, format=None, compression='ZSTD', compression_level=None, row_group_size_mb=None, row_group_rows=None, geoparquet_version=None, write_strategy='duckdb-kv', profile=None, verbose=False, ...)`
@@ -824,14 +792,14 @@ Write the table to a GeoParquet file. Returns the output `Path` for chaining or 
 
 ```python
 # Basic write
-path = table.write('output.parquet')
+path = table.write("output.parquet")
 print(f"Wrote to {path}")
 
 # With compression options
-table.write('output.parquet', compression='GZIP', compression_level=6)
+table.write("output.parquet", compression="GZIP", compression_level=6)
 
 # With row group size
-table.write('output.parquet', row_group_size_mb=128)
+table.write("output.parquet", row_group_size_mb=128)
 ```
 
 A geometry column name the table does not carry — `Table(arrow_table,
@@ -861,8 +829,8 @@ is dictionary-encoded, on any `write_strategy` and any `geoparquet_version`
 ([#1122](https://github.com/geoparquet/geoparquet-io/issues/1122)).
 
 ```python
-gpio.convert('fields.parquet').write('out.parquet')  # keeps the fiboa key
-gpio.read('geography.parquet').write('out.parquet', geoparquet_version='2.0')
+gpio.convert("fields.parquet").write("out.parquet")  # keeps the fiboa key
+gpio.read("geography.parquet").write("out.parquet", geoparquet_version="2.0")
 ```
 
 **Row group size**
@@ -898,7 +866,7 @@ Control the GeoParquet spec version written into the file metadata:
 
 ```python
 # Write GeoParquet 2.0
-table.write('output.parquet', geoparquet_version='2.0')
+table.write("output.parquet", geoparquet_version="2.0")
 ```
 
 | Parameter | Type | Description |
@@ -911,7 +879,7 @@ For large files, choose a write strategy to control memory behavior:
 
 ```python
 # Use streaming strategy (constant memory usage)
-table.write('output.parquet', write_strategy='streaming')
+table.write("output.parquet", write_strategy="streaming")
 ```
 
 | Parameter | Type | Description |
@@ -952,13 +920,13 @@ Control the GeoParquet encoding version when writing:
     ```python
     # GeoParquet 1.1 with native GeoArrow nested-coordinate encoding
     # (no bbox column; incompatible mixed-geometry columns fall back to WKB)
-    table.write('output.parquet', geoparquet_version='1.1-geoarrow')
+    table.write("output.parquet", geoparquet_version="1.1-geoarrow")
 
     # GeoParquet 1.0 with WKB encoding
-    table.write('output.parquet', geoparquet_version='1.0')
+    table.write("output.parquet", geoparquet_version="1.0")
 
     # GeoParquet 1.1 with WKB encoding (default)
-    table.write('output.parquet', geoparquet_version='1.1')
+    table.write("output.parquet", geoparquet_version="1.1")
     ```
 
 === "CLI"
@@ -1025,19 +993,15 @@ With `hive=False` the partition value lives only in the file name, so the genera
 
 ```python
 # Partition to a directory
-stats = table.partition_by_quadkey('output/', resolution=12, partition_resolution=6)
+stats = table.partition_by_quadkey("output/", resolution=12, partition_resolution=6)
 print(f"Created {stats['file_count']} files")
 
 # Let gpio size both resolutions from the data
-stats = table.partition_by_quadkey('output/', auto=True)
+stats = table.partition_by_quadkey("output/", auto=True)
 
 # With custom options
 stats = table.partition_by_quadkey(
-    'output/',
-    resolution=13,
-    partition_resolution=4,
-    compression='SNAPPY',
-    overwrite=True
+    "output/", resolution=13, partition_resolution=4, compression="SNAPPY", overwrite=True
 )
 ```
 
@@ -1049,11 +1013,11 @@ With `hive=False` the partition value lives only in the file name, so the genera
 
 ```python
 # Partition by H3
-stats = table.partition_by_h3('output/', resolution=6)
+stats = table.partition_by_h3("output/", resolution=6)
 print(f"Created {stats['file_count']} files")
 
 # Or let gpio size the resolution from the data
-stats = table.partition_by_h3('output/', auto=True, target_rows=50000)
+stats = table.partition_by_h3("output/", auto=True, target_rows=50000)
 ```
 
 #### `partition_by_s2(output_dir, level=None, auto=False, target_rows=100000, max_partitions=10000, compression='ZSTD', hive=False, keep_s2_column=None, overwrite=False)`
@@ -1064,11 +1028,11 @@ With `hive=False` the partition value lives only in the file name, so the genera
 
 ```python
 # Partition by S2
-stats = table.partition_by_s2('output/', level=10)
+stats = table.partition_by_s2("output/", level=10)
 print(f"Created {stats['file_count']} files")
 
 # Or let gpio size the level from the data
-stats = table.partition_by_s2('output/', auto=True)
+stats = table.partition_by_s2("output/", auto=True)
 ```
 
 #### `partition_by_a5(output_dir, resolution=None, auto=False, target_rows=100000, max_partitions=10000, compression='ZSTD', hive=False, keep_a5_column=None, overwrite=False)`
@@ -1079,11 +1043,11 @@ With `hive=False` the partition value lives only in the file name, so the genera
 
 ```python
 # Partition by A5
-stats = table.partition_by_a5('output/', resolution=12)
+stats = table.partition_by_a5("output/", resolution=12)
 print(f"Created {stats['file_count']} files")
 
 # Or let gpio size the resolution from the data
-stats = table.partition_by_a5('output/', auto=True)
+stats = table.partition_by_a5("output/", auto=True)
 ```
 
 #### `partition_by_string(output_dir, column, chars=None, hive=False, overwrite=False)`
@@ -1092,10 +1056,10 @@ Partition by string column values or prefixes.
 
 ```python
 # Partition by full column values
-stats = table.partition_by_string('output/', column='category')
+stats = table.partition_by_string("output/", column="category")
 
 # Partition by first 2 characters
-stats = table.partition_by_string('output/', column='mgrs_code', chars=2)
+stats = table.partition_by_string("output/", column="mgrs_code", chars=2)
 ```
 
 #### `partition_by_kdtree(output_dir, iterations=None, auto=False, target_rows=120000, hive=False, keep_kdtree_column=None, overwrite=False)`
@@ -1114,10 +1078,10 @@ needed and the existing cells drive the partition.
 
 ```python
 # Auto: sized from the row count, targeting ~120k rows per partition
-stats = table.partition_by_kdtree('output/', auto=True)
+stats = table.partition_by_kdtree("output/", auto=True)
 
 # 64 partitions (2^6)
-stats = table.partition_by_kdtree('output/', iterations=6)
+stats = table.partition_by_kdtree("output/", iterations=6)
 ```
 
 #### `partition_by_admin(output_dir, dataset='gaul', levels=None, hive=False, overwrite=False, vecorel=False)`
@@ -1130,18 +1094,15 @@ partition. This forces the Overture dataset with `country,region` levels.
 
 ```python
 # Partition by country using GAUL dataset
-stats = table.partition_by_admin('output/', dataset='gaul', levels=['country'])
+stats = table.partition_by_admin("output/", dataset="gaul", levels=["country"])
 
 # Multi-level hierarchical
 stats = table.partition_by_admin(
-    'output/',
-    dataset='gaul',
-    levels=['continent', 'country', 'department'],
-    hive=True
+    "output/", dataset="gaul", levels=["continent", "country", "department"], hive=True
 )
 
 # Vecorel-compliant partitions (forces Overture country,region)
-stats = table.partition_by_admin('output/', vecorel=True)
+stats = table.partition_by_admin("output/", vecorel=True)
 ```
 
 ### Aggregation Methods {#aggregation}
@@ -1159,32 +1120,32 @@ Aggregate features into A5 grid cells with per-cell statistics for low-zoom visu
 import geoparquet_io as gpio
 
 # Basic cell count at resolution 8
-result = gpio.read('fields.parquet').aggregate_a5(resolution=8)
-result.write('cells.parquet')
+result = gpio.read("fields.parquet").aggregate_a5(resolution=8)
+result.write("cells.parquet")
 
 # Numeric rollups + category breakdown
-result = gpio.read('fields.parquet').aggregate_a5(
+result = gpio.read("fields.parquet").aggregate_a5(
     resolution=8,
     metric="sum:area_ha,avg:yield",
     breakdown="crop_type",
     breakdown_limit=15,
 )
-result.write('cells.parquet')
+result.write("cells.parquet")
 
 # Aggregate only a subset of rows
-result = gpio.read('fields.parquet').aggregate_a5(
+result = gpio.read("fields.parquet").aggregate_a5(
     resolution=8,
     where="\"crop:name\" = 'wheat'",
 )
-result.write('wheat_cells.parquet')
+result.write("wheat_cells.parquet")
 
 # No geometry — plain Parquet (re-join a5_cell to geometry later)
-result = gpio.read('fields.parquet').aggregate_a5(
+result = gpio.read("fields.parquet").aggregate_a5(
     resolution=8,
     metric="sum:area_ha",
     out_geometry="none",
 )
-result.write('cells_stats.parquet')
+result.write("cells_stats.parquet")
 ```
 
 **Parameters:**
@@ -1214,12 +1175,12 @@ string).
 ```python
 import geoparquet_io as gpio
 
-result = gpio.read('fields.parquet').aggregate_h3(
+result = gpio.read("fields.parquet").aggregate_h3(
     resolution=8,
     metric="sum:area_ha",
     breakdown="crop_type",
 )
-result.write('cells.parquet')
+result.write("cells.parquet")
 ```
 
 Every output row carries `h3_cell` (string) as the bucket identifier.
@@ -1232,16 +1193,16 @@ Aggregate features into administrative regions (Overture Maps) with per-region s
 import geoparquet_io as gpio
 
 # Country-level aggregation
-result = gpio.read('fields.parquet').aggregate_admin(level="country")
-result.write('by_country.parquet')
+result = gpio.read("fields.parquet").aggregate_admin(level="country")
+result.write("by_country.parquet")
 
 # Region-level with rollups and breakdown
-result = gpio.read('fields.parquet').aggregate_admin(
+result = gpio.read("fields.parquet").aggregate_admin(
     level="region",
     metric="sum:area_ha,avg:yield",
     breakdown="crop_type",
 )
-result.write('by_region.parquet')
+result.write("by_region.parquet")
 ```
 
 **Parameters:**
@@ -1272,12 +1233,12 @@ their ISO country prefix). The table must be a `process aggregate` output.
 import geoparquet_io as gpio
 
 # Grid aggregate: roll res-10 cells up to res 6
-coarse = gpio.read('cells.parquet').overview(6)
-coarse.write('cells_r6.parquet')
+coarse = gpio.read("cells.parquet").overview(6)
+coarse.write("cells_r6.parquet")
 
 # Region-level admin aggregate: roll up to country
-by_country = gpio.read('by_region.parquet').overview('country')
-by_country.write('by_region_country.parquet')
+by_country = gpio.read("by_region.parquet").overview("country")
+by_country.write("by_region_country.parquet")
 ```
 
 **Parameters:**
@@ -1306,7 +1267,7 @@ across a polygonal coverage. See [Simplifying Geometries](../guide/process-simpl
 ```python
 import geoparquet_io as gpio
 
-gpio.read('parcels.parquet').simplify(10).write('simplified.parquet')
+gpio.read("parcels.parquet").simplify(10).write("simplified.parquet")
 ```
 
 #### `Table.polygonize(input_raster, ...)` / `Table.contour(input_raster, ...)`
@@ -1319,8 +1280,8 @@ extra, Python 3.12+). See [Raster to Vector](../guide/process-raster.md).
 ```python
 import geoparquet_io as gpio
 
-gpio.Table.polygonize('landcover.tif').write('landcover.parquet')
-gpio.Table.contour('dem.tif', interval=100).write('contours.parquet')
+gpio.Table.polygonize("landcover.tif").write("landcover.parquet")
+gpio.Table.contour("dem.tif", interval=100).write("contours.parquet")
 ```
 
 ### Sub-Partitioning Utilities
@@ -1335,7 +1296,7 @@ Find parquet files exceeding a size threshold.
 from geoparquet_io.core.sub_partition import find_large_files
 
 # Find files over 100MB
-large_files = find_large_files('/data/partitions/', min_size_bytes=100 * 1024 * 1024)
+large_files = find_large_files("/data/partitions/", min_size_bytes=100 * 1024 * 1024)
 print(f"Found {len(large_files)} large files")
 for file_path in large_files:
     print(f"  {file_path}")
@@ -1357,12 +1318,12 @@ from geoparquet_io.core.sub_partition import sub_partition_directory
 
 # Sub-partition all H3-partitioned files over 100MB
 result = sub_partition_directory(
-    directory='/data/h3_partitions/',
-    partition_type='h3',
+    directory="/data/h3_partitions/",
+    partition_type="h3",
     min_size_bytes=100 * 1024 * 1024,
     resolution=4,
     in_place=True,  # Replace originals
-    verbose=True
+    verbose=True,
 )
 
 print(f"Processed: {result['processed']}")
@@ -1370,23 +1331,23 @@ print(f"Errors: {len(result['errors'])}")
 
 # Sub-partition S2 files with auto-resolution
 result = sub_partition_directory(
-    directory='/data/s2_partitions/',
-    partition_type='s2',
+    directory="/data/s2_partitions/",
+    partition_type="s2",
     min_size_bytes=50 * 1024 * 1024,
     auto=True,
     target_rows=50000,
-    skip_analysis=True  # Skip per-file analysis for speed
+    skip_analysis=True,  # Skip per-file analysis for speed
 )
 
 # Sub-partition quadkey files: the cell column is built at `resolution` and
 # the sub-partitions are the first `partition_resolution` characters of it
 result = sub_partition_directory(
-    directory='/data/quadkey_partitions/',
-    partition_type='quadkey',
+    directory="/data/quadkey_partitions/",
+    partition_type="quadkey",
     min_size_bytes=200 * 1024 * 1024,
     resolution=13,
     partition_resolution=8,
-    hive=True
+    hive=True,
 )
 ```
 
@@ -1449,10 +1410,10 @@ has the Collection too.
 <!-- doctest: skip="needs a collection.json and a table of STAC items" -->
 ```python
 # From a Collection on disk
-table.add_stac_metadata('collection.json').write('items.parquet')
+table.add_stac_metadata("collection.json").write("items.parquet")
 
 # Or from a dict you already hold
-table.add_stac_metadata(collection_dict, version='1.0.0').write('items.parquet')
+table.add_stac_metadata(collection_dict, version="1.0.0").write("items.parquet")
 ```
 
 The value written is
@@ -1482,7 +1443,7 @@ already-written file's footer without re-encoding it, exactly as
 ```python
 from geoparquet_io.api import ops
 
-ops.add_stac_metadata('items.parquet', 'collection.json')
+ops.add_stac_metadata("items.parquet", "collection.json")
 ```
 
 #### `check()` / `check_spatial()` / `check_compression()` / `check_bbox()` / `check_row_groups()`
@@ -1522,12 +1483,12 @@ comparison decodes a seeded sample of 5,000 rows drawn across the file by
 default, though it reads the geometry and bbox columns in full:
 
 ```python
-bbox_result = table.check_bbox(all_rows=True)       # compare every row
-bbox_result = table.check_bbox(sample_rows=50000)   # wider sample
-bbox_result = table.check_bbox(sample_rows=0)       # structure and metadata only
+bbox_result = table.check_bbox(all_rows=True)  # compare every row
+bbox_result = table.check_bbox(sample_rows=50000)  # wider sample
+bbox_result = table.check_bbox(sample_rows=0)  # structure and metadata only
 
-report = table.check_bbox().to_dict()['bbox_values']
-print(report['undersized_rows'], report['undersized_examples'])
+report = table.check_bbox().to_dict()["bbox_values"]
+print(report["undersized_rows"], report["undersized_examples"])
 ```
 
 **Which bytes a check describes.** A table from `gpio.read(path)` is checked
@@ -1539,8 +1500,8 @@ defaults and say so with `prospective`. A source file that was replaced or
 removed after `read()`, or a remote URL, is treated the same way.
 
 ```python
-gpio.read('data.parquet').check_row_groups().prospective                # False
-gpio.read('data.parquet').sort_hilbert().check_row_groups().prospective  # True
+gpio.read("data.parquet").check_row_groups().prospective  # False
+gpio.read("data.parquet").sort_hilbert().check_row_groups().prospective  # True
 
 result = gpio.Table(arrow_table).check_compression()
 result.source_path  # None
@@ -1582,13 +1543,12 @@ details = result.to_dict()
 Run DuckDB EXPLAIN ANALYZE on a query against a Parquet file. This is a classmethod, not an instance method.
 
 ```python
-result = Table.explain_analyze('data.parquet')
+result = Table.explain_analyze("data.parquet")
 print(result)
 
 # Custom query
 result = Table.explain_analyze(
-    'data.parquet',
-    query="SELECT * FROM read_parquet('{file}') WHERE id > 10"
+    "data.parquet", query="SELECT * FROM read_parquet('{file}') WHERE id > 10"
 )
 ```
 
@@ -1602,7 +1562,7 @@ if result.passed():
     print(f"Valid GeoParquet {table.geoparquet_version}")
 
 # Validate against specific version
-result = table.validate(version='1.1')
+result = table.validate(version="1.1")
 ```
 
 #### `upload(destination, compression='ZSTD', compression_level=None, row_group_size_mb=None, row_group_rows=None, geoparquet_version=None, profile=None, s3_endpoint=None, ...)`
@@ -1611,26 +1571,19 @@ Write and upload the table to cloud object storage (S3, GCS, Azure).
 
 ```python
 # Upload to S3
-gpio.read('input.parquet') \
-    .add_bbox() \
-    .sort_hilbert() \
-    .upload('s3://bucket/data.parquet')
+gpio.read("input.parquet").add_bbox().sort_hilbert().upload("s3://bucket/data.parquet")
 
 # Upload with AWS profile
-table.upload('s3://bucket/data.parquet', profile='my-aws-profile')
+table.upload("s3://bucket/data.parquet", profile="my-aws-profile")
 
 # Upload to S3-compatible storage (MinIO, source.coop)
-table.upload(
-    's3://bucket/data.parquet',
-    s3_endpoint='minio.example.com:9000',
-    s3_use_ssl=False
-)
+table.upload("s3://bucket/data.parquet", s3_endpoint="minio.example.com:9000", s3_use_ssl=False)
 
 # Upload to GCS
-table.upload('gs://bucket/data.parquet')
+table.upload("gs://bucket/data.parquet")
 
 # Upload as GeoParquet 2.0
-table.upload('s3://bucket/data.parquet', geoparquet_version='2.0')
+table.upload("s3://bucket/data.parquet", geoparquet_version="2.0")
 ```
 
 ## Converting Other Formats
@@ -1643,29 +1596,29 @@ Use `gpio.convert()` to load GeoPackage, Shapefile, GeoJSON, FlatGeobuf, or CSV 
 import geoparquet_io as gpio
 
 # Convert GeoPackage
-table = gpio.convert('data.gpkg')
+table = gpio.convert("data.gpkg")
 
 # Convert Shapefile
-table = gpio.convert('data.shp')
+table = gpio.convert("data.shp")
 
 # Convert GeoJSON
-table = gpio.convert('data.geojson')
+table = gpio.convert("data.geojson")
 
 # Convert CSV with WKT geometry
-table = gpio.convert('data.csv', wkt_column='geometry')
+table = gpio.convert("data.csv", wkt_column="geometry")
 
 # Convert CSV with lat/lon columns
-table = gpio.convert('data.csv', lat_column='latitude', lon_column='longitude')
+table = gpio.convert("data.csv", lat_column="latitude", lon_column="longitude")
 
 # Convert from S3 with authentication
-table = gpio.convert('s3://bucket/data.gpkg', profile='my-aws')
+table = gpio.convert("s3://bucket/data.gpkg", profile="my-aws")
 
 # Name the text encoding of a source that cannot say (a DBF without .cpg, a Latin-1 CSV)
-table = gpio.convert('ehak.shp', encoding='ISO-8859-1')
-table = gpio.convert('tokyo.shp', encoding='CP932')  # Shift_JIS attribute table
+table = gpio.convert("ehak.shp", encoding="ISO-8859-1")
+table = gpio.convert("tokyo.shp", encoding="CP932")  # Shift_JIS attribute table
 
 # Drop Z/M so a 3D source becomes 2D geometry
-table = gpio.convert('etak_3d.shp', force_2d=True)
+table = gpio.convert("etak_3d.shp", force_2d=True)
 ```
 
 `geometry_column` is a *request*, and the returned `Table` carries the name
@@ -1679,23 +1632,19 @@ comes back with `geometry` ([#1176](https://github.com/geoparquet/geoparquet-io/
 
 ```python
 # Honoured: the geometry is built here, so it can take the name
-table = gpio.convert('pts.csv', lat_column='lat', lon_column='lon',
-                     geometry_column='geom')
-table.geometry_column   # 'geom'
+table = gpio.convert("pts.csv", lat_column="lat", lon_column="lon", geometry_column="geom")
+table.geometry_column  # 'geom'
 
 # A GeoPackage's geometry is read, not built: the name is reported back
-table = gpio.convert('data.gpkg', geometry_column='geom')
-table.geometry_column   # 'geometry'
+table = gpio.convert("data.gpkg", geometry_column="geom")
+table.geometry_column  # 'geometry'
 ```
 
 Unlike the CLI `convert` command, the Python API does NOT apply Hilbert sorting by default. Chain `.sort_hilbert()` explicitly if you want spatial ordering:
 
 ```python
 # Full conversion workflow
-gpio.convert('data.shp') \
-    .add_bbox() \
-    .sort_hilbert() \
-    .write('output.parquet')
+gpio.convert("data.shp").add_bbox().sort_hilbert().write("output.parquet")
 ```
 
 ### Writing to Other Formats (from GeoParquet)
@@ -1706,17 +1655,17 @@ The `Table.write()` method supports multiple output formats with automatic forma
 import geoparquet_io as gpio
 
 # Read GeoParquet
-table = gpio.read('data.parquet')
+table = gpio.read("data.parquet")
 
 # Write to different formats (auto-detected from extension)
-table.write('output.gpkg')      # GeoPackage
-table.write('output.fgb')       # FlatGeobuf
-table.write('output.csv')       # CSV with WKT
-table.write('output.shp')       # Shapefile
-table.write('output.geojson')   # GeoJSON
+table.write("output.gpkg")  # GeoPackage
+table.write("output.fgb")  # FlatGeobuf
+table.write("output.csv")  # CSV with WKT
+table.write("output.shp")  # Shapefile
+table.write("output.geojson")  # GeoJSON
 
 # Or specify format explicitly
-table.write('output.dat', format='csv')
+table.write("output.dat", format="csv")
 ```
 
 #### Format-Specific Options
@@ -1724,17 +1673,21 @@ table.write('output.dat', format='csv')
 **GeoPackage:**
 
 ```python
-table.write('output.gpkg',
-           layer_name='buildings',  # Custom layer name
-           overwrite=True)          # Overwrite existing file
+table.write(
+    "output.gpkg",
+    layer_name="buildings",  # Custom layer name
+    overwrite=True,
+)  # Overwrite existing file
 ```
 
 **Shapefile:**
 
 ```python
-table.write('output.shp',
-           encoding='ISO-8859-1',  # Custom encoding (default: UTF-8)
-           overwrite=True)
+table.write(
+    "output.shp",
+    encoding="ISO-8859-1",  # Custom encoding (default: UTF-8)
+    overwrite=True,
+)
 ```
 
 !!! warning "Shapefile Limitations"
@@ -1750,9 +1703,11 @@ table.write('output.shp',
 **CSV:**
 
 ```python
-table.write('output.csv',
-           include_wkt=True,    # Include WKT geometry (default)
-           include_bbox=False)  # Exclude bbox column
+table.write(
+    "output.csv",
+    include_wkt=True,  # Include WKT geometry (default)
+    include_bbox=False,
+)  # Exclude bbox column
 ```
 
 **Row filters (GeoPackage, FlatGeobuf, CSV):**
@@ -1762,20 +1717,22 @@ the same semantics as `gpio extract`. A `bbox` prunes on the table's bbox
 covering column when it has one.
 
 ```python
-table.write('subset.gpkg', bbox=(-0.5, 10.0, 0.5, 11.0))     # bounding box
-table.write('subset.fgb', geometry='POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))')
-table.write('subset.csv', where="name IS NOT NULL")           # DuckDB WHERE
+table.write("subset.gpkg", bbox=(-0.5, 10.0, 0.5, 11.0))  # bounding box
+table.write("subset.fgb", geometry="POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))")
+table.write("subset.csv", where="name IS NOT NULL")  # DuckDB WHERE
 ```
 
 **GeoJSON:**
 
 ```python
-table.write('output.geojson',
-           precision=5,             # Coordinate precision (default: 7)
-           write_bbox=True,         # Include bbox for each feature
-           id_field='osm_id',       # Use field as feature ID
-           pretty=True,             # Pretty-print JSON
-           keep_crs=False)          # Reproject to WGS84 (default)
+table.write(
+    "output.geojson",
+    precision=5,  # Coordinate precision (default: 7)
+    write_bbox=True,  # Include bbox for each feature
+    id_field="osm_id",  # Use field as feature ID
+    pretty=True,  # Pretty-print JSON
+    keep_crs=False,
+)  # Reproject to WGS84 (default)
 ```
 
 #### Using ops Functions for Format Conversion
@@ -1787,18 +1744,18 @@ from geoparquet_io import ops
 import pyarrow.parquet as pq
 
 # Read Arrow table
-table = pq.read_table('data.parquet')
+table = pq.read_table("data.parquet")
 
 # Convert to various formats
-ops.convert_to_geopackage(table, 'output.gpkg', layer_name='features')
-ops.convert_to_flatgeobuf(table, 'output.fgb')
-ops.convert_to_csv(table, 'output.csv', include_wkt=True)
+ops.convert_to_geopackage(table, "output.gpkg", layer_name="features")
+ops.convert_to_flatgeobuf(table, "output.fgb")
+ops.convert_to_csv(table, "output.csv", include_wkt=True)
 
 # Filter rows on the way through (GeoPackage, FlatGeobuf, CSV)
-ops.convert_to_geopackage(table, 'subset.gpkg', bbox=(-0.5, 10.0, 0.5, 11.0))
-ops.convert_to_csv(table, 'subset.csv', where="name IS NOT NULL")
-ops.convert_to_shapefile(table, 'output.shp', encoding='UTF-8')
-ops.convert_to_geojson(table, 'output.geojson', precision=7)
+ops.convert_to_geopackage(table, "subset.gpkg", bbox=(-0.5, 10.0, 0.5, 11.0))
+ops.convert_to_csv(table, "subset.csv", where="name IS NOT NULL")
+ops.convert_to_shapefile(table, "output.shp", encoding="UTF-8")
+ops.convert_to_geojson(table, "output.geojson", precision=7)
 ```
 
 ## Reading Partitioned Data
@@ -1809,13 +1766,13 @@ Use `gpio.read_partition()` to read Hive-partitioned datasets:
 import geoparquet_io as gpio
 
 # Read from a partitioned directory
-table = gpio.read_partition('partitioned_output/')
+table = gpio.read_partition("partitioned_output/")
 
 # Read with glob pattern
-table = gpio.read_partition('data/quadkey=*/*.parquet')
+table = gpio.read_partition("data/quadkey=*/*.parquet")
 
 # Allow schema differences across partitions
-table = gpio.read_partition('output/', allow_schema_diff=True)
+table = gpio.read_partition("output/", allow_schema_diff=True)
 ```
 
 ## Method Chaining
@@ -1823,13 +1780,15 @@ table = gpio.read_partition('output/', allow_schema_diff=True)
 All transformation methods return a new `Table`, enabling fluent chains:
 
 ```python
-result = gpio.read('input.parquet') \
-    .extract(limit=10000) \
-    .add_bbox() \
-    .add_quadkey(resolution=12) \
+result = (
+    gpio.read("input.parquet")
+    .extract(limit=10000)
+    .add_bbox()
+    .add_quadkey(resolution=12)
     .sort_hilbert()
+)
 
-result.write('output.parquet')
+result.write("output.parquet")
 ```
 
 ## Pure Functions (ops module)
@@ -1841,7 +1800,7 @@ import pyarrow.parquet as pq
 from geoparquet_io.api import ops
 
 # Read with PyArrow
-table = pq.read_table('input.parquet')
+table = pq.read_table("input.parquet")
 
 # Apply transformations
 table = ops.add_bbox(table)
@@ -1849,7 +1808,7 @@ table = ops.add_quadkey(table, resolution=12)
 table = ops.sort_hilbert(table)
 
 # Write with PyArrow
-pq.write_table(table, 'output.parquet')
+pq.write_table(table, "output.parquet")
 ```
 
 > **Note:** `pq.write_table()` may not preserve all GeoParquet metadata (such as the `geo` key with CRS and geometry column info). For proper metadata preservation, wrap the result in `Table(table).write('output.parquet')` or use `write_parquet_with_metadata()` from `geoparquet_io.core.write_funnels`. The fluent API's `.write()` method is recommended.
@@ -1863,15 +1822,15 @@ directory and returns the run's statistics -- the same
 import pyarrow.parquet as pq
 from geoparquet_io.api import ops
 
-table = pq.read_table('input.parquet')
+table = pq.read_table("input.parquet")
 
 # An explicit resolution, or auto=True -- gpio never guesses one for you
-stats = ops.partition_by_h3(table, 'output/', resolution=7)
-stats = ops.partition_by_a5(table, 'output/', auto=True, target_rows=50000)
+stats = ops.partition_by_h3(table, "output/", resolution=7)
+stats = ops.partition_by_a5(table, "output/", auto=True, target_rows=50000)
 
 # Non-spatial schemes return the same dict
-stats = ops.partition_by_string(table, 'output/', column='region', hive=True)
-stats = ops.partition_by_admin(table, 'output/', levels=['country'])
+stats = ops.partition_by_string(table, "output/", column="region", hive=True)
+stats = ops.partition_by_admin(table, "output/", levels=["country"])
 
 print(f"Created {stats['file_count']} files")
 ```
@@ -1893,14 +1852,12 @@ the command it mirrors:
 from geoparquet_io.api import ops
 
 # Split every file over 100MB into H3 sub-partitions, removing the originals
-result = ops.sub_partition_by_h3(
-    'by_country/', min_size='100MB', resolution=7, in_place=True
-)
+result = ops.sub_partition_by_h3("by_country/", min_size="100MB", resolution=7, in_place=True)
 print(f"{result['processed']} file(s) sub-partitioned")
 
 # Or see what would happen, writing and deleting nothing
-plan = ops.sub_partition_by_a5('by_country/', min_size='100MB', auto=True, preview=True)
-for candidate in plan['candidates']:
+plan = ops.sub_partition_by_a5("by_country/", min_size="100MB", auto=True, preview=True)
+for candidate in plan["candidates"]:
     print(f"{candidate['path']} -> {candidate['output_dir']}/")
 ```
 
@@ -1993,8 +1950,8 @@ preprocess = pipe(
 )
 
 # Apply to any table
-result = preprocess(read('input.parquet'))
-result.write('output.parquet')
+result = preprocess(read("input.parquet"))
+result.write("output.parquet")
 
 # Or with ops functions
 from geoparquet_io.api import ops
@@ -2006,7 +1963,8 @@ transform = pipe(
 )
 
 import pyarrow.parquet as pq
-table = pq.read_table('input.parquet')
+
+table = pq.read_table("input.parquet")
 result = transform(table)
 ```
 
@@ -2036,7 +1994,7 @@ import geoparquet_io as gpio
 from geoparquet_io.api import Table
 
 # From PyArrow Table
-arrow_table = pq.read_table('input.parquet')
+arrow_table = pq.read_table("input.parquet")
 table = Table(arrow_table)
 result = table.add_bbox().sort_hilbert()
 
@@ -2044,7 +2002,7 @@ result = table.add_bbox().sort_hilbert()
 arrow_result = result.to_arrow()
 
 # Use with PyArrow operations
-filtered = arrow_result.filter(arrow_result['population'] > 1000)
+filtered = arrow_result.filter(arrow_result["population"] > 1000)
 ```
 
 ## Advanced: Direct Core Function Access
@@ -2060,7 +2018,7 @@ add_bbox_column(
     input_parquet="input.parquet",
     output_parquet="output.parquet",
     bbox_column_name="bbox",
-    verbose=True
+    verbose=True,
 )
 
 hilbert_order(
@@ -2068,7 +2026,7 @@ hilbert_order(
     output_parquet="sorted.parquet",
     geometry_column="geometry",
     add_bbox_flag=True,
-    verbose=True
+    verbose=True,
 )
 ```
 
@@ -2090,31 +2048,24 @@ Generate and validate STAC (SpatioTemporal Asset Catalog) metadata:
 from geoparquet_io import generate_stac, validate_stac
 
 # Generate STAC Item for a single file
-stac_path = generate_stac(
-    'data.parquet',
-    bucket='s3://my-bucket/data/'
-)
+stac_path = generate_stac("data.parquet", bucket="s3://my-bucket/data/")
 
 # Generate STAC Collection for a directory
-stac_path = generate_stac(
-    'partitioned/',
-    bucket='s3://my-bucket/data/',
-    collection_id='my-dataset'
-)
+stac_path = generate_stac("partitioned/", bucket="s3://my-bucket/data/", collection_id="my-dataset")
 
 # With all options
 stac_path = generate_stac(
-    'data.parquet',
-    output_path='custom.json',
-    bucket='s3://my-bucket/data/',
-    item_id='my-item',
-    public_url='https://data.example.com/',
+    "data.parquet",
+    output_path="custom.json",
+    bucket="s3://my-bucket/data/",
+    item_id="my-item",
+    public_url="https://data.example.com/",
     overwrite=True,
-    verbose=True
+    verbose=True,
 )
 
 # Validate STAC
-result = validate_stac('collection.json')
+result = validate_stac("collection.json")
 if result.passed():
     print("Valid STAC!")
 else:
@@ -2130,13 +2081,13 @@ All check and validate methods return a `CheckResult` object:
 from geoparquet_io import CheckResult
 
 # Methods
-result.passed()          # Returns True if all checks passed
-result.verdict()         # "pass", "warning" or "failure" - what `gpio check` exits on
-                         # (exit 1 on "failure"; `verdict() != "pass"` is --strict)
-result.failures()        # Issues whose severity is "failure"
-result.warnings()        # Issues whose severity is "warning" (advice)
-result.recommendations() # List of recommendations
-result.to_dict()         # Full results as dictionary
+result.passed()  # Returns True if all checks passed
+result.verdict()  # "pass", "warning" or "failure" - what `gpio check` exits on
+# (exit 1 on "failure"; `verdict() != "pass"` is --strict)
+result.failures()  # Issues whose severity is "failure"
+result.warnings()  # Issues whose severity is "warning" (advice)
+result.recommendations()  # List of recommendations
+result.to_dict()  # Full results as dictionary
 
 # Can be used as boolean
 if result:
@@ -2151,13 +2102,15 @@ Inspect per-row-group bounding box statistics to verify spatial locality:
 from geoparquet_io.api.ops import get_row_group_geo_stats
 
 # Get stats for each row group
-stats = get_row_group_geo_stats('hilbert_sorted.parquet')
+stats = get_row_group_geo_stats("hilbert_sorted.parquet")
 
 for rg in stats:
-    print(f"Row group {rg['row_group_id']}: "
-          f"{rg['num_rows']} rows, "
-          f"bbox=[{rg['xmin']:.2f}, {rg['ymin']:.2f}, "
-          f"{rg['xmax']:.2f}, {rg['ymax']:.2f}]")
+    print(
+        f"Row group {rg['row_group_id']}: "
+        f"{rg['num_rows']} rows, "
+        f"bbox=[{rg['xmin']:.2f}, {rg['ymin']:.2f}, "
+        f"{rg['xmax']:.2f}, {rg['ymax']:.2f}]"
+    )
 
 # Works with both:
 # - Native Parquet geo stats (GeoParquet 2.0, parquet-geo-only)
@@ -2174,18 +2127,22 @@ progress bar or a size warning ahead of a large (remote) read:
 from geoparquet_io.api import ops
 
 preview = ops.preview_bbox_filter(
-    'https://example.com/places.parquet',
+    "https://example.com/places.parquet",
     bbox=(-122.5, 37.7, -122.3, 37.9),
 )
 
 if preview.has_estimate:
-    print(f"{len(preview.row_groups)} of {preview.total_row_groups} row groups, "
-          f"~{preview.est_rows} rows, ~{preview.est_bytes} bytes")
+    print(
+        f"{len(preview.row_groups)} of {preview.total_row_groups} row groups, "
+        f"~{preview.est_rows} rows, ~{preview.est_bytes} bytes"
+    )
 else:
     # The file has no usable per-row-group spatial statistics: the preview
     # says so instead of guessing. The total_* fields are still real.
-    print(f"No estimate: {preview.reason} "
-          f"(file holds {preview.total_rows} rows, {preview.total_bytes} bytes)")
+    print(
+        f"No estimate: {preview.reason} "
+        f"(file holds {preview.total_rows} rows, {preview.total_bytes} bytes)"
+    )
 
 # The estimate is an upper bound derived from the same statistics DuckDB
 # prunes with, in the same order as get_row_group_geo_stats:

@@ -33,9 +33,9 @@ For most users, the default just works. No configuration is needed:
     import geoparquet_io as gpio
 
     # Process large files with the fluent API
-    gpio.read('huge_dataset.parquet') \
-        .extract(bbox=(-122.5, 37.5, -122.0, 38.0)) \
-        .write('filtered.parquet')
+    gpio.read("huge_dataset.parquet").extract(bbox=(-122.5, 37.5, -122.0, 38.0)).write(
+        "filtered.parquet"
+    )
     ```
 
 ## Strategy Comparison
@@ -86,10 +86,10 @@ Override the default strategy when needed:
     import geoparquet_io as gpio
 
     # Use streaming strategy
-    gpio.read('input.parquet').write('output.parquet', write_strategy='streaming')
+    gpio.read("input.parquet").write("output.parquet", write_strategy="streaming")
 
     # Use in-memory for verification
-    gpio.read('input.parquet').write('output.parquet', write_strategy='in-memory')
+    gpio.read("input.parquet").write("output.parquet", write_strategy="in-memory")
     ```
 
 ## When to Use Alternative Strategies
@@ -306,7 +306,7 @@ Override auto-detection when needed:
     import geoparquet_io as gpio
 
     # Streaming strategy for constant memory usage
-    gpio.read('input.parquet').write('output.parquet', write_strategy='streaming')
+    gpio.read("input.parquet").write("output.parquet", write_strategy="streaming")
     ```
 
 ### Memory Sizing Guidelines
@@ -374,11 +374,10 @@ For serverless environments with tight memory constraints:
     ```python
     import geoparquet_io as gpio
 
+
     def handler(event, context):
         # Memory limit is auto-detected from the Lambda environment
-        gpio.read('s3://bucket/input.parquet') \
-            .extract(bbox=event['bbox']) \
-            .write('/tmp/output.parquet')
+        gpio.read("s3://bucket/input.parquet").extract(bbox=event["bbox"]).write("/tmp/output.parquet")
     ```
 
 ## Examples
@@ -402,12 +401,9 @@ For serverless environments with tight memory constraints:
     import geoparquet_io as gpio
 
     # Large file processing with the fluent API
-    gpio.read('large_dataset.parquet') \
-        .extract(
-            bbox=(-122.5, 37.5, -122.0, 38.0),
-            where="population > 1000"
-        ) \
-        .write('filtered.parquet')
+    gpio.read("large_dataset.parquet").extract(
+        bbox=(-122.5, 37.5, -122.0, 38.0), where="population > 1000"
+    ).write("filtered.parquet")
     ```
 
 ### Troubleshoot Output Issues
@@ -432,17 +428,17 @@ If you suspect the default strategy is producing incorrect output:
     import geoparquet_io as gpio
 
     # Verify with in-memory strategy
-    table = gpio.read('input.parquet')
+    table = gpio.read("input.parquet")
 
     # Write with default
-    table.write('output_default.parquet')
+    table.write("output_default.parquet")
 
     # Write with in-memory for comparison
-    table.write('output_inmemory.parquet', write_strategy='in-memory')
+    table.write("output_inmemory.parquet", write_strategy="in-memory")
 
     # Compare
-    default = gpio.read('output_default.parquet')
-    inmemory = gpio.read('output_inmemory.parquet')
+    default = gpio.read("output_default.parquet")
+    inmemory = gpio.read("output_inmemory.parquet")
     print(f"Default rows: {default.num_rows}, In-memory rows: {inmemory.num_rows}")
     ```
 
@@ -467,10 +463,10 @@ If you suspect the default strategy is producing incorrect output:
     from pathlib import Path
 
     # Batch processing (memory limit auto-detected per environment)
-    for input_file in Path('data').glob('*.parquet'):
-        gpio.read(input_file) \
-            .extract(bbox=(-122.5, 37.5, -122.0, 38.0)) \
-            .write(f'output/{input_file.name}', write_strategy='streaming')
+    for input_file in Path("data").glob("*.parquet"):
+        gpio.read(input_file).extract(bbox=(-122.5, 37.5, -122.0, 38.0)).write(
+            f"output/{input_file.name}", write_strategy="streaming"
+        )
     ```
 
 ## See Also

@@ -35,8 +35,7 @@ def test_the_seam_hands_the_extractors_the_fake_client(monkeypatch):
     assert http.client_timeouts == [7.0, 9.0]
 
     http_retry.reset_http_client()
-    wfs._reset_http_client_base()
-    assert http.resets == 2
+    assert http.resets == 1
 
 
 def test_routes_are_tried_in_registration_order(monkeypatch):

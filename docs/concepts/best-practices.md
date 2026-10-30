@@ -170,18 +170,16 @@ delete.
     from geoparquet_io import ops
 
     # Default ZSTD compression
-    gpio.convert('input.shp').write('output.parquet')
+    gpio.convert("input.shp").write("output.parquet")
 
     # A process function that writes the file takes the group's default (level 9)
-    ops.create_overviews('cells.parquet', levels=[4, 7])
+    ops.create_overviews("cells.parquet", levels=[4, 7])
 
     # ...and still honours an explicit level
-    ops.create_overviews('cells.parquet', levels=[4, 7], compression_level=15)
+    ops.create_overviews("cells.parquet", levels=[4, 7], compression_level=15)
 
     # Maximum compression
-    gpio.convert('input.shp').write(
-        'output.parquet', compression='ZSTD', compression_level=22
-    )
+    gpio.convert("input.shp").write("output.parquet", compression="ZSTD", compression_level=22)
     ```
 
 !!! note "Which Python calls get level 9"

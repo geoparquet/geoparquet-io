@@ -64,13 +64,13 @@ uv tool install geoparquet-io --with contourrs --with rasterio
     from geoparquet_io.api import ops
 
     # Table constructor, chainable
-    gpio.Table.polygonize('landcover.tif').write('landcover.parquet')
+    gpio.Table.polygonize("landcover.tif").write("landcover.parquet")
 
     # Pure function returning a PyArrow table
-    table = ops.polygonize('mask.tif', values=[1.0], value_column='class_id')
+    table = ops.polygonize("mask.tif", values=[1.0], value_column="class_id")
 
     # Skip repairing self-touching rings (see below)
-    table = ops.polygonize('landcover.tif', repair_geometry=False)
+    table = ops.polygonize("landcover.tif", repair_geometry=False)
     ```
 
 | Option | Default | Meaning |
@@ -139,9 +139,9 @@ Contour output needs none of this: it measured 100% valid on every test DEM.
     import geoparquet_io as gpio
     from geoparquet_io.api import ops
 
-    gpio.Table.contour('dem.tif', interval=100).write('contours.parquet')
+    gpio.Table.contour("dem.tif", interval=100).write("contours.parquet")
 
-    table = ops.contour('dem.tif', levels=[0.0, 250.0, 500.0, 1000.0])
+    table = ops.contour("dem.tif", levels=[0.0, 250.0, 500.0, 1000.0])
     ```
 
 | Option | Default | Meaning |
