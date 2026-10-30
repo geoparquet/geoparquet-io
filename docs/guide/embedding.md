@@ -15,15 +15,15 @@ These modules are the declared, semver-tracked embeddable surface:
 | `geoparquet_io/core/bbox_structure.py` | bbox column and covering detection/resolution |
 | `geoparquet_io/core/duckdb_metadata.py` | Parquet footer and `geo` metadata readers |
 | `geoparquet_io/core/geo_metadata.py` | the `geo` block: parse, sanitize, versions, WKB type codes |
-| `geoparquet_io/core/format_writers.py` | GeoPackage/FlatGeobuf/CSV/GeoJSON export |
+| `geoparquet_io/core/format_writers.py` | GeoPackage/FlatGeobuf/Shapefile/CSV/GeoJSON export |
 | `geoparquet_io/core/extract.py` | column/row extraction with spatial predicates |
 | `geoparquet_io/core/preview.py` | bbox query-plan preview from the Parquet footer |
 | `geoparquet_io/core/remote.py` | remote-URL detection and `needs_httpfs` |
 
 Vendor them together with the internal modules they import (`duckdb_utils`,
 `crs_utils`, `exceptions`, `logging_config`, and so on — your bundler or a
-`python -c "import ..."` smoke test will name the full closure). The six
-modules above are the surface the contract covers; everything else in `core/`
+`python -c "import ..."` smoke test will name the full closure). The modules
+above are the surface the contract covers; everything else in `core/`
 travels with them as an implementation detail.
 
 ## The contract
@@ -41,7 +41,7 @@ travels with them as an implementation detail.
 - **`import geoparquet_io` is side-effect-light.** The package root resolves
   its public names lazily (PEP 562), so importing it pulls in neither the CLI
   stack (click, rich) nor DuckDB.
-- **Semver-tracked.** Function signatures and behavior in the six modules
+- **Semver-tracked.** Function signatures and behavior in the surface modules
   follow the package version: breaking changes to them arrive only in a major
   release and are called out in the changelog. Everything else in `core/` is
   internal and may change in any release — vendored copies of it are carried
@@ -63,12 +63,33 @@ import geoparquet_io.core.duckdb_metadata
 import geoparquet_io.core.extract
 import geoparquet_io.core.format_writers
 import geoparquet_io.core.geo_metadata
+import geoparquet_io.core.preview
 import geoparquet_io.core.remote
 
 assert "click" not in sys.modules
 assert "duckdb" not in sys.modules
 print("imports stayed lazy")
 ```
+
+## What a host must supply
+
+**Python 3.10 or newer, to import.** Modules in the surface's closure —
+`logging_config` and `remote` among them — write `X | None` in signatures without
+`from __future__ import annotations`, so an older interpreter fails at import
+with a `TypeError`. This is gpio's own floor (`requires-python` in
+pyproject.toml), so it matters only to a host whose embedded Python is older.
+
+**More than pyarrow, to call.** Each of these is imported inside the function
+that needs it, so its absence surfaces as `ModuleNotFoundError` at that call,
+not at import:
+
+| Package | First needed by |
+|---------|-----------------|
+| `duckdb` | any function that opens a connection |
+| `fsspec` | GeoPackage, FlatGeobuf, Shapefile and CSV export (`format_writers.write_gdal_format`, `write_csv`), which read the input's schema through it — local files included. HTTP(S) inputs also need `aiohttp`; S3 inputs need `s3fs` |
+| `pyproj` | CRS normalization in `crs_utils`, `duckdb_metadata`, `geodesic_bbox` and the write funnels |
+| `geoarrow-pyarrow` | the Arrow-side geometry paths: geometry types or a bbox computed from the data (`geo_metadata`), and pyarrow reads and writes that must keep a native Parquet `GEOMETRY`/`GEOGRAPHY` type and its CRS |
+| `obstore` and `botocore` | `remote.upload_if_remote` — any upload of a written file to a remote URL goes through obstore, and its AWS credential resolution through botocore |
 
 ## Detecting a missing DuckDB from a host
 
