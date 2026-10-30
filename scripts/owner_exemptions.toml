@@ -68,12 +68,10 @@ reason = "streams an HTTP source to disk chunk by chunk; T2e moves the download 
 [[G1.tid251]]
 path = "geoparquet_io/core/process/aggregate/by_admin.py"
 name = "pyarrow.parquet.write_table"
-count = 2
 reason = "geometry-free aggregate output bypasses the facade's row-group count (approved change 2); T2c"
 [[G1.tid251]]
 path = "geoparquet_io/core/process/aggregate/grid_common.py"
 name = "pyarrow.parquet.write_table"
-count = 2
 reason = "geometry-free aggregate output bypasses the facade's row-group count (approved change 2); T2c"
 [[G1.tid251]]
 path = "geoparquet_io/core/process/overview/overview_file.py"
@@ -703,10 +701,18 @@ block = "cli.commands.add:add_h3|cli.commands.sort:str_order_command"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
 block = "cli.commands.process:process_aggregate_a5|core.process.aggregate.by_h3:aggregate_by_h3"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+count = 2
+reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
 [[G3.pylint]]
 block = "cli.commands.process:process_aggregate_h3|core.process.aggregate.by_a5:aggregate_by_a5"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+count = 2
+reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
+[[G3.pylint]]
+block = "api.ops:_sub_partition|cli.commands.partition:partition_h3"
+reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
+[[G3.pylint]]
+block = "cli.commands.partition:partition_s2|cli.decorators:handle_directory_sub_partition"
+reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
 [[G3.pylint]]
 block = "core.add.a5:_add_a5_streaming.make_query|core.add.bbox:_make_streaming_bbox_query"
 reason = "the LIMIT 0 probe, STANDARD_GEOMETRY_NAMES loop and literal 'geometry' fallback (concept 7); T3c's primary_geometry_column"
@@ -768,9 +774,6 @@ reason = "geometry stats twins; T3b"
 block = "core.arrow_geo_metadata:_detect_version_from_table|core.streaming:extract_version_from_metadata"
 reason = "version read from the geo key, copied; T2b"
 [[G3.pylint]]
-block = "core.common:add_computed_column|core.str_order:_str_order_file_based"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
 block = "core.convert:<module>|core.process.aggregate.common:<module>"
 reason = "DuckDB integer type-name list copied; T1c's type owner"
 [[G3.pylint]]
@@ -826,9 +829,6 @@ reason = "permanent: the same keyword-argument list forwarded to one callee (API
 [[G3.pylint]]
 block = "core.sort_quadkey:sort_by_quadkey_table|core.str_order:str_order_table"
 reason = "sort result read back with the input's schema metadata carried, copied per sort; T2c"
-[[G3.pylint]]
-block = "core.write_funnels:_plain_copy_to|core.write_strategies.disk_rewrite:DiskRewriteStrategy.write_from_query"
-reason = "codec name map copied; T2a (compression owner)"
 
 # ---------------------------------------------------------------------------
 # G13: shared-option consistency (tests/test_cli_shared_options.py)

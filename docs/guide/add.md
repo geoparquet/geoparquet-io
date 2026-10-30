@@ -177,8 +177,10 @@ If your file already has a bbox column but lacks covering metadata (e.g., from e
         `COPY`, which had no level to carry over and fell back to DuckDB's default
         of 3: a file written at zstd 15 came back 11.6% bigger on the reported
         fixture and 36% bigger on a real one. A footer gpio cannot read — an
-        encrypted one, or a thrift structure it does not recognise — falls back to
-        that rewrite, with a warning saying so.
+        encrypted one, or a thrift structure it does not recognise — still falls
+        back to a rewrite, with a warning saying so. That rewrite keeps the file's
+        codec and writes gpio's default level for it (zstd 15), not DuckDB's 3; a
+        file written at another level comes back at 15.
 
     !!! note "Requires GeoParquet 1.1+"
 

@@ -11,13 +11,12 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.compression import resolve_process_compression_level
+from geoparquet_io.core.compression import resolve_codec, resolve_process_compression_level
 from geoparquet_io.core.duckdb_utils import fetch_one, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
@@ -203,17 +202,15 @@ def _write_overview(
     table: pa.Table,
     out_path: str,
     info: AggregateInfo,
-    compression: str,
+    compression: str | None,
     compression_level: int | None,
     gpq_version: str | None,
     verbose: bool,
     geo_bbox: list[float] | None = None,
 ) -> None:
     if info.out_geometry == "none":
-        kwargs: dict[str, Any] = {"compression": compression}
-        if compression_level is not None:
-            kwargs["compression_level"] = compression_level
-        pq.write_table(table, out_path, **kwargs)
+        codec = resolve_codec(compression, compression_level, context="process")
+        pq.write_table(table, out_path, **codec.pyarrow_kwargs())
         return
     write_geoparquet_table(
         table,
@@ -257,7 +254,7 @@ def create_overviews(
     cell_column: str | None = None,
     scheme: str | None = None,
     output_dir: str | None = None,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     geoparquet_version: str | None = None,
     force: bool = False,
@@ -349,7 +346,7 @@ def _build_levels(
     target_levels: list[int | str],
     outputs: list[str],
     *,
-    compression: str,
+    compression: str | None,
     compression_level: int | None,
     geoparquet_version: str | None,
     verbose: bool,
@@ -392,7 +389,7 @@ def create_overview_file(
     cell_column: str | None = None,
     scheme: str | None = None,
     output_dir: str | None = None,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     geoparquet_version: str | None = None,
     force: bool = False,

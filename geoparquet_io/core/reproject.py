@@ -15,7 +15,7 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.bbox_structure import bbox_shaped_struct_columns, check_bbox_structure
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.compression import validate_compression_settings
+from geoparquet_io.core.compression import codec_from_footer, resolve_codec
 from geoparquet_io.core.crs_utils import (
     apply_target_crs_to_geo_meta,
     entry_crs_is_unknown,
@@ -396,19 +396,19 @@ def _warn_carried_bbox_structs(input_path: str, bbox_col: str | None) -> None:
         )
 
 
-def _row_group_compression(parquet_file: pq.ParquetFile) -> str:
-    """Return the file's first-column compression codec for ParquetWriter.
+def _row_group_compression(parquet_file: pq.ParquetFile) -> dict:
+    """ParquetWriter codec kwargs that keep the file's first-column codec.
 
     Preserves the input codec so the sanitized copy isn't silently re-encoded to
-    a different (e.g. larger) compression. Falls back to ZSTD for empty files.
+    a different (e.g. larger) compression; an empty file, or a codec gpio does
+    not write, gets the default. Parquet records no level, so the owner's
+    default level for the codec is written rather than pyarrow's ZSTD 1.
     """
     md = parquet_file.metadata
+    footer_codec = None
     if md.num_row_groups > 0 and md.row_group(0).num_columns > 0:
-        codec = md.row_group(0).column(0).compression
-        if codec:
-            codec = codec.lower()
-            return "none" if codec == "uncompressed" else codec
-    return "zstd"
+        footer_codec = md.row_group(0).column(0).compression
+    return codec_from_footer(footer_codec, None).pyarrow_kwargs()
 
 
 def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, str | None]:
@@ -444,9 +444,7 @@ def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, 
     fd, temp_path = tempfile.mkstemp(suffix=".parquet", prefix="gpio_assume_crs84_")
     os.close(fd)
     try:
-        writer = pq.ParquetWriter(
-            temp_path, new_schema, compression=_row_group_compression(parquet_file)
-        )
+        writer = pq.ParquetWriter(temp_path, new_schema, **_row_group_compression(parquet_file))
         try:
             for i in range(parquet_file.num_row_groups):
                 writer.write_table(parquet_file.read_row_group(i))
@@ -496,7 +494,7 @@ def reproject_impl(
     target_crs: str = "EPSG:4326",
     source_crs: str | None = None,
     overwrite: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     verbose: bool = False,
     profile: str | None = None,
@@ -658,9 +656,8 @@ def reproject_impl(
         log(f"Output: {out_path}")
 
         # Validate compression settings
-        compression, compression_level, _ = validate_compression_settings(
-            compression, compression_level, verbose
-        )
+        codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
+        compression, compression_level = codec.name, codec.level
 
         # Get target CRS as PROJJSON for metadata
         target_crs_projjson = parse_crs_string_to_projjson(target_crs, con)
@@ -935,7 +932,7 @@ def reproject(
     target_crs: str = "EPSG:4326",
     source_crs: str | None = None,
     overwrite: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     verbose: bool = False,
     profile: str | None = None,

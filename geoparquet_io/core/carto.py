@@ -1326,7 +1326,7 @@ def convert_carto_to_geoparquet(
     max_retries: int = DEFAULT_MAX_RETRIES,
     skip_hilbert: bool = False,
     skip_bbox: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,

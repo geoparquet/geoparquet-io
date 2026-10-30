@@ -139,10 +139,19 @@
     "split_column_list"
   ],
   "geoparquet_io.core.compression": [
+    "ACCEPTED_CODEC_NAMES",
+    "ALLOWED_CODECS",
+    "CODEC_ALIASES",
     "COMPRESSION_RANGES",
+    "DEFAULT_CODEC",
+    "DUCKDB_COPY_FIXED_LEVELS",
+    "MAX_COMPRESSION_LEVEL",
     "PROCESS_ZSTD_LEVEL",
-    "resolve_process_compression_level",
-    "validate_compression_settings"
+    "ResolvedCodec",
+    "codec_from_footer",
+    "print_copy_dry_run",
+    "resolve_codec",
+    "resolve_process_compression_level"
   ],
   "geoparquet_io.core.crs_utils": [
     "CRS_ABSENT",
@@ -265,6 +274,7 @@
     "orphaned_spill_dirs",
     "pin_duckdb_settings",
     "planar_view",
+    "print_spatial_join_dry_run",
     "quote_identifier",
     "register_arrow",
     "require_community_extension",
@@ -277,7 +287,6 @@
     "sql_path",
     "sweep_orphaned_spill_dirs",
     "uses_aws_profile",
-    "validate_compression_level",
     "validate_where_clause",
     "where_condition_fragment",
     "where_sql_fragment"

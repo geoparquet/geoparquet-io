@@ -64,7 +64,7 @@ def add_geometry_metrics(
     vecorel: bool = True,
     dry_run: bool = False,
     verbose: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
@@ -278,7 +278,8 @@ def _add_metrics_file_based(
     # Add Vecorel metadata and ensure required columns. These rewrite the file
     # in place, so they must keep writing at the caller's resolved settings —
     # left to their own defaults they undid the level of everything above
-    # (DuckDB's 3 for the id column, pyarrow's 1 for the schema fix).
+    # (DuckDB's 3 for the id column, pyarrow's 1 for the schema fix, before
+    # both resolved through `compression.resolve_codec`).
     if vecorel:
         from geoparquet_io.core.constants import ensure_vecorel_columns
 
@@ -299,7 +300,7 @@ def _add_vecorel_metadata_to_file(
     parquet_file: str,
     verbose: bool,
     memory_limit: str | None,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
 ) -> None:
     """Add Vecorel schema metadata to an existing file via rewrite."""
@@ -331,9 +332,8 @@ def _add_vecorel_metadata_to_file(
 
     # The caller's codec always goes through -- dropping it when the level is
     # unset re-encoded a GZIP output as ZSTD on this one rewrite. An unset
-    # level stays None, the same "no COMPRESSION_LEVEL in the COPY" the
-    # command's other writes already mean by it (#1335 tracks what unset
-    # resolves to across the COPY paths).
+    # level stays None here and resolves in the write funnel's owner
+    # (`compression.resolve_codec`), as on the command's other writes (#1335).
     level_kwargs: dict[str, Any] = {
         "compression": compression,
         "compression_level": compression_level,

@@ -18,6 +18,7 @@ from geoparquet_io.core.column_selection import (
     resolve_columns_against_schema,
     split_column_list,
 )
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     fetch_one,
@@ -39,6 +40,7 @@ from geoparquet_io.core.logging_config import (
 )
 from geoparquet_io.core.memory_limits import bound_open_connection
 from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+from geoparquet_io.core.remote import remote_write_context, upload_if_remote
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 # Regex patterns for GCP resource validation
@@ -1187,7 +1189,7 @@ def extract_bigquery(
     dry_run: bool = False,
     show_sql: bool = False,
     verbose: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
@@ -1577,17 +1579,25 @@ def _execute_bigquery_extraction(
                 # plain VARCHAR column named `geom` or `shape` geometry and
                 # stamp a geo key on it, which is precisely what BigQuery's own
                 # schema said this table does not have.
+                #
+                # The codec and level still resolve through the owner (an
+                # unvalidated `UNCOMPRESSED` raised from pyarrow, and an unset
+                # level was pyarrow's ZSTD 1), and a remote URL is staged and
+                # uploaded as the geometry branch does (#1026).
                 import pyarrow.parquet as pq
 
-                pq.write_table(
-                    result,
-                    output_parquet,
-                    compression=compression,
-                    compression_level=compression_level,
-                    row_group_size=resolve_row_group_rows_for_table(
-                        result, row_group_rows, row_group_size_mb
-                    ),
-                )
+                codec = resolve_codec(compression, compression_level, context="write")
+                with remote_write_context(output_parquet, verbose=verbose) as (local, is_remote):
+                    pq.write_table(
+                        result,
+                        local,
+                        **codec.pyarrow_kwargs(),
+                        row_group_size=resolve_row_group_rows_for_table(
+                            result, row_group_rows, row_group_size_mb
+                        ),
+                    )
+                    if is_remote:
+                        upload_if_remote(local, output_parquet, verbose=verbose)
 
             success(f"Extracted {row_count:,} rows to {output_parquet}")
             return None

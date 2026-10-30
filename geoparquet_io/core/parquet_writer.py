@@ -35,8 +35,8 @@ file that contradicts itself: native 2.0 with EPSG:5070 in the Parquet
 GeoParquet resolves as ``OGC:CRS84`` (#993). Splitting the two answers between
 two owners is what made that possible, so they are answered together.
 
-It deliberately does **not** own the rest of the write. Compression validation
-(``common.validate_compression_settings``), the contents of the ``geo`` block
+It deliberately does **not** own the rest of the write. The codec and level
+(``compression.resolve_codec``), the contents of the ``geo`` block
 (``write_strategies.base.build_geo_metadata``), the null-vs-default CRS rule
 (``crs_utils.apply_output_crs``), bbox coverings and geometry-type computation
 all already have a single owner each, and pulling them in here would turn a
@@ -65,6 +65,7 @@ from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
     PARQUET_UNKNOWN_CRS,
     extract_crs_from_parquet,
@@ -698,14 +699,13 @@ class ParquetWriteSettings:
     Single source of truth for compression, row groups, and other settings.
     """
 
-    compression: str = "ZSTD"
-    compression_level: int = 15
+    #: ``None`` means the owner's default (``compression.resolve_codec``):
+    #: ZSTD, at the codec's documented level.
+    compression: str | None = None
+    compression_level: int | None = None
     row_group_rows: int | None = None
     row_group_size_mb: int | None = None
 
-    # Best practice constants
-    DEFAULT_COMPRESSION = "ZSTD"
-    DEFAULT_COMPRESSION_LEVEL = 15
     DEFAULT_PARQUET_VERSION = "2.6"
 
     def get_pyarrow_kwargs(
@@ -720,10 +720,11 @@ class ParquetWriteSettings:
         columns (:func:`dictionary_columns`). Without it, pyarrow's default
         applies to every column.
         """
-        pa_compression = self.compression if self.compression != "UNCOMPRESSED" else None
-        pa_compression_level = (
-            self.compression_level if self.compression in ["GZIP", "ZSTD", "BROTLI"] else None
-        )
+        # The owner validates the codec and level and drops a level the codec
+        # does not take; it is the only codec list in the package.
+        codec_kwargs = resolve_codec(
+            self.compression, self.compression_level, context="write"
+        ).pyarrow_kwargs()
 
         # Last resort, not a second policy: a caller that reached here without
         # going through resolve_row_group_rows still lands on the one number
@@ -733,15 +734,12 @@ class ParquetWriteSettings:
 
         kwargs = {
             "row_group_size": row_group_size,
-            "compression": pa_compression,
+            **codec_kwargs,
             "write_statistics": True,
             "use_dictionary": (
                 True if schema is None else dictionary_columns(schema, geometry_columns)
             ),
             "version": self.DEFAULT_PARQUET_VERSION,
         }
-
-        if pa_compression_level is not None:
-            kwargs["compression_level"] = pa_compression_level
 
         return kwargs

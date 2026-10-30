@@ -42,7 +42,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
-from geoparquet_io.core.compression import resolve_process_compression_level
+from geoparquet_io.core.compression import resolve_codec, resolve_process_compression_level
 from geoparquet_io.core.geo_metadata import (
     OVERVIEW_LEVEL_COLUMN,
     OVERVIEWS_KEY,
@@ -338,7 +338,7 @@ def write_overview_file(
     output_path: str,
     *,
     geoparquet_version: str | None = None,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     verbose: bool = False,
 ) -> str:
@@ -378,7 +378,7 @@ def write_overview_file(
             )
             # OVERVIEWS_SPEC 4.5: no dictionary encoding on the geometry.
             writer_kwargs = without_geometry_dictionary(
-                {"compression": compression, "compression_level": compression_level},
+                resolve_codec(compression, compression_level, context="process").pyarrow_kwargs(),
                 schema,
                 [geometry_column] if geometry_column else (),
             )

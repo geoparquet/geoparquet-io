@@ -20,6 +20,7 @@ from geoparquet_io.core.duckdb_utils import (
     SPATIAL_JOIN_NATIVE,
     build_spatial_join_condition,
     fetch_one,
+    print_spatial_join_dry_run,
     quote_identifier,
     s3_config_scope,
     spatial_join_strategy,
@@ -667,26 +668,7 @@ def _handle_dry_run_mode(
     strategy = spatial_join_strategy(
         has_native_geometry, input_bbox_col, admin_bbox_col, input_geom_rewritten
     )
-    if strategy == SPATIAL_JOIN_NATIVE:
-        info("-- Using native geometry with DuckDB SPATIAL_JOIN")
-    elif strategy == SPATIAL_JOIN_BBOX_PREFILTER:
-        info("-- Using bbox columns for optimized spatial join")
-    else:
-        info("-- Using full geometry intersection (no bbox optimization)")
-
-    if compression in ["GZIP", "ZSTD", "BROTLI"]:
-        compression_str = f"{compression}:{compression_level}"
-    else:
-        compression_str = compression
-
-    duckdb_compression = compression.lower() if compression != "UNCOMPRESSED" else "uncompressed"
-    display_query = f"""COPY ({query.strip()})
-TO {sql_path(output_parquet)}
-(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
-    progress(display_query)
-
-    info(f"\n-- Note: Using {compression_str} compression")
-    info("-- Original metadata would also be preserved in the output file")
+    print_spatial_join_dry_run(strategy, query, output_parquet, compression, compression_level)
     return True
 
 
@@ -813,7 +795,7 @@ def add_admin_divisions_multi(
     add_bbox_flag: bool = False,
     dry_run: bool = False,
     verbose: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,

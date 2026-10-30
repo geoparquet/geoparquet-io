@@ -11,7 +11,15 @@ import math
 import click
 from click.core import ParameterSource
 
-from geoparquet_io.core.compression import COMPRESSION_RANGES, PROCESS_ZSTD_LEVEL
+from geoparquet_io.core.compression import (
+    ACCEPTED_CODEC_NAMES,
+    ALLOWED_CODECS,
+    COMPRESSION_RANGES,
+    MAX_COMPRESSION_LEVEL,
+    WriteContext,
+    resolve_codec,
+)
+from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
     SPATIAL_BAND_TOP_ROWS,
@@ -203,34 +211,58 @@ def resolve_kdtree_options(
     return None, sample_size, ("rows", target_rows)
 
 
-def _compression_level_help(zstd_default: int) -> str:
-    """The ``--compression-level`` help, which has to name the right ZSTD default.
+def _compression_level_help(context: WriteContext) -> str:
+    """The ``--compression-level`` help, naming each codec's default for *context*.
 
-    Two strings, because there are two defaults: ``gpio process`` resolves an
-    unset ZSTD level to ``PROCESS_ZSTD_LEVEL`` and everything else to the
-    global 15 (#1299). Both numbers are imported, not typed, so help text
-    cannot drift from what the writers actually do -- the mistake #967 made
-    with the row-group number.
+    ``gpio process`` resolves an unset ZSTD level to ``PROCESS_ZSTD_LEVEL`` and
+    everything else to the global 15 (#1299). Each default is asked of the
+    owner, not typed or recomputed, so help text cannot drift from what the
+    writers actually do -- the mistake #967 made with the row-group number.
     """
-    return (
-        f"Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 "
-        f"(default: {zstd_default}), BROTLI: 1-11 (default: 6). "
-        "Ignored for LZ4/SNAPPY."
+    ranges = ", ".join(
+        f"{codec}: {low}-{high} (default: {resolve_codec(codec, None, context=context).level})"
+        for codec, (low, high, _) in COMPRESSION_RANGES.items()
     )
+    levelless = "/".join(
+        codec
+        for codec in ALLOWED_CODECS
+        if codec not in COMPRESSION_RANGES and codec != "UNCOMPRESSED"
+    )
+    return f"Compression level - {ranges}. Ignored for {levelless}."
+
+
+def _check_codec_and_level(ctx, param, value):
+    """Check ``--compression`` and ``--compression-level`` together, in the owner.
+
+    Each option's callback runs once its own value is known; whichever of the
+    two Click processes second sees both, so the pair is checked before the
+    command runs, against the range of the codec actually chosen (GZIP 1-9,
+    ZSTD 1-22, BROTLI 1-11) rather than ZSTD's range for every codec.
+    """
+    other = "compression_level" if param.name == "compression" else "compression"
+    if other in ctx.params:
+        pair = {param.name: value, other: ctx.params[other]}
+        try:
+            resolve_codec(pair["compression"], pair["compression_level"], context="write")
+        except InvalidParameterError as exc:
+            raise click.BadParameter(
+                exc.reason, ctx=ctx, param_hint="'--compression-level'"
+            ) from exc
+    return value
 
 
 def _add_compression_options(func, level_help: str):
     func = click.option(
         "--compression",
-        default="ZSTD",
-        type=click.Choice(
-            ["ZSTD", "GZIP", "BROTLI", "LZ4", "SNAPPY", "UNCOMPRESSED"], case_sensitive=False
-        ),
-        help="Compression type for output file (default: ZSTD)",
+        default=None,
+        type=click.Choice(list(ACCEPTED_CODEC_NAMES), case_sensitive=False),
+        callback=_check_codec_and_level,
+        help="Compression type for output file (default: ZSTD; NONE is UNCOMPRESSED)",
     )(func)
     func = click.option(
         "--compression-level",
-        type=click.IntRange(1, 22),
+        type=click.IntRange(1, MAX_COMPRESSION_LEVEL),
+        callback=_check_codec_and_level,
         help=level_help,
     )(func)
     return func
@@ -247,7 +279,7 @@ def compression_options(func):
     For a ``gpio process`` command use :func:`process_compression_options`
     instead, so the help names that group's lower ZSTD default.
     """
-    return _add_compression_options(func, _compression_level_help(COMPRESSION_RANGES["ZSTD"][2]))
+    return _add_compression_options(func, _compression_level_help("write"))
 
 
 def process_compression_options(func):
@@ -259,7 +291,7 @@ def process_compression_options(func):
     (``core/compression.resolve_process_compression_level``), so the Python API
     gets it too -- this decorator only keeps ``--help`` honest.
     """
-    return _add_compression_options(func, _compression_level_help(PROCESS_ZSTD_LEVEL))
+    return _add_compression_options(func, _compression_level_help("process"))
 
 
 # Help text for --row-group-size. One string, because there is now one rule.
@@ -1234,8 +1266,8 @@ def handle_directory_sub_partition(
             verbose=verbose,
             force=force,
             skip_analysis=skip_analysis,
-            compression=compression.upper() if compression else "ZSTD",
-            compression_level=compression_level or 15,
+            compression=compression,
+            compression_level=compression_level,
             auto=auto,
             target_rows=target_rows,
             max_partitions=max_partitions,

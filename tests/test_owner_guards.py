@@ -78,10 +78,10 @@ EXPECTED_COUNTS = {
     "G2.exemptions": 33,
     "G3.pairs": 27,
     "G3.baseline": 27,
-    "G3.pylint": 58,
+    "G3.pylint": 60,
     "G13.options": 13,
     "G13.bbox_parsers": 3,
-    "G4.whitelist": 186,
+    "G4.whitelist": 184,
     "G4.tests_whitelist": 99,
 }
 

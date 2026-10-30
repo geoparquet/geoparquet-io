@@ -4,7 +4,7 @@ import pytest
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure, get_bbox_advice
 from geoparquet_io.core.common import get_parquet_metadata, should_skip_bbox
-from geoparquet_io.core.compression import validate_compression_settings
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
     _extract_crs_identifier,
     _validate_projjson,
@@ -196,48 +196,52 @@ class TestFormatSize:
         assert "GB" in result
 
 
-class TestValidateCompressionSettings:
-    """Tests for validate_compression_settings function."""
+class TestResolveCodecDescriptions:
+    """``resolve_codec``'s canonical name, default level and description."""
 
     def test_valid_zstd(self):
         """Test valid ZSTD compression with default level."""
-        compression, level, desc = validate_compression_settings("ZSTD", None, False)
+        codec = resolve_codec("ZSTD", None, context="write")
+        compression, level, desc = codec.name, codec.level, codec.description
         assert compression == "ZSTD"
         assert level == 15  # Default ZSTD level
         assert desc == "ZSTD:15"
 
     def test_valid_zstd_with_level(self):
         """Test valid ZSTD with custom compression level."""
-        compression, level, desc = validate_compression_settings("ZSTD", 10, False)
+        codec = resolve_codec("ZSTD", 10, context="write")
+        compression, level, desc = codec.name, codec.level, codec.description
         assert compression == "ZSTD"
         assert level == 10
         assert desc == "ZSTD:10"
 
     def test_valid_snappy(self):
         """Test valid SNAPPY compression (no level support)."""
-        compression, level, desc = validate_compression_settings("SNAPPY", None, False)
+        codec = resolve_codec("SNAPPY", None, context="write")
+        compression, level, desc = codec.name, codec.level, codec.description
         assert compression == "SNAPPY"
         assert level is None
         assert desc == "SNAPPY"
 
     def test_valid_gzip(self):
         """Test valid GZIP compression with default level."""
-        compression, level, desc = validate_compression_settings("GZIP", None, False)
+        codec = resolve_codec("GZIP", None, context="write")
+        compression, level, desc = codec.name, codec.level, codec.description
         assert compression == "GZIP"
         assert level == 6  # Default GZIP level
         assert desc == "GZIP:6"
 
     def test_valid_uncompressed(self):
         """Test valid UNCOMPRESSED setting."""
-        compression, level, desc = validate_compression_settings("UNCOMPRESSED", None, False)
+        codec = resolve_codec("UNCOMPRESSED", None, context="write")
+        compression, level, desc = codec.name, codec.level, codec.description
         assert compression == "UNCOMPRESSED"
         assert level is None
         assert desc == "UNCOMPRESSED"
 
     def test_case_insensitive(self):
         """Test that compression names are case insensitive."""
-        compression, level, desc = validate_compression_settings("zstd", None, False)
-        assert compression == "ZSTD"
+        assert resolve_codec("zstd", None, context="write").name == "ZSTD"
 
 
 class TestDetectGeoparquetFileType:

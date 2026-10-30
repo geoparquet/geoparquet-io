@@ -1184,21 +1184,24 @@ class TestDuckDBKVWriteConfiguration:
 class TestCompressionLevelValidation:
     """`COMPRESSION_LEVEL` is formatted into SQL, so the value must be checked."""
 
-    @pytest.mark.parametrize("bad", ["1; DROP TABLE t", 3.5, True, 0, 23, -1, "15", None, object()])
+    @pytest.mark.parametrize("bad", ["1; DROP TABLE t", 3.5, True, 0, 23, -1, "15", object()])
     def test_rejects_values_that_are_not_a_duckdb_level(self, bad):
-        from geoparquet_io.core.duckdb_utils import validate_compression_level
+        from geoparquet_io.core.compression import resolve_codec
+        from geoparquet_io.core.exceptions import InvalidParameterError
 
-        with pytest.raises(ValueError):
-            validate_compression_level(bad)
+        with pytest.raises(InvalidParameterError):
+            resolve_codec("ZSTD", bad, context="write")
 
     @pytest.mark.parametrize("level", [1, 15, 22])
     def test_accepts_the_documented_range(self, level):
-        from geoparquet_io.core.duckdb_utils import validate_compression_level
+        from geoparquet_io.core.compression import resolve_codec
 
-        assert validate_compression_level(level) == level
+        assert resolve_codec("ZSTD", level, context="write").duckdb_copy_options()[-1] == (
+            f"COMPRESSION_LEVEL {level}"
+        )
 
     def test_library_callers_are_checked_not_just_the_cli(self, tmp_path):
-        """The CLI has IntRange(1, 22); a Python caller reaches the writer directly."""
+        """The CLI checks the pair first; a Python caller reaches the writer directly."""
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
         from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
@@ -1210,7 +1213,9 @@ class TestCompressionLevelValidation:
                 TO '{src}' (FORMAT PARQUET)"""
         )
 
-        with pytest.raises(ValueError, match="compression_level"):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        with pytest.raises(InvalidParameterError, match="compression_level"):
             write_parquet_with_metadata(
                 con,
                 f"SELECT * FROM read_parquet('{src}')",

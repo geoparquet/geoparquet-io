@@ -22,6 +22,7 @@ from typing import Any
 import duckdb
 import psutil
 
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     duckdb_capabilities,
@@ -261,10 +262,12 @@ def benchmark_duckdb(input_path: Path, output_path: Path) -> tuple[float, float]
     tracemalloc.start()
     start = time.perf_counter()
     try:
+        # DuckDB's fast ZSTD 3, named through the owner rather than by default.
+        codec_options = ", ".join(resolve_codec("ZSTD", 3, context="write").duckdb_copy_options())
         conn.execute(f"""
             COPY (SELECT * FROM ST_Read({sql_path(input_path)}))
             TO {sql_path(output_path)}
-            (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000)
+            (FORMAT PARQUET, {codec_options}, ROW_GROUP_SIZE 100000)
         """)
         elapsed = time.perf_counter() - start
         _, peak = tracemalloc.get_traced_memory()

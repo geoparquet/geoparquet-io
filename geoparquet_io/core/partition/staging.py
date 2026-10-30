@@ -23,6 +23,7 @@ import tempfile
 from dataclasses import dataclass
 from urllib.parse import unquote
 
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import sql_path
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.logging_config import debug
@@ -93,8 +94,9 @@ class PartitionWriteOptions:
 
     geoparquet_version: str | None = None
     input_file: str | None = None
-    compression: str = "ZSTD"
-    compression_level: int = 15
+    #: ``None``: the owner's default (``compression.resolve_codec``).
+    compression: str | None = None
+    compression_level: int | None = None
     row_group_size_mb: int | None = None
     row_group_rows: int | None = None
     memory_limit: str | None = None
@@ -183,10 +185,12 @@ def run_partitioned_copy(con, select_sql, partition_cols, staging_dir, verbose, 
     partition on it, so all three settings are restored afterwards.
     """
     part_cols = ", ".join(partition_cols)
+    # Staging files are rewritten by finalize, so a fast codec is enough here.
+    staging_codec = ", ".join(resolve_codec("SNAPPY", None, context="write").duckdb_copy_options())
     copy_sql = (
         f"COPY ({select_sql}) TO {sql_path(staging_dir)} "
         f"(FORMAT PARQUET, PARTITION_BY ({part_cols}), "
-        f"COMPRESSION SNAPPY, GEOPARQUET_VERSION 'NONE', OVERWRITE_OR_IGNORE)"
+        f"{staging_codec}, GEOPARQUET_VERSION 'NONE', OVERWRITE_OR_IGNORE)"
     )
     # threads=1: one file per partition (and bounded memory); insertion order
     # is not needed for the split.

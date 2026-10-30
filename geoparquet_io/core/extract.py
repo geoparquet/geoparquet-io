@@ -1113,18 +1113,10 @@ def _print_dry_run_output(
         info(f"-- Limit: {limit}")
     progress("")
 
-    compression_desc = compression
-    if compression in ["GZIP", "ZSTD", "BROTLI"] and compression_level:
-        compression_desc = f"{compression}:{compression_level}"
-
-    duckdb_compression = compression.lower() if compression != "UNCOMPRESSED" else "uncompressed"
-    display_query = f"""COPY ({query})
-TO {sql_path(output_parquet)}
-(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
+    from geoparquet_io.core.compression import print_copy_dry_run
 
     info("-- Main query:")
-    progress(display_query)
-    info(f"\n-- Note: Using {compression_desc} compression")
+    print_copy_dry_run(query, output_parquet, compression, compression_level)
 
 
 def _advise_spatial_stats_on_merge(
@@ -1318,7 +1310,7 @@ def extract(
     dry_run: bool = False,
     show_sql: bool = False,
     verbose: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,

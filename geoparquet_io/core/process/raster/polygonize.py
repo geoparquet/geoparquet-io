@@ -111,7 +111,7 @@ def polygonize_file(
     use_mask: bool = True,
     connectivity: int = 4,
     repair_geometry: bool = True,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,

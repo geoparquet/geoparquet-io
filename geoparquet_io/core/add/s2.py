@@ -216,7 +216,7 @@ def add_s2_column(
     s2_level: int = DEFAULT_S2_LEVEL,
     dry_run: bool = False,
     verbose: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,

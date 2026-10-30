@@ -5,8 +5,6 @@ This module defines constants that are shared across multiple modules to ensure
 consistency and make it easy to change values in one place.
 """
 
-from typing import Any
-
 from geoparquet_io.core.common import add_computed_column
 from geoparquet_io.core.duckdb_metadata import get_column_names
 
@@ -30,9 +28,6 @@ DEFAULT_S2_COLUMN_NAME = "s2_cell"
 
 # Default S2 level (comparable to H3 resolution 9, ~1.2 km² cells)
 DEFAULT_S2_LEVEL = 13
-
-# Default compression level for S2 temp file generation
-DEFAULT_S2_COMPRESSION_LEVEL = 15
 
 # Default target rows per partition for S2 auto-resolution
 DEFAULT_S2_TARGET_ROWS = 100000
@@ -137,16 +132,15 @@ def ensure_vecorel_columns(
         os.close(fd)
         os.unlink(temp_out)
         try:
-            write_kwargs: dict[str, Any] = {}
-            if compression is not None:
-                write_kwargs["compression"] = compression
-                write_kwargs["compression_level"] = compression_level
+            # Both pass through as given: ``None`` is the owner's default, and a
+            # level set without a codec still applies to the default codec.
             add_computed_column(
                 parquet_file,
                 temp_out,
                 column_name="id",
                 sql_expression="CAST(row_number() OVER () AS VARCHAR)",
-                **write_kwargs,
+                compression=compression,
+                compression_level=compression_level,
             )
             os.replace(temp_out, parquet_file)
         finally:
@@ -250,19 +244,12 @@ def _fix_vecorel_schema(
     import os
     import tempfile
 
-    # Detect compression from the first row group's first column
-    rg0 = pf.metadata.row_group(0)
-    original_compression = rg0.column(0).compression.lower()
-    compression_map = {
-        "snappy": "SNAPPY",
-        "gzip": "GZIP",
-        "brotli": "BROTLI",
-        "lz4": "LZ4",
-        "zstd": "ZSTD",
-        "none": "NONE",
-        "uncompressed": "NONE",
-    }
-    pa_compression = compression_map.get(original_compression, "ZSTD")
+    from geoparquet_io.core.compression import codec_from_footer
+
+    # Keep the file's codec, read from the first row group's first column.
+    # Parquet records no level, so the caller's level or the codec's own
+    # default resolves through the owner -- omitted, pyarrow fills ZSTD level 1.
+    codec = codec_from_footer(pf.metadata.row_group(0).column(0).compression, compression_level)
 
     fd, temp_out = tempfile.mkstemp(suffix=".parquet")
     os.close(fd)
@@ -270,16 +257,7 @@ def _fix_vecorel_schema(
         # The facade's use_dictionary, or pyarrow re-encodes the geometry the
         # write funnel kept out of the dictionary (#1122). The geo block and the
         # geoarrow extension types name the geometry columns.
-        writer_kwargs = without_geometry_dictionary({"compression": pa_compression}, new_schema)
-        # An omitted level is not "the default": pyarrow fills ZSTD level 1,
-        # 14 under the global 15 the file was most likely written at. Resolve
-        # the caller's level (or the codec's own default) through the owner.
-        if pa_compression != "NONE":
-            from geoparquet_io.core.compression import validate_compression_settings
-
-            _, resolved_level, _ = validate_compression_settings(pa_compression, compression_level)
-            if resolved_level is not None:
-                writer_kwargs["compression_level"] = resolved_level
+        writer_kwargs = without_geometry_dictionary(codec.pyarrow_kwargs(), new_schema)
         with pq.ParquetWriter(temp_out, new_schema, **writer_kwargs) as writer:
             for rg_idx in range(pf.metadata.num_row_groups):
                 rg_table = pf.read_row_group(rg_idx)

@@ -34,7 +34,7 @@ from geoparquet_io.core.arrow_geo_metadata import (
     nonplanar_edges_from_schema,
     with_planar_edge_types,
 )
-from geoparquet_io.core.compression import validate_compression_settings
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
     _wrap_query_with_crs,
     apply_output_crs,
@@ -59,7 +59,6 @@ from geoparquet_io.core.duckdb_utils import (
     _get_query_column_type,
     _get_query_columns,
     sql_path,
-    validate_compression_level,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import is_partition_path
@@ -212,7 +211,7 @@ def _collect_nonplanar_edges_from_metadata(original_metadata: dict | None) -> di
 def apply_nonplanar_edges(
     edges_by_col: dict[str, str],
     output_file: str,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_rows: int | None = None,
     verbose: bool = False,
@@ -489,7 +488,7 @@ def _geo_block_updates(
 
 def _ensure_v2_geo_metadata(
     output_path: str,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_rows: int | None = None,
     verbose: bool = False,
@@ -556,7 +555,7 @@ def _plain_copy_to(
     con,
     query: str,
     output_path: str,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     verbose: bool = False,
     geoparquet_version: str = "1.1",
     compression_level: int | None = None,
@@ -616,16 +615,10 @@ def _plain_copy_to(
         The repair's pending ``geo`` block when ``defer_v2_geo_repair`` asked
         for it and the output needs one; ``None`` otherwise.
     """
-    compression_map = {
-        "zstd": "ZSTD",
-        "gzip": "GZIP",
-        "snappy": "SNAPPY",
-        "lz4": "LZ4",
-        "none": "UNCOMPRESSED",
-        "uncompressed": "UNCOMPRESSED",
-        "brotli": "BROTLI",
-    }
-    duckdb_compression = compression_map.get(compression.lower(), "ZSTD")
+    # One owner validates the codec and resolves the level: an unknown codec is
+    # an error rather than a silent ZSTD, and an unset ZSTD level is gpio's 15
+    # rather than DuckDB's own 3 (#1335).
+    codec = resolve_codec(compression, compression_level, context="write")
 
     # Map version to DuckDB GEOPARQUET_VERSION parameter
     version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
@@ -639,14 +632,7 @@ def _plain_copy_to(
     )
 
     # Build options list
-    options = [
-        "FORMAT PARQUET",
-        f"COMPRESSION {duckdb_compression}",
-    ]
-    # DuckDB accepts COMPRESSION_LEVEL for ZSTD only; pairing it with GZIP or
-    # BROTLI is a binder error, not a silently ignored option.
-    if compression_level is not None and duckdb_compression.upper() == "ZSTD":
-        options.append(f"COMPRESSION_LEVEL {validate_compression_level(compression_level)}")
+    options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
     if row_group_rows is not None:
         options.append(f"ROW_GROUP_SIZE {row_group_rows}")
     kv_pairs = dict(extra_kv_metadata or {})
@@ -669,7 +655,7 @@ def _plain_copy_to(
     """
 
     if verbose:
-        debug(f"Executing plain COPY TO with {duckdb_compression} compression...")
+        debug(f"Executing plain COPY TO with {codec.name} compression...")
 
     with scoped_write_memory_limit(con, memory_limit, verbose):
         con.execute(copy_query)
@@ -683,8 +669,8 @@ def _plain_copy_to(
     if duckdb_version == "V2":
         pending_v2_geo = _ensure_v2_geo_metadata(
             output_path,
-            compression=duckdb_compression,
-            compression_level=compression_level,
+            compression=codec.name,
+            compression_level=codec.level,
             row_group_rows=row_group_rows,
             verbose=verbose,
             primary_column=geometry_column,
@@ -1195,8 +1181,8 @@ def write_parquet_with_metadata(
     query,
     output_file,
     original_metadata=None,
-    compression="ZSTD",
-    compression_level=15,
+    compression=None,
+    compression_level=None,
     row_group_size_mb=None,
     row_group_rows=None,
     custom_metadata=None,
@@ -1733,7 +1719,7 @@ def write_geoparquet_table(
     table,
     output_file: str,
     geometry_column: str | None = None,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
@@ -1792,13 +1778,8 @@ def write_geoparquet_table(
     col_meta = (geo_meta.get("columns") or {}).get(geometry_column)
     input_crs = col_meta.get("crs") if isinstance(col_meta, dict) else None
 
-    # Validate and normalize compression settings
-    validated_compression, validated_level, _ = validate_compression_settings(
-        compression or "ZSTD", compression_level, verbose
-    )
-    # Handle UNCOMPRESSED - pass None for compression when uncompressed
-    if validated_compression == "UNCOMPRESSED":
-        validated_compression = None
+    # Validated and resolved once, by the owner; every write below takes it.
+    codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
 
     # Normalize large_string/large_binary back to string/binary for Parquet compatibility
     table = _normalize_arrow_large_types(table)
@@ -1838,8 +1819,8 @@ def write_geoparquet_table(
         _write_table_with_settings(
             table,
             actual_output,
-            compression=validated_compression or "UNCOMPRESSED",
-            compression_level=validated_level,
+            compression=codec.name,
+            compression_level=codec.level,
             row_group_rows=row_group_rows,
             row_group_size_mb=row_group_size_mb,
             geoparquet_version=geoparquet_version,
@@ -1853,8 +1834,8 @@ def write_geoparquet_table(
         apply_nonplanar_edges(
             edges_by_col,
             actual_output,
-            compression=validated_compression or "UNCOMPRESSED",
-            compression_level=validated_level,
+            compression=codec.name,
+            compression_level=codec.level,
             row_group_rows=row_group_rows,
             verbose=verbose,
         )

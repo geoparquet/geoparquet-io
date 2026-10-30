@@ -42,7 +42,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -55,7 +55,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -306,7 +306,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -319,7 +319,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -618,7 +618,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -631,7 +631,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -906,7 +906,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -919,7 +919,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -1138,7 +1138,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -1151,7 +1151,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -1418,7 +1418,7 @@
        "type": "integer"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -1431,7 +1431,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -1698,7 +1698,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -1711,7 +1711,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -1962,7 +1962,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -1975,7 +1975,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -4782,7 +4782,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -4795,7 +4795,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -5226,7 +5226,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -5239,7 +5239,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -5645,7 +5645,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -5658,7 +5658,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -6135,7 +6135,7 @@
        "type": "integer range[min=0,max=None,min_open=False,max_open=False,clamp=False]"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -6148,7 +6148,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -6561,7 +6561,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -6574,7 +6574,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -6941,7 +6941,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -6954,7 +6954,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -7385,7 +7385,7 @@
        "type": "choice[auto|server|local,case_sensitive=True]"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -7398,7 +7398,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -8391,7 +8391,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -8404,7 +8404,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -8767,7 +8767,7 @@
      "kind": "command",
      "params": [
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -8780,7 +8780,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -9111,7 +9111,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -9124,7 +9124,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -9535,7 +9535,7 @@
        "type": "integer"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -9548,7 +9548,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -9895,7 +9895,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -9908,7 +9908,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -10335,7 +10335,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -10348,7 +10348,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -10759,7 +10759,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -10772,7 +10772,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -11797,7 +11797,7 @@
          "type": "text"
         },
         {
-         "default": "'ZSTD'",
+         "default": "None",
          "hidden": false,
          "is_flag": false,
          "metavar": null,
@@ -11810,7 +11810,7 @@
          "param_type": "Option",
          "required": false,
          "secondary_opts": [],
-         "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+         "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
         },
         {
          "default": "<unset>",
@@ -12125,7 +12125,7 @@
          "type": "text"
         },
         {
-         "default": "'ZSTD'",
+         "default": "None",
          "hidden": false,
          "is_flag": false,
          "metavar": null,
@@ -12138,7 +12138,7 @@
          "param_type": "Option",
          "required": false,
          "secondary_opts": [],
-         "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+         "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
         },
         {
          "default": "<unset>",
@@ -12437,7 +12437,7 @@
          "type": "text"
         },
         {
-         "default": "'ZSTD'",
+         "default": "None",
          "hidden": false,
          "is_flag": false,
          "metavar": null,
@@ -12450,7 +12450,7 @@
          "param_type": "Option",
          "required": false,
          "secondary_opts": [],
-         "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+         "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
         },
         {
          "default": "<unset>",
@@ -12724,7 +12724,7 @@
        "type": "float"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -12737,7 +12737,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -13004,7 +13004,7 @@
        "type": "float"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -13017,7 +13017,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -13253,7 +13253,7 @@
        "type": "integer"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -13266,7 +13266,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -13471,7 +13471,7 @@
      "kind": "command",
      "params": [
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -13484,7 +13484,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -14232,7 +14232,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -14245,7 +14245,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -14464,7 +14464,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -14477,7 +14477,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -14697,7 +14697,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -14710,7 +14710,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -14977,7 +14977,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -14990,7 +14990,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",

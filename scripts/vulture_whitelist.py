@@ -40,8 +40,6 @@ DEFAULT_S2_TARGET_ROWS  # unused variable (geoparquet_io/core/constants.py:38) -
 FIBOA_CORE_SCHEMA  # unused variable (geoparquet_io/core/constants.py:44) -- dead: T0e deletes (no package caller; only tests)
 NULL_CRS_NO_FLAG_ERROR  # unused variable (geoparquet_io/core/crs_utils.py:518) -- dead: T0e deletes
 ERROR_NO_GEOMETRY  # unused variable (geoparquet_io/core/format_writers.py:58) -- dead: T0e deletes
-DEFAULT_COMPRESSION  # unused variable (geoparquet_io/core/parquet_writer.py:706) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
-DEFAULT_COMPRESSION_LEVEL  # unused variable (geoparquet_io/core/parquet_writer.py:707) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
 column_existed  # unused variable (geoparquet_io/core/partition/by_a5.py:214) -- dead: T0e deletes
 column_existed  # unused variable (geoparquet_io/core/partition/by_h3.py:214) -- dead: T0e deletes
 column_existed  # unused variable (geoparquet_io/core/partition/by_s2.py:274) -- dead: T0e deletes

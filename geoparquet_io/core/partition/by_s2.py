@@ -14,10 +14,7 @@ import tempfile
 import uuid
 
 from geoparquet_io.core.add.s2 import add_s2_column
-from geoparquet_io.core.constants import (
-    DEFAULT_S2_COLUMN_NAME,
-    DEFAULT_S2_COMPRESSION_LEVEL,
-)
+from geoparquet_io.core.constants import DEFAULT_S2_COLUMN_NAME
 from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.duckdb_utils import require_community_extension
 from geoparquet_io.core.exceptions import InvalidParameterError, PartitionError
@@ -68,8 +65,6 @@ def _ensure_s2_column(input_parquet, s2_column_name, level, verbose):
             s2_column_name=s2_column_name,
             s2_level=level,
             verbose=verbose,
-            compression="ZSTD",
-            compression_level=DEFAULT_S2_COMPRESSION_LEVEL,
         )
         if verbose:
             debug(f"S2 column added successfully at level {level}")
@@ -178,8 +173,8 @@ def partition_by_s2(
     filename_prefix: str | None = None,
     profile: str | None = None,
     geoparquet_version: str | None = None,
-    compression: str = "ZSTD",
-    compression_level: int = 15,
+    compression: str | None = None,
+    compression_level: int | None = None,
     row_group_size_mb: int | None = None,
     row_group_rows: int | None = None,
     memory_limit: str | None = None,

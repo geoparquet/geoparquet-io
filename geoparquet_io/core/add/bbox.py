@@ -407,7 +407,6 @@ def add_bbox_column(
     write_options_requested = _write_options_requested(
         compression, compression_level, row_group_size_mb, row_group_rows, geoparquet_version
     )
-    compression = compression or "ZSTD"
 
     warn_planar_math_for_file("add_bbox", input_parquet)
 

@@ -878,7 +878,11 @@ Available compression types:
 - `BROTLI` (level 1-11) - High compression
 - `LZ4` - Fastest decompression
 - `SNAPPY` - Fast compression
-- `UNCOMPRESSED` - No compression
+- `UNCOMPRESSED` (or `NONE`) - No compression
+
+The level's range is the codec's, and an unset level is the codec's default
+on every write path, the DuckDB `COPY` paths included. `LZ4_RAW` is not
+accepted: `LZ4` already writes Parquet's `LZ4_RAW` codec.
 
 ### GeoParquet Version
 
