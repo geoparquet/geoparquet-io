@@ -1155,24 +1155,11 @@ def handle_directory_sub_partition(
     input_parquet: str,
     partition_type: str,
     min_size: str | None,
-    resolution: int | None = None,
-    level: int | None = None,
-    partition_resolution: int | None = None,
-    use_centroid: bool = False,
-    in_place: bool = False,
-    hive: bool = False,
-    overwrite: bool = False,
-    verbose: bool = False,
-    force: bool = False,
-    skip_analysis: bool = True,
-    compression: str | None = None,
-    compression_level: int | None = None,
-    auto: bool = False,
-    target_rows: int = 100000,
-    max_partitions: int = 10000,
+    *,
     preview: bool = False,
     column_name: str | None = None,
     output_folder: str | None = None,
+    **run,
 ) -> bool:
     """
     Handle directory input with --min-size for partition commands.
@@ -1185,25 +1172,13 @@ def handle_directory_sub_partition(
         input_parquet: Path to input file or directory
         partition_type: Type of partition ("a5", "h3", "s2", "quadkey")
         min_size: Size threshold string (e.g., "100MB") or None
-        resolution: Resolution for A5/H3/quadkey
-        level: Level for S2
-        partition_resolution: Quadkey only -- the --partition-resolution the
-            directories are split on, required alongside --resolution (#854)
-        use_centroid: Quadkey only -- the --use-centroid flag
-        in_place: Delete originals after sub-partition
-        hive: Use Hive-style partitioning
-        overwrite: Overwrite existing output
-        verbose: Print verbose output
-        force: Force operation with warnings
-        skip_analysis: Skip partition analysis
-        compression: Compression codec
-        compression_level: Compression level
-        auto: Auto-calculate resolution
-        target_rows: Target rows per partition (auto mode)
-        max_partitions: Max partitions (auto mode)
         preview: List the files that would be processed and stop
         column_name: Index column name from the command's --<index>-name option
         output_folder: OUTPUT_FOLDER argument, if the user supplied one
+        run: Everything else ``core.sub_partition.sub_partition_directory`` takes
+            (the resolution or level, ``in_place``, ``hive``, ``overwrite``,
+            ``verbose``, ``force``, ``skip_analysis``, ``write``, the auto
+            options), forwarded as given
 
     Returns:
         True if directory was handled, False if it's a file (continue to single-file logic)
@@ -1253,21 +1228,7 @@ def handle_directory_sub_partition(
             directory=input_parquet,
             partition_type=partition_type,
             min_size_bytes=min_size_bytes,
-            resolution=resolution,
-            level=level,
-            partition_resolution=partition_resolution,
-            use_centroid=use_centroid,
-            in_place=in_place,
-            hive=hive,
-            overwrite=overwrite,
-            verbose=verbose,
-            force=force,
-            skip_analysis=skip_analysis,
-            compression=compression,
-            compression_level=compression_level,
-            auto=auto,
-            target_rows=target_rows,
-            max_partitions=max_partitions,
+            **run,
         )
     except ValueError as e:
         raise click_error_for(e) from None

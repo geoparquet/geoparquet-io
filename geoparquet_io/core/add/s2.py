@@ -17,6 +17,7 @@ from geoparquet_io.core.constants import (
     DEFAULT_S2_LEVEL,
 )
 from geoparquet_io.core.index_ops import IndexSpec, add_index_column, add_index_table
+from geoparquet_io.core.parquet_writer import WriteOptions
 
 
 def _get_level_size(level):
@@ -157,6 +158,7 @@ def add_s2_column(
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         memory_limit: DuckDB memory limit for the write (e.g., '2GB', '512MB')
     """
+    write = WriteOptions.pick(locals())
     return add_index_column(
         SPEC,
         input_parquet,
@@ -165,12 +167,6 @@ def add_s2_column(
         s2_level,
         dry_run,
         verbose,
-        compression,
-        compression_level,
-        row_group_size_mb,
-        row_group_rows,
-        profile,
-        geoparquet_version,
+        write,
         overwrite,
-        memory_limit,
     )

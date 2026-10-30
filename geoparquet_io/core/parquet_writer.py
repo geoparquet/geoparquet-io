@@ -62,8 +62,8 @@ from __future__ import annotations
 
 import math
 from collections.abc import Collection, Iterator, Mapping
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast, overload
+from dataclasses import dataclass, fields, replace
+from typing import TYPE_CHECKING, Any, cast, overload
 
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
@@ -1136,3 +1136,47 @@ def write_arrow_table(
 
     if verbose:
         success(f"Wrote {table.num_rows:,} rows to {output_path}")
+
+
+# ---------------------------------------------------------------------------
+# The write-options object (#1367, T5c)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WriteOptions:
+    """The write facts a command hands the funnel, as one value.
+
+    Every write path used to forward the same seven keywords from its public
+    entry point through each private driver to ``write_parquet_with_metadata``
+    / ``stream_io.write_output`` / ``stream_io.execute_transform``, and the
+    lists drifted into 18 copies (pylint R0801). An entry point builds this once
+    (:meth:`pick` from its own parameters, or the CLI's
+    ``decorators.write_options`` from the Click values), the drivers pass it
+    along, and the funnel call expands it once (:meth:`funnel_kwargs`).
+
+    Each field means what leaving the funnel's keyword out means when unset:
+    ``None`` everywhere, which the facade resolves (codec ZSTD, the default
+    row-group count, the auto output version, gpio's memory default).
+    """
+
+    compression: str | None = None
+    compression_level: int | None = None
+    row_group_size_mb: float | None = None
+    row_group_rows: int | None = None
+    profile: str | None = None
+    geoparquet_version: str | None = None
+    memory_limit: str | None = None
+
+    @classmethod
+    def pick(cls, values: Mapping[str, Any]) -> WriteOptions:
+        """The options named in *values*; other keys are ignored, absent fields stay unset."""
+        return cls(**{f.name: values[f.name] for f in fields(cls) if f.name in values})
+
+    def with_version(self, geoparquet_version: str | None) -> WriteOptions:
+        """These options with the output version replaced (a pass-through keeps the input's)."""
+        return replace(self, geoparquet_version=geoparquet_version)
+
+    def funnel_kwargs(self) -> dict[str, Any]:
+        """The keywords every funnel takes, for ``funnel(..., **options.funnel_kwargs())``."""
+        return {f.name: getattr(self, f.name) for f in fields(self)}

@@ -688,6 +688,7 @@ class TestStreamingPathsInvalidateStats:
 
     def _stream_extract(self, src, out, **overrides):
         from geoparquet_io.core.extract import _extract_streaming
+        from geoparquet_io.core.parquet_writer import WriteOptions
 
         kwargs = {
             "input_path": str(src),
@@ -699,12 +700,7 @@ class TestStreamingPathsInvalidateStats:
             "where": None,
             "limit": None,
             "verbose": False,
-            "compression": "ZSTD",
-            "compression_level": None,
-            "row_group_size_mb": None,
-            "row_group_rows": None,
-            "profile": None,
-            "geoparquet_version": "1.1",
+            "write": WriteOptions(compression="ZSTD", geoparquet_version="1.1"),
         }
         kwargs.update(overrides)
         _extract_streaming(**kwargs)

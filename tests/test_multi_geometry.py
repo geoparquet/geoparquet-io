@@ -836,6 +836,7 @@ class TestMultiGeometryDerivedStatsInvalidation:
     def test_extract_streaming_to_a_file_keeps_the_secondary_readable(self, tmp_path):
         """stdin-shaped input with a file output takes the other extract path."""
         from geoparquet_io.core.extract import _extract_streaming
+        from geoparquet_io.core.parquet_writer import WriteOptions
 
         input_file = tmp_path / "in.parquet"
         output_file = tmp_path / "out.parquet"
@@ -850,12 +851,7 @@ class TestMultiGeometryDerivedStatsInvalidation:
             "id = 1",
             None,
             False,
-            "ZSTD",
-            None,
-            None,
-            None,
-            None,
-            None,
+            WriteOptions(compression="ZSTD"),
         )
 
         boundary = self._geo(output_file)["columns"]["boundary"]

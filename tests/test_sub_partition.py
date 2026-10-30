@@ -1389,7 +1389,18 @@ class TestSubPartitionFrontDoorParity:
             getattr(ops, function)(temp_partition_dir, min_size=threshold, **api_kwargs)
             api_call = fake.call_args.kwargs
 
-        assert api_call == cli_call
+        # The two doors may spell a defaulted argument or leave it out; compare
+        # what core receives once its defaults are applied.
+        import inspect
+
+        signature = inspect.signature(core_sub_partition.sub_partition_directory)
+
+        def received(call):
+            bound = signature.bind(**call)
+            bound.apply_defaults()
+            return bound.arguments
+
+        assert received(api_call) == received(cli_call)
 
 
 @pytest.mark.parametrize("option", ["resolution", "partition_resolution"])

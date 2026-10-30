@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import add, cli
 from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.parquet_writer import WriteOptions
 from tests.conftest import BUILDINGS_TEST_FILE
 
 
@@ -885,14 +886,8 @@ class TestAddBboxCoveringMetadata:
             output_path=output_file,
             bbox_column_name="bbox",
             verbose=False,
-            compression="ZSTD",
-            compression_level=None,
-            row_group_size_mb=None,
-            row_group_rows=None,
-            profile=None,
+            write=WriteOptions(compression="ZSTD", geoparquet_version="2.0"),
             force=False,
-            geoparquet_version="2.0",
-            memory_limit=None,
         )
 
         assert os.path.exists(output_file)

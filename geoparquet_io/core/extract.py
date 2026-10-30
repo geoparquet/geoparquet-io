@@ -73,6 +73,7 @@ from geoparquet_io.core.geometry_repair import (
 )
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
 from geoparquet_io.core.parquet_writer import (
+    WriteOptions,
     resolve_output_geoparquet_version,
     resolve_row_group_rows_for_query,
 )
@@ -953,12 +954,7 @@ def _extract_streaming(
     where: str | None,
     limit: int | None,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
+    write: WriteOptions,
     repair_geometry: bool = True,
 ) -> None:
     """Handle extraction with streaming input/output."""
@@ -1046,13 +1042,8 @@ def _extract_streaming(
             output_path,
             original_metadata=metadata,
             geometry_column=geom_col,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
+            **write.funnel_kwargs(),
         )
 
         if not should_stream_output(output_path):
@@ -1181,14 +1172,8 @@ def _execute_extraction(
     selected_columns: list[str],
     verbose: bool,
     show_sql: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None = None,
+    write: WriteOptions,
     write_strategy: str = "duckdb-kv",
-    memory_limit: str | None = None,
     geometry_col: str | None = None,
     repair_geometry: bool = True,
 ) -> None:
@@ -1257,19 +1242,13 @@ def _execute_extraction(
             query,
             output_parquet,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
             show_sql=show_sql,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
             write_strategy=write_strategy,
-            memory_limit=memory_limit,
             input_file=input_parquet,
             invalidate_derived_stats=stale_columns is None or bool(stale_columns),
             invalidate_derived_stats_columns=stale_columns,
+            **write.funnel_kwargs(),
         )
 
         # Get extracted row count from output file metadata (fast - reads footer only)
@@ -1417,6 +1396,7 @@ def _extract_impl(
     if output_parquet and not is_streaming and not dry_run:
         handle_output_overwrite(output_parquet, overwrite, input_parquet)
 
+    write = WriteOptions.pick(locals())
     if is_streaming and not dry_run:
         bbox_tuple = parse_bbox(bbox) if bbox else None
         geometry_wkt = parse_geometry_input(geometry, use_first_geometry) if geometry else None
@@ -1432,12 +1412,7 @@ def _extract_impl(
             where,
             limit,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
+            write,
             repair_geometry=repair_geometry,
         )
 
@@ -1508,14 +1483,8 @@ def _extract_impl(
             selected_columns,
             verbose,
             show_sql,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
+            write,
             write_strategy,
-            memory_limit,
             geometry_col=geometry_col,
             repair_geometry=repair_geometry,
         )

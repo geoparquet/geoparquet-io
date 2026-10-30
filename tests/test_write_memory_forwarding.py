@@ -46,6 +46,7 @@ from geoparquet_io.cli.commands import add as cli_add
 from geoparquet_io.cli.commands import process as cli_process
 from geoparquet_io.cli.commands import sort as cli_sort
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.parquet_writer import WriteOptions
 from tests.conftest import skip_if_geography_unavailable
 
 
@@ -699,14 +700,8 @@ class TestIndexStreamingForwardMemoryLimit:
                 kdtree_column_name="kdtree_cell",
                 iterations=1,
                 verbose=False,
-                compression="ZSTD",
-                compression_level=None,
-                row_group_size_mb=None,
-                row_group_rows=None,
+                write=WriteOptions(compression="ZSTD", memory_limit="605MB"),
                 sample_size=100,
-                profile=None,
-                geoparquet_version=None,
-                memory_limit="605MB",
             )
         mocked.assert_called_once()
         assert mocked.call_args.kwargs.get("memory_limit") == "605MB"
@@ -768,14 +763,8 @@ class TestIndexStreamingForwardMemoryLimit:
                 output_path="out.parquet",
                 bbox_column_name="bbox",
                 verbose=False,
-                compression="ZSTD",
-                compression_level=None,
-                row_group_size_mb=None,
-                row_group_rows=None,
-                profile=None,
+                write=WriteOptions(compression="ZSTD", memory_limit="609MB"),
                 force=False,
-                geoparquet_version=None,
-                memory_limit="609MB",
             )
         mocked.assert_called_once()
         assert mocked.call_args.kwargs.get("memory_limit") == "609MB"

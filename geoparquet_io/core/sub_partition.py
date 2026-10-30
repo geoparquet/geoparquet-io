@@ -20,6 +20,7 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.sizing import bytes_to_mb
 
 
@@ -180,8 +181,7 @@ def sub_partition_directory(
     verbose: bool = False,
     force: bool = False,
     skip_analysis: bool = True,
-    compression: str | None = None,
-    compression_level: int | None = None,
+    write: WriteOptions | None = None,
     auto: bool = False,
     target_rows: int = 100000,
     max_partitions: int = 10000,
@@ -208,8 +208,9 @@ def sub_partition_directory(
         verbose: Print verbose output
         force: Force operation even with warnings
         skip_analysis: Skip partition analysis (default True for batch)
-        compression: Compression codec
-        compression_level: Compression level
+        write: The write options each partition is written with (codec and level;
+            the rest of :class:`~geoparquet_io.core.parquet_writer.WriteOptions`
+            at its default)
         auto: Auto-calculate resolution
         target_rows: Target rows per partition for auto mode
         max_partitions: Max partitions for auto mode
@@ -256,8 +257,7 @@ def sub_partition_directory(
                 "verbose": verbose,
                 "force": force,
                 "skip_analysis": skip_analysis,
-                "compression": compression,
-                "compression_level": compression_level,
+                "write": write,
                 "auto": auto,
                 "target_rows": target_rows,
                 "max_partitions": max_partitions,

@@ -16,6 +16,7 @@ from geoparquet_io.core.index_ops import IndexSpec, add_index_column, add_index_
 from geoparquet_io.core.logging_config import (
     debug,
 )
+from geoparquet_io.core.parquet_writer import WriteOptions
 
 
 def _is_geographic_crs(crs_info: dict | str | None) -> bool | None:
@@ -252,6 +253,7 @@ def add_quadkey_column(
         hive_input: Read a multi-file input with hive partitioning on, so the
             ``key=value`` directory names come through as columns
     """
+    write = WriteOptions.pick(locals())
     return add_index_column(
         SPEC,
         input_parquet,
@@ -260,14 +262,8 @@ def add_quadkey_column(
         resolution,
         dry_run,
         verbose,
-        compression,
-        compression_level,
-        row_group_size_mb,
-        row_group_rows,
-        profile,
-        geoparquet_version,
+        write,
         overwrite,
-        memory_limit,
         use_centroid=use_centroid,
         allow_schema_diff=allow_schema_diff,
         hive_input=hive_input,

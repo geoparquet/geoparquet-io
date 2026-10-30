@@ -47,6 +47,7 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.common import preview_partition
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
@@ -207,19 +208,14 @@ def add_index_column(
     resolution,
     dry_run=False,
     verbose=False,
-    compression=None,
-    compression_level=None,
-    row_group_size_mb=None,
-    row_group_rows=None,
-    profile=None,
-    geoparquet_version=None,
+    write: WriteOptions | None = None,
     overwrite=False,
-    memory_limit=None,
     use_centroid=False,
     allow_schema_diff=False,
     hive_input=None,
 ):
     configure_verbose(verbose)
+    write = write or WriteOptions()
     validate_index_resolution(spec, resolution)
     preflight_index(spec, "add")
     warn_planar_math_for_file(f"add_{spec.name}", input_parquet)
@@ -231,19 +227,13 @@ def add_index_column(
             column_name,
             resolution,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
-            memory_limit,
+            write,
             use_centroid=use_centroid,
         )
     handle_output_overwrite(output_parquet, overwrite, input_parquet)
     if not spec.multiple_files:
         require_single_file(input_parquet, f"add {spec.name}")
-    validate_profile_for_urls(profile, input_parquet, output_parquet)
+    validate_profile_for_urls(write.profile, input_parquet, output_parquet)
     geom_col = find_primary_geometry_column(input_parquet, verbose)
     input_path = resolve_file_url(input_parquet, verbose)
     source_crs = source_crs_string(input_parquet, verbose, geom_col)
@@ -273,19 +263,13 @@ def add_index_column(
         index_expression(spec, geom_col, resolution, source_crs, bbox_col),
         dry_run=dry_run,
         verbose=verbose,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
-        memory_limit=memory_limit,
         custom_metadata={"covering": {spec.name: {"column": column_name, spec.unit: resolution}}},
         from_clause=source,
         connection_setup=lambda con: load_index(con, spec, verbose=verbose),
         dry_run_description=description,
         report_count=spec.report_count,
         progress_message=f"Adding {spec.label} column '{column_name}' ({spec.display_unit or spec.unit} {resolution})...",
+        **write.funnel_kwargs(),
     )
     if dry_run:
         return
@@ -301,13 +285,7 @@ def add_index_streaming(
     column_name,
     resolution,
     verbose,
-    compression,
-    compression_level,
-    row_group_size_mb,
-    row_group_rows,
-    profile,
-    geoparquet_version,
-    memory_limit,
+    write: WriteOptions,
     use_centroid=False,
 ):
     """Build the index query through the shared streaming driver."""
@@ -344,13 +322,7 @@ def add_index_streaming(
         output_path,
         make_query,
         verbose=verbose,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
-        memory_limit=memory_limit,
+        **write.funnel_kwargs(),
     )
     if not should_stream_output(output_path):
         unit = spec.display_unit or spec.unit
@@ -432,10 +404,8 @@ def ensure_index_column(
             column_name,
             resolution,
             verbose=verbose,
-            compression=None,
-            compression_level=None,
+            write=WriteOptions(profile=profile),
             use_centroid=use_centroid,
-            profile=profile,
             allow_schema_diff=allow_schema_diff,
             hive_input=hive_input,
         )
@@ -551,13 +521,7 @@ def partition_index(
     force=False,
     skip_analysis=False,
     filename_prefix=None,
-    profile=None,
-    geoparquet_version=None,
-    compression=None,
-    compression_level=None,
-    row_group_size_mb=None,
-    row_group_rows=None,
-    memory_limit=None,
+    write: WriteOptions | None = None,
     auto=False,
     target_rows=100000,
     max_partitions=10000,
@@ -572,6 +536,7 @@ def partition_index(
     )
     from geoparquet_io.core.streaming import read_stdin_to_temp_file
 
+    write = write or WriteOptions()
     validate_partition_arguments(spec, resolution, partition_resolution, auto)
     preflight_index(spec, "partition")
     configure_verbose(verbose)
@@ -602,7 +567,7 @@ def partition_index(
                 min_resolution=spec.min_resolution,
                 max_resolution=spec.max_resolution,
                 verbose=verbose,
-                profile=profile,
+                profile=write.profile,
             )
             if spec.prefix_partition:
                 partition_resolution = resolution
@@ -630,7 +595,7 @@ def partition_index(
 
     try:
         working_parquet, column_name, temp_file = ensure_index_column(
-            spec, actual_input, column_name, resolution, verbose, use_centroid, profile
+            spec, actual_input, column_name, resolution, verbose, use_centroid, write.profile
         )
 
         if preview:
@@ -665,13 +630,7 @@ def partition_index(
                 force=force,
                 skip_analysis=skip_analysis,
                 filename_prefix=filename_prefix,
-                profile=profile,
-                geoparquet_version=geoparquet_version,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
-                memory_limit=memory_limit,
+                **write.funnel_kwargs(),
             )
 
             total_size_mb, avg_size_mb = calculate_partition_stats(output_folder, num_partitions)

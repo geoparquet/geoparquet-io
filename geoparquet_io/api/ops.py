@@ -1509,6 +1509,7 @@ def _sub_partition(
 
     from geoparquet_io.core import sub_partition as core_sub_partition
     from geoparquet_io.core.exceptions import InvalidParameterError, PartitionError
+    from geoparquet_io.core.parquet_writer import WriteOptions
 
     if not _Path(directory).is_dir():
         raise InvalidParameterError(
@@ -1579,8 +1580,7 @@ def _sub_partition(
         verbose=verbose,
         force=force,
         skip_analysis=skip_analysis,
-        compression=compression,
-        compression_level=compression_level,
+        write=WriteOptions(compression=compression, compression_level=compression_level),
         auto=auto,
         target_rows=target_rows,
         max_partitions=max_partitions,

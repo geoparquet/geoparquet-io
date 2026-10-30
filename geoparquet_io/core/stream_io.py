@@ -47,6 +47,7 @@ from geoparquet_io.core.geo_metadata import (
 )
 from geoparquet_io.core.geometry_detection import native_geometry_types_from_query
 from geoparquet_io.core.logging_config import progress, warn
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.streaming import (
     apply_geoarrow_extension_type,
@@ -599,6 +600,7 @@ def execute_transform(
     if should_stream_output(output_path):
         verbose = False
 
+    write = WriteOptions.pick(locals())
     with open_input(
         input_path, verbose=verbose, stream_output=should_stream_output(output_path)
     ) as (source, metadata, is_stream, con):
@@ -620,14 +622,8 @@ def execute_transform(
             query,
             output_path,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
             custom_metadata=custom_metadata,
-            geoparquet_version=geoparquet_version,
             extra_kv_metadata=extra_kv_metadata,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )

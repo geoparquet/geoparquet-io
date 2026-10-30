@@ -570,6 +570,7 @@
     "ParquetWriteSettings",
     "SPATIAL_BAND_TOP_ROWS",
     "WRITER_VECTOR_ROWS",
+    "WriteOptions",
     "align_to_writer_vector",
     "apply_output_kv_metadata",
     "carried_geoparquet_version",

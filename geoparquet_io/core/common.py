@@ -54,6 +54,7 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.remote import (
     display_path,
     is_remote_url,
@@ -257,24 +258,19 @@ def add_computed_column(
     # Closed deterministically, success or not: the caller may os.replace() the
     # input right after this returns, which Windows refuses while a reader
     # holds it (#1032), and a failed write removes its staging file the same way.
+    write = WriteOptions.pick(locals())
     try:
         write_parquet_with_metadata(
             con,
             query,
             output_parquet,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             custom_metadata=custom_metadata,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
             # The precondition: the query above is `SELECT *` plus one computed
             # column, so the rows this write reads are `input_parquet`'s own.
             input_file=input_parquet,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
     finally:
         con.close()

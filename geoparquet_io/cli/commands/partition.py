@@ -25,6 +25,7 @@ from geoparquet_io.cli.decorators import (
 )
 from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.index_ops import get_index_spec
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.admin_hierarchical import (
     partition_by_admin_hierarchical as partition_admin_hierarchical_impl,
 )
@@ -1040,6 +1041,9 @@ def _partition_cell_index(
     index_options = {resolution_key: resolution}
     if spec.prefix_partition:
         index_options.update(partition_resolution=partition_resolution, use_centroid=use_centroid)
+    # A directory run writes each partition with the codec only (its row groups
+    # and memory are the defaults), as it always has.
+    codec = WriteOptions(compression=compression, compression_level=compression_level)
     with _activate_s3(ctx):
         # Handle directory input with --min-size
         if handle_directory_sub_partition(
@@ -1056,8 +1060,7 @@ def _partition_cell_index(
             verbose=verbose,
             force=force,
             skip_analysis=skip_analysis,
-            compression=compression,
-            compression_level=compression_level,
+            write=codec,
             auto=auto,
             target_rows=target_rows,
             max_partitions=max_partitions,

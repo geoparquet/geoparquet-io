@@ -31,6 +31,7 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
     display_path,
@@ -504,6 +505,7 @@ def add_kdtree_column(
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
+    write = WriteOptions.pick(locals())
     if is_streaming and not dry_run:
         _add_kdtree_streaming(
             input_parquet,
@@ -511,14 +513,8 @@ def add_kdtree_column(
             kdtree_column_name,
             iterations,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
+            write,
             sample_size,
-            profile,
-            geoparquet_version,
-            memory_limit=memory_limit,
             auto_target_rows=auto_target_rows,
         )
         return
@@ -674,19 +670,13 @@ def add_kdtree_column(
         query,
         output_parquet,
         original_metadata=metadata,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
         custom_metadata=kdtree_metadata,
         verbose=verbose,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
         # The rows this write reads are the input's, so auto mode resolves the
         # output version from the input file rather than from a `geo` key a
         # native-geo-only input does not have (#993).
         input_file=input_parquet,
-        memory_limit=memory_limit,
+        **write.funnel_kwargs(),
     )
 
     con.close()
@@ -703,14 +693,8 @@ def _add_kdtree_streaming(
     kdtree_column_name: str,
     iterations: int | None,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
+    write: WriteOptions,
     sample_size: int,
-    profile: str | None,
-    geoparquet_version: str | None,
-    memory_limit: str | None,
     auto_target_rows: int | tuple | None = None,
 ) -> None:
     """Handle streaming input/output for add_kdtree."""
@@ -776,14 +760,8 @@ def _add_kdtree_streaming(
                 output_path,
                 original_metadata=metadata,
                 geometry_column=geom_col,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
                 verbose=verbose,
-                profile=profile,
-                geoparquet_version=geoparquet_version,
-                memory_limit=memory_limit,
+                **write.funnel_kwargs(),
             )
         finally:
             con.close()

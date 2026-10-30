@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from geoparquet_io.core.constants import DEFAULT_A5_COLUMN_NAME
 from geoparquet_io.core.index_ops import get_index_spec, partition_index
+from geoparquet_io.core.parquet_writer import WriteOptions
 
 SPEC = get_index_spec("a5")
 
@@ -69,6 +70,7 @@ def partition_by_a5(
         target_rows: Target rows per partition for auto mode (default: 100000)
         max_partitions: Maximum partitions for auto mode (default: 10000)
     """
+    write = WriteOptions.pick(locals())
     return partition_index(
         SPEC,
         input_parquet,
@@ -84,13 +86,7 @@ def partition_by_a5(
         force,
         skip_analysis,
         filename_prefix,
-        profile,
-        geoparquet_version,
-        compression,
-        compression_level,
-        row_group_size_mb,
-        row_group_rows,
-        memory_limit,
+        write,
         auto,
         target_rows,
         max_partitions,

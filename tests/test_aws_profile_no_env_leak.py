@@ -103,6 +103,20 @@ def test_uses_aws_profile_without_profile_keeps_outer_scope():
         assert inner == {"profile": "inner", "profile_from_env": False, "s3_region": "eu-west-1"}
 
 
+def test_uses_aws_profile_reads_the_profile_off_the_write_options():
+    """A driver that takes ``write: WriteOptions`` is scoped by ``write.profile`` (#1367)."""
+    from geoparquet_io.core.parquet_writer import WriteOptions
+
+    @uses_aws_profile
+    def probe(path, write):
+        return get_active_s3_config().get("profile")
+
+    assert probe("s3://b/k", WriteOptions(profile="opts")) == "opts"
+    assert probe("s3://b/k", write=WriteOptions(profile="kw")) == "kw"
+    assert probe("s3://b/k", WriteOptions()) is None
+    assert get_active_s3_config().get("profile") is None
+
+
 def test_uses_aws_profile_rejects_function_without_profile_parameter():
     with pytest.raises(TypeError, match="profile"):
 

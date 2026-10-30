@@ -5,6 +5,7 @@ from __future__ import annotations
 from geoparquet_io.core.duckdb_metadata import get_column_names, get_schema_info
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.common import (
     partition_by_column,
     preview_partition,
@@ -103,6 +104,7 @@ def partition_by_string(
         temp_file_path = read_stdin_to_temp_file(verbose)
         input_parquet = temp_file_path
 
+    write = WriteOptions.pick(locals())
     try:
         # Validate column exists
         if verbose:
@@ -169,13 +171,7 @@ def partition_by_string(
             force=force,
             skip_analysis=skip_analysis,
             filename_prefix=filename_prefix,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
 
         success(f"Successfully created {num_partitions} partition file(s)")

@@ -6,6 +6,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.constants import DEFAULT_H3_COLUMN_NAME
 from geoparquet_io.core.index_ops import IndexSpec, add_index_column, add_index_table
+from geoparquet_io.core.parquet_writer import WriteOptions
 
 
 def _get_resolution_size(resolution):
@@ -129,6 +130,7 @@ def add_h3_column(
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         memory_limit: DuckDB memory limit for the write (e.g., '2GB', '512MB')
     """
+    write = WriteOptions.pick(locals())
     return add_index_column(
         SPEC,
         input_parquet,
@@ -137,12 +139,6 @@ def add_h3_column(
         h3_resolution,
         dry_run,
         verbose,
-        compression,
-        compression_level,
-        row_group_size_mb,
-        row_group_rows,
-        profile,
-        geoparquet_version,
+        write,
         overwrite,
-        memory_limit,
     )

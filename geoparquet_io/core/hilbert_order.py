@@ -30,6 +30,7 @@ from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.optional_deps import load_module
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
+    WriteOptions,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
 )
@@ -386,19 +387,14 @@ def hilbert_order(
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
+    write = WriteOptions.pick(locals())
     if is_streaming:
         _hilbert_order_streaming(
             input_parquet,
             output_parquet,
             geometry_column,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
-            memory_limit,
+            write,
         )
         return
 
@@ -409,14 +405,8 @@ def hilbert_order(
         geometry_column,
         add_bbox_flag,
         verbose,
-        compression,
-        compression_level,
-        row_group_size_mb,
-        row_group_rows,
-        profile,
-        geoparquet_version,
+        write,
         overwrite,
-        memory_limit,
     )
 
 
@@ -425,13 +415,7 @@ def _hilbert_order_streaming(
     output_path: str | None,
     geometry_column: str,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
-    memory_limit: str | None = None,
+    write: WriteOptions,
 ) -> None:
     """Handle streaming input/output for hilbert_order."""
     # Suppress verbose when streaming to stdout
@@ -484,14 +468,8 @@ def _hilbert_order_streaming(
                 output_path,
                 original_metadata=metadata,
                 geometry_column=geom_col,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
                 verbose=verbose,
-                profile=profile,
-                geoparquet_version=geoparquet_version,
-                memory_limit=memory_limit,
+                **write.funnel_kwargs(),
             )
             if not should_stream_output(output_path):
                 success(f"Wrote data without Hilbert ordering to: {output_path}")
@@ -530,14 +508,8 @@ def _hilbert_order_streaming(
             output_path,
             original_metadata=metadata,
             geometry_column=geom_col,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
 
         if not should_stream_output(output_path):
@@ -551,14 +523,8 @@ def _hilbert_order_file_based(
     geometry_column: str,
     add_bbox_flag: bool,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
+    write: WriteOptions,
     overwrite: bool = False,
-    memory_limit: str | None = None,
 ) -> None:
     """Handle file-based hilbert_order operation."""
     # Check if output file exists and handle overwrite (fixes issue #278)
@@ -571,7 +537,7 @@ def _hilbert_order_file_based(
         input_parquet, add_bbox_flag, verbose
     )
 
-    validate_profile_for_urls(profile, input_parquet, output_parquet)
+    validate_profile_for_urls(write.profile, input_parquet, output_parquet)
     show_remote_read_message(working_parquet, verbose)
 
     working_url = resolve_file_url(working_parquet, verbose)
@@ -619,15 +585,9 @@ def _hilbert_order_file_based(
             passthrough_query,
             output_parquet,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
             input_file=input_parquet,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
         con.close()
         if temp_file_created and temp_file:
@@ -664,15 +624,9 @@ def _hilbert_order_file_based(
             order_query,
             output_parquet,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
             input_file=input_parquet,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
         if verbose:
             debug("Hilbert ordering completed successfully")
