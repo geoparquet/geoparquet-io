@@ -20,7 +20,6 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import RemoteAccessError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
-from geoparquet_io.core.geo_metadata import DEFAULT_GEOPARQUET_VERSION
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
@@ -51,7 +50,7 @@ from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 
 @uses_aws_profile
-def _resolve_output_version(
+def _advised_output_version(
     input_parquet: str,
     geoparquet_version: str | None,
     verbose: bool,
@@ -63,9 +62,8 @@ def _resolve_output_version(
     ``--geoparquet-version 2.0``, and whether they offer their row-group
     guidance at all, both hang off this answer -- so it has to be the *write's*
     answer. It asks the write facade the same question the write asks it, with
-    the same two witnesses (the input file, then its carried metadata) and the
-    same ``or DEFAULT_GEOPARQUET_VERSION`` fallback that
-    ``write_parquet_with_metadata`` applies.
+    the same two witnesses (the input file, then its carried metadata), and the
+    facade's answer includes the default the write would fall back to.
 
     It used to re-implement that decision instead, reading only the carried
     ``geo`` key. Once the facade started consulting the file, the two answers
@@ -80,8 +78,8 @@ def _resolve_output_version(
     Callers use None to stay silent. Defaulting instead is what produced the
     original wrong warning -- a failed read is not evidence of a 1.1 input.
     The facade cannot make that distinction on its own: it swallows a failed
-    read and returns None, which the ``or`` below would turn straight back into
-    the guess. So the read stays here, as the gate on saying anything at all.
+    read and answers with the default, which is the guess. So the read stays
+    here, as the gate on saying anything at all.
     """
     if geoparquet_version:
         return geoparquet_version
@@ -93,14 +91,11 @@ def _resolve_output_version(
     except Exception as e:  # noqa: BLE001 - any read failure means "stay quiet"
         debug(f"Could not read {input_parquet} to resolve output version: {e}")
         return None
-    return (
-        resolve_output_geoparquet_version(
-            None,
-            input_file=input_parquet,
-            original_metadata=metadata,
-            verbose=verbose,
-        )
-        or DEFAULT_GEOPARQUET_VERSION
+    return resolve_output_geoparquet_version(
+        None,
+        input_file=input_parquet,
+        original_metadata=metadata,
+        verbose=verbose,
     )
 
 
@@ -376,7 +371,7 @@ def hilbert_order(
         memory_limit: DuckDB memory limit for streaming writes (e.g., '2GB', '512MB')
     """
     row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
-    effective_version = _resolve_output_version(input_parquet, geoparquet_version, verbose, profile)
+    effective_version = _advised_output_version(input_parquet, geoparquet_version, verbose, profile)
     if effective_version == "1.1":
         warn(
             "Hilbert sorting to GeoParquet v1.1 provides no spatial filter pushdown benefit. "

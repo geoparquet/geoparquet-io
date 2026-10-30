@@ -42,6 +42,7 @@ from geoparquet_io.core.parquet_footer import (
 )
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
+    preserved_geoparquet_version,
     resolve_row_group_rows_for_rewrite,
 )
 from geoparquet_io.core.remote import (
@@ -635,21 +636,9 @@ def get_geoparquet_version_from_check_results(check_results):
         str: GeoParquet version string (1.0, 1.1, 2.0, parquet-geo-only) or None for default
     """
     bbox_result = check_results.get("bbox", {})
-    file_type = bbox_result.get("file_type", "unknown")
-
-    if file_type == "geoparquet_v2":
-        return "2.0"
-    elif file_type == "parquet_geo_only":
-        return "parquet-geo-only"
-    elif file_type == "geoparquet_v1":
-        # Check the specific version from metadata
-        version = bbox_result.get("version", "1.1.0")
-        if version and version.startswith("1.0"):
-            return "1.0"
-        return "1.1"
-    else:
-        # Unknown or no geo metadata - default to 1.1
-        return None
+    return preserved_geoparquet_version(
+        bbox_result.get("file_type", "unknown"), bbox_result.get("version")
+    )
 
 
 def _apply_covering_fix(check_results, current_file, temp_files, verbose, profile):

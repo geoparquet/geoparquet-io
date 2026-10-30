@@ -34,6 +34,7 @@ from geoparquet_io.core.geo_metadata import (
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, success, warn
 from geoparquet_io.core.parquet_footer import FooterPatchUnsupported, patch_footer_kv
+from geoparquet_io.core.parquet_writer import declared_geoparquet_version
 from geoparquet_io.core.remote import is_remote_url
 from geoparquet_io.core.streaming import find_geometry_column_from_table
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
@@ -165,7 +166,7 @@ def add_bbox_metadata_table(
     # 'covering' was introduced in GeoParquet 1.1. This path exists solely to
     # write that key, so a 1.0 table gets a clear error naming the conflict
     # rather than silently returning a table without the metadata it asked for.
-    table_version = geo_meta.get("version", "")
+    table_version = declared_geoparquet_version(geo_meta)
     if not covering_supported(table_version):
         raise ValueError(
             f"Cannot add bbox covering metadata: this table declares GeoParquet "
@@ -326,7 +327,7 @@ def add_bbox_metadata(
     # covering is an implicit side effect of writing a bbox column and is simply
     # omitted — this command exists solely to write that key, so a 1.0 file gets a
     # clear error naming the conflict rather than a silent no-op reporting success.
-    file_version = geo_meta.get("version", "")
+    file_version = declared_geoparquet_version(geo_meta)
     if not covering_supported(file_version):
         raise GeoParquetError(
             f"Cannot add bbox covering metadata: this file declares GeoParquet "

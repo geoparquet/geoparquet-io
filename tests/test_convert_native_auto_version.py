@@ -1,7 +1,6 @@
 """Auto mode must not relabel a GeoArrow-native input as WKB (#1176).
 
-``resolve_geoparquet_version_from_file`` reads the input's *version* (1.1.0) and
-answered "1.1". The nested-list geometry then passed through the conversion
+Auto mode read the input's *version* (1.1.0) and answered "1.1". The nested-list geometry then passed through the conversion
 query untouched while the output's ``geo`` block declared ``encoding: WKB`` --
 a file whose metadata contradicts its own schema. ``1.1-geoarrow`` is the
 version that describes a native 1.1 file, so that is what auto resolves to.
@@ -13,8 +12,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.common import resolve_geoparquet_version_from_file
 from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.validate import validate_geoparquet
 
 NATIVE_ENCODINGS = (
@@ -40,13 +39,11 @@ def native_input(request, test_data_dir):
 class TestAutoVersionOfANativeInput:
     def test_resolves_to_1_1_geoarrow(self, native_input):
         path, _encoding = native_input
-        assert resolve_geoparquet_version_from_file(path) == "1.1-geoarrow"
+        assert resolve_output_geoparquet_version(None, input_file=path) == "1.1-geoarrow"
 
     def test_a_wkb_1_1_input_still_resolves_to_1_1(self, test_data_dir):
-        assert (
-            resolve_geoparquet_version_from_file(str(test_data_dir / "buildings_test.parquet"))
-            == "1.1"
-        )
+        path = str(test_data_dir / "buildings_test.parquet")
+        assert resolve_output_geoparquet_version(None, input_file=path) == "1.1"
 
 
 class TestConvertPreservesNativeEncoding:

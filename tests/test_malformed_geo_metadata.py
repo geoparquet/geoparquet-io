@@ -2083,41 +2083,41 @@ def test_detect_file_type_still_reads_a_real_version(version, expected, tmp_path
 
 
 @pytest.mark.parametrize(("case", "bad"), NON_STRING_VERSIONS)
-def test_extract_version_from_metadata_survives_a_non_string_version(case, bad):
+def test_carried_version_survives_a_non_string_version(case, bad):
     """`sort hilbert` resolves its output version through here (#979)."""
-    from geoparquet_io.core.streaming import extract_version_from_metadata
+    from geoparquet_io.core.parquet_writer import carried_geoparquet_version
 
     reset_malformed_geo_warnings()
     metadata = {b"geo": json.dumps(_version_block(bad)).encode("utf-8")}
-    assert extract_version_from_metadata(metadata) is None
+    assert carried_geoparquet_version(metadata) is None
 
 
 @pytest.mark.parametrize(
     ("version", "expected"), [("1.0.0", "1.1"), ("1.1.0", "1.1"), ("2.0.0", "2.0")]
 )
-def test_extract_version_from_metadata_still_reads_a_real_version(version, expected):
-    from geoparquet_io.core.streaming import extract_version_from_metadata
+def test_carried_version_still_reads_a_real_version(version, expected):
+    from geoparquet_io.core.parquet_writer import carried_geoparquet_version
 
     metadata = {b"geo": json.dumps(_version_block(version)).encode("utf-8")}
-    assert extract_version_from_metadata(metadata) == expected
+    assert carried_geoparquet_version(metadata) == expected
 
 
 @pytest.mark.parametrize(("case", "bad"), NON_STRING_VERSIONS)
-def test_detect_version_from_table_survives_a_non_string_version(case, bad):
+def test_table_version_survives_a_non_string_version(case, bad):
     """The API-side twin: `gpio.read(f).write(out)` resolves auto-mode through here."""
-    from geoparquet_io.core.common import resolve_geoparquet_version_from_table
+    from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
     reset_malformed_geo_warnings()
-    assert resolve_geoparquet_version_from_table(_table_with_geo(_version_block(bad))) is None
+    table = _table_with_geo(_version_block(bad))
+    assert resolve_output_geoparquet_version(None, table=table) == "1.1"
 
 
 @pytest.mark.parametrize(("version", "expected"), [("1.0.0", "1.1"), ("2.0.0", "2.0")])
-def test_detect_version_from_table_still_reads_a_real_version(version, expected):
-    from geoparquet_io.core.common import resolve_geoparquet_version_from_table
+def test_table_version_still_reads_a_real_version(version, expected):
+    from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
-    assert (
-        resolve_geoparquet_version_from_table(_table_with_geo(_version_block(version))) == expected
-    )
+    table = _table_with_geo(_version_block(version))
+    assert resolve_output_geoparquet_version(None, table=table) == expected
 
 
 @pytest.mark.parametrize(("case", "bad"), NON_STRING_VERSIONS)

@@ -1346,7 +1346,7 @@ def write_parquet_with_metadata(
         input_crs, input_file=input_file, geometry_column=geometry_column, verbose=verbose
     )
 
-    effective_version = geoparquet_version or "1.1"
+    effective_version = geoparquet_version
 
     # Check if we need to add/rewrite geo metadata
     rewrite_needed = needs_metadata_rewrite(effective_version, original_metadata)
@@ -1745,6 +1745,15 @@ def write_geoparquet_table(
     # raise `argument of type 'NoneType' is not iterable` here, and a list-,
     # string- or non-object-entry `columns` a `TypeError` one line later (#947).
     geo_meta = sanitized_carried_geo(table.schema.metadata)
+
+    # The facade's version decision (approved change 10): the table's carried
+    # key, else a GeoArrow column with no key is native and writes 2.0 -- what
+    # `Table.write` and the file paths already wrote, where this funnel wrote
+    # parquet-geo-only. Decided here so no Arrow-side caller writes a table
+    # without it.
+    geoparquet_version = resolve_output_geoparquet_version(
+        geoparquet_version, table=table, verbose=verbose
+    )
 
     # The facade's row-group decision, so an Arrow-side write (arcgis, carto,
     # wfs, bigquery, aggregate, overview) lands on the same number a DuckDB-side

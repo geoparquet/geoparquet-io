@@ -81,7 +81,8 @@ EXPECTED_COUNTS = {
     "G1.row_group_policy": 2,
     "G1.scheme_test": 0,
     "G1.overwrite_check": 0,
-    "G2.exemptions": 28,
+    "G1.output_version": 0,
+    "G2.exemptions": 21,
     "G3.pairs": 23,
     "G3.baseline": 23,
     "G3.pylint": 50,
@@ -1017,6 +1018,121 @@ def _row_group_policy_node(node: ast.AST, strings: set[int]) -> bool:
     return False
 
 
+#: The output version's owners: the decision in ``parquet_writer``, the version
+#: table (``GEOPARQUET_VERSIONS``) and the carried-block decoder in ``geo_metadata``.
+_VERSION_OWNERS = ("geoparquet_io/core/parquet_writer.py", "geoparquet_io/core/geo_metadata.py")
+#: ``gpio inspect``'s two modules print the decoded block, version included, and
+#: write nothing: reporting what an input declares is not deciding an output.
+_VERSION_REPORTERS = ("geoparquet_io/core/inspect_utils.py", "geoparquet_io/core/metadata_utils.py")
+#: Every spelling of a GeoParquet version a write can declare or be asked for.
+_VERSION_SPELLINGS = frozenset(
+    {"1.0", "1.1", "2.0", "1.1-geoarrow", "parquet-geo-only", "1.0.0", "1.1.0", "2.0.0"}
+)
+#: The write-path decoders of a carried ``geo`` block (T3a): a write reads its
+#: input's version off one of these, and only the owner may.
+_CARRIED_GEO_DECODERS = ("sanitized_carried_geo", "sanitized_carried_geo_of_file")
+
+
+#: What an output version is called on a write path: the request, the answer.
+_OUTPUT_VERSION_NAMES = frozenset({"geoparquet_version", "effective_version", "output_version"})
+#: Keys that make a dict literal a ``geo`` block: composing one is T3e's arm
+#: (``geo_metadata`` composes every block), not a version decision.
+_GEO_BLOCK_KEYS = frozenset({"primary_column", "columns"})
+
+
+def _names_an_output_version(node: ast.AST) -> bool:
+    """``geoparquet_version``, ``self.effective_version``, or a ``resolve_*version*(...)`` call."""
+    if isinstance(node, ast.Name):
+        return node.id in _OUTPUT_VERSION_NAMES
+    if isinstance(node, ast.Attribute):
+        return node.attr in _OUTPUT_VERSION_NAMES
+    if isinstance(node, ast.Call):
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+        return fnmatchcase(name.lstrip("_"), "resolve_*version*")
+    return False
+
+
+def _in_geo_block_literal(m: _Module, node: ast.AST) -> bool:
+    up = m.parents.get(id(node))
+    while up is not None:
+        if isinstance(up, ast.Dict) and any(
+            isinstance(k, ast.Constant) and k.value in _GEO_BLOCK_KEYS for k in up.keys
+        ):
+            return True
+        up = m.parents.get(id(up))
+    return False
+
+
+def _version_fallback(node: ast.AST) -> bool:
+    """A version spelled out, or ``DEFAULT_GEOPARQUET_VERSION``: a second default."""
+    if isinstance(node, ast.Constant):
+        return node.value in _VERSION_SPELLINGS
+    name = node.id if isinstance(node, ast.Name) else getattr(node, "attr", "")
+    return name == "DEFAULT_GEOPARQUET_VERSION"
+
+
+def _is_version_key(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value == "version"
+
+
+def _decodes_carried_geo(m: _Module, node: ast.AST) -> bool:
+    """*node* is a write-path decoder call, or a name the enclosing function bound to one."""
+    if isinstance(node, ast.Call):
+        return (m.dotted(node.func) or "").rsplit(".", 1)[-1] in _CARRIED_GEO_DECODERS
+    if isinstance(node, ast.Name):
+        values = m.local_bindings(node).get(node.id, [])
+        return any(_decodes_carried_geo(m, v) for v in values if not isinstance(v, ast.Name))
+    return False
+
+
+def _find_output_version(m: _Module) -> Iterator[Hit]:
+    """An output GeoParquet version decided outside ``parquet_writer`` (#1367 concept 1).
+
+    ``resolve_output_geoparquet_version`` is the one decision: explicit request,
+    then the input file, then the carried ``geo`` key, then the table's schema,
+    then the default. Its copies took one of three shapes. A read of the
+    carried block's ``version`` off a write-path decoder
+    (``sanitized_carried_geo(md).get("version")`` -- ``add bbox``'s
+    pass-through, which kept a 1.0 input at 1.0, and the table detector the
+    strategies each called), whatever wraps it; and a second default after
+    ``or`` (``resolve(...) or "1.1"`` in ``extract``,
+    ``... or DEFAULT_GEOPARQUET_VERSION`` in ``sort hilbert`` and
+    ``Table.write``) or in ``.get("version", "1.1.0")``.
+
+    Reporting the *input's* declared version is not a write decision: ``gpio
+    check`` reads it through ``read_raw_geo``/``raw_geo_of_file``, ``gpio
+    inspect`` (``_VERSION_REPORTERS``) prints the decoded block, and a write
+    command that names it in a refusal or advice asks the owner's
+    ``declared_geoparquet_version``. WFS and stac-geoparquet protocol versions
+    pass too.
+    A ``version`` inside a ``geo`` block literal (one with ``primary_column`` or
+    ``columns``) is block composition, which T3e's arm owns.
+    """
+    for node in ast.walk(m.tree):
+        if _output_version_node(m, node) and not _in_geo_block_literal(m, node):
+            yield m.hit(node)
+
+
+def _output_version_node(m: _Module, node: ast.AST) -> bool:
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        first, *rest = node.values
+        return _names_an_output_version(first) and any(_version_fallback(r) for r in rest)
+    if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
+        return _is_version_key(node.slice) and _decodes_carried_geo(m, node.value)
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if not (isinstance(func, ast.Attribute) and func.attr == "get" and node.args):
+        return False
+    if not _is_version_key(node.args[0]):
+        return False
+    default = node.args[1] if len(node.args) > 1 else None
+    return _decodes_carried_geo(m, func.value) or (
+        default is not None and _version_fallback(default)
+    )
+
+
 #: ``in`` and ``not in``.
 _MEMBERSHIP_OPS = (ast.In, ast.NotIn)  # codespell:ignore
 
@@ -1171,6 +1287,7 @@ ARMS = {
     "row_group_policy": Arm(_find_row_group_policy, _ROW_GROUP_OWNER),
     "scheme_test": Arm(_find_scheme_test, ("geoparquet_io/core/remote.py",), needs_repo=True),
     "overwrite_check": Arm(_find_overwrite_check, ("geoparquet_io/core/file_utils.py",)),
+    "output_version": Arm(_find_output_version, _VERSION_OWNERS + _VERSION_REPORTERS),
 }
 
 
@@ -1677,6 +1794,7 @@ G1_PLANTS = {
         "    return con.execute(f\"SELECT * FROM parquet_metadata('{path}')\").fetchall()\n"
     ),
     "scheme_test": 'def remote(p):\n    return p.startswith("s3://")\n',
+    "output_version": ('def version(md):\n    return sanitized_carried_geo(md).get("version")\n'),
     "overwrite_check": (
         "import os\n\ndef check(out, force):\n"
         "    if os.path.exists(out) and not force:\n        raise ValueError(out)\n"
@@ -1716,6 +1834,7 @@ G1_CLEAN = {
         'def url(bucket, path):\n    scheme, _, rest = path.partition("://")\n'
         '    return f"s3://{bucket}/{rest}"\n'
     ),
+    "output_version": ('def version(path):\n    return read_raw_geo(path).value.get("version")\n'),
     "overwrite_check": (
         "import os\n\ndef cleanup(tmp):\n    if os.path.exists(tmp):\n        os.remove(tmp)\n"
     ),
@@ -2609,3 +2728,38 @@ def test_g12_the_row_group_arm_catches_a_second_policy(tmp_path, source):
 @pytest.mark.parametrize("source", ROW_GROUP_OWNER_ANSWERS)
 def test_g12_the_row_group_arm_leaves_owner_answers_alone(tmp_path, source):
     assert arm_hits(_plant(tmp_path, "row_group_policy", source), "row_group_policy") == [], source
+
+
+#: The copies of the output-version decision #1367 found (concept 1), each a
+#: shape the arm must flag...
+OUTPUT_VERSION_COPIES = [
+    'def passthrough(md):\n    return sanitized_carried_geo(md).get("version")\n',
+    'def detect(t):\n    geo = sanitized_carried_geo(t.schema.metadata)\n    return geo["version"]\n',
+    'def detect(md):\n    return carried_version(sanitized_carried_geo(md).get("version"))\n',
+    'v = resolve_output_geoparquet_version(req, input_file=p) or "1.1"\n',
+    "v = geoparquet_version or DEFAULT_GEOPARQUET_VERSION\n",
+    'v = geo.get("version", "1.1.0")\n',
+    'def advice(p):\n    geo = sanitized_carried_geo_of_file(p)\n    return geo.get("version", "")\n',
+]
+#: ...and the readers it must leave alone: reporting a declared version,
+#: protocol versions, and a call to the owner.
+OUTPUT_VERSION_NON_DECISIONS = [
+    'def show(p):\n    return read_raw_geo(p).value.get("version")\n',
+    'def fetch(url, version="1.1.0"):\n    return url\n',
+    'SUPPORTED = ("1.0.0", "1.1.0")\n',
+    "v = resolve_output_geoparquet_version(req, input_file=p)\n",
+    'def stac(payload):\n    return payload["version"]\n',
+    "label = version or 'unknown'\n",
+    "shown = geo_version or '2.0'\n",
+    'def block(v):\n    return {"version": v or "1.1.0", "primary_column": "geometry"}\n',
+]
+
+
+@pytest.mark.parametrize("source", OUTPUT_VERSION_COPIES)
+def test_g12_the_output_version_arm_catches_every_copy(tmp_path, source):
+    assert arm_hits(_plant(tmp_path, "output_version", source), "output_version"), source
+
+
+@pytest.mark.parametrize("source", OUTPUT_VERSION_NON_DECISIONS)
+def test_g12_the_output_version_arm_leaves_non_decisions_alone(tmp_path, source):
+    assert arm_hits(_plant(tmp_path, "output_version", source), "output_version") == [], source

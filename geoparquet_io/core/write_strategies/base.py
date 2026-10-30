@@ -40,9 +40,9 @@ from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
     compose_geo_block,
     read_raw_geo,
-    sanitized_carried_geo,
     strip_unsupported_covering,
 )
+from geoparquet_io.core.parquet_writer import carried_geoparquet_version
 
 if TYPE_CHECKING:
     import duckdb
@@ -520,8 +520,7 @@ def needs_metadata_rewrite(
         # A carried block needs the rewrite unless it already vouches for a 2.x
         # version. An undecodable or non-object one reads as `{}` and so cannot
         # vouch (a raw json.loads here once aborted the write instead).
-        input_version = sanitized_carried_geo(original_metadata).get("version")
-        if isinstance(input_version, str) and input_version.startswith("2."):
+        if carried_geoparquet_version(original_metadata) == "2.0":
             return False
         return read_raw_geo(original_metadata).present
 

@@ -29,11 +29,9 @@ from geoparquet_io.core.geo_metadata import (
     GEOGRAPHY_EDGE_ALGORITHMS,
     backfill_derived_stats,
     carried_geometry_column,
-    carried_version,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
 )
-from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
 from geoparquet_io.core.geometry_detection import detect_geometry_column_from_names
 from geoparquet_io.core.logging_config import debug
 
@@ -526,90 +524,6 @@ def extract_crs_from_table(
     if geometry_column:
         return _crs_from_geoarrow_field(table, geometry_column)
 
-    return None
-
-
-def extract_version_from_metadata(metadata: dict | None) -> str | None:
-    """
-    Extract GeoParquet version string from schema metadata.
-
-    Upgrades 1.0 to 1.1 since 1.1 is backwards compatible and preferred.
-
-    Args:
-        metadata: Schema metadata dict (with bytes keys)
-
-    Returns:
-        Version string suitable for --geoparquet-version (e.g., "1.1", "2.0")
-        or None if no version detected
-    """
-    # A truthiness guard let `2`, `2.0`, `["2.0"]` and `true` through to
-    # `.split`, and the old `except` named only the two decoder errors, so
-    # the `AttributeError` passed straight out of `gpio sort hilbert` as a
-    # traceback (#979).
-    version = carried_version(sanitized_carried_geo(metadata).get("version"))
-    if not version:
-        return None
-    parts = version.split(".")
-    if len(parts) < 2:
-        return None
-    major = parts[0]
-    # Upgrade all 1.x versions to 1.1 (backwards compatible)
-    if major == "1":
-        return "1.1"
-    # Flatten any 2.x to "2.0" — the highest 2.x this writer knows — so this
-    # path agrees with its file-based twin, resolve_geoparquet_version_from_file.
-    if major == "2":
-        return "2.0"
-    return f"{major}.{parts[1]}"
-
-
-def has_geoarrow_extension_in_table(table: pa.Table) -> bool:
-    """
-    Check if table has geoarrow extension types (indicating native geo types).
-
-    Args:
-        table: PyArrow Table to inspect
-
-    Returns:
-        True if table has geoarrow extension type columns
-    """
-
-    # Field, not type: the extension name may be carried in the field metadata
-    # instead of a resolved extension type, and both shapes are the same
-    # column (#792).
-    return any(is_geoarrow_extension_field(field) for field in table.schema)
-
-
-def detect_version_for_output(
-    original_metadata: dict | None,
-    table: pa.Table | None = None,
-) -> str | None:
-    """
-    Detect the appropriate GeoParquet version for output.
-
-    Logic:
-    - If geo metadata has version 1.x -> return "1.1" (upgrade 1.0 to 1.1)
-    - If geo metadata has version 2.x -> return "2.0"
-    - If no geo metadata but has geoarrow types -> return "2.0" (upgrade)
-    - Otherwise -> return None (will use default 1.1)
-
-    Args:
-        original_metadata: Schema metadata from input
-        table: Arrow table (optional, for detecting geoarrow types)
-
-    Returns:
-        Version string or None
-    """
-    # First check geo metadata for explicit version
-    version = extract_version_from_metadata(original_metadata)
-    if version:
-        return version
-
-    # Check for parquet-geo-only (geoarrow types without geo metadata)
-    if table is not None and has_geoarrow_extension_in_table(table):
-        return "2.0"  # Upgrade to 2.0 with proper metadata
-
-    # No version info - will use default (1.1)
     return None
 
 

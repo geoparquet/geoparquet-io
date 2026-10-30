@@ -111,21 +111,21 @@ def test_reproject_explicit_version_still_wins(pgo_input, tmp_path):
 
 
 def test_streaming_metadata_path_flattens_future_2x_to_2_0():
-    """extract_version_from_metadata must agree with the file-based twin
-    (resolve_geoparquet_version_from_file), which flattens any 2.x to "2.0"."""
+    """The carried-metadata witness agrees with the file witness, which flattens
+    any 2.x to "2.0"."""
     import json
 
-    from geoparquet_io.core.streaming import extract_version_from_metadata
+    from geoparquet_io.core.parquet_writer import carried_geoparquet_version
 
     meta = {b"geo": json.dumps({"version": "2.1.0"}).encode()}
-    assert extract_version_from_metadata(meta) == "2.0"
+    assert carried_geoparquet_version(meta) == "2.0"
 
 
 def test_streaming_metadata_path_known_versions_unchanged():
     import json
 
-    from geoparquet_io.core.streaming import extract_version_from_metadata
+    from geoparquet_io.core.parquet_writer import carried_geoparquet_version
 
     for declared, expected in [("1.0.0", "1.1"), ("1.1.0", "1.1"), ("2.0.0", "2.0")]:
         meta = {b"geo": json.dumps({"version": declared}).encode()}
-        assert extract_version_from_metadata(meta) == expected, declared
+        assert carried_geoparquet_version(meta) == expected, declared

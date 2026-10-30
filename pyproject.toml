@@ -618,9 +618,11 @@ layers = [
     # construction (#1010): neither reaches the other.
     "geoparquet_io.core.arrow_geo_metadata | geoparquet_io.core.derive_geo_from_file",
     "geoparquet_io.core.bbox_structure",
-    # file_type: what kind of GeoParquet a file is. parquet_writer: the write
-    # facade's three decisions (#990). Neither needs the other.
-    "geoparquet_io.core.file_type | geoparquet_io.core.parquet_writer",
+    # parquet_writer: the write facade's decisions (#990), the output version
+    # among them, which asks file_type what kind of GeoParquet the input is
+    # (#1367 concept 1). file_type never needs the facade.
+    "geoparquet_io.core.parquet_writer",
+    "geoparquet_io.core.file_type",
     # The geo-metadata readers. geo_metadata owns the WKB type-code tables that
     # arrow_geo_metadata and derive_geo_from_file consume, which is why it sits
     # below both of them.
@@ -638,8 +640,6 @@ ignore_imports = [
     "geoparquet_io.core.geo_metadata -> geoparquet_io.core.common",
     "geoparquet_io.core.write_strategies.arrow_streaming -> geoparquet_io.core.common",
     "geoparquet_io.core.write_strategies.disk_rewrite -> geoparquet_io.core.common",
-    # version_resolution: _resolve_auto_version, resolve_geoparquet_version_from_file
-    "geoparquet_io.core.parquet_writer -> geoparquet_io.core.common",
     # add/computed_column: add_computed_column
     "geoparquet_io.core.constants -> geoparquet_io.core.common",
 ]

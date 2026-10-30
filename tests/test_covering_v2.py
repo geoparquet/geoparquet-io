@@ -435,28 +435,28 @@ def test_bbox_shaped_columns_gpio_did_not_compute_stay_undeclared(tmp_path, bbox
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_output_version_is_silent_for_stdin():
+def test_advised_output_version_is_silent_for_stdin():
     """A stdin stream's version is not knowable here, so nothing is claimed.
 
     Returning the default instead made `sort hilbert -` advise "consider
     --geoparquet-version 2.0" while it was already writing 2.0 (#738).
     """
-    from geoparquet_io.core.hilbert_order import _resolve_output_version
+    from geoparquet_io.core.hilbert_order import _advised_output_version
 
-    assert _resolve_output_version("-", None, verbose=False) is None
+    assert _advised_output_version("-", None, verbose=False) is None
 
 
-def test_resolve_output_version_is_silent_for_an_unreadable_input(tmp_path):
+def test_advised_output_version_is_silent_for_an_unreadable_input(tmp_path):
     """A failed read is not evidence of a 1.1 input."""
-    from geoparquet_io.core.hilbert_order import _resolve_output_version
+    from geoparquet_io.core.hilbert_order import _advised_output_version
 
-    assert _resolve_output_version(str(tmp_path / "nope.parquet"), None, verbose=False) is None
+    assert _advised_output_version(str(tmp_path / "nope.parquet"), None, verbose=False) is None
 
 
-def test_resolve_output_version_honours_an_explicit_version():
-    from geoparquet_io.core.hilbert_order import _resolve_output_version
+def test_advised_output_version_honours_an_explicit_version():
+    from geoparquet_io.core.hilbert_order import _advised_output_version
 
-    assert _resolve_output_version("-", "2.0", verbose=False) == "2.0"
+    assert _advised_output_version("-", "2.0", verbose=False) == "2.0"
 
 
 def test_fast_path_carry_declines_a_geo_block_too_thin_to_stand_in(tmp_path):
