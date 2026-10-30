@@ -248,7 +248,7 @@ def _make_request(
         return content
 
     try:
-        return run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay)
+        return bytes(run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay))
     except httpx.HTTPStatusError as e:
         status = e.response.status_code
         if status == 401:

@@ -192,7 +192,7 @@ def retry_wait(attempt: int, retry_delay: float, retry_after: float | None = Non
     ``retry_delay * 2 ** attempt``, raised to the server's ``Retry-After`` when it
     sent one, and never more than ``MAX_RETRY_AFTER``.
     """
-    delay = retry_delay * (2**attempt)
+    delay = float(retry_delay * (2**attempt))
     if retry_after is not None:
         delay = max(delay, retry_after)
     return min(delay, MAX_RETRY_AFTER)
