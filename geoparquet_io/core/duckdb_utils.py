@@ -974,36 +974,31 @@ def build_spatial_join_query(
     target_relation: str,
     target_select: str,
     condition: str,
-    one_match_per_input: bool,
-    match_order: Sequence[str] = (),
+    match_order: Sequence[str],
     input_alias: str = "a",
     target_alias: str = "b",
 ) -> str:
-    """Build the ``SELECT`` that LEFT JOINs every input row to the targets it meets.
+    """Build the ``SELECT`` that LEFT JOINs every input row to one target it meets.
 
     The query keeps every input column (``<input_alias>.*``), adds
     ``target_select`` (target-side expressions, aliased by the caller), and
     joins ``ON condition`` -- normally :func:`build_spatial_join_condition`.
     An input row that meets no target is kept, with NULL target columns.
 
-    ``one_match_per_input`` is the dedup decision, made explicitly by every
-    caller:
-
-    - ``False``: one output row per (input, matching target) pair. A feature
-      that intersects two target polygons comes out twice.
-    - ``True``: exactly one output row per input row, in input order (#543).
-      Of the targets a row meets, the one kept is the first by
-      ``match_order`` -- SQL expressions over the target alias, compared in
-      order, ascending, NULLs last. That is the tiebreak, and it is
-      deterministic: rows that tie on every ``match_order`` key carry the same
-      target values, so which of them survives cannot show in the output. The
-      admin commands pass the admin code columns, so a feature in the overlap of
-      two admin polygons goes to the smaller code. It is a cheap key on
-      purpose: an intersection-area tiebreak would run ``ST_Intersection`` on
-      every matched row, and the admin join point is a POINT with no area.
-      Caveat for polygon inputs (``add admin-divisions``, ``partition admin``
-      join the full geometry): a polygon straddling a border goes to the
-      smaller code, not to the region holding most of its area.
+    Exactly one output row per input row, in input order (#543): a feature
+    that intersects two target polygons is never emitted twice. Of the
+    targets a row meets, the one kept is the first by ``match_order`` -- SQL
+    expressions over the target alias, compared in order, ascending, NULLs
+    last. That is the tiebreak, and it is deterministic: rows that tie on
+    every ``match_order`` key carry the same target values, so which of them
+    survives cannot show in the output. The admin commands pass the admin code
+    columns, so a feature in the overlap of two admin polygons goes to the
+    smaller code. It is a cheap key on purpose: an intersection-area tiebreak
+    would run ``ST_Intersection`` on every matched row, and the admin join
+    point is a POINT with no area. Caveat for polygon inputs (``add
+    admin-divisions``, ``partition admin`` join the full geometry): a polygon
+    straddling a border goes to the smaller code, not to the region holding
+    most of its area.
 
     The dedup is spill-safe at the scale the admin commands target. Input rows
     are numbered with ``row_number() OVER ()`` -- a streaming window, with no
@@ -1019,8 +1014,7 @@ def build_spatial_join_query(
         target_relation: The target side, in the same forms.
         target_select: The target-side SELECT items, e.g. ``b."country" AS c``.
         condition: The ON condition.
-        one_match_per_input: See above.
-        match_order: The tiebreak keys; required when ``one_match_per_input``.
+        match_order: The tiebreak keys (at least one).
         input_alias: SQL alias for the input (default "a").
         target_alias: SQL alias for the target (default "b").
 
@@ -1028,17 +1022,10 @@ def build_spatial_join_query(
         A SELECT statement (no trailing semicolon).
 
     Raises:
-        ValueError: ``one_match_per_input`` without a ``match_order``.
+        ValueError: An empty ``match_order``.
     """
-    if not one_match_per_input:
-        return (
-            f"SELECT {input_alias}.*, {target_select}\n"
-            f"FROM {input_relation} {input_alias}\n"
-            f"LEFT JOIN {target_relation} {target_alias}\n"
-            f"ON {condition}"
-        )
     if not match_order:
-        raise ValueError("one_match_per_input=True needs a match_order to pick the kept match")
+        raise ValueError("build_spatial_join_query needs a match_order to pick the kept match")
 
     row = SPATIAL_JOIN_INPUT_ROW
     keys = [f"__gpio_match_{i}" for i in range(len(match_order))]

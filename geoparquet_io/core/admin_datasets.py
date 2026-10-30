@@ -1479,7 +1479,6 @@ def build_admin_join_query(
             input_geom_sql=input_geom_sql,
             input_is_point=input_is_point,
         ),
-        one_match_per_input=True,
         match_order=admin_match_order(boundary_columns),
         input_alias=input_alias,
     )

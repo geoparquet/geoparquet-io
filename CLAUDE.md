@@ -177,7 +177,7 @@ both DuckDB 1.5.x and 2.0.
 | `FROM '{path}'` | `FROM {sql_path(path)}` |
 
 Never hand-roll SQL escaping. `quote_identifier()` is for **identifiers**
-(column/table names — doubles embedded `"`); `_escape_sql_string()` is for SQL
+(column/table names — doubles embedded `"`); `sql_literal()` is for SQL
 **string literals** (doubles embedded `'`); `sql_path()` is for a **file path**
 and returns the quotes too, so a call site cannot forget the escape. All three
 live in `core/duckdb_utils.py` and take a RAW value — escaping is not

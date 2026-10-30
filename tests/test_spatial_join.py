@@ -2,10 +2,9 @@
 
 ``core/duckdb_utils.py`` owns the admin spatial join: the ON clause
 (:func:`build_spatial_join_condition`) and the query around it
-(:func:`build_spatial_join_query`), whose ``one_match_per_input`` parameter
-decides whether an input feature that intersects two target polygons comes out
-once or once per match. The three admin commands build their join only through
-it, so:
+(:func:`build_spatial_join_query`), which keeps one match per input row: an
+input feature that intersects two target polygons comes out once. The three
+admin commands build their join only through it, so:
 
 * #543 -- a feature in the overlap of two admin polygons is assigned / counted
   exactly once, to the polygon with the smallest admin code (the documented
@@ -242,23 +241,24 @@ class TestOwnerQuery:
             target_relation="t",
             target_select='b."code" AS "c"',
             condition=du.build_spatial_join_condition("geometry", "geometry"),
-            one_match_per_input=True,
             match_order=['b."code"'],
         )
         assert "row_number() OVER ()" in sql  # streaming: no PARTITION BY
         assert "DISTINCT ON (__gpio_input_row)" in sql
         assert "PARTITION BY" not in sql and "QUALIFY" not in sql
 
-    def test_all_matches_is_the_plain_join(self):
-        sql = du.build_spatial_join_query(
-            input_relation="t_in",
-            target_relation="t",
-            target_select='b."code" AS "c"',
-            condition="TRUE",
-            one_match_per_input=False,
-        )
-        assert "DISTINCT" not in sql and "row_number" not in sql
-        assert "LEFT JOIN t b" in sql and "ON TRUE" in sql
+    def test_there_is_no_all_matches_flag(self):
+        """One match per input is the only join (#1367 T1d ruling): a
+        one-value flag has no purpose."""
+        with pytest.raises(TypeError, match="one_match_per_input"):
+            du.build_spatial_join_query(
+                input_relation="t_in",
+                target_relation="t",
+                target_select='b."code" AS "c"',
+                condition="TRUE",
+                match_order=['b."code"'],
+                one_match_per_input=False,
+            )
 
     def test_one_match_requires_a_match_order(self):
         with pytest.raises(ValueError, match="match_order"):
@@ -267,7 +267,7 @@ class TestOwnerQuery:
                 target_relation="t",
                 target_select="b.x",
                 condition="TRUE",
-                one_match_per_input=True,
+                match_order=(),
             )
 
     def test_point_input_gets_a_point_in_bbox_prefilter(self):
