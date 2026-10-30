@@ -232,3 +232,251 @@ def test_the_python_api_names_its_own_switch(tmp_path):
     out.write_text("{}")
     with pytest.raises(ValueError, match=r"already exists: .*item\.json\nUse overwrite=True"):
         generate_stac(PLACES, out, bucket="s3://bucket/")
+
+
+# ---------------------------------------------------------------------------
+# One store spelling per family: upload and copy_file read the same map
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("s3://b/k/x.parquet", ("s3://b", "k/x.parquet")),
+        ("s3a://b/k/x.parquet", ("s3://b", "k/x.parquet")),
+        ("gs://b/k/x.parquet", ("gs://b", "k/x.parquet")),
+        ("gcs://b/k/x.parquet", ("gs://b", "k/x.parquet")),
+        ("az://acct/cont/x.parquet", ("az://acct/cont", "x.parquet")),
+    ],
+)
+def test_upload_parses_every_spelling_of_a_store(url, expected):
+    from geoparquet_io.core.upload import parse_object_store_url
+
+    assert parse_object_store_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "checker"),
+    [
+        ("s3a://b/x.parquet", "_check_s3_credentials"),
+        ("gcs://b/x.parquet", "_check_gcs_credentials"),
+    ],
+)
+def test_upload_checks_the_credentials_of_the_family(url, checker, monkeypatch):
+    from geoparquet_io.core import upload
+
+    monkeypatch.setattr(upload, checker, lambda *a, **k: (False, f"{checker} ran"))
+    assert upload.check_credentials(url) == (False, f"{checker} ran")
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("s3a://b/k", "s3://b/k"),
+        ("gcs://b/k", "gs://b/k"),
+        ("s3://b/k", "s3://b/k"),
+        ("az://a/c/k", "az://a/c/k"),
+        ("abfs://c@a.dfs.core.windows.net/k", "abfs://c@a.dfs.core.windows.net/k"),
+        ("https://h/k", "https://h/k"),
+        ("/local/k", "/local/k"),
+    ],
+)
+def test_canonical_store_url_respells_only_aliases(url, expected):
+    from geoparquet_io.core.remote import canonical_store_url
+
+    assert canonical_store_url(url) == expected
+
+
+# ---------------------------------------------------------------------------
+# Direct pins for the small owner helpers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("path", "label"),
+    [
+        ("s3://b/x", "S3"),
+        ("s3a://b/x", "S3A"),
+        ("gs://b/x", "GS"),
+        ("az://a/c/x", "AZ"),
+        ("https://h/x", "HTTPS"),
+        ("/local/x", "HTTP"),
+    ],
+)
+def test_protocol_label_names_the_scheme_as_written(path, label):
+    from geoparquet_io.core.remote import protocol_label
+
+    assert protocol_label(path) == label
+
+
+def test_protocol_label_falls_back_to_the_given_default():
+    from geoparquet_io.core.remote import protocol_label
+
+    assert protocol_label("/local/x", default="local") == "local"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("http://h/api", True),
+        ("https://h/api", True),
+        ("HTTPS://h/api", True),
+        ("s3://b/x", False),
+        ("gs://b/x", False),
+        ("file:///x", False),
+        ("/local/x", False),
+        ("", False),
+    ],
+)
+def test_has_http_scheme_accepts_only_http(url, expected):
+    from geoparquet_io.core.remote import has_http_scheme
+
+    assert has_http_scheme(url) is expected
+
+
+def test_output_is_kept_only_when_it_exists_without_the_switch(tmp_path):
+    from geoparquet_io.core.file_utils import output_is_kept
+
+    out = tmp_path / "o.parquet"
+    assert output_is_kept(str(out), overwrite=False) is False
+    out.write_bytes(b"x")
+    assert output_is_kept(str(out), overwrite=False) is True
+    assert output_is_kept(str(out), overwrite=True) is False
+
+
+def test_unlink_released_file_deletes_and_ignores_a_missing_file(tmp_path):
+    from geoparquet_io.core.file_utils import unlink_released_file
+
+    f = tmp_path / "t.parquet"
+    f.write_bytes(b"x")
+    unlink_released_file(f)
+    assert not f.exists()
+    unlink_released_file(f)  # missing: silent
+
+
+def test_unlink_released_file_retries_then_gives_up_quietly(tmp_path, monkeypatch):
+    from geoparquet_io.core import file_utils
+
+    f = tmp_path / "t.parquet"
+    f.write_bytes(b"x")
+    calls = []
+
+    def locked(self, *a, **k):
+        calls.append(self)
+        raise PermissionError("held")
+
+    monkeypatch.setattr(Path, "unlink", locked)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    file_utils.unlink_released_file(f)
+    assert len(calls) == len(file_utils._UNLINK_WAITS)
+
+
+# ---------------------------------------------------------------------------
+# One remote listing: partition info, the all-files read and the GeoJSON sweep
+# ---------------------------------------------------------------------------
+
+REMOTE_GLOB = "s3://bkt/parts/*.parquet"
+REMOTE_FILES = ["s3://bkt/parts/a.parquet", "s3://bkt/parts/b.parquet"]
+
+
+def test_a_remote_glob_lists_every_file(remote_parts):
+    from geoparquet_io.core.file_utils import get_all_parquet_files
+
+    assert get_all_parquet_files(REMOTE_GLOB) == REMOTE_FILES
+
+
+def test_partition_info_of_a_remote_glob_names_its_files(remote_parts):
+    from geoparquet_io.core.partition.reader import get_partition_info
+
+    info = get_partition_info(REMOTE_GLOB)
+    assert info["first_file"] == REMOTE_FILES[0]
+    assert info["all_files"] == REMOTE_FILES
+    assert info["file_count"] == 2
+
+
+def test_the_geojson_sweep_reads_the_one_listing(remote_parts):
+    from geoparquet_io.core.geojson_stream import _geojson_input_files
+
+    assert _geojson_input_files(REMOTE_GLOB) == REMOTE_FILES
+
+
+def test_check_of_a_remote_glob_checks_its_first_file(remote_parts):
+    endpoint, _requests = remote_parts
+    result = _run(
+        "--s3-endpoint", endpoint, "--s3-no-ssl", "check", "bbox", REMOTE_GLOB,
+    )  # fmt: skip
+    assert "Checking first file (of 2 total)" in result.output, _explain(result)
+
+
+def test_stac_lists_a_partition_like_every_other_reader(tmp_path):
+    from geoparquet_io.core.file_utils import get_all_parquet_files
+    from geoparquet_io.core.stac import _find_partition_files
+
+    for rel in ("a.parquet", "k=1/b.parquet", "k=1/j=2/c.parquet", "._a.parquet"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_bytes(b"x")
+    found = [str(p) for p in _find_partition_files(str(tmp_path))]
+    assert found == get_all_parquet_files(str(tmp_path))
+    assert len(found) == 3
+
+
+# ---------------------------------------------------------------------------
+# A remote in-place rewrite is the owner's call too
+# ---------------------------------------------------------------------------
+
+
+def test_the_owner_refuses_a_remote_in_place_rewrite_without_the_switch():
+    from geoparquet_io.core.exceptions import GeoParquetError
+    from geoparquet_io.core.file_utils import handle_output_overwrite
+
+    url = "s3://b/x.parquet"
+    with pytest.raises(GeoParquetError, match="Cannot modify remote file without --force flag"):
+        handle_output_overwrite(url, False, url, flag="--force")
+    handle_output_overwrite(url, True, url)  # the switch allows it
+    handle_output_overwrite("s3://b/y.parquet", False, url)  # another output passes
+
+
+def test_a_remote_fix_reads_the_owner_refusal(monkeypatch):
+    from geoparquet_io.cli import fix_helpers
+    from geoparquet_io.core.exceptions import GeoParquetError
+
+    def refuse(*a, **k):
+        raise GeoParquetError("owner says no")
+
+    monkeypatch.setattr(fix_helpers, "handle_output_overwrite", refuse)
+    with pytest.raises(GeoParquetError, match="owner says no"):
+        fix_helpers.validate_remote_file_modification("s3://b/x.parquet", None, False)
+
+
+def test_overwrite_option_spells_the_tile_switch():
+    import click
+
+    from geoparquet_io.cli.decorators import overwrite_option
+
+    @click.command()
+    @overwrite_option(flag="--force", short="-f", help_text="Replace it")
+    def cmd(force):
+        click.echo(f"force={force}")
+
+    (param,) = cmd.params
+    assert param.opts == ["--force", "-f"] and param.help == "Replace it"
+    assert CliRunner().invoke(cmd, ["-f"]).output == "force=True\n"
+
+
+@pytest.mark.parametrize(
+    ("overwrite", "expected"), [(False, "Use --overwrite"), (True, "Failed to create")]
+)
+def test_a_writer_already_exists_error_is_the_refusal_only_without_the_switch(
+    tmp_path, monkeypatch, overwrite, expected
+):
+    from geoparquet_io.core import format_writers
+    from geoparquet_io.core.exceptions import GeoParquetError
+
+    def boom(*a, **k):
+        raise RuntimeError("GDAL Error: layer already exists")
+
+    monkeypatch.setattr(format_writers, "atomic_write", boom)
+    with pytest.raises(GeoParquetError, match=expected):
+        format_writers.write_gdal_format(
+            str(PLACES), str(tmp_path / "o.gpkg"), "geopackage", overwrite=overwrite
+        )

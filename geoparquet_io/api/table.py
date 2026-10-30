@@ -1601,8 +1601,8 @@ class Table:
             return local_path
         finally:
             # Clean up temp file for remote writes
-            if is_remote and local_path.exists():
-                local_path.unlink()
+            if is_remote:
+                unlink_released_file(local_path)
 
     def _write_format(
         self,

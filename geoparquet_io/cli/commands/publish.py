@@ -16,23 +16,18 @@ from geoparquet_io.cli.decorators import (
     overwrite_option,
     verbose_option,
 )
-from geoparquet_io.core.file_utils import handle_output_overwrite
+from geoparquet_io.core.file_utils import get_all_parquet_files, handle_output_overwrite
 from geoparquet_io.core.upload import check_credentials
 from geoparquet_io.core.upload import upload as upload_impl
 
 
 # STAC commands
 def _check_existing_stac(path, shown, kind: str, overwrite: bool) -> None:
-    """Refuse to replace an existing STAC *kind* without --overwrite (the one
-    overwrite policy), and say so when replacing it. A file at *path* that is
-    not a STAC *kind* is written over as before."""
-
-    from geoparquet_io.core.stac import detect_stac
-
-    if detect_stac(str(path)) != kind:
-        return
+    """Refuse to replace any existing output without --overwrite (the one
+    overwrite policy, whatever the file holds), and say so when replacing it."""
     handle_output_overwrite(str(path), overwrite, remove=False)
-    click.echo(click.style(f"⚠️  Overwriting existing STAC {kind}: {shown}", fg="yellow"))
+    if Path(path).exists():
+        click.echo(click.style(f"⚠️  Overwriting existing STAC {kind}: {shown}", fg="yellow"))
 
 
 def _handle_stac_item(
@@ -105,24 +100,20 @@ def _handle_stac_collection(
 
     # Write items alongside their parquet files in the input directory
     # This follows STAC best practice of co-locating metadata with data
+    partition_files: dict[str, Path] = {}
+    for found in get_all_parquet_files(str(input_path_obj)):
+        partition_files.setdefault(Path(found).stem, Path(found))
     for item_dict in item_dicts:
         item_id = item_dict["id"]
-        # Find the parquet file in input directory
+        # The item's parquet file: top level first, else where the one
+        # partition listing (file_utils) found it
         parquet_file = input_path_obj / f"{item_id}.parquet"
         if not parquet_file.exists():
-            # Check for hive-style partitions
-            hive_partitions = list(input_path_obj.glob(f"*/{item_id}.parquet"))
-            if hive_partitions:
-                parquet_file = hive_partitions[0]
+            parquet_file = partition_files.get(item_id, parquet_file)
 
         # Write item JSON next to parquet file
         item_file = parquet_file.parent / f"{item_id}.json"
-
-        # An existing STAC file of either kind is not replaced without --overwrite
-        from geoparquet_io.core.stac import detect_stac
-
-        if detect_stac(str(item_file)):
-            handle_output_overwrite(str(item_file), overwrite, remove=False)
+        handle_output_overwrite(str(item_file), overwrite, remove=False)
 
         write_stac_json(item_dict, str(item_file), verbose)
 

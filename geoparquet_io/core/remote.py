@@ -56,6 +56,50 @@ def remote_family(path) -> str | None:
     return REMOTE_SCHEMES[scheme] if scheme else None
 
 
+#: The one spelling gpio's object-store code (upload, copy_file) addresses each
+#: family by: ``s3a://`` is ``s3://`` and ``gcs://`` is ``gs://`` everywhere.
+#: Azure is addressed only as ``az://<account>/<container>/<path>`` (#864); the
+#: ``azure://`` and ``abfs[s]://`` spellings put the account and container
+#: elsewhere and are refused by name, never respelled.
+STORE_SCHEME_FOR_FAMILY = {"s3": "s3", "gcs": "gs", "azure": "az"}
+
+
+def is_http_url(path) -> bool:
+    """Whether *path* is an ``http://`` or ``https://`` URL."""
+    return remote_family(path) == "http"
+
+
+def is_account_first_azure_url(path) -> bool:
+    """Whether *path* is an Azure URL in the one form gpio parses, ``az://``."""
+    return is_azure_url(path) and url_scheme(path) == STORE_SCHEME_FOR_FAMILY["azure"]
+
+
+def canonical_store_url(url: str) -> str:
+    """*url* under its family's store spelling: ``s3a://b/k`` -> ``s3://b/k``,
+    ``gcs://b/k`` -> ``gs://b/k``. Azure, HTTP(S) and local paths come back as
+    given."""
+    family = remote_family(url)
+    if family is None or family == "azure":
+        return url
+    store_scheme = STORE_SCHEME_FOR_FAMILY.get(family)
+    if store_scheme is None:
+        return url
+    return f"{store_scheme}://{url.partition('://')[2]}"
+
+
+@contextmanager
+def open_url(path, mode: str = "rb"):
+    """Open a local path or a remote URL as a file object (fsspec underneath).
+
+    The one place gpio hands a URL to fsspec, so a filesystem picked by URL
+    prefix cannot grow up beside the scheme table (#1367 T2e).
+    """
+    import fsspec
+
+    with fsspec.open(path, mode) as handle:
+        yield handle
+
+
 def has_http_scheme(url: str) -> bool:
     """Whether *url* parses with an ``http``/``https`` scheme, in any case.
 

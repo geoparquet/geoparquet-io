@@ -13,6 +13,7 @@ import shutil
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 
 # Use importlib to get the actual module (avoids namespace collision with cli group)
@@ -88,12 +89,27 @@ class TestPublishStacItem:
         assert "Overwriting existing STAC Item" in result.output
         assert json.loads(out.read_text())["id"] == "places_test"
 
-    def test_existing_non_stac_output_is_replaced(self, places_test_file, tmp_path):
-        """A pre-existing file that is not a STAC Item does not block the write."""
+    @pytest.mark.parametrize("existing", ["not json at all", '{"type": "Collection"}'])
+    def test_any_existing_output_is_refused_without_overwrite(
+        self, places_test_file, tmp_path, existing
+    ):
+        """One overwrite policy: a non-STAC file, or a STAC file of the other
+        kind, is refused like an existing Item (PR #1387 review, F8)."""
+        out = tmp_path / "item.json"
+        out.write_text(existing)
+        result = CliRunner().invoke(
+            cli, ["publish", "stac", places_test_file, str(out), "--bucket", BUCKET]
+        )
+        assert result.exit_code != 0, result.output
+        assert "Output file already exists" in result.output
+        assert out.read_text() == existing
+
+    def test_existing_non_stac_output_is_replaced_with_flag(self, places_test_file, tmp_path):
         out = tmp_path / "item.json"
         out.write_text("not json at all")
         result = CliRunner().invoke(
-            cli, ["publish", "stac", places_test_file, str(out), "--bucket", BUCKET]
+            cli,
+            ["publish", "stac", places_test_file, str(out), "--bucket", BUCKET, "--overwrite"],
         )
         assert result.exit_code == 0, result.output
         assert json.loads(out.read_text())["id"] == "places_test"

@@ -163,8 +163,8 @@ def main() -> int:
     print("       Use sql_path(path) from core/duckdb_utils.py:")
     print("           FROM {sql_path(path)}      instead of      FROM '{path}'")
     print("       It quotes and escapes in one step, so the escape cannot be forgotten.")
-    print("       If the value is already a safe_file_url() result, pass the RAW path here")
-    print("       instead and drop the safe_file_url() call -- escaping is not idempotent.")
+    print("       Pass it the RAW path, never one already escaped -- escaping is not")
+    print("       idempotent, so an escaped path is escaped twice (#718).")
     print()
     for rel, (was, now) in sorted(regressions.items()):
         print(f"  {rel}: {was} -> {now}")

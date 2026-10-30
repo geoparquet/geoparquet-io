@@ -45,8 +45,6 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
 
-
-
 def require_geo_metadata_for_covering(geo_meta: object, source: str | None = None) -> dict:
     """Refuse an input that carries no usable GeoParquet metadata (#713).
 

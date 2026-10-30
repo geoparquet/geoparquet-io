@@ -285,7 +285,9 @@ def test_remote_glob_checks_each_matched_footer(monkeypatch):
         ("s3://fake/a.parquet",),
         ("s3://fake/b.parquet",),
     ]
-    monkeypatch.setattr("geoparquet_io.core.duckdb_utils.get_duckdb_connection", lambda **kw: con)
+    monkeypatch.setattr(
+        "geoparquet_io.core.duckdb_utils.get_duckdb_connection_for_s3", lambda *a, **kw: con
+    )
     seen = []
 
     def collect(path):
@@ -297,7 +299,9 @@ def test_remote_glob_checks_each_matched_footer(monkeypatch):
         require_planar_geojson_file("s3://fake/*.parquet", "geometry", profile="test-only")
     assert [path for path, _ in seen] == ["s3://fake/a.parquet", "s3://fake/b.parquet"]
     assert all(config["profile"] == "test-only" for _, config in seen)
-    con.execute.assert_called_once_with("SELECT file FROM glob(?)", ["s3://fake/*.parquet"])
+    con.execute.assert_called_once_with(
+        "SELECT file FROM glob(?) ORDER BY file", ["s3://fake/*.parquet"]
+    )
     con.close.assert_called_once()
 
 

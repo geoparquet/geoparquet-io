@@ -86,7 +86,7 @@ EXPECTED_COUNTS = {
     "G3.pylint": 55,
     "G13.options": 13,
     "G13.bbox_parsers": 3,
-    "G4.whitelist": 183,
+    "G4.whitelist": 182,
     "G4.tests_whitelist": 99,
 }
 
@@ -988,7 +988,9 @@ def _remote_scheme_names(repo: Path) -> frozenset[str]:
     """The keys of the owner's ``REMOTE_SCHEMES`` table, read from its source."""
     owner = repo / "geoparquet_io" / "core" / "remote.py"
     if not owner.is_file():
-        return frozenset({"http", "https", "s3", "s3a", "gs", "gcs", "az", "azure"})
+        from geoparquet_io.core.remote import REMOTE_SCHEMES
+
+        return frozenset(REMOTE_SCHEMES)
     for node in ast.walk(ast.parse(owner.read_text(encoding="utf-8"))):
         if (
             isinstance(node, ast.Assign)
@@ -999,10 +1001,22 @@ def _remote_scheme_names(repo: Path) -> frozenset[str]:
     return frozenset()
 
 
+def _compares_to_a_scheme_name(node: ast.Compare, names: frozenset[str]) -> bool:
+    """``x == "s3"`` / ``"gs" != x``: an equality test against one scheme name."""
+    if not any(isinstance(op, (ast.Eq, ast.NotEq)) for op in node.ops):
+        return False
+    return any(
+        isinstance(side, ast.Constant) and isinstance(side.value, str) and side.value in names
+        for side in (node.left, *node.comparators)
+    )
+
+
 def _find_scheme_test(m: _Module, repo: Path) -> Iterator[Hit]:
     """A URL-scheme test outside ``core/remote.py``: ``"://" in path``, a scheme
-    prefix spelled out (``startswith("s3://")``, a prefix tuple), or a
-    tuple/list/set of two or more scheme names (``("s3", "gs", "az")``).
+    prefix spelled out (``startswith("s3://")``, a prefix tuple), a
+    tuple/list/set of two or more scheme names (``("s3", "gs", "az")``), a
+    compare against one scheme name (``url_scheme(x) == "s3"``) or a dict keyed
+    by scheme names (``{"s3": "s3", "gcs": "gs"}``).
 
     ``remote.REMOTE_SCHEMES`` is the one scheme table, and ``is_remote_url``,
     ``url_scheme`` and ``remote_family`` the tests over it. Would have caught
@@ -1011,13 +1025,21 @@ def _find_scheme_test(m: _Module, repo: Path) -> Iterator[Hit]:
     ``stac_check`` and ``admin_datasets`` that called ``gs://`` local, and the
     ``"://" in`` test in ``process/simplify.py`` (#1367 T2e). Building a URL
     (``f"s3://{bucket}"``) and splitting one (``.partition("://")``) are not
-    tests and pass.
+    tests and pass. The single-name compare and the dict would have caught
+    upload's per-spelling dispatch and ``copy_file``'s private spelling map
+    that disagreed over ``s3a://``/``gcs://`` (PR #1387 review).
     """
     names = _remote_scheme_names(repo)
     for node in ast.walk(m.tree):
         if isinstance(node, ast.Compare):
             literal = isinstance(node.left, ast.Constant) and node.left.value == "://"
             if literal and any(isinstance(op, _MEMBERSHIP_OPS) for op in node.ops):
+                yield m.hit(node)
+            elif _compares_to_a_scheme_name(node, names):
+                yield m.hit(node)
+        elif isinstance(node, ast.Dict) and node.keys:
+            keys = [k.value if isinstance(k, ast.Constant) else None for k in node.keys]
+            if all(isinstance(k, str) and k in names for k in keys):
                 yield m.hit(node)
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             in_fstring = isinstance(m.parents.get(id(node)), ast.JoinedStr)
@@ -1191,6 +1213,7 @@ TID251_OWNERS = {
     "requests": _HTTP_OWNER,
     "httpx": _HTTP_OWNER,
     "urllib.request": _HTTP_OWNER,
+    "fsspec": ("geoparquet_io/core/remote.py",),
 }
 
 #: Paths outside the package, which G1 does not govern.
@@ -1838,6 +1861,38 @@ def test_g12_each_g1_arm_flags_its_pattern(arm_name, tmp_path):
     repo = _plant(tmp_path, arm_name, G1_PLANTS[arm_name])
     unexcused, _ = reconcile(arm_hits(repo, arm_name), [])
     assert len(unexcused) == 1, unexcused
+
+
+#: The other shapes of a scheme test the arm must see (PR #1387 review).
+SCHEME_TEST_SHAPES = {
+    "single-name compare": 'def is_s3(p):\n    return url_scheme(p) == "s3"\n',
+    "reversed compare": 'def not_gs(p):\n    return "gs" != url_scheme(p)\n',
+    "spelling dict": 'SPELLING = {"s3": "s3", "gcs": "gs"}\n',
+}
+#: ...and the look-alikes it must not.
+SCHEME_TEST_NEAR_MISSES = {
+    "format compare": 'def is_csv(fmt):\n    return fmt == "csv"\n',
+    "mixed-key dict": 'OPTS = {"s3": 1, "format": "parquet"}\n',
+    "family helper": "def is_s3(p):\n    return is_s3_url(p)\n",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(SCHEME_TEST_SHAPES))
+def test_g12_scheme_arm_flags_every_shape(shape, tmp_path):
+    repo = _plant(tmp_path, "scheme_test", SCHEME_TEST_SHAPES[shape])
+    assert len(arm_hits(repo, "scheme_test")) == 1
+
+
+@pytest.mark.parametrize("shape", sorted(SCHEME_TEST_NEAR_MISSES))
+def test_g12_scheme_arm_passes_its_look_alikes(shape, tmp_path):
+    repo = _plant(tmp_path, "scheme_test", SCHEME_TEST_NEAR_MISSES[shape])
+    assert arm_hits(repo, "scheme_test") == []
+
+
+def test_g12_scheme_arm_fallback_reads_the_owner_table(tmp_path):
+    from geoparquet_io.core.remote import REMOTE_SCHEMES
+
+    assert _remote_scheme_names(tmp_path) == frozenset(REMOTE_SCHEMES)
 
 
 @pytest.mark.parametrize("arm_name", sorted(ARMS))

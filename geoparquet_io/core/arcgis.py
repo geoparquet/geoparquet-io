@@ -381,9 +381,9 @@ def resolve_token(
         if verbose:
             debug(f"Reading token from file: {auth.token_file}")
         try:
-            import fsspec
+            from geoparquet_io.core.remote import open_url
 
-            with fsspec.open(auth.token_file, mode="rt") as f:
+            with open_url(auth.token_file, mode="rt") as f:
                 return f.read().strip()
         except OSError as e:
             raise GeoParquetError(f"Failed to read token file: {e}") from e

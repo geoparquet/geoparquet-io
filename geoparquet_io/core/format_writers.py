@@ -56,6 +56,7 @@ from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.remote import (
     is_remote_url,
     needs_httpfs,
+    open_url,
     validate_profile_for_urls,
 )
 from geoparquet_io.core.sizing import format_size
@@ -110,12 +111,11 @@ def shapefile_members(shapefile_path: str | Path) -> list[Path]:
 
 
 # Format configuration for GDAL-based writers
-GDAL_FORMATS = {
+GDAL_FORMATS: dict[str, dict[str, object]] = {
     "geopackage": {
         "cli_command": "geopackage",
         "driver": "GPKG",
         "description": "GeoPackage",
-        "check_overwrite": True,
         "layer_option": "LAYER_NAME",
         "sidecar_suffixes": None,
         "extension": ".gpkg",
@@ -124,7 +124,6 @@ GDAL_FORMATS = {
         "cli_command": "flatgeobuf",
         "driver": "FlatGeobuf",
         "description": "FlatGeobuf",
-        "check_overwrite": True,
         "layer_option": "LAYER_NAME",
         "sidecar_suffixes": None,
         "extension": ".fgb",
@@ -133,7 +132,6 @@ GDAL_FORMATS = {
         "cli_command": "shapefile",
         "driver": "ESRI Shapefile",
         "description": "Shapefile",
-        "check_overwrite": True,
         "layer_option": None,
         "sidecar_suffixes": SHAPEFILE_SIDECARS,
         "extension": ".shp",
@@ -430,7 +428,7 @@ def write_gdal_format(
 
     config = GDAL_FORMATS[format_name]
 
-    # str(): GDAL_FORMATS mixes str/bool/None values, so mypy infers `object`.
+    # str(): GDAL_FORMATS mixes str/tuple/None values, typed `object`.
     _reject_stdin_input(
         input_path,
         str(config["description"]),
@@ -446,8 +444,7 @@ def write_gdal_format(
 
     validate_profile_for_urls(profile, input_path)
 
-    if config["check_overwrite"]:
-        handle_output_overwrite(output_path, overwrite, remove=False)
+    handle_output_overwrite(output_path, overwrite, remove=False)
 
     validate_output_path(output_path, verbose)
     progress(f"Converting to {config['description']}: {output_path}")
@@ -471,11 +468,8 @@ def write_gdal_format(
             debug("No CRS metadata found or using default CRS")
 
         # GDAL formats don't support complex types (STRUCT, LIST, MAP), so select only compatible columns
-        # Read schema to filter out incompatible columns
-        # Use fsspec to support remote URLs (HTTP/HTTPS)
-        import fsspec
-
-        with fsspec.open(input_url, "rb") as f:
+        # Read schema to filter out incompatible columns (local or remote)
+        with open_url(input_url) as f:
             pf = pq.ParquetFile(f)
             schema = pf.schema_arrow
 
@@ -576,7 +570,9 @@ def write_gdal_format(
         raise
     except Exception as e:
         error_msg = str(e)
-        if "already exists" in error_msg.lower():
+        # A writer's own "already exists" is the owner's refusal only when the
+        # switch was not given; with it, the write failed for another reason.
+        if not overwrite and "already exists" in error_msg.lower():
             raise output_exists_error(output_path) from e
         raise GeoParquetError(
             ERROR_CONVERSION_FAILED.format(format=config["description"], error=error_msg)
@@ -645,11 +641,8 @@ def write_csv(
     try:
         input_url = resolve_file_url(input_path, verbose)
 
-        # Read parquet to inspect schema
-        # Use fsspec to support remote URLs (HTTP/HTTPS)
-        import fsspec
-
-        with fsspec.open(input_url, "rb") as f:
+        # Read parquet to inspect schema (local or remote)
+        with open_url(input_url) as f:
             pf = pq.ParquetFile(f)
             schema = pf.schema_arrow
             columns = [field.name for field in schema]

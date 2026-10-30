@@ -16,6 +16,7 @@ from geoparquet_io.core.exceptions import (
     GeoParquetError,
     InvalidParameterError,
 )
+from geoparquet_io.core.file_utils import get_all_parquet_files
 from geoparquet_io.core.geo_metadata import parse_geo_metadata, sanitize_geo_metadata
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, warn
@@ -58,8 +59,7 @@ def _detect_stac_directory(dir_path: Path) -> str | None:
 
     # Check if directory also contains parquet files
     # If it does, it's a mixed directory (STAC + parquet) - allow it
-    parquet_files = list(dir_path.glob("*.parquet")) + list(dir_path.glob("*/*.parquet"))
-    if parquet_files:
+    if get_all_parquet_files(str(dir_path)):
         # Mixed directory - has both STAC and parquet, allow generation from parquet
         return None
 
@@ -585,10 +585,8 @@ def generate_stac_collection(
 
 
 def _find_partition_files(partition_dir: str) -> list[Path]:
-    """Find all parquet files in partition directory."""
-    partition_files = list(Path(partition_dir).glob("*.parquet"))
-    hive_partitions = list(Path(partition_dir).glob("*/*.parquet"))
-    return partition_files + hive_partitions
+    """Every parquet file of a partition, as every other reader lists it."""
+    return [Path(f) for f in get_all_parquet_files(partition_dir)]
 
 
 def _generate_collection_items(

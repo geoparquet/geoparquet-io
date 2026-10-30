@@ -17,11 +17,13 @@ from geoparquet_io.core.exceptions import (
 )
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.remote import (
+    canonical_store_url,
+    is_account_first_azure_url,
     is_azure_url,
+    is_http_url,
     is_remote_url,
     needs_httpfs,
     protocol_label,
-    remote_family,
 )
 
 
@@ -97,12 +99,14 @@ def resolve_partition_path(path: str, hive_partitioning: bool | None = None) -> 
     return resolved, options
 
 
-def _first_remote_match(pattern: str) -> str | None:
-    """The first object a remote glob matches, as DuckDB's ``glob()`` lists it.
+def _remote_glob_matches(pattern: str) -> list[str]:
+    """Every object a remote glob matches, as DuckDB's ``glob()`` lists it.
 
-    One listing call. Without it a "first file" read of ``s3://b/part-*.parquet``
-    handed DuckDB the whole pattern, which read every matched footer and merged
-    row groups across files by their per-file ids (#1332).
+    The one remote listing (#1367 T2e): the first-file read, the all-files read,
+    a partition's info and the GeoJSON footer sweep all come here. Sorted, and
+    dot-named objects skipped as a local glob skips them. Without it a "first
+    file" read of ``s3://b/part-*.parquet`` handed DuckDB the whole pattern,
+    which read every matched footer and merged row groups across files (#1332).
     """
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection_for_s3
 
@@ -111,7 +115,23 @@ def _first_remote_match(pattern: str) -> str | None:
         rows = con.execute("SELECT file FROM glob(?) ORDER BY file", [pattern]).fetchall()
     finally:
         con.close()
-    return next((row[0] for row in rows if row[0].endswith(".parquet")), None)
+    return [row[0] for row in rows if not row[0].rsplit("/", 1)[-1].startswith(".")]
+
+
+def glob_matches(pattern: str) -> list[str]:
+    """Every path a glob *pattern* matches, sorted, whatever its suffix.
+
+    Local patterns go to :mod:`glob` (``**`` recursive); an object-store
+    pattern is listed once by :func:`_remote_glob_matches`. An HTTP(S) URL
+    cannot be listed and comes back as given.
+    """
+    if is_remote_url(pattern):
+        return _remote_glob_matches(pattern) if needs_httpfs(pattern) else [pattern]
+    return sorted(glob_module.glob(pattern, recursive=True))
+
+
+def _parquet_glob_matches(pattern: str) -> list[str]:
+    return [m for m in glob_matches(pattern) if m.endswith(".parquet")]
 
 
 def get_first_parquet_file(partition_path: str) -> str | None:
@@ -123,7 +143,7 @@ def get_first_parquet_file(partition_path: str) -> str | None:
     """
     if is_remote_url(partition_path):
         if has_glob_pattern(partition_path) and needs_httpfs(partition_path):
-            return _first_remote_match(partition_path)
+            return next(iter(_parquet_glob_matches(partition_path)), None)
         return partition_path
 
     if os.path.isdir(partition_path):
@@ -134,15 +154,20 @@ def get_first_parquet_file(partition_path: str) -> str | None:
         return None
 
     if has_glob_pattern(partition_path):
-        matches = glob_module.glob(partition_path, recursive=True)
-        parquet_matches = [m for m in sorted(matches) if m.endswith(".parquet")]
-        return parquet_matches[0] if parquet_matches else None
+        return next(iter(_parquet_glob_matches(partition_path)), None)
 
     return partition_path
 
 
 def get_all_parquet_files(partition_path: str) -> list[str]:
+    """Every ``.parquet`` file under a directory or matched by a glob, sorted.
+
+    An object-store glob is listed (:func:`glob_matches`); any other remote
+    URL cannot be listed and is returned as given.
+    """
     if is_remote_url(partition_path):
+        if has_glob_pattern(partition_path) and needs_httpfs(partition_path):
+            return _parquet_glob_matches(partition_path)
         return [partition_path]
 
     if os.path.isdir(partition_path):
@@ -157,8 +182,7 @@ def get_all_parquet_files(partition_path: str) -> list[str]:
         return sorted(parquet_files)
 
     if has_glob_pattern(partition_path):
-        matches = glob_module.glob(partition_path, recursive=True)
-        return sorted([m for m in matches if m.endswith(".parquet")])
+        return _parquet_glob_matches(partition_path)
 
     return [partition_path] if os.path.exists(partition_path) else []
 
@@ -330,6 +354,15 @@ def output_exists_error(output_path: str, flag: str = "--overwrite") -> GeoParqu
     return GeoParquetError(f"Output file already exists: {output_path}\nUse {flag} to replace it.")
 
 
+def remote_in_place_error(flag: str = "--overwrite") -> GeoParquetError:
+    """The refusal to rewrite a remote input in place without the switch."""
+    return GeoParquetError(
+        f"Cannot modify remote file without {flag} flag. "
+        f"Use {flag} to confirm overwriting the remote file, "
+        "or write to a different output path."
+    )
+
+
 def handle_output_overwrite(
     output_path: str | None,
     overwrite: bool,
@@ -344,7 +377,9 @@ def handle_output_overwrite(
     matched by, a directory or glob input is refused whether or not it exists
     yet (:func:`guard_output_not_read_as_input`); an existing output that is
     the input itself is refused; any other existing output is refused unless
-    *overwrite* is set. Remote outputs are the object store's business and pass.
+    *overwrite* is set. A remote output cannot be looked up; the one existing
+    remote output gpio knows of is the input itself, and replacing it in place
+    is refused unless *overwrite* is set (:func:`remote_in_place_error`).
 
     Args:
         output_path: The output the command is about to write
@@ -369,6 +404,8 @@ def handle_output_overwrite(
     guard_output_not_read_as_input(input_path, output_path)
 
     if is_remote_url(output_path):
+        if output_path == input_path and not overwrite:
+            raise remote_in_place_error(flag)
         return
     output_file = Path(output_path)
 
@@ -406,17 +443,11 @@ def unlink_released_file(path: Path) -> None:
             time.sleep(wait)
 
 
-# copy_file resolves the s3, gcs and azure families (remote.REMOTE_SCHEMES) to a
-# configured object store, under the one scheme gpio's upload path speaks for
-# each: s3a:// becomes s3:// and gcs:// becomes gs://. Anything else is refused
-# by name, rather than dying inside a filesystem library on a dependency gpio
-# does not ship (#810). Azure is served through the one spelling gpio's upload
-# path parses -- az://<account>/<container>/<path>, built by
-# upload._build_azure_store (#864). The abfs[s]:// and azure:// spellings put the
-# account and container in a different order, or in a host name, so they are
-# refused by name rather than mis-parsed as account-first.
-_COPY_SCHEME_FOR_FAMILY = {"s3": "s3", "gcs": "gs"}
-_AZURE_COPY_SCHEME = "az"
+# copy_file resolves the s3, gcs and azure families to a configured object store
+# under remote.STORE_SCHEME_FOR_FAMILY, the spelling upload() reads too.
+# Anything else is refused by name, rather than dying inside a filesystem
+# library on a dependency gpio does not ship (#810). The abfs[s]:// and azure://
+# spellings are refused rather than mis-parsed as account-first (#864).
 
 # _setup_store_and_kwargs() folds this into the upload kwargs it returns alongside
 # the store. A streamed copy does not use those kwargs, so this only satisfies the
@@ -424,19 +455,9 @@ _AZURE_COPY_SCHEME = "az"
 _COPY_CHUNK_CONCURRENCY = 12
 
 
-def _canonical_remote_url(url: str) -> tuple[str, str]:
-    """Split a remote URL into (canonical scheme, canonical URL)."""
-    scheme, separator, rest = url.partition("://")
-    canonical = _COPY_SCHEME_FOR_FAMILY.get(remote_family(url), scheme.lower())
-    return canonical, f"{canonical}{separator}{rest}"
-
-
 def _check_copyable_scheme(param_name: str, url: str, writing: bool) -> None:
     """Reject a scheme copy_file cannot serve, before any store or I/O is built."""
-    scheme, _ = _canonical_remote_url(url)
-    family = remote_family(url)
-
-    if family == "http":
+    if is_http_url(url):
         if writing:
             raise InvalidParameterError(
                 param_name,
@@ -445,7 +466,7 @@ def _check_copyable_scheme(param_name: str, url: str, writing: bool) -> None:
             )
         return
 
-    if family == "azure" and scheme != _AZURE_COPY_SCHEME:
+    if is_azure_url(url) and not is_account_first_azure_url(url):
         from geoparquet_io.core.upload import AZURE_URL_FORM
 
         raise InvalidParameterError(
@@ -454,7 +475,8 @@ def _check_copyable_scheme(param_name: str, url: str, writing: bool) -> None:
             f"{AZURE_URL_FORM}. Rewrite the URL in that form.",
         )
 
-    if family is None:
+    if not is_remote_url(url):
+        scheme = url.partition("://")[0].lower()
         raise InvalidParameterError(
             param_name,
             f"cannot copy '{scheme}://' URLs. gpio copies s3://, gs:// and az:// "
@@ -543,7 +565,7 @@ def resolve_object_store(url: str) -> tuple[object, str]:
         InvalidParameterError: If the scheme has no configured store
     """
     _check_copyable_scheme("path", url, writing=False)
-    _scheme, canonical = _canonical_remote_url(url)
+    canonical = canonical_store_url(url)
 
     from geoparquet_io.core.upload import _setup_store_and_kwargs, parse_object_store_url
 
@@ -606,7 +628,7 @@ def copy_file(source_path: str, dest_path: str, verbose: bool = False) -> None:
     # An http(s) source is a full URL, not a store plus key: it is streamed with
     # a plain GET of the URL verbatim, so a presigned query string survives and
     # nothing is percent-encoded a second time (#825).
-    if source_is_remote and remote_family(source_path) == "http":
+    if source_is_remote and is_http_url(source_path):
         from geoparquet_io.core.http_retry import run_with_retry
 
         run_with_retry(functools.partial(_copy_http_source, source_path, dest_path, dest_is_remote))

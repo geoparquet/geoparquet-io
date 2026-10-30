@@ -21,7 +21,14 @@ from geoparquet_io.core.exceptions import (
     RemoteAccessError,
 )
 from geoparquet_io.core.logging_config import error, progress, success
-from geoparquet_io.core.remote import remote_family, url_scheme
+from geoparquet_io.core.remote import (
+    canonical_store_url,
+    is_account_first_azure_url,
+    is_azure_url,
+    is_gcs_url,
+    is_http_url,
+    is_s3_url,
+)
 
 
 def _try_infer_region_from_bucket(bucket: str) -> str | None:
@@ -201,12 +208,11 @@ def check_credentials(destination: str, profile: str | None = None) -> tuple[boo
     Returns:
         Tuple of (credentials_ok, hint_message)
     """
-    scheme = url_scheme(destination)
-    if scheme == "s3":
+    if is_s3_url(destination):
         return _check_s3_credentials(profile)
-    elif scheme == "gs":
+    elif is_gcs_url(destination):
         return _check_gcs_credentials()
-    elif scheme == "az":
+    elif is_account_first_azure_url(destination):
         return _check_azure_credentials()
     else:
         # HTTP or other - assume ok
@@ -335,8 +341,7 @@ def _setup_store_and_kwargs(
     environment keys, as it always has. When the chain finds nothing, no
     credential kwargs are passed and obstore resolves for itself.
     """
-    scheme = url_scheme(bucket_url)
-    if scheme == "s3":
+    if is_s3_url(bucket_url):
         bucket = bucket_url.partition("://")[2].split("/")[0]
 
         credentials = resolve_aws_credentials(profile)
@@ -363,7 +368,7 @@ def _setup_store_and_kwargs(
                 store_kwargs["region"] = "us-east-1"  # Default for custom endpoints
 
         store = S3Store(bucket, **store_kwargs)
-    elif scheme == "az":
+    elif is_account_first_azure_url(bucket_url):
         # Azure is built explicitly: obstore reads az:// as container-first, so
         # from_url() cannot serve gpio's account-first URLs (#864).
         store = _build_azure_store(bucket_url)
@@ -840,29 +845,23 @@ def parse_object_store_url(url: str) -> tuple[str, str]:
             is malformed or uses a spelling gpio cannot parse account-first
             (``abfs://``, ``abfss://``, ``azure://``)
     """
-    scheme = url_scheme(url)
-    if scheme == "s3":
-        parts = url[5:].split("/", 1)
-        bucket = parts[0]
-        prefix = parts[1] if len(parts) > 1 else ""
-        return f"s3://{bucket}", prefix
+    if is_s3_url(url) or is_gcs_url(url):
+        # s3a:// and gcs:// are the same stores under their one spelling
+        store = canonical_store_url(url)
+        scheme, _, rest = store.partition("://")
+        bucket, _, prefix = rest.partition("/")
+        return f"{scheme}://{bucket}", prefix
 
-    elif scheme == "gs":
-        parts = url[5:].split("/", 1)
-        bucket = parts[0]
-        prefix = parts[1] if len(parts) > 1 else ""
-        return f"gs://{bucket}", prefix
-
-    elif scheme == "az":
+    elif is_account_first_azure_url(url):
         account, container, prefix = _split_azure_url(url)
         return f"az://{account}/{container}", prefix
 
-    elif remote_family(url) == "http":
+    elif is_http_url(url):
         # HTTP stores - may need different handling
         # For now, return as-is
         return url, ""
 
-    elif remote_family(url) == "azure":
+    elif is_azure_url(url):
         # These spellings put the account and container in a different order
         # (or in a host name), so parsing them account-first would target the
         # wrong place. Name the supported form instead of guessing.

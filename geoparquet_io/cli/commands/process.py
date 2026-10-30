@@ -16,6 +16,7 @@ from geoparquet_io.cli.decorators import (
     geoparquet_version_option,
     grid_aggregate_options,
     metric_nodata_option,
+    overwrite_option,
     process_compression_options,
     repair_geometry_option,
     row_group_options,
@@ -97,11 +98,10 @@ def process(ctx):
     default=None,
     help="Directory for overview files (default: alongside the input).",
 )
-@click.option(
-    "--force",
-    "-f",
-    is_flag=True,
-    help="Overwrite existing overview output files.",
+@overwrite_option(
+    flag="--force",
+    short="-f",
+    help_text="Overwrite existing overview output files.",
 )
 @click.option(
     "--overview-out",
