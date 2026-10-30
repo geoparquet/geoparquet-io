@@ -172,12 +172,12 @@ def test_g12_the_walk_reports_two_commands_that_disagree_on_a_default():
 
     @group.command()
     @click.option("--x", default=1)
-    def one(x):
+    def one(**_options):
         pass
 
     @group.command()
     @click.option("--x", default=2)
-    def two(x):
+    def two(**_options):
         pass
 
     assert shared_option_differences(group, None) == {"--x": ["default"]}
@@ -201,12 +201,12 @@ def test_g12_the_walk_compares_each_field(left, right, field):
 
     @group.command()
     @click.option("--x", **left)
-    def one(x):
+    def one(**_options):
         pass
 
     @group.command()
     @click.option("--x", **right)
-    def two(x):
+    def two(**_options):
         pass
 
     assert field in shared_option_differences(group, None)["--x"]
@@ -220,12 +220,12 @@ def test_g12_the_walk_passes_identical_declarations_and_one_off_options():
     @group.command()
     @click.option("--x", type=int, default=3)
     @click.option("--only-here", default=1)
-    def one(x, only_here):
+    def one(**_options):
         pass
 
     @group.command()
     @click.option("--x", type=int, default=3)
-    def two(x):
+    def two(**_options):
         pass
 
     assert shared_option_differences(group, None) == {}
