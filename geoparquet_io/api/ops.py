@@ -3041,6 +3041,7 @@ def create_pmtiles_pyramid(
     force: bool = False,
     verbose: bool = False,
     temporary_directory: str | None = None,
+    memory_limit: str | None = None,
 ) -> None:
     """
     Create a banded multi-level PMTiles pyramid from an aggregate file.
@@ -3077,6 +3078,8 @@ def create_pmtiles_pyramid(
         verbose: Enable verbose output
         temporary_directory: Existing directory for this run's scratch and
             the intermediate band archives; defaults to the OS temp directory
+        memory_limit: DuckDB memory limit for band planning and the overview
+            rollups (e.g. "2GB"); default: half the memory ceiling (#1191)
 
     Raises:
         TippecanoeNotFoundError: If tippecanoe is not in PATH
@@ -3117,6 +3120,7 @@ def create_pmtiles_pyramid(
         force=force,
         verbose=verbose,
         temporary_directory=temporary_directory,
+        memory_limit=memory_limit,
     )
 
 

@@ -14,6 +14,7 @@ from geoparquet_io.cli.decorators import (
     overwrite_option,
     repair_geometry_option,
     verbose_option,
+    write_memory_option,
 )
 from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.exceptions import GeoParquetError
@@ -279,6 +280,11 @@ def pmtiles_create(
     help_text="Overwrite the output archive if it already exists",
 )
 @temporary_directory_option
+@write_memory_option(
+    help="Memory limit for band planning and the overview rollups (e.g., '512MB', '2GB'). "
+    "Default: 50% of the memory ceiling -- physical RAM, or the container or Slurm job "
+    "cap when lower. The tippecanoe runs are separate processes and are not bounded by it."
+)
 @verbose_option
 def pmtiles_pyramid(
     input_parquet,
@@ -296,6 +302,7 @@ def pmtiles_pyramid(
     force,
     verbose,
     temporary_directory,
+    write_memory,
 ):
     """Create a multi-level PMTiles pyramid from an aggregate file.
 
@@ -340,6 +347,7 @@ def pmtiles_pyramid(
             force=force,
             verbose=verbose,
             temporary_directory=temporary_directory,
+            memory_limit=write_memory,
         )
         click.echo(click.style(f"✓ Created {output_pmtiles}", fg="green"))
     except GeoParquetError:
