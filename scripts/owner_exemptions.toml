@@ -774,9 +774,6 @@ reason = "geometry stats twins; T3b"
 block = "core.arrow_geo_metadata:_detect_version_from_table|core.streaming:extract_version_from_metadata"
 reason = "version read from the geo key, copied; T2b"
 [[G3.pylint]]
-block = "core.common:add_computed_column|core.str_order:_str_order_file_based"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
 block = "core.convert:<module>|core.process.aggregate.common:<module>"
 reason = "DuckDB integer type-name list copied; T1c's type owner"
 [[G3.pylint]]
