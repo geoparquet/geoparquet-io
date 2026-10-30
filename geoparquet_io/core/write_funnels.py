@@ -69,6 +69,7 @@ from geoparquet_io.core.geo_metadata import (
     SELF_EVIDENT_BBOX_COLUMN,
     carried_geometry_column,
     declare_carried_bbox_column,
+    edges_for_version,
     gate_illegal_bbox_covering,
     prune_geo_metadata_to_columns,
     read_raw_geo,
@@ -160,21 +161,6 @@ def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
     return edges_by_col
 
 
-def _edges_for_output_version(edges: str, geo_version: str) -> str:
-    """Map an edges value to one representable in the output's spec version.
-
-    GeoParquet 1.x only allows {"planar", "spherical"}; ellipsoidal algorithms
-    (vincenty/karney/andoyer/thomas) from 2.0/native inputs degrade to
-    "spherical" with a warning. 2.0 outputs keep the algorithm verbatim.
-    """
-    if not str(geo_version).startswith("1."):
-        return edges
-    if edges in ("planar", "spherical"):
-        return edges
-    warn(f"edges algorithm '{edges}' is not representable in GeoParquet 1.x; writing 'spherical'")
-    return "spherical"
-
-
 def _block_edges(original_metadata: dict | None) -> dict[str, object]:
     """Map geometry column -> the ``edges`` value its ``geo`` block states, as written.
 
@@ -228,7 +214,7 @@ def apply_nonplanar_edges(
     as straight lines over the same bytes -- so both carriers are restored:
 
     * the ``geo`` block's ``edges``, mapped to what the block's version can
-      say (:func:`_edges_for_output_version`);
+      say (:func:`~geoparquet_io.core.geo_metadata.edges_for_version`);
     * the Parquet logical type, retyped from GEOMETRY to GEOGRAPHY with the
       same CRS and the edge algorithm (#999). Restoring only the block left a
       2.0 output whose block said spherical over a planar column, which
@@ -262,7 +248,7 @@ def apply_nonplanar_edges(
     geo_meta = pending_geo if pending_geo is not None else _read_geo_key(output_file)
     geo_version = str((geo_meta or {}).get("version") or "")
     edges_by_col = {
-        name: _edges_for_output_version(edges, geo_version) for name, edges in edges_by_col.items()
+        name: edges_for_version(edges, geo_version) for name, edges in edges_by_col.items()
     }
     geography = _geography_candidates(output_file, edges_by_col)
     targets = {**_block_bbox_targets(geo_meta, edges_by_col, geography), **geography}
