@@ -177,6 +177,37 @@ class TestCoreExceptions:
         assert "Query.Farm install" in message
         assert "https://duckdb-extensions.query.farm" in message
 
+    def test_query_farm_offline_failure_points_at_the_query_farm_host(self):
+        """A non-404 Query.Farm failure must not send users to the community host.
+
+        DuckDB 2.0 offline with nothing cached fails reading the repository's
+        metadata file -- a reachability problem with
+        duckdb-extensions.query.farm, which checking
+        community-extensions.duckdb.org says nothing about.
+        """
+        detail = (
+            "installing 'a5' from the Query.Farm repository "
+            "(https://duckdb-extensions.query.farm) failed: IO Error: "
+            "Failed to read the metadata file of the extension repository "
+            '"https://duckdb-extensions.query.farm": Could not resolve hostname'
+        )
+        exc = ExtensionUnavailableError(
+            "a5", "2.0.0", detail, feature="gpio add a5", query_farm=True
+        )
+
+        assert not exc.unpublished
+        message = str(exc)
+        assert "check that https://duckdb-extensions.query.farm is reachable" in message
+        assert "community-extensions.duckdb.org is reachable" not in message
+
+    def test_non_query_farm_offline_failure_keeps_the_community_host(self):
+        """The community registry stays the host to check for everything else."""
+        exc = ExtensionUnavailableError("geography", "1.5.5", _OFFLINE)
+
+        message = str(exc)
+        assert "check that https://community-extensions.duckdb.org is reachable" in message
+        assert "query.farm is reachable" not in message
+
     def test_file_not_found_error_with_detail(self):
         with pytest.raises(FileNotFoundGeoParquetError) as exc_info:
             raise FileNotFoundGeoParquetError("test.parquet", "no read permission")

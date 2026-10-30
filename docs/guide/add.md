@@ -493,6 +493,11 @@ Either way gpio opts out of the extension's load-time telemetry (it sets
 `QUERY_FARM_TELEMETRY_OPT_OUT` before loading, leaving any value you set
 yourself alone), and extension signature checks stay on.
 
+Note that A5 cell IDs are not stable across a5 builds: the Query.Farm build
+for DuckDB 2.0 numbers cells differently from the 1.5-era community build
+(the cell geometries are identical), so IDs added under one DuckDB major
+will not join against IDs computed under the other.
+
 === "CLI"
 
     ```bash

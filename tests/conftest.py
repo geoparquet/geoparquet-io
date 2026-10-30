@@ -870,16 +870,24 @@ def pytest_runtest_setup(item):
 # output -- so they must ask before asserting success (#737).
 
 
-#: DuckDB's text when an extension could not be *downloaded* at all (offline,
+#: DuckDB's texts when an extension could not be *downloaded* at all (offline,
 #: proxy): the registry never answered, so whether the extension is published
 #: is unknown here. For the availability probe that is still "this environment
 #: cannot run the extension", so the honest outcome is a skip -- unlike the
 #: user-facing classification, which must NOT call an offline error
-#: "unpublished" (#778). The unpublished 404 carries this phrase too, but is
-#: classified first by `is_unpublished_extension_error`. a5 on DuckDB 2.0
+#: "unpublished" (#778). The unpublished 404 carries the first phrase too, but
+#: is classified first by `is_unpublished_extension_error`. a5 on DuckDB 2.0
 #: downloads from the Query.Farm repository (#1347), the others from the
-#: community registry; both failures read "Failed to download extension".
-_DOWNLOAD_FAILURE = "failed to download extension"
+#: community registry; a failed download reads "Failed to download extension"
+#: either way. A *cold* offline start on 2.0 fails earlier: with no persisted
+#: query_farm registration, CREATE EXTENSION REPOSITORY cannot fetch the
+#: repository's metadata file, and that error ("Failed to read the metadata
+#: file of the extension repository ... Could not resolve hostname") never
+#: mentions a download.
+_DOWNLOAD_FAILURE_SIGNATURES = (
+    "failed to download extension",
+    "failed to read the metadata file of the extension repository",
+)
 
 
 def _extension_download_failed(exc) -> bool:
@@ -888,7 +896,8 @@ def _extension_download_failed(exc) -> bool:
     cur = exc
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
-        if _DOWNLOAD_FAILURE in str(cur).lower():
+        blob = str(cur).lower()
+        if any(signature in blob for signature in _DOWNLOAD_FAILURE_SIGNATURES):
             return True
         cur = cur.__cause__ or cur.__context__
     return False

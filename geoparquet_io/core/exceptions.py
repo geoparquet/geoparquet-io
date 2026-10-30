@@ -289,10 +289,16 @@ class ExtensionUnavailableError(GeoParquetError):
         duckdb_version: str,
         detail: str | None = None,
         feature: str | None = None,
+        query_farm: bool = False,
     ) -> None:
+        """``query_farm``: the install routed to the Query.Farm repository
+        (``duckdb_utils._installs_from_query_farm``), so reachability guidance
+        must name https://duckdb-extensions.query.farm, not the community
+        registry this install never talked to."""
         self.name = name
         self.duckdb_version = duckdb_version
         self.feature = feature
+        self.query_farm = query_farm
         self.unpublished = is_unpublished_extension_error(detail)
         subject = f"'{feature}' requires" if feature else "This operation requires"
         listing = f"https://community-extensions.duckdb.org/extensions/{name}.html"
@@ -310,10 +316,16 @@ class ExtensionUnavailableError(GeoParquetError):
             if hint:
                 msg = f"{msg} {hint}"
         elif detail:
-            # A failure that is NOT a 404: do not blame the extension registry.
+            # A failure that is NOT a 404: do not blame the extension registry,
+            # and name the registry this install actually talked to.
+            registry = (
+                "https://duckdb-extensions.query.farm"
+                if query_farm
+                else "https://community-extensions.duckdb.org"
+            )
             msg += (
                 " This is not the 'not published for this DuckDB version' 404, so "
-                "check that https://community-extensions.duckdb.org is reachable "
+                f"check that {registry} is reachable "
                 "from here (proxy, firewall, offline)."
             )
         else:
