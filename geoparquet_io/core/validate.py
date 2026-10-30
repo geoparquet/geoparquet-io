@@ -58,6 +58,7 @@ from geoparquet_io.core.geo_metadata import (
     BBOX_COVERING_FIELD_ORDERS,
     GEOARROW_ENCODINGS,
     GEOGRAPHY_EDGE_ALGORITHMS,
+    GEOPARQUET_VERSIONS,
     covering_lacks_bbox,
     is_covering_path,
     read_raw_geo,
@@ -76,6 +77,7 @@ from geoparquet_io.core.parquet_schema import (
     schema_direct_children,
     schema_entry_is_group,
 )
+from geoparquet_io.core.parquet_writer import version_for_file_type
 from geoparquet_io.core.remote import is_remote_url, needs_httpfs
 
 
@@ -4347,7 +4349,7 @@ def _determine_version(file_type_info: dict) -> str:
     elif file_type == "geoparquet_v1":
         return geo_version or "1.x"
     elif file_type == "geoparquet_v2":
-        return geo_version or "2.0"
+        return geo_version or version_for_file_type(file_type)
     else:
         return "unknown"
 
@@ -4534,7 +4536,9 @@ def _run_geoparquet_checks(
 
     # A missing version is reported by _check_version_present above; guard the
     # string comparisons below against None so validation never crashes on it.
-    geo_version = file_type_info.get("geo_version") or "1.0.0"
+    geo_version = (
+        file_type_info.get("geo_version") or GEOPARQUET_VERSIONS["1.0"]["metadata_version"]
+    )
 
     # Column metadata checks for each geometry column
     for col_name, col_meta in columns.items():

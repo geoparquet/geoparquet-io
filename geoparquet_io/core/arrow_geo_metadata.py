@@ -757,14 +757,12 @@ def _apply_geoparquet_metadata(
         geoparquet_version, table=table, verbose=verbose
     )
 
-    version_config = GEOPARQUET_VERSIONS.get(
-        effective_version, GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]
-    )
+    version_config = GEOPARQUET_VERSIONS[effective_version]
     metadata_version = version_config["metadata_version"]
     should_add_geo_metadata = effective_version != "parquet-geo-only"
 
     if verbose:
-        debug(f"Applying GeoParquet metadata for version: {effective_version or 'default (1.1)'}")
+        debug(f"Applying GeoParquet metadata for version: {effective_version}")
 
     # Check if geometry column exists in table
     if geometry_column not in table.column_names:

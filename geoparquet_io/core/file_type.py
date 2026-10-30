@@ -102,7 +102,9 @@ def detect_geoparquet_file_type(parquet_file, verbose=False, con=None):
             # `check bbox`, `check optimization` and `add bbox` down with a bare
             # `AttributeError` (#979). `geo_version` is documented as the
             # version *or None*, and every consumer already handles None.
-            result["geo_version"] = carried_version(geo_meta["version"], source=str(parquet_file))
+            result["geo_version"] = carried_version(
+                geo_meta.get("version"), source=str(parquet_file)
+            )
 
     # Check for native Parquet geo types using schema. A GeoArrow struct column
     # counts here (its coordinate stats prune like native ones, #461), but only

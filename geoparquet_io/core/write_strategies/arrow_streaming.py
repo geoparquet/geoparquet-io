@@ -335,7 +335,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             )
             return
 
-        version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
+        version_config = GEOPARQUET_VERSIONS[geoparquet_version]
 
         # Check geometry type and prepare SQL
         _, final_sql = _check_geometry_type(con, query, geometry_column, verbose)
@@ -756,7 +756,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             geoparquet_version, table=table, verbose=verbose
         )
 
-        version_config = GEOPARQUET_VERSIONS.get(effective_version, GEOPARQUET_VERSIONS["1.1"])
+        version_config = GEOPARQUET_VERSIONS[effective_version]
         metadata_version = version_config["metadata_version"]
 
         # This entry point gets no `geometry_info`, so the table's own schema is

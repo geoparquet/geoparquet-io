@@ -21,6 +21,14 @@ was already there (approved change 7: it now writes 1.1 like every other
 command), and ``write_geoparquet_table`` wrote a GeoArrow table with no ``geo``
 key as parquet-geo-only while ``Table.write`` and the file paths wrote it as 2.0
 (approved change 10).
+
+``add bbox`` copies its input only when the facade's answer is the version the
+input already declares. So a native-geo-only input that already has a bbox
+column is written at 2.0, as the one without a bbox always was; before, the
+copy kept it with no ``geo`` key (recorded under approved change 7, "the facade
+decides", and flagged for the maintainer as the one cell beyond its letter).
+A repair (``check --fix``) asks the same resolver with ``preserve_input=True``
+and keeps the input's own version: 1.0 stays 1.0, native-geo-only stays keyless.
 """
 
 from __future__ import annotations
@@ -92,6 +100,8 @@ def inputs(tmp_path_factory):
     _declare(paths["v11"], "1.1.0", covering=True)
     _copy(_ROWS, paths["v20"], "V2")
     _copy(_ROWS, paths["pgo"], "NONE")
+    paths["pgo_bbox"] = root / "pgo_bbox.parquet"
+    _copy(_ROWS_WITH_BBOX, paths["pgo_bbox"], "NONE")
     assert b"geo" not in (pq.ParquetFile(str(paths["pgo"])).metadata.metadata or {})
     return paths
 
@@ -196,3 +206,64 @@ def test_parquet_geo_only_request_writes_no_geo_key_on_every_path(inputs, tmp_pa
         out = tmp_path / f"out_{index}.parquet"
         run(inputs["v11"], out, "parquet-geo-only")
         assert _declared_version(out) is None, name
+
+
+def test_add_bbox_on_a_native_geo_only_input_with_a_bbox_writes_2_0(inputs, tmp_path):
+    """The copy would keep no ``geo`` key; the facade's auto answer is 2.0."""
+    out = tmp_path / "out.parquet"
+    result = _invoke("add", "bbox", inputs["pgo_bbox"], out)
+    assert result.exit_code == 0, result.output
+    assert _declared_version(out) == "2.0.0"
+
+
+@pytest.mark.parametrize(
+    ("input_name", "preserved"),
+    [("v10", "1.0"), ("v11", "1.1"), ("v20", "2.0"), ("pgo", "parquet-geo-only")],
+)
+def test_the_repair_policy_keeps_the_inputs_own_version(inputs, input_name, preserved):
+    from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+    from geoparquet_io.core.parquet_writer import (
+        resolve_output_geoparquet_version,
+        version_for_file_type,
+    )
+
+    path = str(inputs[input_name])
+    resolved = resolve_output_geoparquet_version(None, input_file=path, preserve_input=True)
+    bbox = check_metadata_and_bbox(path, verbose=False, return_results=True, quiet=True)
+    from_checks = version_for_file_type(
+        bbox.get("file_type"), bbox.get("version"), preserve_input=True
+    )
+    assert resolved == from_checks == preserved
+
+
+@pytest.mark.parametrize("requested", ["3.0", "1.2", "", "2"])
+def test_an_unknown_explicit_version_is_refused_not_written_as_1_1(requested):
+    from geoparquet_io.core.exceptions import InvalidParameterError
+    from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+
+    with pytest.raises(InvalidParameterError, match="Unknown GeoParquet version"):
+        resolve_output_geoparquet_version(requested)
+
+
+def test_table_write_refuses_an_unknown_version(inputs, tmp_path):
+    import geoparquet_io as gpio
+    from geoparquet_io.core.exceptions import InvalidParameterError
+
+    with pytest.raises(InvalidParameterError):
+        gpio.read(str(inputs["v11"])).write(str(tmp_path / "out.parquet"), geoparquet_version="3.0")
+    assert not (tmp_path / "out.parquet").exists()
+
+
+@pytest.mark.parametrize("bad", [2, 1.1, ["2.0"], {"v": "2.0"}, True])
+def test_a_non_string_declared_version_reads_as_none_everywhere(bad):
+    import pyarrow as pa
+
+    from geoparquet_io.api.table import Table
+    from geoparquet_io.core.parquet_writer import declared_geoparquet_version
+
+    geo = {"version": bad, "primary_column": "geometry", "columns": {"geometry": {}}}
+    assert declared_geoparquet_version(geo, default=None) is None
+    assert declared_geoparquet_version(geo) == ""
+    table = pa.table({"geometry": pa.array([b""], pa.binary())})
+    table = table.replace_schema_metadata({b"geo": json.dumps(geo).encode()})
+    assert Table(table).geoparquet_version is None

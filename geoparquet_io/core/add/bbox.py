@@ -17,6 +17,7 @@ from geoparquet_io.core.duckdb_utils import get_duckdb_connection, query_schema,
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
 from geoparquet_io.core.geo_metadata import (
+    GEOPARQUET_VERSIONS,
     _bbox_claimed_by_another_column,
     bbox_struct_child_names_match,
     build_bbox_covering,
@@ -32,8 +33,8 @@ from geoparquet_io.core.geometry_detection import (
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, progress, success, warn
 from geoparquet_io.core.parquet_writer import (
-    auto_version_upgrade,
     declared_geoparquet_version,
+    resolve_output_geoparquet_version,
 )
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import open_input, write_output
@@ -291,6 +292,23 @@ def _write_options_requested(
             geoparquet_version,
         )
     )
+
+
+def _version_a_copy_would_miss(input_parquet: str) -> str | None:
+    """The facade's version for this input, when a verbatim copy would declare another.
+
+    A copy keeps whatever version the input declares, so it can answer this
+    run only where that already is the facade's answer: a 1.0 input writes
+    1.1, and a native-geo-only one (no ``geo`` key) writes 2.0, like every
+    other command (approved change 7 of #1367: the facade decides).
+    """
+    target = resolve_output_geoparquet_version(None, input_file=input_parquet)
+    declared = declared_geoparquet_version(
+        sanitized_carried_geo_of_file(input_parquet), default=None
+    )
+    if GEOPARQUET_VERSIONS[target]["metadata_version"] == declared:
+        return None
+    return target
 
 
 def _make_add_bbox_query(
@@ -582,7 +600,7 @@ def _add_bbox_file_based(
         # Nor a version other than the one it declares: a 1.0 input writes 1.1
         # like every other command (approved change 7 of #1367).
         version_upgrade=(
-            auto_version_upgrade(input_parquet)
+            _version_a_copy_would_miss(input_parquet)
             if output_parquet is not None and not write_options_requested
             else None
         ),

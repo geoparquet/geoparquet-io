@@ -669,34 +669,50 @@ class TestVersionPreservation:
 
     def test_get_version_from_check_results_v2(self):
         """Test version detection for v2 files."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+        from geoparquet_io.core.parquet_writer import version_for_file_type
 
         check_results = {"bbox": {"file_type": "geoparquet_v2", "version": "2.0.0"}}
-        version = get_geoparquet_version_from_check_results(check_results)
+        version = version_for_file_type(
+            check_results.get("bbox", {}).get("file_type"),
+            check_results.get("bbox", {}).get("version"),
+            preserve_input=True,
+        )
         assert version == "2.0"
 
     def test_get_version_from_check_results_parquet_geo_only(self):
         """Test version detection for parquet-geo-only files."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+        from geoparquet_io.core.parquet_writer import version_for_file_type
 
         check_results = {"bbox": {"file_type": "parquet_geo_only"}}
-        version = get_geoparquet_version_from_check_results(check_results)
+        version = version_for_file_type(
+            check_results.get("bbox", {}).get("file_type"),
+            check_results.get("bbox", {}).get("version"),
+            preserve_input=True,
+        )
         assert version == "parquet-geo-only"
 
     def test_get_version_from_check_results_v1_1(self):
         """Test version detection for v1.1 files."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+        from geoparquet_io.core.parquet_writer import version_for_file_type
 
         check_results = {"bbox": {"file_type": "geoparquet_v1", "version": "1.1.0"}}
-        version = get_geoparquet_version_from_check_results(check_results)
+        version = version_for_file_type(
+            check_results.get("bbox", {}).get("file_type"),
+            check_results.get("bbox", {}).get("version"),
+            preserve_input=True,
+        )
         assert version == "1.1"
 
     def test_get_version_from_check_results_v1_0(self):
         """Test version detection for v1.0 files."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+        from geoparquet_io.core.parquet_writer import version_for_file_type
 
         check_results = {"bbox": {"file_type": "geoparquet_v1", "version": "1.0.0"}}
-        version = get_geoparquet_version_from_check_results(check_results)
+        version = version_for_file_type(
+            check_results.get("bbox", {}).get("file_type"),
+            check_results.get("bbox", {}).get("version"),
+            preserve_input=True,
+        )
         assert version == "1.0"
 
 

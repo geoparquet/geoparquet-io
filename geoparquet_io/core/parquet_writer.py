@@ -502,6 +502,7 @@ def resolve_output_geoparquet_version(
     original_metadata: Mapping | None = None,
     table: pa.Table | None = None,
     source_version: str | None = None,
+    preserve_input: bool = False,
     verbose: bool = False,
 ) -> str:
     """Decide which GeoParquet version the output declares. The second decision.
@@ -522,6 +523,16 @@ def resolve_output_geoparquet_version(
     4. ``source_version`` -- an answer already reached for the file the data
        was read from (``Table.write`` remembers it from ``gpio.read``);
     5. ``DEFAULT_GEOPARQUET_VERSION``.
+
+    An explicit version must be one this writer can write (a key of
+    ``GEOPARQUET_VERSIONS``); anything else raises ``InvalidParameterError``
+    rather than reaching a writer that would quietly write 1.1 in its place.
+    Every answer is therefore a key the callers index directly.
+
+    ``preserve_input=True`` is the repair policy (``check --fix``): the file
+    witness keeps the input's own version exactly -- a 1.0 file stays 1.0 and
+    a native-geo-only file writes no ``geo`` key -- instead of auto mode's
+    upgrades. Same steps, same map (:func:`version_for_file_type`), one option.
 
     The default is part of the decision, so no caller adds an ``or "1.1"`` of
     its own: before #1367 ``extract``, ``sort hilbert``, ``Table.write`` and
@@ -553,10 +564,16 @@ def resolve_output_geoparquet_version(
     CRS in two places that must agree.
     """
     if requested is not None:
+        if requested not in GEOPARQUET_VERSIONS:
+            raise InvalidParameterError(
+                "geoparquet_version",
+                f"Unknown GeoParquet version {requested!r}; expected one of "
+                f"{', '.join(GEOPARQUET_VERSIONS)}",
+            )
         return requested
 
     detected = (
-        (_version_of_file(input_file, verbose) if input_file else None)
+        (_version_of_file(input_file, verbose, preserve_input) if input_file else None)
         or carried_geoparquet_version(original_metadata)
         or (_version_of_table(table, verbose) if table is not None else None)
         or source_version
@@ -581,63 +598,63 @@ def carried_geoparquet_version(metadata: Mapping | None) -> str | None:
     through as ``"3.0"``, a version no writer table knows; the file and table
     paths already read it as no version.)
     """
-    return _writable_version(carried_version(sanitized_carried_geo(metadata).get("version")))
+    return writable_geoparquet_version(
+        carried_version(sanitized_carried_geo(metadata).get("version"))
+    )
 
 
-def _writable_version(declared: str | None) -> str | None:
-    """A declared ``geo.version`` as the version this writer writes for it (1.x -> 1.1, 2.x -> 2.0)."""
+def writable_geoparquet_version(declared: str | None) -> str | None:
+    """A declared ``geo.version`` as the version this writer writes for it (1.x -> 1.1, 2.x -> 2.0).
+
+    None for anything else (no version, no minor, a major this writer does not know).
+    """
     parts = declared.split(".") if declared else []
     if len(parts) < 2:
         return None
     return {"1": "1.1", "2": "2.0"}.get(parts[0])
 
 
-def auto_version_upgrade(input_file: str) -> str | None:
-    """The version auto mode writes for *input_file*, when it differs from the one it declares.
+def declared_geoparquet_version(geo_meta: Mapping, default: str | None = "") -> str | None:
+    """The ``version`` string a decoded ``geo`` block declares (*default* when it gives none).
 
-    A verbatim copy of a file keeps the version it declares, so a command that
-    may answer with a copy (``add bbox`` over an input that already has its
-    bbox column, #728) asks this first: a 1.0 file is written at 1.1 by auto
-    mode like every other command (approved change 7), so it cannot be copied.
-    A block that declares the version auto mode writes, or no version at all
-    (a native-geo-only file has no ``geo`` key), can be: None.
+    For reporting the *input's* version -- ``gpio inspect`` printing it,
+    ``Table.geoparquet_version``, ``add bbox-metadata`` refusing a 1.0 file,
+    ``add bbox``'s advice and its copy test; never for choosing the output's,
+    which is :func:`resolve_output_geoparquet_version`. A version that is not a
+    string is no version (``carried_version`` names it once, #979), so every
+    reader of a declared version gets the same answer for the same block.
     """
-    declared = carried_version(sanitized_carried_geo_of_file(input_file).get("version"))
-    target = _writable_version(declared)
-    if target is None or GEOPARQUET_VERSIONS[target]["metadata_version"] == declared:
-        return None
-    return target
+    return carried_version(geo_meta.get("version")) or default
 
 
-def declared_geoparquet_version(geo_meta: Mapping, default: object = "") -> object:
-    """The ``version`` a decoded ``geo`` block declares, exactly as declared (*default* when absent).
+def version_for_file_type(
+    file_type: str | None, declared: str | None = None, *, preserve_input: bool = False
+) -> str | None:
+    """The version a file of this kind writes: the one map both policies share.
 
-    For reporting the *input's* version -- ``gpio inspect`` printing it, ``add
-    bbox-metadata`` refusing a 1.0 file, ``add bbox``'s advice; never for
-    choosing the output's, which is :func:`resolve_output_geoparquet_version`.
-    """
-    return geo_meta.get("version", default)
-
-
-def preserved_geoparquet_version(file_type: str, declared: str | None) -> str | None:
-    """The version a repair of a file writes: the file's own, exactly.
-
-    ``check --fix`` rewrites a file to repair it, not to convert it, so unlike
-    auto mode it keeps a 1.0 file at 1.0 and a native-geo-only file without a
-    ``geo`` key. ``file_type`` is ``detect_geoparquet_file_type``'s answer and
-    ``declared`` the file's declared ``geo.version``. None for a file that is
-    not GeoParquet, which the writer then decides by auto mode.
+    ``file_type`` is ``file_type.detect_geoparquet_file_type``'s answer and
+    ``declared`` the file's declared ``geo.version``. Auto mode upgrades a 1.x
+    file to 1.1 and a native-geo-only file to 2.0; ``preserve_input`` (the
+    repair policy) keeps both as they are -- 1.0 stays 1.0, native-geo-only
+    writes no ``geo`` key. None for a file that is not GeoParquet.
     """
     if file_type == "geoparquet_v2":
         return "2.0"
     if file_type == "parquet_geo_only":
-        return "parquet-geo-only"
+        return "parquet-geo-only" if preserve_input else "2.0"
     if file_type == "geoparquet_v1":
-        return "1.0" if (declared or "").startswith("1.0") else "1.1"
+        return _declared_1x(declared) if preserve_input else "1.1"
     return None
 
 
-def _version_of_file(parquet_file: str, verbose: bool = False) -> str | None:
+def _declared_1x(declared: str | None) -> str:
+    """A 1.x file's own minor version as a writable key: "1.0" for 1.0.x, else "1.1"."""
+    return "1.0" if (declared or "").split(".")[:2] == ["1", "0"] else "1.1"
+
+
+def _version_of_file(
+    parquet_file: str, verbose: bool = False, preserve_input: bool = False
+) -> str | None:
     """What a parquet file says about its version: ``2.0``, ``1.1``, ``1.1-geoarrow`` or None.
 
     1.x normalizes to 1.1, matching :func:`carried_geoparquet_version`, and a
@@ -646,21 +663,23 @@ def _version_of_file(parquet_file: str, verbose: bool = False) -> str | None:
     witness answers.
     """
     try:
-        file_type = detect_geoparquet_file_type(parquet_file, verbose).get("file_type")
+        info = detect_geoparquet_file_type(parquet_file, verbose)
     except Exception as e:
         debug(f"Version auto-detect failed for {parquet_file}: {e}; falling back to default")
         return None
 
-    if file_type == "geoparquet_v1" and _declares_geoarrow_encoding(parquet_file):
+    file_type = info.get("file_type")
+    # The repair policy keeps the declared 1.x as is (``version_for_file_type``),
+    # the answer ``check --fix`` reads off its check results, so both agree.
+    auto_v1 = file_type == "geoparquet_v1" and not preserve_input
+    if auto_v1 and _declares_geoarrow_encoding(parquet_file):
         # A GeoArrow-native 1.1 file declares version 1.1.0 just as a WKB one
         # does, so "1.1" is the version but not the *encoding*: writing it meant
         # passing the nested-list geometry through under `encoding: WKB`, a block
         # contradicting the schema beside it (#1176). "1.1-geoarrow" is the one
         # version that preserves what the input actually is.
         return "1.1-geoarrow"
-    return {"geoparquet_v2": "2.0", "parquet_geo_only": "2.0", "geoparquet_v1": "1.1"}.get(
-        file_type
-    )
+    return version_for_file_type(file_type, info.get("geo_version"), preserve_input=preserve_input)
 
 
 def _declares_geoarrow_encoding(parquet_file: str) -> bool:
