@@ -1,5 +1,6 @@
-"""Self-tests for the ``no-click-echo`` and ``forbid-bespoke-schema-reconciliation``
-guards, whose exemptions used to be unanchored (#970).
+"""Self-tests for the ``no-click-echo`` guard, whose exemption used to be
+unanchored (#970), and for ``forbid-bespoke-schema-reconciliation``, which had the
+same hole before it became the AST-based owner-only-defs check (#1367, G2).
 
 Both filtered their own output with a bare substring match::
 
@@ -29,7 +30,14 @@ list, and a whole-module exemption has many shapes (``grep -v`` without the
 ``^``, a double-quoted path, an ``awk`` regex match, an ``--exclude=`` on the
 search, the path in a shell variable). Pinning the stages fails all of them.
 
-Neither guard has any match in the tree today -- anchoring newly exempted
+The schema guard is no longer a grep pipeline: since #1367 the hook runs
+``scripts/check_owner_defs.py``, whose exemptions are ``(path, name)`` pairs in
+``scripts/owner_exemptions.toml`` and which never reads comments, so neither
+consequence above can happen to it. ``tests/test_owner_guards.py`` runs that
+script on synthetic trees, including both #970 reproductions; the
+``TestSchemaGuardIsTheOwnerDefsCheck`` class below pins the hand-over.
+
+``no-click-echo`` has no match in the tree today -- anchoring newly exempted
 nothing and newly flagged nothing -- so these tests are the only thing standing
 between the guards and a hole nobody would notice. That is what happened to
 ``duckdb-antipatterns`` in #946.
@@ -88,15 +96,7 @@ CLICK_ECHO = _GuardCase(
     clean="from geoparquet_io.core.logging_config import info\n\ninfo('hello')\n",
 )
 
-SCHEMA = _GuardCase(
-    hook_id=SCHEMA_HOOK,
-    exempt_path=SCHEMA_EXEMPT,
-    violation="def _align_schema(a, b):\n    return a\n",
-    comment_bypass="def _align_schema(a, b):  # mirrors arrow_types.py\n    return a\n",
-    clean="from geoparquet_io.core.arrow_types import _compute_unified_schema\n",
-)
-
-GUARDS = [CLICK_ECHO, SCHEMA]
+GUARDS = [CLICK_ECHO]
 
 
 def _run(guard: _GuardCase, tmp_path, files):
@@ -174,14 +174,9 @@ class TestGuardExemptionsStayAnchored:
             'grep -rn "click\\.echo" geoparquet_io/core/ --include="*.py"',
             f"grep -v '^{CLICK_ECHO_EXEMPT}:'",
         ),
-        SCHEMA_HOOK: (
-            "grep -rnE 'def _(align|unify|reconcile)[a-zA-Z_]*schema' "
-            'geoparquet_io/core/ --include="*.py"',
-            f"grep -v '^{SCHEMA_EXEMPT}:'",
-        ),
     }
 
-    EXEMPT_PATHS = {CLICK_ECHO_HOOK: CLICK_ECHO_EXEMPT, SCHEMA_HOOK: SCHEMA_EXEMPT}
+    EXEMPT_PATHS = {CLICK_ECHO_HOOK: CLICK_ECHO_EXEMPT}
 
     #: ``if`` where a shell statement can begin. A bare ``"if "`` substring
     #: count -- which is what this used to do -- also matches ``elif``, a
@@ -277,6 +272,32 @@ class TestTheAnchoredGuardsStillHaveNothingToReport:
         result = run_hook_script(hook_script(guard.hook_id), REPO_ROOT)
 
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestSchemaGuardIsTheOwnerDefsCheck:
+    """The schema rule moved from a grep into ``scripts/check_owner_defs.py``.
+
+    These pin that the move kept the rule and both #970 fixes; the script's own
+    behaviour is tested in ``tests/test_owner_guards.py``.
+    """
+
+    def test_the_hook_runs_the_ast_check_not_a_grep(self):
+        hook = hook_entry(SCHEMA_HOOK)
+        command = " ".join([hook["entry"], *map(str, hook.get("args", []))])
+
+        assert "scripts/check_owner_defs.py" in command
+        assert "grep" not in command
+
+    def test_the_schema_rule_still_names_arrow_types_alone(self):
+        text = (REPO_ROOT / "scripts" / "owner_exemptions.toml").read_text(encoding="utf-8")
+        for glob in ("_align*schema", "_unify*schema", "_reconcile*schema"):
+            assert f'"{glob}" = ["{SCHEMA_EXEMPT}"]' in text
+
+    def test_the_hook_is_not_narrowed_by_a_files_or_exclude_key(self):
+        hook = hook_entry(SCHEMA_HOOK)
+
+        assert not {"files", "exclude"} & set(hook)
+        assert hook.get("always_run") is True
 
 
 if __name__ == "__main__":

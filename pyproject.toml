@@ -204,6 +204,7 @@ select = [
     "B",   # flake8-bugbear
     "C4",  # flake8-comprehensions
     "UP",  # pyupgrade
+    "TID", # flake8-tidy-imports: TID251 banned-api is guard G1's import layer (#1367)
 ]
 ignore = [
     "E501",  # line too long (handled by formatter)
@@ -211,8 +212,62 @@ ignore = [
     "C901",  # too complex
 ]
 
+# Guard G1 of #1367, import layer: each concept below has one owner module, and
+# a call elsewhere is a second implementation of it. The owners, and the files
+# that still hold a copy, are exempted under [tool.ruff.lint.per-file-ignores];
+# every copy is listed with its reason in scripts/owner_exemptions.toml, and
+# tests/test_owner_guards.py fails if the two disagree.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"pyarrow.parquet.write_table".msg = "Write through core/write_funnels.py or core/parquet_writer.py; a private writer re-decides row groups, codec and the geo key (#1030, #1026, #1335)."
+"pyarrow.parquet.ParquetWriter".msg = "Write through core/write_funnels.py, core/parquet_writer.py or a core/write_strategies module (#1030, #1026, #1335)."
+"psutil".msg = "Memory and process facts come from core/memory_limits.py (#1156, #1174, #1179, #1330)."
+"os.sysconf".msg = "Memory facts come from core/memory_limits.py (#1156, #1174)."
+"requests".msg = "HTTP goes through core/http_retry.py, which owns retries, timeouts and Retry-After."
+"httpx".msg = "HTTP goes through core/http_retry.py, which owns retries, timeouts and Retry-After."
+
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # unused imports in __init__.py
+# G1 owners: the modules the banned-api messages above point at.
+"geoparquet_io/core/write_funnels.py" = ["TID251"]
+"geoparquet_io/core/parquet_writer.py" = ["TID251"]
+"geoparquet_io/core/parquet_footer.py" = ["TID251"]
+"geoparquet_io/core/write_strategies/*.py" = ["TID251"]
+"geoparquet_io/core/memory_limits.py" = ["TID251"]
+"geoparquet_io/core/http_retry.py" = ["TID251"]
+"geoparquet_io/core/benchmark.py" = ["TID251"]
+"geoparquet_io/core/benchmark_suite.py" = ["TID251"]
+"geoparquet_io/benchmarks/*.py" = ["TID251"]
+# G1 is a rule about the package. Tests, scripts, docs and plugins write
+# fixtures with pyarrow directly, and that is not a second write path.
+"tests/**" = ["TID251"]
+"scripts/**" = ["TID251"]
+"docs/**" = ["TID251"]
+"plugins/**" = ["TID251"]
+"examples/**" = ["TID251"]
+"conftest.py" = ["TID251"]
+# vulture's whitelist format is bare names, never executed (guard G4).
+"scripts/vulture_whitelist.py" = ["F821", "B018"]
+# G1 copies that exist today, one line per file; each is listed with its
+# reason in scripts/owner_exemptions.toml ([[G1.tid251]]). Delete the line
+# with the copy.
+"geoparquet_io/api/ops.py" = ["TID251"]
+"geoparquet_io/core/add/kdtree.py" = ["TID251"]
+"geoparquet_io/core/arcgis.py" = ["TID251"]
+"geoparquet_io/core/arrow_geo_metadata.py" = ["TID251"]
+"geoparquet_io/core/carto.py" = ["TID251"]
+"geoparquet_io/core/constants.py" = ["TID251"]
+"geoparquet_io/core/derive_geo_from_file.py" = ["TID251"]
+"geoparquet_io/core/duckdb_utils.py" = ["TID251"]
+"geoparquet_io/core/extract_bigquery.py" = ["TID251"]
+"geoparquet_io/core/file_utils.py" = ["TID251"]
+"geoparquet_io/core/process/aggregate/by_admin.py" = ["TID251"]
+"geoparquet_io/core/process/aggregate/grid_common.py" = ["TID251"]
+"geoparquet_io/core/process/overview/overview_file.py" = ["TID251"]
+"geoparquet_io/core/process/overview/run.py" = ["TID251"]
+"geoparquet_io/core/process/simplify.py" = ["TID251"]
+"geoparquet_io/core/reproject.py" = ["TID251"]
+"geoparquet_io/core/streaming.py" = ["TID251"]
+"geoparquet_io/core/wfs.py" = ["TID251"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["geoparquet_io"]
@@ -387,9 +442,13 @@ update_changelog_on_bump = false
 changelog_file = "CHANGELOG.md"
 major_version_zero = true
 
+# Guard G4 of #1367. At 80 vulture reports only unused imports and arguments;
+# unused functions score 60, so 80 let a function with no caller pass. The
+# findings that existed when the level dropped are the whitelist, whose entry
+# count tests/test_owner_guards.py pins (it can only go down).
 [tool.vulture]
-min_confidence = 80
-paths = ["geoparquet_io", "tests"]
+min_confidence = 60
+paths = ["geoparquet_io", "tests", "scripts/vulture_whitelist.py"]
 sort_by_size = true
 verbose = false
 

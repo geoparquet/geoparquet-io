@@ -56,7 +56,6 @@ REQUIRED_CONTEXTS = ["all-checks", "pr-title"]
 PENDING_CODEOWNERS_PATHS = {
     "geoparquet_io/core/edges.py",  # created by T3
     "geoparquet_io/core/index_ops.py",  # created by T5
-    "scripts/owner_exemptions.toml",  # created by the T0 guard sub-phase
 }
 
 CODEOWNER = "@nlebovits"
