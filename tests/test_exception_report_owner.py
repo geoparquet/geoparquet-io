@@ -7,10 +7,11 @@ string and credentials included. The owners are
 ``core.exceptions.sanitize_error_message`` / ``GeoParquetError`` (which
 sanitizes in its constructor) and ``cli.exception_handler.cli_error_for``.
 
-A handler is flagged when its body calls a reporting function with an argument
-that mentions the bound exception and is not wrapped in
-``sanitize_error_message``. ``UNSANITIZED_REMAINDER`` lists the justified
-handlers that remain (a reason for each); the list only shrinks.
+A handler (or a function handed an exception) is flagged when it calls a
+reporting function with an argument that mentions the exception and is not
+wrapped in ``sanitize_error_message``. Logged text is not a reporter here:
+``logging_config.warn``/``error`` redact credentials once. ``UNSANITIZED_REMAINDER``
+lists the justified sites that remain (a reason for each); the list only shrinks.
 """
 
 from __future__ import annotations
@@ -20,49 +21,22 @@ import pathlib
 
 PACKAGE = pathlib.Path(__file__).resolve().parent.parent / "geoparquet_io"
 
-REPORTERS = {"echo", "print", "warn", "error", "ClickException", "BadParameter", "UsageError"}
+#: Where text reaches the user unredacted. ``warn``/``error`` are not here: the
+#: logging layer redacts credentials once (``logging_config``), so a caught
+#: exception can be interpolated into a log line without a call-site wrap.
+REPORTERS = {"echo", "print", "ClickException", "BadParameter", "UsageError"}
+#: Parameter names / annotations that mean "this function was handed an exception".
+EXCEPTION_PARAMS = {"e", "exc", "err", "error", "exception"}
+EXCEPTION_ANNOTATIONS = {"Exception", "BaseException"}
 OWNERS = {"core/exceptions.py", "cli/exception_handler.py"}
 # `type(e)` names a class, not text the exception carries.
 SANITIZERS = {"sanitize_error_message", "sanitize_url_for_logging", "type"}
 
 #: ``relative path:function`` -> reason the exception text is safe to print.
-_USER_TEXT = "echoes the user's own option value back, no network text"
-_HANDOFF = (
-    "hand-off to T-owner of the file: DuckDB/Arrow text on a local or "
-    "gpio-minted path; wrap in sanitize_error_message when the file is next edited"
-)
-_HANDOFF_NET = "hand-off: can carry a remote URL; wrap in sanitize_error_message (not T4b's file)"
 UNSANITIZED_REMAINDER: dict[str, str] = {
-    "cli/commands/extract.py:extract_arcgis": _USER_TEXT,
-    "cli/commands/extract.py:_check_bigquery_source": "exc.reason is gpio's own sentence",
-    "cli/decorators.py:parse_row_group_options": _USER_TEXT,
-    "cli/decorators.py:_validate_write_memory": _USER_TEXT,
-    "cli/decorators.py:handle_directory_sub_partition": "StreamingError/ValueError sentences gpio wrote",
-    "core/add/bbox_metadata.py:add_bbox_metadata": _HANDOFF,
-    "core/add/country_codes.py:_print_results_summary": _HANDOFF,
-    "core/admin_datasets.py:get_or_cache_dataset": _HANDOFF_NET,
-    "core/check_fixes.py:fix_bboxless_covering": _HANDOFF,
-    "core/check_spatial_order.py:check_spatial_order": _HANDOFF,
-    "core/common.py:get_dataset_bounds": _HANDOFF,
-    "core/crs_utils.py:detect_crs_from_spatial_file": _HANDOFF,
-    "core/crs_utils.py:geoarrow_crs_to_projjson": "CRS decode text, no URL",
-    "core/geometry_repair.py:repair_arrow_table_geometry": _HANDOFF,
-    "core/hilbert_order.py:_cleanup_temp_file": "OSError on a gpio temp path",
-    "core/overture.py:get_latest_overture_release": _HANDOFF_NET,
-    "core/partition/auto_resolution.py:_probe_extent_resolution": _HANDOFF_NET,
-    "core/partition/by_a5.py:_run_preview": _HANDOFF,
-    "core/partition/by_h3.py:_run_preview": _HANDOFF,
-    "core/partition/by_kdtree.py:_show_partition_preview": _HANDOFF,
-    "core/partition/by_quadkey.py:_run_quadkey_preview": _HANDOFF,
-    "core/partition/by_s2.py:_run_preview": _HANDOFF,
-    "core/partition/by_string.py:partition_by_string": _HANDOFF,
-    "core/remote.py:remote_write_context": _HANDOFF_NET,
-    "core/sub_partition.py:sub_partition_directory": _HANDOFF,
-    "core/write_funnels.py:collect_nonplanar_edges": _HANDOFF_NET,
-    "core/write_funnels.py:apply_nonplanar_edges": _HANDOFF,
-    "core/write_funnels.py:_geodesic_bounds": _HANDOFF,
-    "core/write_funnels.py:_ensure_v2_geo_metadata": _HANDOFF,
-    "core/write_funnels.py:read_preserved_kv_metadata": _HANDOFF_NET,
+    "cli/commands/extract.py:_check_bigquery_source": (
+        "InvalidParameterError.reason, sanitized at construction in core/exceptions"
+    ),
 }
 
 
@@ -93,28 +67,50 @@ def _wrapped(arg: ast.AST) -> ast.AST:
     return _Strip().visit(copy.deepcopy(arg))
 
 
+def _reports(node: ast.AST, names: set[str], scope: str, found: list[tuple[str, int]]) -> None:
+    for call in (n for n in ast.walk(node) if isinstance(n, ast.Call)):
+        if _call_name(call) not in REPORTERS:
+            continue
+        args = [*call.args, *(k.value for k in call.keywords)]
+        if any(names & _names(_wrapped(a)) for a in args):
+            found.append((scope, call.lineno))
+
+
+def _exception_params(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    names = set()
+    for arg in [*func.args.args, *func.args.kwonlyargs, *func.args.posonlyargs]:
+        annotation = ast.unparse(arg.annotation) if arg.annotation else ""
+        if arg.arg in EXCEPTION_PARAMS or any(t in annotation for t in EXCEPTION_ANNOTATIONS):
+            names.add(arg.arg)
+    return names
+
+
 def unsanitized_reports(source: str) -> list[tuple[str, int]]:
-    """``(enclosing function, line)`` for each raw-exception report in ``source``."""
+    """``(enclosing function, line)`` for each raw-exception report in ``source``.
+
+    Two shapes: an ``except ... as e`` body that reports ``e``, and a function
+    handed an exception (by parameter name or annotation) that reports it
+    outside any ``except`` body -- the helper that builds a ``ClickException``
+    from ``exc.reason`` is invisible to the first shape.
+    """
     tree = ast.parse(source)
     found: list[tuple[str, int]] = []
 
     def visit(node: ast.AST, scope: str) -> None:
         for child in ast.iter_child_nodes(node):
-            inner = (
-                child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else scope
-            )
+            inner = scope
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                inner = child.name
+                names = _exception_params(child)
+                if names:
+                    _reports(child, names, inner, found)
             if isinstance(child, ast.ExceptHandler) and child.name:
                 for stmt in child.body:
-                    for call in (n for n in ast.walk(stmt) if isinstance(n, ast.Call)):
-                        if _call_name(call) not in REPORTERS:
-                            continue
-                        args = [*call.args, *(k.value for k in call.keywords)]
-                        if any(child.name in _names(_wrapped(a)) for a in args):
-                            found.append((scope, call.lineno))
+                    _reports(stmt, {child.name}, scope, found)
             visit(child, inner)
 
     visit(tree, "<module>")
-    return found
+    return sorted(set(found))
 
 
 def _scan() -> dict[str, list[int]]:
@@ -140,10 +136,40 @@ def test_no_handler_reports_raw_exception_text_outside_the_owners():
 
 
 def test_the_detector_flags_a_raw_report_and_passes_a_sanitized_one():
-    raw = "def f():\n    try:\n        g()\n    except OSError as e:\n        warn(f'x {e}')\n"
+    raw = (
+        "def f():\n    try:\n        g()\n    except OSError as e:\n        click.echo(f'x {e}')\n"
+    )
     safe = (
         "def f():\n    try:\n        g()\n    except OSError as e:\n"
-        "        warn(f'x {sanitize_error_message(str(e))}')\n"
+        "        click.echo(f'x {sanitize_error_message(str(e))}')\n"
     )
     assert unsanitized_reports(raw) == [("f", 5)]
     assert unsanitized_reports(safe) == []
+
+
+def test_the_detector_flags_a_click_error_built_from_an_exception_argument():
+    """No ``except`` body here: the helper is handed the exception."""
+    by_name = "def to_click(exc):\n    return click.ClickException(exc.reason)\n"
+    by_annotation = "def to_click(problem: Exception):\n    raise click.UsageError(str(problem))\n"
+    clean = (
+        "def to_click(exc):\n    return click.ClickException(sanitize_error_message(str(exc)))\n"
+    )
+    assert unsanitized_reports(by_name) == [("to_click", 2)]
+    assert unsanitized_reports(by_annotation) == [("to_click", 2)]
+    assert unsanitized_reports(clean) == []
+
+
+def test_logging_redacts_credentials_once(caplog):
+    """``warn``/``error`` are the single point for logged exception text."""
+    import logging
+
+    from geoparquet_io.core.logging_config import error, warn
+
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        warn("could not read s3://k:secret@bucket/x.parquet (api_key=SECRETKEY)")
+        error("failed with token: SECRETTOKEN on s3://bucket/y.parquet")
+    assert "secret@" not in caplog.text and "SECRETKEY" not in caplog.text
+    assert "SECRETTOKEN" not in caplog.text
+    # URLs are otherwise intact: the line still names the file it is about.
+    assert "s3://k:***@bucket/x.parquet" in caplog.text
+    assert "s3://bucket/y.parquet" in caplog.text

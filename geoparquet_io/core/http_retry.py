@@ -41,7 +41,9 @@ from typing import TYPE_CHECKING, Any, cast
 
 from geoparquet_io.core.exceptions import (
     BatchTooLargeError,
+    FailureKind,
     RemoteAccessError,
+    classify_failure,
     fatal_status_message,
 )
 from geoparquet_io.core.logging_config import warn
@@ -57,6 +59,8 @@ _http_client_lock = threading.Lock()
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_DELAY = 1.0
+#: The remedy a 401/403 names when the caller does not say which options carry a credential.
+DEFAULT_CREDENTIALS_HINT = "Check your credentials."
 
 # Statuses worth another attempt: request timeout, rate limit, and every 5xx.
 RETRYABLE_STATUSES = frozenset({408, 429})
@@ -248,21 +252,25 @@ class RetryExhaustedError(Exception):
 
 
 def classify_httpx_error(exc: BaseException) -> RetryVerdict:
-    """The default ``classify``: transport failures and 408/429/5xx are retryable."""
-    import httpx
+    """The default ``classify``: transport failures and 408/429/5xx are retryable.
 
-    if isinstance(exc, httpx.HTTPStatusError):
-        status = exc.response.status_code
+    The failure kind is ``exceptions.classify_failure``'s; this only turns it into
+    a retry decision (and reads ``Retry-After`` off the response it came with).
+    """
+    verdict = classify_failure(exc)
+    if verdict.kind is FailureKind.HTTP_STATUS and verdict.status is not None:
+        response = getattr(exc, "response", None)
         return RetryVerdict(
-            is_retryable_status(status),
-            retry_after=response_retry_after(exc.response),
-            description=f"HTTP {status}",
+            is_retryable_status(verdict.status),
+            retry_after=response_retry_after(response) if response is not None else None,
+            description=f"HTTP {verdict.status}",
         )
-    if isinstance(exc, httpx.TimeoutException):
+    if verdict.kind is FailureKind.TIMEOUT:
         return RetryVerdict(True, description="HTTP timeout")
-    if isinstance(exc, httpx.RequestError):
-        kind = "protocol" if isinstance(exc, httpx.RemoteProtocolError) else "network"
-        return RetryVerdict(True, reset_client=True, description=f"HTTP {kind} error: {exc}")
+    if verdict.kind is FailureKind.UNREACHABLE:
+        return RetryVerdict(
+            True, reset_client=True, description=f"HTTP network error: {type(exc).__name__}"
+        )
     return RetryVerdict(False)
 
 
@@ -308,17 +316,24 @@ def run_with_retry(
     raise RetryExhaustedError(max_retries, last_exception, last_verdict) from last_exception
 
 
-def _status_error(url: str, exc: Any) -> RemoteAccessError:
-    """The user-facing error for an HTTP status that will not be retried further."""
-    status = exc.response.status_code
-    message = fatal_status_message(
-        status, subject="the service", credentials="Use --token or --username/--password."
-    )
-    if message is not None:
-        return RemoteAccessError(url, message)
-    # Not str(exc): httpx spells out the full request URL there, and on
-    # ArcGIS the token rides in the query string.
-    return RemoteAccessError(url, f"HTTP error {status} {exc.response.reason_phrase}".rstrip())
+def status_error(
+    url: str, response: Any, credentials: str, detail: str | None = None
+) -> RemoteAccessError:
+    """The user-facing error for an HTTP status that will not be retried further.
+
+    The one place a response's status becomes gpio's sentence: 401/403/404 through
+    ``exceptions.fatal_status_message``, anything else as ``HTTP error <n> <reason>``.
+    ``detail`` is the server's own explanation (an error body), appended when given.
+    """
+    status = response.status_code
+    message = fatal_status_message(status, subject="the service", credentials=credentials)
+    if message is None:
+        # Not str(exc): httpx spells out the full request URL there, and on
+        # ArcGIS the token rides in the query string.
+        message = f"HTTP error {status} {getattr(response, 'reason_phrase', '')}".rstrip()
+    if detail:
+        message = f"{message}: {detail}"
+    return RemoteAccessError(url, message)
 
 
 def make_request_with_retry(
@@ -332,6 +347,7 @@ def make_request_with_retry(
     timeout: float = DEFAULT_TIMEOUT,
     parse_json: bool = True,
     batch_size: int | None = None,
+    credentials: str = DEFAULT_CREDENTIALS_HINT,
 ) -> dict[str, Any] | bytes:
     """
     Make HTTP request with retry logic and proper error handling.
@@ -347,6 +363,8 @@ def make_request_with_retry(
         timeout: Request timeout in seconds
         parse_json: If True, parse response as JSON and raise BatchTooLargeError
             on parse failure. If False, return raw bytes.
+        credentials: The remedy a 401/403 names; the caller knows which of its own
+            options (a flag, an environment variable) carry a credential.
         batch_size: The page size of a paged request, or None for a request
             that asked for no page (layer info, count, token). Decides whether
             a refused response is the caller's batch-size ladder's business.
@@ -427,7 +445,7 @@ def make_request_with_retry(
             run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay),
         )
     except httpx.HTTPStatusError as e:
-        raise _status_error(url, e) from _cause(e)
+        raise status_error(url, e.response, credentials) from _cause(e)
     except RetryExhaustedError as e:
         last = e.last_exception
         if isinstance(last, httpx.HTTPStatusError):
@@ -444,7 +462,7 @@ def make_request_with_retry(
                     batch_size=cast(int, batch_size),  # _is_page_refusal says it is set
                     reason=f"HTTP {status} persisted after {max_retries} attempts",
                 ) from last
-            raise _status_error(url, last) from _cause(last)
+            raise status_error(url, last.response, credentials) from _cause(last)
         raise RemoteAccessError(
             url, f"Request failed after {max_retries} attempts: {last}"
         ) from last

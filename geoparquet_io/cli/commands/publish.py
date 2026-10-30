@@ -13,7 +13,6 @@ from geoparquet_io.cli._shared import _activate_s3, init_group_context
 from geoparquet_io.cli.decorators import (
     aws_profile_option,
     dry_run_option,
-    handle_geoparquet_errors,
     verbose_option,
 )
 from geoparquet_io.core.upload import check_credentials
@@ -200,7 +199,6 @@ def publish(ctx):
 
 
 @publish.command(name="stac")
-@handle_geoparquet_errors
 @click.argument("input")
 @click.argument("output", type=click.Path())
 @click.option(
@@ -253,7 +251,6 @@ def publish_stac(input, output, bucket, public_url, collection_id, item_id, over
 
 
 @publish.command(name="upload")
-@handle_geoparquet_errors
 @click.argument("source", type=click.Path(exists=True, path_type=Path))
 @click.argument("destination", type=str)
 @aws_profile_option

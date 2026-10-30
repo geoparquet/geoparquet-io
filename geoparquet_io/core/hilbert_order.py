@@ -704,7 +704,7 @@ def _hilbert_order_file_based(
     except duckdb.IOException as e:
         con.close()
         if is_remote_url(input_parquet):
-            hints = get_remote_error_hint(str(e), input_parquet)
+            hints = get_remote_error_hint(e, input_parquet)
             raise RemoteAccessError(input_parquet, f"{hints}\n\nOriginal error: {str(e)}") from e
         raise
     finally:

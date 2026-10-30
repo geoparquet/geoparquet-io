@@ -7,92 +7,100 @@ and click-specific exceptions needed for proper CLI error display.
 
 from __future__ import annotations
 
-import functools
-from collections.abc import Callable
-from typing import TypeVar
+import os
 
 import click
 
 from geoparquet_io.core.exceptions import (
-    FileNotFoundGeoParquetError,
-    GeometryError,
+    FailureKind,
     GeoParquetError,
     InvalidParameterError,
-    PartitionError,
-    RemoteAccessError,
-    ValidationError,
+    classify_failure,
+    sanitize_error_message,
 )
-
-F = TypeVar("F", bound=Callable)
 
 
 def handle_core_exception(exc: GeoParquetError) -> click.ClickException:
-    """Convert a core exception to the appropriate click exception."""
+    """The one GeoParquetError -> Click translation.
+
+    ``InvalidParameterError`` names the option that was wrong, so it becomes a
+    ``BadParameter`` (exit 2, a usage-style line); every other gpio error is a
+    plain ``ClickException`` (exit 1) carrying its already-sanitized message.
+    """
     if isinstance(exc, InvalidParameterError):
         return click.BadParameter(exc.message, param_hint=exc.param_name)
-    elif isinstance(exc, FileNotFoundGeoParquetError):
-        return click.ClickException(exc.message)
-    elif isinstance(exc, RemoteAccessError):
-        return click.ClickException(exc.message)
-    elif isinstance(exc, GeometryError):
-        return click.ClickException(exc.message)
-    elif isinstance(exc, PartitionError):
-        return click.ClickException(exc.message)
-    elif isinstance(exc, ValidationError):
-        return click.ClickException(exc.message)
-    else:
-        # Generic fallback for any GeoParquetError subclass
-        return click.ClickException(exc.message)
+    return click.ClickException(exc.message)
 
 
-def cli_error_for(exc: BaseException) -> click.ClickException | None:
-    """The CLI's answer to an exception no gpio frame owned, or ``None``.
+def _error_text(exc: BaseException) -> str:
+    """The sanitized text of ``exc``, minus DuckDB's echo of the generated SQL.
 
-    ``handle_core_exception`` above translates gpio's own vocabulary. This is
-    the other half: exceptions raised *underneath* gpio, by DuckDB, which reach
-    the boundary with nothing in between willing to claim them.
+    A DuckDB binder/parser error appends ``LINE n: <the SQL gpio built>`` and a
+    caret; that excerpt buries the cause and is never the user's to act on.
+    """
+    import duckdb
 
-    It decides nothing itself. Three questions already have an answer in
-    ``core/`` -- is this a spill-volume shortage, an unpublished community
-    extension, or a failure the *input file* caused
-    (:data:`~geoparquet_io.core.duckdb_utils.INPUT_FILE_DUCKDB_ERRORS`, which
-    carries the reasoning for where that line falls) -- and this asks them in
-    order, most specific first, then wraps. Keeping the taxonomy in ``core/`` is
-    what lets ``api/`` reach the same verdict, which it could never do from
-    here: ``api/`` may not import ``cli/``.
+    text = exc.message if isinstance(exc, GeoParquetError) else sanitize_error_message(str(exc))
+    if isinstance(exc, duckdb.Error):
+        text = text.split("\nLINE ")[0].strip()
+    return text
 
-    Every message is sanitized before it is shown. DuckDB names the URL it
-    failed on with its query string intact, and quotes offending values back
-    verbatim, so a presigned signature or an ANSI escape can ride in from
-    outside gpio -- see
-    :func:`~geoparquet_io.core.exceptions.sanitize_error_message`.
+
+def _not_parquet_message(path: str | None) -> str:
+    subject = f"The file '{os.path.basename(path)}'" if path else "This file"
+    return (
+        f"{subject} has a .parquet extension but is not a valid "
+        f"Parquet file. It may be a different format (CSV, JSON, etc.) that was "
+        f"incorrectly named. Check the file contents or use 'gpio convert' to "
+        f"create a proper GeoParquet file."
+    )
+
+
+def cli_error_for(exc: BaseException, *, path: str | None = None) -> click.ClickException | None:
+    """The CLI's answer to an exception, or ``None`` when it is not one gpio claims.
+
+    The one translation from an exception to what the terminal shows. It decides
+    nothing itself: the taxonomy lives in ``core/`` (``classify_failure``, the
+    spill-space and unpublished-extension hints, and
+    :data:`~geoparquet_io.core.duckdb_utils.INPUT_FILE_DUCKDB_ERRORS`, which
+    carries the reasoning for where the "input file" line falls) so ``api/`` can
+    reach the same verdict -- it may not import ``cli/``.
+
+    In order: the two hints that name a fix (a wrapped error keeps them, so they
+    are asked first), then a file that is not Parquet, then gpio's own errors,
+    then a DuckDB failure the input file caused. Every message is sanitized: DuckDB
+    names the URL it failed on with its query string intact and quotes offending
+    values back verbatim.
+
+    Args:
+        exc: What was caught.
+        path: The input the command was reading, to name it in a not-Parquet answer.
 
     ``None`` means "not mine": the caller re-raises, traceback intact, which is
     what a genuine gpio bug deserves.
     """
     from geoparquet_io.core.duckdb_utils import is_input_file_duckdb_error, spill_space_hint
-    from geoparquet_io.core.exceptions import (
-        sanitize_error_message,
-        unpublished_extension_hint,
-    )
+    from geoparquet_io.core.exceptions import unpublished_extension_hint
+
+    # Click's own exceptions are already the final word (and `Exit`/`Abort` are
+    # control flow): translating one again would re-run the taxonomy on its cause.
+    if isinstance(exc, (click.ClickException, click.exceptions.Exit, click.Abort)):
+        return None
+
+    message = _error_text(exc)
+
+    # Running out of room to spill needs the line naming TMPDIR that DuckDB's own
+    # message never mentions (#752); a community extension the registry has no
+    # build of would otherwise read as "your input file is unreachable" (#778).
+    extra = spill_space_hint(exc) or unpublished_extension_hint(exc)
+    if extra is not None:
+        return click.ClickException(f"{message}\n\n{extra}")
+
+    if classify_failure(exc).kind is FailureKind.NOT_PARQUET:
+        return click.ClickException(_not_parquet_message(path))
 
     if isinstance(exc, GeoParquetError):
         return handle_core_exception(exc)
-
-    message = sanitize_error_message(str(exc))
-
-    # Running out of room to spill is a DuckDB error too, and it needs the extra
-    # line naming TMPDIR that DuckDB's own message never mentions (#752).
-    hint = spill_space_hint(exc)
-    if hint is not None:
-        return click.ClickException(f"{message}\n\n{hint}")
-
-    # A community extension the registry has no build of arrives as an
-    # HTTPException, which hangs below IOException -- so without this it would
-    # read as "your input file is unreachable" and lose #778's guidance.
-    hint = unpublished_extension_hint(exc)
-    if hint is not None:
-        return click.ClickException(f"{message}\n\n{hint}")
 
     if is_input_file_duckdb_error(exc):
         return click.ClickException(message)
@@ -100,48 +108,17 @@ def cli_error_for(exc: BaseException) -> click.ClickException | None:
     return None
 
 
-def click_error_for(exc: BaseException) -> click.ClickException:
-    """An error line for any exception a command wants to report, sanitized once.
+def click_error_for(
+    exc: BaseException, *, path: str | None = None, hint: str | None = None
+) -> click.ClickException:
+    """:func:`cli_error_for`, but always an answer: any other exception is its sanitized text.
 
-    The replacement for ``click.ClickException(str(e))``: ``cli_error_for``'s
-    verdict (with its hints) when the exception is one it claims, otherwise the
-    exception's text through ``sanitize_error_message``. A ``GeoParquetError``
-    is already clean (its constructor sanitized it) and keeps its own message
-    and plain ``ClickException`` shape, so exit codes do not move.
+    The replacement for ``click.ClickException(str(e))`` at the sites that already
+    decided the failure is the user's to read. ``hint`` is guidance appended to a
+    DuckDB failure (e.g. the ``--where`` clause that probably caused a binder error).
     """
-    from geoparquet_io.core.exceptions import sanitize_error_message
+    import duckdb
 
-    if isinstance(exc, GeoParquetError):
-        return click.ClickException(exc.message)
-    return cli_error_for(exc) or click.ClickException(sanitize_error_message(str(exc)))
-
-
-def core_exception_handler(func: F) -> F:
-    """
-    Decorator to catch core exceptions and convert to click exceptions.
-
-    Use this decorator on CLI command functions to automatically convert
-    framework-agnostic core exceptions to click exceptions.
-
-    Note:
-        This decorator is provided for external integrations and custom Click
-        commands that use geoparquet-io core functions. The main CLI commands
-        handle exceptions through Click's built-in error handling, but this
-        decorator enables consistent error display for third-party extensions.
-
-    Example:
-        @click.command()
-        @core_exception_handler
-        def my_command():
-            # If this raises InvalidParameterError, it becomes click.BadParameter
-            do_something_that_might_fail()
-    """
-
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except GeoParquetError as e:
-            raise handle_core_exception(e) from e
-
-    return wrapper  # type: ignore
+    if hint and isinstance(exc, duckdb.Error):
+        return click.ClickException(f"{_error_text(exc)}\n\n{hint}")
+    return cli_error_for(exc, path=path) or click.ClickException(_error_text(exc))

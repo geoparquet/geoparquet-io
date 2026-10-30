@@ -47,7 +47,6 @@ from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
     InvalidParameterError,
-    sanitize_error_message,
 )
 from geoparquet_io.core.file_utils import (
     get_all_parquet_files,
@@ -1237,10 +1236,7 @@ def _execute_extraction(
             # Preservation is best-effort (a corrupt footer surfaces as anything
             # from OSError to GeoParquetError to an Arrow exception), but don't
             # silently drop all geo/kv metadata: warn so it is visible.
-            warn(
-                f"Could not read input metadata for preservation; skipping: "
-                f"{sanitize_error_message(str(e))}"
-            )
+            warn(f"Could not read input metadata for preservation; skipping: {e}")
 
         # Repair invalid geometry (issue #506). Auto-detects GEOMETRY vs WKB
         # encoding and rewrites the query to repair in place before the write.

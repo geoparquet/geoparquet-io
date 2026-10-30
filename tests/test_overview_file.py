@@ -376,7 +376,7 @@ class TestCli:
                 "4000,1500",
             ]
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 2  # an option-naming error is a BadParameter
         assert "expected 3 GSD value(s)" in result.output and "plus the base" in result.output
 
     @pytest.mark.parametrize("flag", [["--cell-detail", "2"], ["--gsd", "1000,100"]])

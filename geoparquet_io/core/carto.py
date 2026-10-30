@@ -36,7 +36,6 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
     classify_failure,
     fatal_status_message,
-    sanitize_error_message,
 )
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
@@ -687,7 +686,7 @@ def _resolve_table_crs(
     except CartoError as e:
         raise CartoError(
             f"Carto: could not read the SRID of '{table_name}'.{_CARTO_GEOMETRY_COLUMN}, so "
-            f"the output cannot be tagged with a CRS: {sanitize_error_message(str(e))}"
+            f"the output cannot be tagged with a CRS: {e}"
         ) from e
     if not srids:
         debug("No non-NULL geometry to read an SRID from; tagging OGC:CRS84")
@@ -813,7 +812,7 @@ def _read_probe_detail(response) -> str | None:
         payload = None
     if isinstance(payload, dict) and isinstance(payload.get("error"), list):
         text = "; ".join(str(item) for item in payload["error"])
-    return sanitize_error_message(text) or None
+    return text or None
 
 
 def _carto_status_of(
@@ -859,7 +858,7 @@ def _fatal_status_error(
     """
     if _is_retryable(status):
         return None
-    reason = sanitize_error_message(str(exc))
+    reason = exc
     if status.local:
         return CartoError(
             f"Reading table '{table_name}' from Carto failed before any response could be "
@@ -985,8 +984,7 @@ def _fetch_with_retry(
         # The DuckDB message names the URL it failed on, key and all; sanitized
         # rather than echoed.
         raise CartoError(
-            f"Failed to fetch data from Carto after {max_retries} attempts: "
-            f"{sanitize_error_message(str(last))}"
+            f"Failed to fetch data from Carto after {max_retries} attempts: {last}"
         ) from last
 
 

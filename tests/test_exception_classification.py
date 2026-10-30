@@ -183,3 +183,47 @@ def test_click_error_for_sanitizes_any_exception():
 
     err = click_error_for(OSError("GET https://h/x?X-Amz-Signature=SECRET failed password=hunter2"))
     assert "SECRET" not in err.message and "hunter2" not in err.message
+
+
+# ---------------------------------------------------------------------------
+# DuckDB's text, read in one opt-in place with the user's own text cut out
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("HTTP Error: HTTP GET error on 'https://b/x' (HTTP 403)", FailureClass(H, 403)),
+        ("IO Error: Could not read (HTTP 404)", FailureClass(H, 404)),
+        ("Access Denied", FailureClass(H, 403)),
+        ("Connection timed out", FailureClass(T)),
+        ("Unable to connect to the server", FailureClass(U)),
+        ("something else", FailureClass(X)),
+    ],
+)
+def test_duckdb_io_text_is_read_only_when_asked(message, expected):
+    exc = duckdb.IOException(message)
+    assert classify_failure(exc, duckdb_text=True) == expected
+    assert classify_failure(exc) == FailureClass(X)  # the default never reads the text
+
+
+def test_a_path_or_url_named_forbidden_cannot_decide_the_verdict():
+    """#1020: the user's own text inside the message is cut out before it is read."""
+    exc = duckdb.IOException(
+        "IO Error: Could not open GDAL dataset at: https://h/forbidden/timeout?q=%27404%20not%20found%27"
+    )
+    assert classify_failure(exc, duckdb_text=True) == FailureClass(X)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        duckdb.InvalidInputException(
+            "Invalid Input Error: No magic bytes found at end of file 'x'"
+        ),
+        duckdb.InvalidInputException("File 'x' too small to be a Parquet file"),
+        __import__("pyarrow").lib.ArrowInvalid("Parquet magic bytes not found in footer."),
+    ],
+)
+def test_one_not_parquet_predicate(exc):
+    assert classify_failure(exc) == FailureClass(FailureKind.NOT_PARQUET)

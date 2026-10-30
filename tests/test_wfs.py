@@ -2279,7 +2279,7 @@ class TestResponseDispatchHelpers:
         from geoparquet_io.core.wfs import WFSError, _fetch_wfs_page
 
         with _mock_wfs_http_response(b"Unknown typeName", "text/plain", status_code=400):
-            with pytest.raises(WFSError, match="HTTP 400.*Unknown typeName"):
+            with pytest.raises(WFSError, match="HTTP error 400.*Unknown typeName"):
                 _fetch_wfs_page("http://mock.wfs/wfs?service=WFS")
 
     def test_http_400_names_the_startindex_limit(self):

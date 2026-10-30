@@ -19,7 +19,6 @@ from geoparquet_io.core.aws_credentials import (
 from geoparquet_io.core.exceptions import (
     InvalidParameterError,
     RemoteAccessError,
-    sanitize_error_message,
 )
 from geoparquet_io.core.logging_config import error, progress, success
 
@@ -441,7 +440,7 @@ def _upload_one_file(
         # the guard above and is attempted after the run was meant to stop.
         if stop_requested is not None and stop_on_error:
             stop_requested.set()
-        error(f"{file_path.name}: {sanitize_error_message(str(e))}")
+        error(f"{file_path.name}: {e}")
         return file_path, e
 
 

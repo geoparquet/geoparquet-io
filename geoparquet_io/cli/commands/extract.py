@@ -22,7 +22,6 @@ from geoparquet_io.cli.decorators import (
     compression_options,
     dry_run_option,
     geoparquet_version_option,
-    handle_geoparquet_errors,
     output_format_options,
     overwrite_option,
     parse_row_group_options,
@@ -35,6 +34,7 @@ from geoparquet_io.cli.decorators import (
 )
 from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT
+from geoparquet_io.core.exceptions import sanitize_error_message
 from geoparquet_io.core.extract import extract as extract_impl
 from geoparquet_io.core.file_utils import validate_parquet_extension
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
@@ -463,7 +463,9 @@ def extract_arcgis(
                 raise ValueError("bbox must have exactly 4 values")
             bbox_tuple = tuple(parts)
         except ValueError as e:
-            raise click.BadParameter(f"Invalid bbox format: {e}. Use xmin,ymin,xmax,ymax") from e
+            raise click.BadParameter(
+                f"Invalid bbox format: {sanitize_error_message(str(e))}. Use xmin,ymin,xmax,ymax"
+            ) from e
 
     with _activate_s3(ctx, aws_profile=aws_profile):
         convert_arcgis_to_geoparquet(
@@ -589,7 +591,6 @@ def _reject_query_shaping_with_sql(ctx: click.Context, sql: str | None) -> None:
 
 
 @extract.command(name="bigquery")
-@handle_geoparquet_errors
 @click.argument("table_id", metavar="[TABLE_ID]", required=False, default=None)
 @click.argument("output_file", type=click.Path(), required=False, default=None)
 @click.option(
@@ -850,7 +851,6 @@ def _deprecated_version_callback(ctx, param, value):
 
 
 @extract.command(name="wfs")
-@handle_geoparquet_errors
 @click.argument("service_url")
 @click.argument("typename", required=False)
 @click.argument("output_file", required=False, type=click.Path())
@@ -1186,7 +1186,6 @@ def extract_wfs_cmd(
 
 
 @extract.command(name="carto")
-@handle_geoparquet_errors
 @click.argument("url")
 @click.argument("table_name")
 @click.argument("output_file", type=click.Path())

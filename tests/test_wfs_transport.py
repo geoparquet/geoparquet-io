@@ -602,7 +602,7 @@ def test_another_400_reports_the_body(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, bytes_reply(b"unknown typeName", status=400, content_type="text/plain"))
 
-    with pytest.raises(WFSError, match="HTTP 400: unknown typeName"):
+    with pytest.raises(WFSError, match="HTTP error 400.*unknown typeName"):
         _fetch_wfs_page(SERVICE)
 
 
@@ -610,7 +610,7 @@ def test_a_5xx_page_is_retried_by_the_page_fetcher_then_reported(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, error_reply(503))
 
-    with pytest.raises(WFSError, match="HTTP 503"):
+    with pytest.raises(WFSError, match="HTTP error 503"):
         _fetch_wfs_page(SERVICE)
     assert len(http.requests) == 3
     assert http.sleeps == [1.0, 2.0]
@@ -620,7 +620,7 @@ def test_a_4xx_page_is_not_retried_by_the_page_fetcher(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, error_reply(404))
 
-    with pytest.raises(WFSError, match="HTTP 404"):
+    with pytest.raises(WFSError, match=r"not found \(404\)"):
         _fetch_wfs_page(SERVICE)
     assert len(http.requests) == 1
 
@@ -1176,3 +1176,48 @@ def test_json_object_limit_is_sized_per_response_not_one_gibibyte(monkeypatch):
     assert seen, "the JSON reader was never sized"
     assert all(16 * 1024 * 1024 <= size < 1024**3 for size in seen), seen
     assert max(seen) <= 16 * 1024 * 1024  # a few KB of GeoJSON gets the floor
+
+
+def test_a_wfs_page_status_uses_the_shared_wording_and_no_arcgis_flags(monkeypatch):
+    """One status sentence for every service; WFS never suggests ArcGIS's --token flags."""
+    http = FakeTransport.install(monkeypatch)
+    http.respond(SERVICE, error_reply(403))
+
+    with pytest.raises(WFSError) as excinfo:
+        _fetch_wfs_page(SERVICE)
+
+    assert "Access denied to the service" in str(excinfo.value)
+    assert "Check the credentials in the URL" in str(excinfo.value)
+    assert "--token" not in str(excinfo.value)
+
+
+def test_the_hits_probe_warning_does_not_suggest_arcgis_flags(monkeypatch, caplog):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(SERVICE, error_reply(401))
+
+    with caplog.at_level("WARNING"):
+        assert _get_feature_count(SERVICE, TYPENAME, "1.1.0") is None
+
+    assert "Authentication required" in caplog.text
+    assert "--token" not in caplog.text
+
+
+def test_properties_probe_only_swallows_the_missing_key_error():
+    import duckdb
+
+    from geoparquet_io.core.wfs import _probe_properties_type
+
+    class _Con:
+        def __init__(self, message):
+            self.message = message
+
+        def execute(self, *_a, **_k):
+            raise duckdb.BinderException(self.message)
+
+        sql = execute
+
+    missing = 'Binder Error: Could not find key "properties" in struct'
+    assert _probe_properties_type(_Con(missing), "/x.json", 1024) == ("MISSING", False)
+    other = "Binder Error: Referenced column x not found\nLINE 3: typeof(feature.properties)"
+    with pytest.raises(duckdb.BinderException):
+        _probe_properties_type(_Con(other), "/x.json", 1024)

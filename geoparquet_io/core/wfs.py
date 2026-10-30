@@ -63,7 +63,6 @@ from geoparquet_io.core.exceptions import (
     RemoteAccessError,
     classify_failure,
     fatal_status_message,
-    sanitize_error_message,
 )
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
@@ -73,6 +72,7 @@ from geoparquet_io.core.http_retry import (
     get_shared_http_client,
     make_request_with_retry,
     run_with_retry,
+    status_error,
 )
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -198,7 +198,14 @@ class WFSLayerInfo:
 # asks for one feature. Both are passed per request, never only to the shared
 # client, which keeps the timeout of whichever caller built it (#1184).
 _PAGE_TIMEOUT = 600.0
+#: What a 401/403 tells the user to fix: WFS has no credential flags, the key rides in the URL.
+WFS_CREDENTIALS_HINT = "Check the credentials in the URL."
 _PROBE_TIMEOUT = 30.0
+
+
+def _wfs_status_error(url: str, response, detail: str | None = None) -> WFSError:
+    """A page's HTTP failure as a ``WFSError`` carrying the shared status sentence."""
+    return WFSError(status_error(url, response, WFS_CREDENTIALS_HINT, detail=detail).message)
 
 
 def _clean_service_url(url: str) -> str:
@@ -336,7 +343,7 @@ def get_wfs_capabilities(service_url: str, version: str = "1.1.0"):
                 fatal_status_message(
                     verdict.status,
                     subject="the WFS service",
-                    credentials="Check the credentials in the URL.",
+                    credentials=WFS_CREDENTIALS_HINT,
                 )
                 or "",
             ) from e
@@ -1591,10 +1598,7 @@ def _reproject_bbox_for_local_filter(
         xmin, ymin, xmax, ymax = transformer.transform_bounds(*bbox)
         return (xmin, ymin, xmax, ymax)
     except Exception as e:
-        warn(
-            f"Could not reproject bbox from {source_crs} to {target_crs} for local filter: "
-            f"{sanitize_error_message(str(e))}"
-        )
+        warn(f"Could not reproject bbox from {source_crs} to {target_crs} for local filter: {e}")
         return bbox
 
 
@@ -1660,7 +1664,10 @@ def _get_feature_count(
     try:
         # The one HTTP owner: gzip, shared client, retry policy and the
         # 401/403/404 wording all live in `http_retry`.
-        content = cast(bytes, make_request_with_retry("GET", url, parse_json=False))
+        content = cast(
+            bytes,
+            make_request_with_retry("GET", url, parse_json=False, credentials=WFS_CREDENTIALS_HINT),
+        )
     except (WFSError, RemoteAccessError, httpx.HTTPError, OSError) as e:
         # Expected failure modes: the service is down, unreachable, rejecting us,
         # or timing out. Degrade to "count unknown" rather than aborting the
@@ -1844,7 +1851,9 @@ def _probe_properties_type(
         )
     except duckdb.BinderException as e:
         # Missing 'properties' key in feature struct (malformed GeoJSON per RFC 7946)
-        if "properties" in str(e):
+        # DuckDB: `Could not find key "properties" in struct` -- the exact phrase,
+        # not any binder error whose SQL excerpt happens to quote `.properties`.
+        if 'Could not find key "properties" in struct' in str(e):
             props_type = "MISSING"
         else:
             raise
@@ -2243,7 +2252,7 @@ def _download_wfs_page(url: str, accept: str, tmp_dir: tempfile.TemporaryDirecto
                 raise WFSError(
                     f"Server rejected paginated request (startIndex limit): {body.strip()}"
                 )
-            raise WFSError(f"WFS request failed with HTTP 400: {body[:500]}")
+            raise _wfs_status_error(url, response, body[:500])
         response.raise_for_status()
 
         # Dispatch on the content-type the server actually sent. HTML and
@@ -2329,11 +2338,11 @@ def _fetch_wfs_page(
     try:
         download = run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay)
     except httpx.HTTPStatusError as e:
-        raise WFSError(f"WFS request failed with HTTP {e.response.status_code}") from e
+        raise _wfs_status_error(url, e.response) from e
     except RetryExhaustedError as e:
         last = e.last_exception
         if isinstance(last, httpx.HTTPStatusError):
-            raise WFSError(f"WFS request failed with HTTP {last.response.status_code}") from last
+            raise _wfs_status_error(url, last.response) from last
         raise WFSError(f"Failed to fetch WFS data after {max_retries} attempts: {last}") from last
 
     tmp_dir, tmp_path = download.tmp_dir, download.tmp_path
@@ -2706,7 +2715,7 @@ def _probe_startindex_limit(
         # re-enables unbounded pagination. Programming errors still surface.
         warn(
             f"startIndex limit probe failed for '{typename}' at WFS {version}: "
-            f"{type(e).__name__}: {sanitize_error_message(str(e))}. Continuing without a known startIndex "
+            f"{type(e).__name__}: {e}. Continuing without a known startIndex "
             "cap — pagination past a server's limit may return truncated or "
             "rejected pages."
         )
@@ -3192,9 +3201,7 @@ def _get_tiling_bbox(
             return None
         return _lon_lat_bbox_in_crs(lon_lat, crs)
     except Exception as e:
-        warn(
-            f"Could not reproject the layer bbox into {crs}, so auto-tiling is off: {sanitize_error_message(str(e))}"
-        )
+        warn(f"Could not reproject the layer bbox into {crs}, so auto-tiling is off: {e}")
         return None
 
 

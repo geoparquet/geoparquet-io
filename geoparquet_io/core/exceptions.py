@@ -80,6 +80,24 @@ _CREDENTIAL_PAIR = re.compile(
 )
 
 
+#: ``scheme://user:password@host`` userinfo. The password is replaced.
+_URL_USERINFO = re.compile(r"(://[^/\s:@'\"]+:)[^/\s@'\"]+@")
+
+
+def redact_credentials(text: str) -> str:
+    """Replace credential values in free text, leaving everything else intact.
+
+    The single redaction both the error path (:func:`sanitize_error_message`)
+    and the log path (``logging_config.warn`` / ``error``) use: ``name=value``
+    / ``name: value`` credential pairs, and the password of ``scheme://user:pw@host``.
+    URLs are otherwise untouched, so a log line still names the file it is about.
+    """
+    if not text:
+        return text
+    text = _URL_USERINFO.sub(r"\1***@", text)
+    return _CREDENTIAL_PAIR.sub(lambda m: f"{m.group(1)}***", text)
+
+
 def sanitize_error_message(text: str, *, truncate: bool = True) -> str:
     """Make a low-level error message safe to print as gpio's own error line.
 
@@ -108,9 +126,14 @@ def sanitize_error_message(text: str, *, truncate: bool = True) -> str:
         # A gpio error that names the destination on purpose keeps the whole
         # path; only the query string (where credentials ride) goes.
         text = _URL_IN_TEXT.sub(lambda m: m.group(0).split("?")[0], text)
-    text = _CREDENTIAL_PAIR.sub(lambda m: f"{m.group(1)}***", text)
+    text = redact_credentials(text)
     text = _ANSI_ESCAPE.sub("", text)
     return _CONTROL_CHARS.sub("", text)
+
+
+def _clean(text: str) -> str:
+    """The one policy for text a gpio error carries: nothing truncated, nothing secret."""
+    return sanitize_error_message(text, truncate=False)
 
 
 class GeoParquetError(Exception):
@@ -121,7 +144,7 @@ class GeoParquetError(Exception):
         # interpolated into it (an httpx / OWSLib / DuckDB message that names
         # the request URL, credentials and all) is sanitized here, once, so
         # ``str(error)`` is safe for the CLI and the API alike (#1034).
-        self.message = sanitize_error_message(message, truncate=False)
+        self.message = _clean(message)
         super().__init__(self.message)
 
 
@@ -130,24 +153,10 @@ class FileNotFoundGeoParquetError(GeoParquetError):
 
     def __init__(self, path: str, detail: str | None = None) -> None:
         self.path = path  # Original path for programmatic access
-        sanitized = self._sanitize_path(path)
-        msg = f"File not found: {sanitized}"
+        msg = f"File not found: {path}"
         if detail:
             msg = f"{msg} - {detail}"
         super().__init__(msg)
-
-    @staticmethod
-    def _sanitize_path(path: str) -> str:
-        """Remove credentials and query params from path for safe logging.
-
-        Presigned URLs contain sensitive credentials in query parameters
-        (e.g., AWSAccessKeyId, Signature, X-Amz-Security-Token). These must
-        be stripped before including the path in error messages.
-        """
-        # Remove query string (may contain presigned credentials)
-        if "?" in path:
-            path = path.split("?")[0]
-        return path
 
 
 class InvalidParameterError(GeoParquetError):
@@ -155,18 +164,17 @@ class InvalidParameterError(GeoParquetError):
 
     def __init__(self, param_name: str, reason: str) -> None:
         self.param_name = param_name
-        self.reason = reason
-        super().__init__(f"Invalid parameter '{param_name}': {reason}")
+        self.reason = _clean(reason)
+        super().__init__(f"Invalid parameter '{param_name}': {self.reason}")
 
 
 class RemoteAccessError(GeoParquetError):
     """Raised when remote file access (S3/GCS/Azure) fails."""
 
     def __init__(self, url: str, reason: str) -> None:
-        # Sanitize URL to avoid logging credentials
-        self.url = sanitize_url_for_logging(url)
-        self.reason = reason
-        super().__init__(f"Remote access error for {self.url}: {reason}")
+        self.url = _clean(url)
+        self.reason = _clean(reason)
+        super().__init__(f"Remote access error for {self.url}: {self.reason}")
 
 
 class GeometryError(GeoParquetError):
@@ -372,10 +380,10 @@ class BatchTooLargeError(GeoParquetError):
     """
 
     def __init__(self, url: str, batch_size: int, reason: str) -> None:
-        self.url = sanitize_url_for_logging(url)
+        self.url = _clean(url)
         self.batch_size = batch_size
-        self.reason = reason
-        super().__init__(f"Batch size {batch_size} too large for {self.url}: {reason}")
+        self.reason = _clean(reason)
+        super().__init__(f"Batch size {batch_size} too large for {self.url}: {self.reason}")
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +409,8 @@ class FailureKind(enum.Enum):
     HTTP_STATUS = "http_status"
     #: The server answered but the body could not be parsed.
     MALFORMED_RESPONSE = "malformed_response"
+    #: The file is not Parquet at all (wrong format, truncated, no magic bytes).
+    NOT_PARQUET = "not_parquet"
     #: Not recognised; the caller keeps its generic message.
     UNKNOWN = "unknown"
 
@@ -427,11 +437,67 @@ def _status_of(exc: BaseException) -> int | None:
     return None
 
 
-def _classify_one(exc: BaseException) -> FailureClass:
+#: The phrases DuckDB and pyarrow use for "this is not a Parquet file". Neither
+#: library gives a structured field for it, so this one predicate reads the text;
+#: every "is it Parquet" question in gpio asks :func:`classify_failure` for
+#: :attr:`FailureKind.NOT_PARQUET` instead of keeping its own copy.
+_NOT_PARQUET_TEXT = re.compile(
+    r"no magic bytes found|not a parquet file|magic bytes not found|too small to be a parquet",
+    re.IGNORECASE,
+)
+
+#: A quoted run or a URL: user-chosen text inside a DuckDB message (the path, the
+#: layer, the SQL). Removed before :func:`_duckdb_io_verdict` reads the rest, so
+#: a file or table *named* "forbidden" cannot decide the verdict (#1020).
+_USER_TEXT_IN_MESSAGE = re.compile(r"'[^']*'|\"[^\"]*\"|[A-Za-z][A-Za-z0-9+.\-]*://\S+")
+_HTTP_STATUS_TEXT = re.compile(r"\(HTTP (\d{3})\)|\bHTTP(?: error)?[ :]+(\d{3})\b", re.IGNORECASE)
+
+
+def _duckdb_io_verdict(exc: BaseException) -> FailureClass | None:
+    """DuckDB's remote-read failure, read from its text -- opt-in, and only here.
+
+    A remote ``read_parquet`` fails as a plain ``IOException`` whose only account
+    of what happened is its message ("... (HTTP 403)", "Timeout was reached").
+    That is the one place gpio reads exception text for an HTTP verdict, it is
+    confined to DuckDB's IO exception types, and the user's own path/URL/SQL is
+    cut out of the text first.
+    """
+    import duckdb
+
+    if not isinstance(exc, (duckdb.IOException, duckdb.HTTPException)):
+        return None
+    text = _USER_TEXT_IN_MESSAGE.sub(" ", str(exc))
+    match = _HTTP_STATUS_TEXT.search(text)
+    if match:
+        return FailureClass(FailureKind.HTTP_STATUS, int(match.group(1) or match.group(2)))
+    lowered = text.lower()
+    if "forbidden" in lowered or "access denied" in lowered:
+        return FailureClass(FailureKind.HTTP_STATUS, 403)
+    if "not found" in lowered or "does not exist" in lowered:
+        return FailureClass(FailureKind.HTTP_STATUS, 404)
+    if "timeout" in lowered or "timed out" in lowered:
+        return FailureClass(FailureKind.TIMEOUT)
+    if "unable to connect" in lowered or "connection" in lowered:
+        return FailureClass(FailureKind.UNREACHABLE)
+    return None
+
+
+def _is_not_parquet(exc: BaseException) -> bool:
+    import duckdb
+    import pyarrow as pa
+
+    return isinstance(exc, (duckdb.Error, pa.ArrowException, OSError)) and bool(
+        _NOT_PARQUET_TEXT.search(str(exc))
+    )
+
+
+def _classify_one(exc: BaseException, duckdb_text: bool = False) -> FailureClass:
     import duckdb
 
     if isinstance(exc, (MemoryError, KeyboardInterrupt, SystemExit)):
         return FailureClass(FailureKind.LOCAL)
+    if _is_not_parquet(exc):
+        return FailureClass(FailureKind.NOT_PARQUET)
     if isinstance(exc, _local_duckdb_errors(duckdb)):
         return FailureClass(FailureKind.LOCAL)
 
@@ -451,6 +517,10 @@ def _classify_one(exc: BaseException) -> FailureClass:
         return FailureClass(FailureKind.UNREACHABLE)
     if isinstance(exc, _MALFORMED_RESPONSE_TYPES) or _is_xml_syntax_error(exc):
         return FailureClass(FailureKind.MALFORMED_RESPONSE)
+    if duckdb_text:
+        verdict = _duckdb_io_verdict(exc)
+        if verdict is not None:
+            return verdict
     return FailureClass(FailureKind.UNKNOWN)
 
 
@@ -480,18 +550,22 @@ def _is_xml_syntax_error(exc: BaseException) -> bool:
     )
 
 
-def classify_failure(exc: BaseException) -> FailureClass:
+def classify_failure(exc: BaseException, *, duckdb_text: bool = False) -> FailureClass:
     """Classify a caught exception by its type and structured fields.
 
     The exception and then its ``__cause__`` / ``__context__`` chain are walked
     and the first recognised link decides, so a library error wrapped by
-    another still classifies. The message text is never read.
+    another still classifies. Message text is not read, with two bounded
+    exceptions: the Parquet-magic phrases (:attr:`FailureKind.NOT_PARQUET`), and,
+    only when ``duckdb_text=True``, the status/timeout wording of a DuckDB IO
+    failure with the user's own path/URL/SQL cut out (see
+    :func:`_duckdb_io_verdict`). Carto and WFS leave it off: their URLs carry user input.
     """
     seen: set[int] = set()
     cur: BaseException | None = exc
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
-        verdict = _classify_one(cur)
+        verdict = _classify_one(cur, duckdb_text)
         if verdict.kind is not FailureKind.UNKNOWN:
             return verdict
         cur = cur.__cause__ or cur.__context__

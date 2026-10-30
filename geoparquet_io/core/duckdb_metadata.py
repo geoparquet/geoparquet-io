@@ -25,7 +25,12 @@ from geoparquet_io.core.crs_utils import (
     merge_longitude_ranges,
 )
 from geoparquet_io.core.duckdb_utils import _escape_sql_string, describe_query, fetch_one, sql_path
-from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
+from geoparquet_io.core.exceptions import (
+    FailureKind,
+    GeoParquetError,
+    InvalidParameterError,
+    classify_failure,
+)
 from geoparquet_io.core.file_utils import (
     get_first_parquet_file,
     is_partition_path,
@@ -70,7 +75,7 @@ def _pyarrow_get_kv_metadata(parquet_file: str) -> dict[bytes, bytes]:
         return dict(metadata) if metadata else {}
     except Exception as e:
         error_msg = str(e)
-        if "not a parquet file" in error_msg.lower() or "magic" in error_msg.lower():
+        if classify_failure(e).kind is FailureKind.NOT_PARQUET:
             raise GeoParquetError(
                 f"Not a valid Parquet file: {parquet_file}\n"
                 f"This command requires .parquet files with valid Parquet format.\n"
@@ -93,7 +98,7 @@ def _pyarrow_get_geo_metadata(parquet_file: str) -> dict | None:
         return None
     except Exception as e:
         error_msg = str(e)
-        if "not a parquet file" in error_msg.lower() or "magic" in error_msg.lower():
+        if classify_failure(e).kind is FailureKind.NOT_PARQUET:
             raise GeoParquetError(
                 f"Not a valid GeoParquet file: {parquet_file}\n"
                 f"This command requires .parquet files with valid Parquet format.\n"
@@ -465,7 +470,7 @@ def _read_kv_entries(parquet_file: str, con=None) -> list[tuple[bytes | None, by
     except duckdb.InvalidInputException as e:
         # File is not a valid Parquet file (e.g., wrong format, corrupt)
         error_msg = str(e)
-        if "No magic bytes found" in error_msg or "not a parquet file" in error_msg.lower():
+        if classify_failure(e).kind is FailureKind.NOT_PARQUET:
             raise GeoParquetError(
                 f"Not a valid Parquet file: {parquet_file}\n"
                 f"This command requires .parquet files with valid Parquet format.\n"

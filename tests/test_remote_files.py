@@ -228,7 +228,9 @@ class TestRemoteErrorHints:
         """Test hint for S3 403 Forbidden error."""
         from geoparquet_io.core.remote import get_remote_error_hint
 
-        hint = get_remote_error_hint("403 Forbidden", "s3://bucket/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("403 Forbidden"), "s3://bucket/file.parquet"
+        )
         assert "AWS_ACCESS_KEY_ID" in hint
         assert "AWS_SECRET_ACCESS_KEY" in hint
 
@@ -236,7 +238,9 @@ class TestRemoteErrorHints:
         """Test hint for Azure 403 error."""
         from geoparquet_io.core.remote import get_remote_error_hint
 
-        hint = get_remote_error_hint("Access Denied", "az://container/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("Access Denied"), "az://container/file.parquet"
+        )
         assert "AZURE_STORAGE_ACCOUNT_NAME" in hint
         assert "AZURE_STORAGE_ACCOUNT_KEY" in hint
 
@@ -244,14 +248,18 @@ class TestRemoteErrorHints:
         """Test hint for GCS 403 error."""
         from geoparquet_io.core.remote import get_remote_error_hint
 
-        hint = get_remote_error_hint("Forbidden", "gs://bucket/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("Forbidden"), "gs://bucket/file.parquet"
+        )
         assert "GOOGLE_APPLICATION_CREDENTIALS" in hint
 
     def test_get_remote_error_hint_404(self):
         """Test hint for 404 Not Found error."""
         from geoparquet_io.core.remote import get_remote_error_hint
 
-        hint = get_remote_error_hint("404 Not Found", "https://example.com/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("404 Not Found"), "https://example.com/file.parquet"
+        )
         assert "not found" in hint.lower()
         assert "verify" in hint.lower() or "check" in hint.lower()
 
@@ -259,7 +267,10 @@ class TestRemoteErrorHints:
         """Test hint for timeout error."""
         from geoparquet_io.core.remote import get_remote_error_hint
 
-        hint = get_remote_error_hint("Connection timed out", "https://example.com/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("Connection timed out"),
+            "https://example.com/file.parquet",
+        )
         assert "timed out" in hint.lower()
         assert "network" in hint.lower()
 
@@ -267,7 +278,10 @@ class TestRemoteErrorHints:
         """Test hint for connection error."""
         from geoparquet_io.core.remote import get_remote_error_hint
 
-        hint = get_remote_error_hint("Unable to connect", "https://example.com/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("Unable to connect"),
+            "https://example.com/file.parquet",
+        )
         assert "connect" in hint.lower()
         assert "network" in hint.lower()
 

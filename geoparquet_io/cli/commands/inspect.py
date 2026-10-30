@@ -109,21 +109,6 @@ def _validate_parquet_input(file_path: str) -> None:
         )
 
 
-def _friendly_parquet_error(error: Exception, file_path: str) -> click.ClickException:
-    """Convert low-level Parquet errors to user-friendly messages."""
-    error_str = str(error)
-    filename = os.path.basename(file_path)
-
-    if "magic bytes" in error_str.lower() or "not a parquet file" in error_str.lower():
-        return click.ClickException(
-            f"The file '{filename}' has a .parquet extension but is not a valid "
-            f"Parquet file. It may be a different format (CSV, JSON, etc.) that was "
-            f"incorrectly named. Check the file contents or use 'gpio convert' to "
-            f"create a proper GeoParquet file."
-        )
-    return click.ClickException(error_str)
-
-
 def _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_files):
     """CLI wrapper for inspect summary - delegates to core function."""
     if json_output and markdown_output:
@@ -146,7 +131,7 @@ def _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_
     except ValueError as e:
         raise click_error_for(e) from e
     except Exception as e:
-        raise _friendly_parquet_error(e, parquet_file) from e
+        raise click_error_for(e, path=parquet_file) from e
 
 
 def _inspect_preview_impl(
@@ -176,7 +161,7 @@ def _inspect_preview_impl(
             click.echo(output)
 
     except Exception as e:
-        raise _friendly_parquet_error(e, parquet_file) from e
+        raise click_error_for(e, path=parquet_file) from e
 
 
 def _inspect_stats_impl(parquet_file, json_output, markdown_output):
@@ -199,7 +184,7 @@ def _inspect_stats_impl(parquet_file, json_output, markdown_output):
             click.echo(output)
 
     except Exception as e:
-        raise _friendly_parquet_error(e, parquet_file) from e
+        raise click_error_for(e, path=parquet_file) from e
 
 
 # Meta command - delegates to core.inspect.display_metadata
@@ -400,7 +385,7 @@ def inspect_meta(
                 meta_geo_stats,
             )
         except Exception as e:
-            raise _friendly_parquet_error(e, parquet_file) from e
+            raise click_error_for(e, path=parquet_file) from e
 
 
 @inspect.command(name="layers", cls=GlobAwareCommand)

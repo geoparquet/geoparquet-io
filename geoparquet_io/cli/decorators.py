@@ -5,7 +5,6 @@ This module provides reusable decorators to ensure consistency across commands
 and reduce code duplication.
 """
 
-import functools
 import math
 
 import click
@@ -19,7 +18,7 @@ from geoparquet_io.core.compression import (
     WriteContext,
     resolve_codec,
 )
-from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.exceptions import InvalidParameterError, sanitize_error_message
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
     SPATIAL_BAND_TOP_ROWS,
@@ -40,7 +39,7 @@ class ErrorBoundaryGroup(click.Group):
     :data:`~geoparquet_io.core.duckdb_utils.INPUT_FILE_DUCKDB_ERRORS`.
 
     This belongs on the *root* group rather than on a decorator, because every
-    command can hit those failures: ``handle_geoparquet_errors`` is applied to
+    command can hit those failures: a per-command decorator was applied to
     four command modules, and ``gpio sort hilbert`` -- the worked example in the
     docs -- is not one of them. ``Group.invoke`` is the single funnel every
     subcommand passes through, so a command added tomorrow inherits this, and
@@ -82,29 +81,6 @@ class ErrorBoundaryGroup(click.Group):
             raise error from exc
 
 
-def handle_geoparquet_errors(func):
-    """
-    Decorator to convert GeoParquetError exceptions to user-friendly Click errors.
-
-    Catches GeoParquetError from core functions and converts them to
-    appropriate click exceptions (BadParameter for invalid params, ClickException
-    for general errors) for clean error display without stack traces.
-    """
-
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        # Import here to avoid circular imports
-        from geoparquet_io.cli.exception_handler import handle_core_exception
-        from geoparquet_io.core.exceptions import GeoParquetError
-
-        try:
-            return func(*args, **kwargs)
-        except GeoParquetError as e:
-            raise handle_core_exception(e) from None
-
-    return wrapper
-
-
 def parse_row_group_options(
     row_group_size: int | None,
     row_group_size_mb: str | None,
@@ -138,7 +114,7 @@ def parse_row_group_options(
     try:
         return bytes_to_mb(parse_size_string(row_group_size_mb))
     except ValueError as e:
-        raise click.UsageError(f"Invalid row group size: {e}") from e
+        raise click.UsageError(f"Invalid row group size: {sanitize_error_message(str(e))}") from e
 
 
 # ``--approx``'s default. ``gpio add kdtree`` and ``gpio partition kdtree`` both
@@ -613,7 +589,7 @@ def _validate_write_memory(ctx, param, value):
     try:
         validate_memory_limit(value)
     except ValueError as e:
-        raise click.BadParameter(str(e), ctx=ctx, param=param) from None
+        raise click.BadParameter(sanitize_error_message(str(e)), ctx=ctx, param=param) from None
     return value
 
 
@@ -1234,7 +1210,7 @@ def handle_directory_sub_partition(
     try:
         min_size_bytes = parse_size_string(min_size)
     except ValueError as e:
-        raise click.UsageError(str(e)) from None
+        raise click.UsageError(sanitize_error_message(str(e))) from None
 
     if preview:
         # --preview used to be accepted, ignored, and the originals deleted
@@ -1273,7 +1249,7 @@ def handle_directory_sub_partition(
             max_partitions=max_partitions,
         )
     except ValueError as e:
-        raise click.UsageError(str(e)) from None
+        raise click.UsageError(sanitize_error_message(str(e))) from None
 
     if result["errors"]:
         # Every per-file failure was caught and warned about, so without this the

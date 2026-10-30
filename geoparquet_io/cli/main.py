@@ -21,7 +21,6 @@ from geoparquet_io.cli.commands.sort import sort
 from geoparquet_io.cli.decorators import (
     ErrorBoundaryGroup,
     GlobAwareCommand,
-    handle_geoparquet_errors,
 )
 from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.logging_config import setup_cli_logging
@@ -132,7 +131,6 @@ cli.add_command(sort)
 
 # Skills command (for LLM integration)
 @cli.command()
-@handle_geoparquet_errors
 @click.option("--show", is_flag=True, help="Print skill content to stdout")
 @click.option("--copy", "copy_to", type=click.Path(), help="Copy skill to directory")
 @click.option("--name", default="geoparquet", help="Skill name (default: geoparquet)")

@@ -31,7 +31,6 @@ from geoparquet_io.cli.decorators import (
     GlobAwareCommand,
     check_partition_options,
     enable_verbose_logging,
-    handle_geoparquet_errors,
     overwrite_option,
     strict_option,
     verbose_option,
@@ -1563,7 +1562,6 @@ def check_row_group_cmd(
 
 
 @check.command(name="stac")
-@handle_geoparquet_errors
 @click.argument("stac_file")
 @verbose_option
 @strict_option

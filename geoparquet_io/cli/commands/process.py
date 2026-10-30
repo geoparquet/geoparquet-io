@@ -15,7 +15,6 @@ from geoparquet_io.cli.decorators import (
     bucket_point_options,
     geoparquet_version_option,
     grid_aggregate_options,
-    handle_geoparquet_errors,
     metric_nodata_option,
     process_compression_options,
     repair_geometry_option,
@@ -41,23 +40,13 @@ from geoparquet_io.core.process.simplify import simplify_file as simplify_file_i
 # =============================================================================
 
 
-def _aggregate_error(exc: Exception, where: str | None) -> click.ClickException:
-    """Turn an aggregation failure into a message a user can act on.
-
-    A bad ``--where`` clause surfaces as a raw DuckDB binder/parser error that
-    echoes the whole generated SQL, which buries the actual cause. Drop the SQL
-    echo and name ``--where`` as the likely culprit (gpio #612). Non-DuckDB
-    errors (validation, bad parameters) already read well and pass through.
-    """
-    if not isinstance(exc, duckdb.Error):
-        return click_error_for(exc)
-    message = str(exc).split("\nLINE ")[0].strip()
-    if where:
-        message += (
-            f'\n\nThis is most likely caused by --where "{where}" '
-            "-- check the column names and SQL syntax."
-        )
-    return click.ClickException(message)
+def _where_hint(where: str | None) -> str | None:
+    """Name ``--where`` as the likely culprit of a DuckDB binder/parser error (gpio #612)."""
+    if not where:
+        return None
+    return (
+        f'This is most likely caused by --where "{where}" -- check the column names and SQL syntax.'
+    )
 
 
 @click.group()
@@ -319,7 +308,7 @@ def process_aggregate_a5(
             ValueError,
             duckdb.Error,
         ) as exc:
-            raise _aggregate_error(exc, where) from exc
+            raise click_error_for(exc, hint=_where_hint(where)) from exc
 
 
 @process_aggregate.command(name="h3")
@@ -409,7 +398,7 @@ def process_aggregate_h3(
             ValueError,
             duckdb.Error,
         ) as exc:
-            raise _aggregate_error(exc, where) from exc
+            raise click_error_for(exc, hint=_where_hint(where)) from exc
 
 
 @process_aggregate.command(name="admin")
@@ -517,7 +506,7 @@ def process_aggregate_admin(
             ValueError,
             duckdb.Error,
         ) as exc:
-            raise _aggregate_error(exc, where) from exc
+            raise click_error_for(exc, hint=_where_hint(where)) from exc
 
 
 @process.command(name="simplify")
@@ -586,7 +575,6 @@ def process_aggregate_admin(
 @process_compression_options
 @geoparquet_version_option
 @verbose_option
-@handle_geoparquet_errors
 @click.pass_context
 def process_simplify(
     ctx,
@@ -695,7 +683,6 @@ def _parse_float_csv(value: str | None, option_name: str) -> list[float] | None:
 @process_compression_options
 @geoparquet_version_option
 @verbose_option
-@handle_geoparquet_errors
 @click.pass_context
 def process_polygonize(
     ctx,
@@ -799,7 +786,6 @@ def process_polygonize(
 @process_compression_options
 @geoparquet_version_option
 @verbose_option
-@handle_geoparquet_errors
 @click.pass_context
 def process_contour(
     ctx,

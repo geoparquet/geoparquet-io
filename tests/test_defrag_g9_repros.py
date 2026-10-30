@@ -352,11 +352,11 @@ SECRET = "SUPERSECRETKEY123"
 
 
 def test_1034_wfs_error_output_does_not_carry_the_api_key(tmp_path, monkeypatch):
-    """Expected to fail: the ``Error:`` line repeats ``apikey=SUPERSECRETKEY123``.
+    """The ``Error:`` line does not repeat ``apikey=SUPERSECRETKEY123`` (#1034).
 
     The capabilities request fails with a message that echoes the request URL,
-    query string and all (as OWSLib and GDAL do). ``extract.py`` raises
-    ``ClickException(str(e))`` without ``sanitize_error_message``.
+    query string and all (as OWSLib and GDAL do). Every gpio error sanitizes its
+    message at construction, so the key never reaches the ``Error:`` line.
     """
     service = f"https://wfs.example.com/geoserver/wfs?apikey={SECRET}"
 

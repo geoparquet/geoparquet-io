@@ -1,10 +1,8 @@
 """Tests for CLI exception handler."""
 
 import click
-import pytest
 
 from geoparquet_io.cli.exception_handler import (
-    core_exception_handler,
     handle_core_exception,
 )
 from geoparquet_io.core.exceptions import (
@@ -61,35 +59,45 @@ class TestExceptionHandler:
         assert isinstance(click_exc, click.ClickException)
         assert "Generic error" in click_exc.message
 
-    def test_decorator_catches_and_converts_exceptions(self):
-        @core_exception_handler
-        def failing_function():
-            raise FileNotFoundGeoParquetError("missing.parquet")
+    def test_the_root_group_translates_a_gpio_error_to_one_line(self):
+        from click.testing import CliRunner
 
-        with pytest.raises(click.ClickException) as exc_info:
-            failing_function()
-        assert "missing.parquet" in str(exc_info.value)
+        from geoparquet_io.cli.decorators import ErrorBoundaryGroup
 
-    def test_decorator_passes_through_non_geoparquet_exceptions(self):
-        @core_exception_handler
-        def raises_value_error():
-            raise ValueError("not a GeoParquet error")
-
-        with pytest.raises(ValueError):
-            raises_value_error()
-
-    def test_decorator_preserves_return_value(self):
-        @core_exception_handler
-        def returns_value():
-            return "success"
-
-        assert returns_value() == "success"
-
-    def test_decorator_preserves_function_metadata(self):
-        @core_exception_handler
-        def documented_function():
-            """This is the docstring."""
+        @click.group(cls=ErrorBoundaryGroup)
+        def root():
             pass
 
-        assert documented_function.__name__ == "documented_function"
-        assert documented_function.__doc__ == """This is the docstring."""
+        @root.command()
+        def boom():
+            raise FileNotFoundGeoParquetError("missing.parquet")
+
+        result = CliRunner().invoke(root, ["boom"])
+        assert result.exit_code == 1
+        assert "Error: File not found: missing.parquet" in result.output
+        assert "Traceback" not in result.output
+
+    def test_invalid_parameter_is_a_bad_parameter_everywhere(self):
+        """One table: the option-naming error is a BadParameter at every entry point."""
+        from geoparquet_io.cli.exception_handler import click_error_for
+
+        exc = InvalidParameterError("limit", "must be positive")
+        assert isinstance(handle_core_exception(exc), click.BadParameter)
+        assert isinstance(click_error_for(exc), click.BadParameter)
+
+    def test_a_wrapped_duckdb_error_keeps_its_hint(self):
+        """The hints are asked before the gpio-error short circuit."""
+        import duckdb
+
+        from geoparquet_io.cli.exception_handler import cli_error_for
+
+        try:
+            try:
+                raise duckdb.OutOfMemoryException(
+                    "Out of Memory Error: max_temp_directory_size reached"
+                )
+            except duckdb.Error as inner:
+                raise GeoParquetError("conversion failed") from inner
+        except GeoParquetError as outer:
+            error = cli_error_for(outer)
+        assert error is not None and "TMPDIR" in error.message

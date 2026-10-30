@@ -729,35 +729,44 @@ class TestGetRemoteErrorHint:
     def test_s3_403_error(self):
         """Test S3 403 error returns AWS credential hint."""
 
-        hint = get_remote_error_hint("403 Forbidden", "s3://bucket/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("403 Forbidden"), "s3://bucket/file.parquet"
+        )
         assert "AWS_ACCESS_KEY_ID" in hint
         assert "AWS_SECRET_ACCESS_KEY" in hint
 
     def test_azure_access_denied(self):
         """Test Azure access denied returns Azure credential hint."""
 
-        hint = get_remote_error_hint("Access Denied", "az://container/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("Access Denied"), "az://container/file.parquet"
+        )
         assert "AZURE_STORAGE_ACCOUNT_NAME" in hint
         assert "AZURE_STORAGE_ACCOUNT_KEY" in hint
 
     def test_gcs_forbidden(self):
         """Test GCS forbidden error returns GCP credential hint."""
 
-        hint = get_remote_error_hint("403", "gs://bucket/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("HTTP 403"), "gs://bucket/file.parquet"
+        )
         assert "GOOGLE_APPLICATION_CREDENTIALS" in hint
 
     def test_404_error(self):
         """Test 404 error returns file not found hint."""
 
-        hint = get_remote_error_hint("404 Not Found", "s3://bucket/missing.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("404 Not Found"), "s3://bucket/missing.parquet"
+        )
         assert "not found" in hint.lower()
-        assert "Verify the URL" in hint
+        assert "the URL" in hint
 
     def test_timeout_error(self):
         """Test timeout error returns network hint."""
 
         hint = get_remote_error_hint(
-            "Connection timed out", "https://slow.example.com/data.parquet"
+            __import__("duckdb").IOException("Connection timed out"),
+            "https://slow.example.com/data.parquet",
         )
         assert "timed out" in hint.lower()
         assert "network connectivity" in hint.lower()
@@ -766,7 +775,8 @@ class TestGetRemoteErrorHint:
         """Test connection error returns connectivity hint."""
 
         hint = get_remote_error_hint(
-            "Unable to connect", "https://invalid.example.com/file.parquet"
+            __import__("duckdb").IOException("Unable to connect"),
+            "https://invalid.example.com/file.parquet",
         )
         assert "connect" in hint.lower()
         assert "network connectivity" in hint.lower()
@@ -774,7 +784,9 @@ class TestGetRemoteErrorHint:
     def test_generic_error(self):
         """Test generic error returns fallback hint."""
 
-        hint = get_remote_error_hint("Unknown error occurred", "s3://bucket/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("Unknown error occurred"), "s3://bucket/file.parquet"
+        )
         assert "Remote file access failed" in hint
         assert "network connectivity" in hint.lower()
 
