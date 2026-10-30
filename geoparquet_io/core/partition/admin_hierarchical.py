@@ -24,6 +24,8 @@ from geoparquet_io.core.crs_utils import (
     transform_geom_sql,
 )
 from geoparquet_io.core.duckdb_utils import (
+    build_spatial_join_condition,
+    build_spatial_join_query,
     fetch_one,
     fetch_rows,
     query_schema,
@@ -86,79 +88,64 @@ def _build_enrichment_query(
 
     input_ref = input_source if input_is_table_ref else sql_path(input_source)
 
-    q_input_geom = quote_identifier(input_geom_col)
     q_admin_geom = quote_identifier(admin_geom_col)
-    # Struct-field access ``a.<col>.xmin``: quote the column segment only, so the
-    # ``a.`` alias and the ``.xmin`` accessor stay bare. ``input_bbox_col`` comes
-    # from the input file's own schema and ``admin_bbox_col`` from the dataset;
-    # both reach here RAW, so quote exactly once (#926).
-    q_input_bbox = quote_identifier(input_bbox_col) if input_bbox_col else None
-    q_admin_bbox = quote_identifier(admin_bbox_col) if admin_bbox_col else None
-    bbox_filter = f"""
-            (a.{q_input_bbox}.xmin <= b.{q_admin_bbox}.xmax AND
-             a.{q_input_bbox}.xmax >= b.{q_admin_bbox}.xmin AND
-             a.{q_input_bbox}.ymin <= b.{q_admin_bbox}.ymax AND
-             a.{q_input_bbox}.ymax >= b.{q_admin_bbox}.ymin)
-        """
-
     if source_crs and input_bbox_col and admin_bbox_col:
         # Non-CRS84 input with bboxes on both sides: reproject the (small) admin
         # polygons into the input CRS and synthesize their source-CRS bbox, so the
         # join runs in one CRS and keeps the cheap bbox pre-filter — instead of
         # transforming the (large) input per row and degrading to a nested-loop
-        # ST_Intersects (#525, preserving the #460 pre-filter).
+        # join (#525, preserving the #460 pre-filter).
         radmin = reproject_to_source_sql(q_admin_geom, source_crs)
+        q_admin_bbox = quote_identifier(admin_bbox_col)
         bbox_struct = (
             f"struct_pack(xmin := ST_XMin({radmin}), xmax := ST_XMax({radmin}), "
             f"ymin := ST_YMin({radmin}), ymax := ST_YMax({radmin})) AS {q_admin_bbox}"
         )
-        return f"""
-            CREATE TEMP TABLE {enriched_table} AS
-            SELECT
-                a.*,
-                {admin_select_clause}
-            FROM {input_ref} a
-            LEFT JOIN (
-                SELECT {radmin} AS {q_admin_geom}, {bbox_struct}, {subquery_cols_str}
-                FROM {admin_table_ref}
-                {admin_where_clause}
-            ) b
-            ON {bbox_filter}
-                AND ST_Intersects(b.{q_admin_geom}, a.{q_input_geom})
-        """
+        admin_cols = f"{radmin} AS {q_admin_geom}, {bbox_struct}"
+        input_geom_sql = None
+    elif input_bbox_col and admin_bbox_col:
+        admin_cols = f"{q_admin_geom}, {quote_identifier(admin_bbox_col)}"
+        input_geom_sql = None
+    else:
+        # No bbox on one side: reproject the input geometry inline (no pre-filter
+        # to preserve either way).
+        admin_cols = q_admin_geom
+        input_geom_sql = (
+            transform_geom_sql(f"a.{quote_identifier(input_geom_col)}", source_crs)
+            if source_crs
+            else None
+        )
 
-    if input_bbox_col and admin_bbox_col and not source_crs:
-        return f"""
-            CREATE TEMP TABLE {enriched_table} AS
-            SELECT
-                a.*,
-                {admin_select_clause}
-            FROM {input_ref} a
-            LEFT JOIN (
-                SELECT {q_admin_geom}, {q_admin_bbox}, {subquery_cols_str}
+    admin_relation = f"""(
+                SELECT {admin_cols}, {subquery_cols_str}
                 FROM {admin_table_ref}
                 {admin_where_clause}
-            ) b
-            ON {bbox_filter}
-                AND ST_Intersects(b.{q_admin_geom}, a.{q_input_geom})
-        """
+            )"""
+    # The owner quotes every identifier in the ON clause (#926, #942) and keeps
+    # one admin assignment per input feature, to the smallest admin code (#543).
+    join = build_spatial_join_query(
+        input_relation=input_ref,
+        target_relation=admin_relation,
+        target_select=admin_select_clause,
+        condition=build_spatial_join_condition(
+            input_geom_col,
+            admin_geom_col,
+            input_bbox_col,
+            admin_bbox_col,
+            input_geom_sql=input_geom_sql,
+        ),
+        one_match_per_input=True,
+        match_order=_admin_match_order(boundary_columns),
+    )
+    return f"CREATE TEMP TABLE {enriched_table} AS\n{join}"
 
-    # No bbox on one side: reproject the input geometry inline (no pre-filter to
-    # preserve either way).
-    input_geom_sql = transform_geom_sql(f"a.{q_input_geom}", source_crs)
-    return f"""
-            CREATE TEMP TABLE {enriched_table} AS
-            SELECT
-                a.*,
-                {admin_select_clause}
-            FROM {input_ref} a
-            LEFT JOIN (
-                SELECT {q_admin_geom}, {subquery_cols_str}
-                FROM {admin_table_ref}
-                {admin_where_clause}
-            ) b
-            ON ST_Intersects(b.{q_admin_geom}, {input_geom_sql})
-        """
+
+def _admin_match_order(boundary_columns):
+    """The admin-side tiebreak keys: the boundary columns, as the subquery names them."""
+    return [
+        f"b._col_{i}" if "[" in col or "(" in col else f"b.{quote_identifier(col)}"
+        for i, col in enumerate(boundary_columns)
+    ]
 
 
 def _compute_input_extent(con, input_path, input_bbox_col, input_geom_col, source_crs=None):

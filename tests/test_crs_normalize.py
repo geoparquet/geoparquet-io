@@ -442,6 +442,7 @@ class TestAdminJoinIsCrsAware:
                 "admin_bbox_col": None,
                 "input_geom_col": "geometry",
                 "admin_geom_col": "geom",
+                "boundary_columns": ["region"],
             }
             with_crs = _build_spatial_join_query(source_crs="EPSG:5070", **kwargs)
             without = _build_spatial_join_query(source_crs=None, **kwargs)
@@ -503,6 +504,7 @@ class TestAdminReprojectsAdminSideWithBbox:
             admin_bbox_col="bbox",
             input_geom_col="geometry",
             admin_geom_col="geom",
+            boundary_columns=["region"],
             source_crs="EPSG:5070",
         )
         # The join itself does not transform the input (admin reproject lives in

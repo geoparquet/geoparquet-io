@@ -809,6 +809,7 @@ def build_spatial_join_condition(
     input_alias: str = "a",
     target_alias: str = "b",
     input_geom_sql: str | None = None,
+    input_is_point: bool = False,
 ) -> str:
     """Build the ON-clause condition for a spatial join between two tables.
 
@@ -859,11 +860,37 @@ def build_spatial_join_condition(
         target_bbox_col: Optional bbox covering column on the target table.
         input_alias: SQL alias for the input table (default "a").
         target_alias: SQL alias for the target table (default "b").
+        input_geom_sql: A pre-built input-geometry expression (e.g. an
+            ``ST_Transform`` reprojecting a non-CRS84 input, #525). It replaces
+            ``input_alias.input_geom_col`` and drops the bbox pre-filter, since
+            the stored input bbox is in the source CRS.
+        input_is_point: The input geometry is one POINT per row (the join point
+            ``gpio process aggregate admin`` builds). With a target bbox, the
+            pre-filter is then point-in-bbox on that point -- comparable even
+            when the input has no bbox of its own.
 
     Returns:
         A SQL boolean expression for use directly after ``ON``.
     """
     qt_geom = quote_identifier(target_geom_col)
+
+    if input_is_point:
+        point = input_geom_sql or f"{input_alias}.{quote_identifier(input_geom_col)}"
+        intersects = f"ST_Intersects({target_alias}.{qt_geom}, {point})"
+        if not target_bbox_col:
+            return intersects
+        qt_bbox = quote_identifier(target_bbox_col)
+        return (
+            "(\n"
+            "        -- Fast point-in-bbox pre-filter (cheap; eliminates most candidate pairs)\n"
+            f"        {target_alias}.{qt_bbox}.xmin <= ST_X({point}) AND\n"
+            f"        {target_alias}.{qt_bbox}.xmax >= ST_X({point}) AND\n"
+            f"        {target_alias}.{qt_bbox}.ymin <= ST_Y({point}) AND\n"
+            f"        {target_alias}.{qt_bbox}.ymax >= ST_Y({point})\n"
+            "    )\n"
+            "    -- Precise check only runs on the bbox matches\n"
+            f"    AND {intersects}"
+        )
 
     # ``input_geom_sql`` is a pre-built input-geometry expression (e.g. wrapped in
     # ST_Transform to reproject a non-CRS84 input, #525). When supplied, the
@@ -893,6 +920,96 @@ def build_spatial_join_condition(
         "    )\n"
         "    -- Precise check only runs on the bbox matches\n"
         f"    AND {intersects}"
+    )
+
+
+# The input-row id build_spatial_join_query carries through a one-match join.
+SPATIAL_JOIN_INPUT_ROW = "__gpio_input_row"
+
+
+def build_spatial_join_query(
+    *,
+    input_relation: str,
+    target_relation: str,
+    target_select: str,
+    condition: str,
+    one_match_per_input: bool,
+    match_order: Sequence[str] = (),
+    input_alias: str = "a",
+    target_alias: str = "b",
+) -> str:
+    """Build the ``SELECT`` that LEFT JOINs every input row to the targets it meets.
+
+    The query keeps every input column (``<input_alias>.*``), adds
+    ``target_select`` (target-side expressions, aliased by the caller), and
+    joins ``ON condition`` -- normally :func:`build_spatial_join_condition`.
+    An input row that meets no target is kept, with NULL target columns.
+
+    ``one_match_per_input`` is the dedup decision, made explicitly by every
+    caller:
+
+    - ``False``: one output row per (input, matching target) pair. A feature
+      that intersects two target polygons comes out twice.
+    - ``True``: exactly one output row per input row, in input order (#543).
+      Of the targets a row meets, the one kept is the first by
+      ``match_order`` -- SQL expressions over the target alias, compared in
+      order, ascending, NULLs last. That is the tiebreak, and it is
+      deterministic: rows that tie on every ``match_order`` key carry the same
+      target values, so which of them survives cannot show in the output. The
+      admin commands pass the admin code columns, so a feature in the overlap of
+      two admin polygons goes to the smaller code. It is a cheap key on
+      purpose: an intersection-area tiebreak would run ``ST_Intersection`` on
+      every matched row, and the admin join point is a POINT with no area.
+
+    The dedup is spill-safe at the scale the admin commands target. Input rows
+    are numbered with ``row_number() OVER ()`` -- a streaming window, with no
+    ``PARTITION BY`` to buffer -- and the survivor is picked with ``DISTINCT
+    ON``, which DuckDB plans as a hash aggregate (it spills) followed by a sort
+    on the row number (it spills). The ``QUALIFY row_number() OVER (PARTITION
+    BY ...)`` form that #461 retired buffers every row in a window that does
+    not spill, and is not used.
+
+    Args:
+        input_relation: The input side: a table name, ``read_parquet(...)``
+            call, or parenthesised subquery.
+        target_relation: The target side, in the same forms.
+        target_select: The target-side SELECT items, e.g. ``b."country" AS c``.
+        condition: The ON condition.
+        one_match_per_input: See above.
+        match_order: The tiebreak keys; required when ``one_match_per_input``.
+        input_alias: SQL alias for the input (default "a").
+        target_alias: SQL alias for the target (default "b").
+
+    Returns:
+        A SELECT statement (no trailing semicolon).
+
+    Raises:
+        ValueError: ``one_match_per_input`` without a ``match_order``.
+    """
+    if not one_match_per_input:
+        return (
+            f"SELECT {input_alias}.*, {target_select}\n"
+            f"FROM {input_relation} {input_alias}\n"
+            f"LEFT JOIN {target_relation} {target_alias}\n"
+            f"ON {condition}"
+        )
+    if not match_order:
+        raise ValueError("one_match_per_input=True needs a match_order to pick the kept match")
+
+    row = SPATIAL_JOIN_INPUT_ROW
+    keys = [f"__gpio_match_{i}" for i in range(len(match_order))]
+    key_select = ", ".join(f"{expr} AS {key}" for expr, key in zip(match_order, keys, strict=True))
+    key_order = ", ".join(f"{key} ASC NULLS LAST" for key in keys)
+    return (
+        f"SELECT * EXCLUDE ({row}, {', '.join(keys)}) FROM (\n"
+        f"    SELECT DISTINCT ON ({row}) * FROM (\n"
+        f"        SELECT {input_alias}.*, {target_select}, {key_select}\n"
+        f"        FROM (SELECT *, row_number() OVER () AS {row} FROM {input_relation}) {input_alias}\n"
+        f"        LEFT JOIN {target_relation} {target_alias}\n"
+        f"        ON {condition}\n"
+        "    )\n"
+        f"    ORDER BY {row}, {key_order}\n"
+        ")"
     )
 
 

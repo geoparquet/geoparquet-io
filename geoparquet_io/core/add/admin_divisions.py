@@ -19,6 +19,7 @@ from geoparquet_io.core.duckdb_utils import (
     SPATIAL_JOIN_BBOX_PREFILTER,
     SPATIAL_JOIN_NATIVE,
     build_spatial_join_condition,
+    build_spatial_join_query,
     fetch_one,
     print_spatial_join_dry_run,
     quote_identifier,
@@ -156,19 +157,18 @@ def _build_spatial_join_query(
     input_geom_col,
     admin_geom_col,
     *,
+    boundary_columns,
     is_table_ref=False,
     source_crs=None,
 ):
     """Build the per-level admin spatial join query.
 
-    A plain streaming ``LEFT JOIN`` (the original design): for each input feature
-    it attaches the admin columns of the polygon(s) it intersects. This is the
-    only memory-scalable shape — a DuckDB ``LEFT JOIN`` spills to disk, whereas
-    the ``QUALIFY ROW_NUMBER()`` window that previously de-duplicated overlapping
-    matches buffers every row and OOMs on large inputs (the window operator does
-    not spill). Per-level caches are non-overlapping, so a feature normally
-    matches exactly one polygon per level; a feature straddling overlapping
-    polygons (rare border slivers) is emitted once per match.
+    A ``LEFT JOIN`` that attaches to each input feature the admin columns of the
+    polygon it intersects. A feature that intersects two admin polygons (a
+    border-straddling feature, or a sliver where independently simplified
+    polygons overlap) is kept once, assigned to the polygon whose
+    ``boundary_columns`` sort first -- the owner's spill-safe one-match dedup,
+    see :func:`build_spatial_join_query` (#543).
 
     All identifiers are quoted via the shared :func:`build_spatial_join_condition`
     helper / :func:`quote_identifier`, so column names sourced from untrusted file
@@ -187,23 +187,23 @@ def _build_spatial_join_query(
     if source_crs and not _admin_reprojected(source_crs, admin_bbox_col):
         input_geom_sql = transform_geom_sql(f"a.{quote_identifier(input_geom_col)}", source_crs)
 
-    # Shared, fully-quoted ON clause (bbox pre-filter + ST_Intersects).
-    join_clause = "ON " + build_spatial_join_condition(
-        input_geom_col,
-        admin_geom_col,
-        input_bbox_col,
-        admin_bbox_col,
-        input_geom_sql=input_geom_sql,
+    return build_spatial_join_query(
+        input_relation=input_ref,
+        target_relation=admin_subquery,
+        target_select=admin_select_clause,
+        condition=build_spatial_join_condition(
+            input_geom_col,
+            admin_geom_col,
+            input_bbox_col,
+            admin_bbox_col,
+            input_geom_sql=input_geom_sql,
+        ),
+        one_match_per_input=True,
+        match_order=[
+            f"b._col_{i}" if "[" in col or "(" in col else f"b.{quote_identifier(col)}"
+            for i, col in enumerate(boundary_columns)
+        ],
     )
-
-    return f"""
-    SELECT
-        a.*,
-        {admin_select_clause}
-    FROM {input_ref} a
-    LEFT JOIN {admin_subquery} b
-    {join_clause}
-"""
 
 
 def _add_extent_filter(
@@ -621,6 +621,7 @@ def _build_query_components(
         admin_bbox_col,
         input_geom_col,
         admin_geom_col,
+        boundary_columns=partition_columns,
         is_table_ref=is_table_ref,
         source_crs=source_crs,
     )

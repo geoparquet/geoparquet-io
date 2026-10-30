@@ -60,6 +60,7 @@ def test_admin_divisions_handles_input_with_region_column():
             admin_bbox_col=None,
             input_geom_col="geometry",
             admin_geom_col="geometry",
+            boundary_columns=["region"],
             is_table_ref=True,
         )
         con.execute(f"CREATE OR REPLACE TEMP TABLE _res AS {query}")

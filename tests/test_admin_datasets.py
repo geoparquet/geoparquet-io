@@ -1688,9 +1688,10 @@ class TestPerLevelJoinRowCountGuardEndToEnd:
         # guard itself must stay silent.
         assert [m for m in messages if "Admin join" in m] == []
 
-    def test_overlapping_admin_polygons_duplicate_rows_and_warn(self, tmp_path, monkeypatch):
-        """Two overlapping country polygons make one input point match twice —
-        exactly the join-multiplication bug the guard exists to name.
+    def test_overlapping_admin_polygons_keep_each_feature_once(self, tmp_path, monkeypatch):
+        """Two overlapping country polygons both cover one input point. The join
+        keeps one match per feature (#543), the smaller code, so the row count
+        is preserved and the guard has nothing to name.
         """
         import duckdb
 
@@ -1726,13 +1727,9 @@ class TestPerLevelJoinRowCountGuardEndToEnd:
         )
 
         con = duckdb.connect()
-        # Duplicated: 1 input point matched 2 polygons, the other matched 1.
-        assert fetch_one(con.execute(f"SELECT COUNT(*) FROM '{out}'"))[0] == 3
-        guard_messages = [m for m in messages if "Admin join" in m]
-        assert len(guard_messages) == 1
-        assert "duplicated" in guard_messages[0]
-        assert "2 input features" in guard_messages[0]
-        assert "3 in the" in guard_messages[0]
+        rows = con.execute(f"SELECT overture_country FROM '{out}'").fetchall()
+        assert sorted(r[0] for r in rows) == ["AA", "CC"]
+        assert [m for m in messages if "Admin join" in m] == []
 
 
 class TestOvertureLevelPredicates:

@@ -8,6 +8,8 @@ import gc
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet
 from geoparquet_io.core.duckdb_utils import (
+    build_spatial_join_condition,
+    build_spatial_join_query,
     describe_query,
     quote_identifier,
     s3_config_scope,
@@ -88,9 +90,12 @@ def _build_joined_sql(
     The admin geometry is stored as WKB (ST_AsWKB) so that _wrap_admin_geometry
     can treat __admin_geom uniformly as WKB binary.
 
-    When admin_bbox_col is provided, a cheap bbox prefilter is added to the ON
-    clause so ST_Intersects is only evaluated for admin polygons whose bounding
-    box contains the feature point.
+    When admin_bbox_col is provided, a cheap point-in-bbox prefilter is added
+    to the ON clause so ST_Intersects is only evaluated for admin polygons whose
+    bounding box contains the feature point. The owner quotes every identifier
+    in it (#942 class), and keeps one admin region per input feature -- the
+    smallest admin code where polygons overlap -- so no feature is counted in
+    two regions (#543, see :func:`build_spatial_join_query`).
 
     ``where`` is applied to the inner input scan, so the spatial join, metrics,
     and breakdowns all see only the filtered rows (#568). The caller validates
@@ -102,28 +107,31 @@ def _build_joined_sql(
     relation so a geometry-less bbox-only input never trips a binder error on a
     column it does not have.
     """
-    if admin_bbox_col:
-        bbox_filter = (
-            f"b.{admin_bbox_col}.xmin <= ST_X(s.__cen) AND "
-            f"b.{admin_bbox_col}.xmax >= ST_X(s.__cen) AND "
-            f"b.{admin_bbox_col}.ymin <= ST_Y(s.__cen) AND "
-            f"b.{admin_bbox_col}.ymax >= ST_Y(s.__cen) AND "
-        )
-    else:
-        bbox_filter = ""
-    return f"""
-        SELECT s.*,
-               b.{quote_identifier(code_col)} AS __admin_code,
-               b.{quote_identifier(name_col)} AS __admin_name,
-               ST_AsWKB(b.{quote_identifier(admin_geom_col)}) AS __admin_geom
-        FROM (
+    q_code = quote_identifier(code_col)
+    q_geom = quote_identifier(admin_geom_col)
+    return build_spatial_join_query(
+        input_relation=f"""(
             SELECT {select_list}{input_pt_expr} AS __cen
             FROM {aggregate_source_relation(input_url)}
             {where_sql_fragment(where)}
-        ) s
-        LEFT JOIN {admin_ref} b
-          ON {bbox_filter}ST_Intersects(b.{quote_identifier(admin_geom_col)}, s.__cen)
-    """
+        )""",
+        target_relation=admin_ref,
+        target_select=(
+            f"b.{q_code} AS __admin_code, "
+            f"b.{quote_identifier(name_col)} AS __admin_name, "
+            f"ST_AsWKB(b.{q_geom}) AS __admin_geom"
+        ),
+        condition=build_spatial_join_condition(
+            "__cen",
+            admin_geom_col,
+            target_bbox_col=admin_bbox_col,
+            input_alias="s",
+            input_is_point=True,
+        ),
+        one_match_per_input=True,
+        match_order=[f"b.{q_code}"],
+        input_alias="s",
+    )
 
 
 def _build_agg_sql(

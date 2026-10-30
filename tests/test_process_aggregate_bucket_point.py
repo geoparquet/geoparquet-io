@@ -240,7 +240,8 @@ def test_admin_joined_sql_uses_point_expr_and_select_list():
         "geometry",
         select_list='"height", "bbox", ',
     )
-    inner = sql.split("FROM (")[1].split(") s")[0]
+    # The input scan's projection: everything between its SELECT and the join point.
+    inner = sql.split("AS __cen")[0].rsplit("SELECT ", 1)[1]
     assert "ST_Point((bbox.xmin" in inner
     assert '"height", "bbox", ' in inner
     # The narrowed list is the whole projection: no passthrough star, so the

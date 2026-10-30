@@ -723,7 +723,7 @@ class TestEscapedValuesDoNotCrossFunctionBoundaries:
             "_enriched",
         )
 
-        assert f"FROM {sql_path(apostrophe_file)} a" in query
+        assert f"FROM {sql_path(apostrophe_file)})" in query
 
     def test_admin_hierarchical_enrichment_query_keeps_a_table_ref_bare(self, apostrophe_file):
         from geoparquet_io.core.partition.admin_hierarchical import _build_enrichment_query
@@ -742,7 +742,7 @@ class TestEscapedValuesDoNotCrossFunctionBoundaries:
             input_is_table_ref=True,
         )
 
-        assert "FROM _admin_step_0 a" in query
+        assert "FROM _admin_step_0)" in query
 
 
 class TestBboxMetadataFallbackPath:
