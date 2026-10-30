@@ -1285,7 +1285,7 @@ def _crs_from_read_type(input_file, con):
     """
     # Aliased: the G1 geo_parse arm reads a ``geo`` token in the owner's name as
     # the footer ``geo`` key, and this json.loads parses a CRS, not that key.
-    from geoparquet_io.core.duckdb_metadata import parse_duckdb_geo_type as parse_type
+    from geoparquet_io.core.duckdb_utils import parse_duckdb_geo_type as parse_type
 
     try:
         described = describe_query(

@@ -13,7 +13,9 @@ from dataclasses import dataclass
 from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
     describe_query,
+    duckdb_type_is_geometry,
     fetch_one,
+    parse_duckdb_geo_type,
     quote_identifier,
     register_arrow,
     sql_path,
@@ -204,8 +206,6 @@ def native_geometry_types_from_query(con, query: str, verbose: bool = False) -> 
     Best-effort: a ``DESCRIBE`` that fails answers ``{}`` rather than failing the
     write.
     """
-    # Deferred: duckdb_metadata -> crs_utils -> this module at import time.
-    from geoparquet_io.core.duckdb_metadata import parse_duckdb_geo_type
 
     try:
         described = describe_query(con, query)
@@ -240,7 +240,6 @@ def _detect_geometry_from_query(
     Returns:
         The name of the detected geometry column, or None if not found.
     """
-    from geoparquet_io.core.duckdb_metadata import duckdb_type_is_geometry
 
     try:
         describe_result = describe_query(con, query)
@@ -311,7 +310,6 @@ def _geoarrow_struct_depth(duckdb_type: str) -> int | None:
 def _read_kind(duckdb_type: str | None) -> str:
     if duckdb_type is None:
         return "missing"
-    from geoparquet_io.core.duckdb_metadata import parse_duckdb_geo_type
 
     text = duckdb_type.strip()
     if parse_duckdb_geo_type(text) is not None:

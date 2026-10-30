@@ -19,10 +19,10 @@ from geoparquet_io.core.column_selection import (
     split_column_list,
 )
 from geoparquet_io.core.compression import resolve_codec
-from geoparquet_io.core.duckdb_metadata import duckdb_type_is_geometry
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     describe_query,
+    duckdb_type_is_geometry,
     fetch_one,
     get_duckdb_connection,
     quote_identifier,

@@ -959,48 +959,6 @@ def native_geo_type(logical_type: object) -> str | None:
     return None
 
 
-#: A DuckDB type name (``DESCRIBE`` / ``TYPEOF`` / a relation's ``.types``) that is
-#: a top-level GEOMETRY or GEOGRAPHY: bare, or ``GEOMETRY('EPSG:3857')`` once it
-#: carries a CRS. Anchored at both ends so a STRUCT or LIST type that merely
-#: mentions GEOMETRY is not matched. The CRS is a SQL string literal, so an
-#: embedded ``'`` arrives doubled (``O''Brien``).
-_DUCKDB_GEO_TYPE = re.compile(
-    r"^(GEOMETRY|GEOGRAPHY)(?:\(\s*'((?:[^']|'')*)'\s*\))?$", re.IGNORECASE | re.DOTALL
-)
-
-
-def parse_duckdb_geo_type(type_name: object) -> tuple[str, str | None] | None:
-    """``("GEOMETRY"|"GEOGRAPHY", crs or None)`` for a DuckDB type name, else None.
-
-    The DuckDB-type twin of :func:`native_geo_type` (which reads *Parquet*
-    logical types): the one answer to "is this DESCRIBE/TYPEOF type a geometry,
-    and with which CRS?" (#1367 concept 10).
-    """
-    match = _DUCKDB_GEO_TYPE.match(str(type_name or "").strip())
-    if match is None:
-        return None
-    crs = match.group(2).replace("''", "'") if match.group(2) else None
-    return match.group(1).upper(), crs
-
-
-def duckdb_type_is_geometry(type_name: object) -> bool:
-    """Whether a DuckDB type name is GEOMETRY, with or without a CRS (not GEOGRAPHY)."""
-    parsed = parse_duckdb_geo_type(type_name)
-    return parsed is not None and parsed[0] == "GEOMETRY"
-
-
-def duckdb_type_contains_geometry(type_name: object) -> bool:
-    """Whether a DuckDB type name mentions GEOMETRY at any depth (``STRUCT(g GEOMETRY)``, ``GEOMETRY[]``).
-
-    The nested question beside :func:`duckdb_type_is_geometry`: the GeoJSON
-    writers render a nested geometry property differently, so the native writer
-    declines any property type that holds one. A plain case-insensitive substring
-    test, as the native-writer gate has always used (a struct field merely named
-    ``geometry_x`` also counts, which only sends the write to the hand-built writer).
-    """
-    return "GEOMETRY" in str(type_name or "").upper()
-
-
 def is_native_geo_column(schema_info: list[dict] | None, column: str) -> str | None:
     """:func:`native_geo_type` of ``column`` in :func:`get_schema_info` rows; None if absent."""
     for col in schema_info or []:

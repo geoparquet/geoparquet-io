@@ -41,14 +41,12 @@ from geoparquet_io.core.crs_utils import (
     transform_source_label,
     warn_null_crs_once,
 )
-from geoparquet_io.core.duckdb_metadata import (
-    duckdb_type_contains_geometry,
-    duckdb_type_is_geometry,
-)
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     describe_query,
     duckdb_capabilities,
+    duckdb_type_contains_geometry,
+    duckdb_type_is_geometry,
     fetch_one,
     quote_identifier,
     register_arrow,

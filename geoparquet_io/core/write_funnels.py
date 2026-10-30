@@ -54,12 +54,12 @@ from geoparquet_io.core.duckdb_metadata import (
     get_kv_metadata,
     get_schema_info,
     native_geo_type,
-    parse_duckdb_geo_type,
     parse_geometry_logical_type,
 )
 from geoparquet_io.core.duckdb_utils import (
     _get_query_column_type,
     _get_query_columns,
+    parse_duckdb_geo_type,
     sql_path,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError

@@ -27,8 +27,12 @@ from geoparquet_io.core.crs_utils import (
     is_default_crs,
     is_unknown_type_crs,
 )
-from geoparquet_io.core.duckdb_metadata import duckdb_type_is_geometry
-from geoparquet_io.core.duckdb_utils import _escape_sql_string, describe_query, quote_identifier
+from geoparquet_io.core.duckdb_utils import (
+    _escape_sql_string,
+    describe_query,
+    duckdb_type_is_geometry,
+    quote_identifier,
+)
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     NATIVE_GEOMETRY_VERSIONS,

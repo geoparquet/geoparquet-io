@@ -31,12 +31,12 @@ from geoparquet_io.core.arrow_geo_metadata import (
 from geoparquet_io.core.compression import ResolvedCodec, resolve_codec
 from geoparquet_io.core.crs_utils import _wrap_query_with_crs as _common_wrap_query_with_crs
 from geoparquet_io.core.crs_utils import is_default_crs, is_unknown_type_crs
-from geoparquet_io.core.duckdb_metadata import duckdb_type_is_geometry
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     _wrap_query_with_blob_conversion,
     build_kv_metadata_clause,
     describe_query,
+    duckdb_type_is_geometry,
     quote_identifier,
     register_arrow,
     sql_path,

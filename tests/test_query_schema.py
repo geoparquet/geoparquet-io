@@ -2,7 +2,8 @@
 
 ``duckdb_utils.query_schema`` (Arrow) and its DuckDB-type view
 ``duckdb_utils.describe_query`` are the only ways gpio asks what a query or
-relation outputs; ``duckdb_metadata.native_geo_type`` / ``is_native_geo_column``
+relation outputs; ``duckdb_utils.parse_duckdb_geo_type`` (and its two predicates) the only
+way it reads DuckDB's own GEOMETRY type name; ``duckdb_metadata.native_geo_type`` / ``is_native_geo_column``
 the only way it asks whether a column is natively GEOMETRY or GEOGRAPHY.
 """
 
@@ -17,19 +18,16 @@ import duckdb
 import pyarrow as pa
 import pytest
 
-from geoparquet_io.core.duckdb_metadata import (
-    duckdb_type_contains_geometry,
-    duckdb_type_is_geometry,
-    is_native_geo_column,
-    native_geo_type,
-    parse_duckdb_geo_type,
-)
+from geoparquet_io.core.duckdb_metadata import is_native_geo_column, native_geo_type
 from geoparquet_io.core.duckdb_utils import (
     _get_query_column_type,
     _get_query_columns,
     _output_types,
     describe_query,
     duckdb_capabilities,
+    duckdb_type_contains_geometry,
+    duckdb_type_is_geometry,
+    parse_duckdb_geo_type,
     query_schema,
 )
 
@@ -228,8 +226,8 @@ _FAMILIES = frozenset({"Geometry", "Geography"})
 NATIVE_BASELINE: dict[str, int] = {}
 
 #: Tests of a DuckDB type name (DESCRIBE / TYPEOF output) for GEOMETRY outside
-#: ``duckdb_metadata.py``: ``"GEOMETRY" in t``, ``t.startswith("GEOMETRY")``,
-#: ``t.upper() == "GEOMETRY"``. Comparing an owner's answer
+#: ``duckdb_utils.py`` / ``duckdb_metadata.py``: ``"GEOMETRY" in t``, ``t.startswith("GEOMETRY")``,
+#: ``t.upper() == "GEOMETRY"`` (owner: ``duckdb_utils.parse_duckdb_geo_type``). Comparing an owner's answer
 #: (``parse_duckdb_geo_type(t)[0] == "GEOMETRY"``, ``native_geo_type(lt) == ...``)
 #: is not one. May only go down.
 DUCKDB_GEO_TYPE_BASELINE = {
@@ -376,10 +374,31 @@ def _duckdb_geo_type_checks(tree: ast.AST) -> int:
     return found
 
 
+#: The DuckDB type-name owner's own functions, the only code that may spell the test.
+GEO_TYPE_OWNER_FUNCTIONS = frozenset(
+    {"parse_duckdb_geo_type", "duckdb_type_is_geometry", "duckdb_type_contains_geometry"}
+)
+
+
+def _without_functions(tree: ast.AST, names: frozenset[str]) -> ast.AST:
+    """*tree* with the named top-level functions dropped."""
+    kept = [
+        n
+        for n in getattr(tree, "body", [])
+        if not (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names)
+    ]
+    return ast.Module(body=kept, type_ignores=[])
+
+
 def _duckdb_geo_type_counts(root: Path = PACKAGE) -> Counter:
+    owner = PROBE_OWNER.split("/", 1)[1]
     return +Counter(
         {
-            rel: _duckdb_geo_type_checks(tree)
+            rel: _duckdb_geo_type_checks(
+                _without_functions(tree, GEO_TYPE_OWNER_FUNCTIONS)
+                if rel.split("/", 1)[1] == owner
+                else tree
+            )
             for rel, tree in _modules(root)
             if not rel.endswith("/duckdb_metadata.py")
         }
@@ -431,11 +450,15 @@ def test_guards_catch_new_copies(tmp_path):
         "def query_schema(con, sql):\n"
         '    return con.sql(f"SELECT * FROM ({sql}) LIMIT 0")\n\n'
         "def _wrap(con, q):\n"
-        '    return con.execute(f"DESCRIBE ({q})").fetchall()\n'
+        '    return con.execute(f"DESCRIBE ({q})").fetchall()\n\n'
+        "def duckdb_type_contains_geometry(t):\n"
+        '    return "GEOMETRY" in t\n\n'
+        "def _wkb(t):\n"
+        '    return t.startswith("GEOMETRY")\n'
     )
     assert dict(_probe_counts(pkg)) == {"pkg/rogue.py": 1, "pkg/core/duckdb_utils.py": 1}
     assert dict(_native_counts(pkg)) == {
         "pkg/rogue.py": 3,
         "pkg/rogue.py::_is_geography_column": 1,
     }
-    assert dict(_duckdb_geo_type_counts(pkg)) == {"pkg/rogue.py": 3}
+    assert dict(_duckdb_geo_type_counts(pkg)) == {"pkg/rogue.py": 3, "pkg/core/duckdb_utils.py": 1}

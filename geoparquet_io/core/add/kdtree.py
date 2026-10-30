@@ -9,9 +9,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.duckdb_metadata import duckdb_type_is_geometry
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
+    duckdb_type_is_geometry,
     fetch_one,
     get_duckdb_connection,
     planar_view,

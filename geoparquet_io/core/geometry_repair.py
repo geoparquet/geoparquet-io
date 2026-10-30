@@ -19,8 +19,12 @@ This module provides three injection styles:
   memory (WFS, ArcGIS, BigQuery, Carto).
 """
 
-from geoparquet_io.core.duckdb_metadata import duckdb_type_is_geometry
-from geoparquet_io.core.duckdb_utils import describe_query, fetch_one, quote_identifier
+from geoparquet_io.core.duckdb_utils import (
+    describe_query,
+    duckdb_type_is_geometry,
+    fetch_one,
+    quote_identifier,
+)
 from geoparquet_io.core.geo_metadata import GEOGRAPHY_EDGE_ALGORITHMS
 from geoparquet_io.core.logging_config import debug, warn
 

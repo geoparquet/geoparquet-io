@@ -331,11 +331,11 @@ def read_partition(
         >>> table = gpio.read_partition('partitioned_output/')
         >>> table = gpio.read_partition('data/quadkey=*/*.parquet')
     """
-    from geoparquet_io.core.duckdb_metadata import parse_duckdb_geo_type
     from geoparquet_io.core.duckdb_utils import (
         _wrap_query_with_wkb_conversion,
         describe_query,
         get_duckdb_connection,
+        parse_duckdb_geo_type,
         s3_config_scope,
     )
     from geoparquet_io.core.partition.reader import build_read_parquet_expr

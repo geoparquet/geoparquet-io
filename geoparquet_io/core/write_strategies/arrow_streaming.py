@@ -28,9 +28,9 @@ from geoparquet_io.core.arrow_geo_metadata import (
 )
 from geoparquet_io.core.compression import ResolvedCodec, resolve_codec
 from geoparquet_io.core.crs_utils import apply_output_crs
-from geoparquet_io.core.duckdb_metadata import duckdb_type_is_geometry
 from geoparquet_io.core.duckdb_utils import (
     _wrap_query_with_wkb_conversion,
+    duckdb_type_is_geometry,
     fetch_one,
     quote_identifier,
 )

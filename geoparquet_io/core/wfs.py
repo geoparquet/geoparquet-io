@@ -48,11 +48,11 @@ __all__ = [
 
 from geoparquet_io.core.arrow_types import _cast_table_to_schema, _compute_unified_schema
 from geoparquet_io.core.crs_utils import _projjson_from_authority
-from geoparquet_io.core.duckdb_metadata import parse_duckdb_geo_type
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     fetch_one,
     get_duckdb_connection,
+    parse_duckdb_geo_type,
     quote_identifier,
     sql_path,
 )
