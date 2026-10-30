@@ -21,7 +21,11 @@ The `gpio publish stac` command generates [STAC (SpatioTemporal Asset Catalog)](
     from geoparquet_io.api.stac import generate_stac
 
     # Generate STAC Item
-    generate_stac("data.parquet", "output.json", bucket="s3://my-bucket/data/")
+    generate_stac(
+        "data.parquet",
+        "output.json",
+        bucket="s3://my-bucket/data/"
+    )
     ```
 
 ## Output Modes

@@ -31,7 +31,7 @@ def test_the_seam_hands_the_extractors_the_fake_client(monkeypatch):
     http.respond("/ping", json_reply({"ok": True}))
 
     assert http_retry.get_shared_http_client(timeout=7.0).get(f"{HOST}/ping").json() == {"ok": True}
-    assert wfs._get_shared_http_client_base(timeout=9.0).get(f"{HOST}/ping").json() == {"ok": True}
+    assert wfs.get_shared_http_client(timeout=9.0).get(f"{HOST}/ping").json() == {"ok": True}
     assert http.client_timeouts == [7.0, 9.0]
 
     http_retry.reset_http_client()

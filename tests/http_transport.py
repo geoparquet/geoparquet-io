@@ -3,7 +3,7 @@
 `gpio extract wfs` and `gpio extract arcgis` reach their servers through one
 seam: ``geoparquet_io.core.http_retry.get_shared_http_client``. ArcGIS calls it
 via ``make_request_with_retry``; WFS re-exports it as
-``geoparquet_io.core.wfs._get_shared_http_client_base``. Swap what that seam
+``geoparquet_io.core.wfs.get_shared_http_client``. Swap what that seam
 returns for an ``httpx.Client`` built on ``httpx.MockTransport`` and the whole
 of both modules — paging, retries, content-type dispatch, the file that gets
 written — runs with no network and no new dependency.
@@ -56,7 +56,7 @@ _TIME_PATCHED_MODULES = (
 # (module, getter attribute, reset attribute).
 _CLIENT_SEAMS = (
     ("geoparquet_io.core.http_retry", "get_shared_http_client", "reset_http_client"),
-    ("geoparquet_io.core.wfs", "_get_shared_http_client_base", None),
+    ("geoparquet_io.core.wfs", "get_shared_http_client", None),
 )
 
 

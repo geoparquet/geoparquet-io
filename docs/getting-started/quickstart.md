@@ -40,13 +40,13 @@ See [Installation Guide](installation.md) for more options.
     import geoparquet_io as gpio
 
     # Read a file
-    table = gpio.read("data.parquet")
+    table = gpio.read('data.parquet')
     table.num_rows
     # 1523847
 
     # Convert from other formats
-    table = gpio.convert("data.shp")
-    table.write("output.parquet")
+    table = gpio.convert('data.shp')
+    table.write('output.parquet')
     ```
 
 ## Transforming Data
@@ -70,7 +70,10 @@ See [Installation Guide](installation.md) for more options.
     import geoparquet_io as gpio
 
     # Chain operations fluently
-    gpio.read("input.parquet").add_bbox().sort_hilbert().write("output.parquet")
+    gpio.read('input.parquet') \
+        .add_bbox() \
+        .sort_hilbert() \
+        .write('output.parquet')
     ```
 
 ## Adding Spatial Indices
@@ -91,7 +94,11 @@ See [Installation Guide](installation.md) for more options.
 === "Python"
 
     ```python
-    gpio.read("input.parquet").add_bbox().add_h3(resolution=9).sort_hilbert().write("output.parquet")
+    gpio.read('input.parquet') \
+        .add_bbox() \
+        .add_h3(resolution=9) \
+        .sort_hilbert() \
+        .write('output.parquet')
     ```
 
 ## Partitioning
@@ -109,7 +116,9 @@ See [Installation Guide](installation.md) for more options.
 === "Python"
 
     ```python
-    gpio.read("input.parquet").add_h3(resolution=9).partition_by_h3("output/", resolution=6)
+    gpio.read('input.parquet') \
+        .add_h3(resolution=9) \
+        .partition_by_h3('output/', resolution=6)
     ```
 
 ## Performance: CLI vs Python

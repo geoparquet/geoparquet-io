@@ -29,15 +29,15 @@ The `sort` command reorders GeoParquet files for optimal performance and query e
 
     # row_group_rows is what the CLI defaults to; the Python API does not
     # apply it for you (see "Optimal row group size for spatial queries" below).
-    gpio.read("input.parquet").sort_hilbert().write("output.parquet", row_group_rows=49152)
+    gpio.read('input.parquet').sort_hilbert().write('output.parquet', row_group_rows=49152)
     ```
 
     <!-- doctest: skip="needs cloud credentials" -->
     ```python
     # With upload to S3
-    gpio.read("https://example.com/data.parquet").sort_hilbert().upload(
-        "s3://bucket/sorted.parquet", row_group_rows=49152, profile="prod"
-    )
+    gpio.read('https://example.com/data.parquet') \
+        .sort_hilbert() \
+        .upload('s3://bucket/sorted.parquet', row_group_rows=49152, profile='prod')
     ```
 
 Reorders rows using a [Hilbert space-filling curve](https://en.wikipedia.org/wiki/Hilbert_curve), which:
@@ -133,7 +133,9 @@ strips so that neighbouring strips stay close.
     ```python
     import geoparquet_io as gpio
 
-    gpio.read("input.parquet").sort_str(tile_size=49152).write("output.parquet", row_group_rows=49152)
+    gpio.read('input.parquet') \
+        .sort_str(tile_size=49152) \
+        .write('output.parquet', row_group_rows=49152)
     ```
 
 ### What `--row-group-size` does here
@@ -216,17 +218,17 @@ Sort by any column(s) for non-spatial ordering needs:
 
     # Sort by a single column (fluent API). row_group_rows matches the CLI
     # default; the Python API does not apply it for you.
-    gpio.read("input.parquet").sort_column("name").write("output.parquet", row_group_rows=49152)
+    gpio.read('input.parquet').sort_column('name').write('output.parquet', row_group_rows=49152)
 
     # Sort in descending order
-    gpio.read("input.parquet").sort_column("date", descending=True).write(
-        "output.parquet", row_group_rows=49152
-    )
+    gpio.read('input.parquet') \
+        .sort_column('date', descending=True) \
+        .write('output.parquet', row_group_rows=49152)
 
     # Multi-column sorting (requires ops API)
-    table = gpio.read("input.parquet")
-    sorted_arrow = ops.sort_column(table.to_arrow(), ["country", "city"])
-    gpio.Table(sorted_arrow).write("output.parquet", row_group_rows=49152)
+    table = gpio.read('input.parquet')
+    sorted_arrow = ops.sort_column(table.to_arrow(), ['country', 'city'])
+    gpio.Table(sorted_arrow).write('output.parquet', row_group_rows=49152)
     ```
 
 !!! note "Multi-column sorting"
@@ -261,7 +263,9 @@ files, or a quoted glob — and write one sorted file:
     ```python
     import geoparquet_io as gpio
 
-    gpio.read_partition("parts/").sort_column("name").write("sorted.parquet", row_group_rows=49152)
+    gpio.read_partition('parts/') \
+        .sort_column('name') \
+        .write('sorted.parquet', row_group_rows=49152)
     ```
 
 The output's `bbox` and `geometry_types` are recomputed over everything written,
@@ -311,9 +315,9 @@ takes:
     ```python
     import geoparquet_io as gpio
 
-    gpio.read_partition("parts/", allow_schema_diff=True).sort_column("name").write(
-        "sorted.parquet", row_group_rows=49152
-    )
+    gpio.read_partition('parts/', allow_schema_diff=True) \
+        .sort_column('name') \
+        .write('sorted.parquet', row_group_rows=49152)
     ```
 
 Files that disagree about the *same* column — a geometry column named

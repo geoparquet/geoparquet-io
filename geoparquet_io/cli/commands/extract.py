@@ -33,8 +33,10 @@ from geoparquet_io.cli.decorators import (
     verbose_option,
     write_strategy_option,
 )
+from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT
 from geoparquet_io.core.extract import extract as extract_impl
 from geoparquet_io.core.file_utils import validate_parquet_extension
+from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
 from geoparquet_io.core.logging_config import configure_verbose
 from geoparquet_io.core.wfs import DEFAULT_WFS_PAGE_SIZE
 
@@ -338,7 +340,7 @@ def extract_geoparquet(
 @click.option(
     "--timeout",
     type=click.FloatRange(min=0, min_open=True),
-    default=60.0,
+    default=DEFAULT_TIMEOUT,
     show_default=True,
     help="Per-request HTTP timeout in seconds. Increase for layers with very large or complex geometries that the server is slow to serialize.",
 )
@@ -1211,8 +1213,8 @@ def extract_wfs_cmd(
 @click.option(
     "--timeout",
     type=click.IntRange(1, 3600),
-    default=120,
-    help="Request timeout in seconds (default: 120)",
+    default=CARTO_REQUEST_TIMEOUT,
+    help=f"Request timeout in seconds (default: {CARTO_REQUEST_TIMEOUT})",
 )
 @click.option(
     "--skip-hilbert",

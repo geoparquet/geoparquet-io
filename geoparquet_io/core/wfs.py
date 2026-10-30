@@ -60,10 +60,8 @@ from geoparquet_io.core.http_retry import (
     DEFAULT_RETRY_DELAY,
     DEFAULT_TIMEOUT,
     RetryExhaustedError,
+    get_shared_http_client,
     run_with_retry,
-)
-from geoparquet_io.core.http_retry import (
-    get_shared_http_client as _get_shared_http_client_base,
 )
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -181,11 +179,6 @@ _PAGE_TIMEOUT = 600.0
 _PROBE_TIMEOUT = 30.0
 
 
-def _get_shared_http_client(timeout: float):
-    """Get shared HTTP client from http_retry module."""
-    return _get_shared_http_client_base(timeout=timeout)
-
-
 def _make_request(
     url: str,
     params: dict | None = None,
@@ -229,7 +222,7 @@ def _make_request(
     def attempt() -> bytes:
         debug(f"HTTP GET: {request_desc[:100]}{'...' if len(request_desc) > 100 else ''}")
         start_time = time.time()
-        client = _get_shared_http_client(timeout=timeout)
+        client = get_shared_http_client(timeout=timeout)
         # The timeout rides on the request, not just the client: the shared
         # client keeps the timeout of whichever caller built it first, so a
         # client-level timeout alone would cap every later caller (#1184).
@@ -2269,7 +2262,7 @@ def _download_wfs_page(url: str, accept: str, tmp_dir: tempfile.TemporaryDirecto
     for answers that retrying cannot change.
     """
     total_bytes = 0
-    client = _get_shared_http_client(timeout=_PAGE_TIMEOUT)
+    client = get_shared_http_client(timeout=_PAGE_TIMEOUT)
 
     # Per-request timeout: the shared client was usually built by the
     # 60s feature-count probe, and keeps that timeout (#1184).
@@ -2721,7 +2714,7 @@ def _probe_startindex_limit(
     )
 
     try:
-        client = _get_shared_http_client(timeout=_PROBE_TIMEOUT)
+        client = get_shared_http_client(timeout=_PROBE_TIMEOUT)
         # Per-request timeout, so this probe neither inherits nor pins the
         # shared client's timeout (#1184).
         response = client.get(

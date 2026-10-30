@@ -49,10 +49,10 @@ The `convert` command transforms between GeoParquet and other vector formats wit
     import geoparquet_io as gpio
 
     # Convert with Hilbert sorting (recommended)
-    gpio.convert("input.shp").sort_hilbert().write("output.parquet")
+    gpio.convert('input.shp').sort_hilbert().write('output.parquet')
 
     # Or without sorting (faster but less optimal for spatial queries)
-    gpio.convert("input.shp").write("output.parquet")
+    gpio.convert('input.shp').write('output.parquet')
     ```
 
 ## Supported Formats
@@ -134,17 +134,17 @@ Convert GeoParquet to other formats with automatic format detection:
     import geoparquet_io as gpio
 
     # Load and convert
-    table = gpio.read("data.parquet")
+    table = gpio.read('data.parquet')
 
     # Auto-detects from extension
-    table.write("output.gpkg")  # → GeoPackage
-    table.write("output.fgb")  # → FlatGeobuf
-    table.write("output.csv")  # → CSV with WKT
-    table.write("output.shp")  # → Shapefile
-    table.write("output.geojson")  # → GeoJSON
+    table.write('output.gpkg')      # → GeoPackage
+    table.write('output.fgb')       # → FlatGeobuf
+    table.write('output.csv')       # → CSV with WKT
+    table.write('output.shp')       # → Shapefile
+    table.write('output.geojson')   # → GeoJSON
 
     # Or use explicit format
-    table.write("output.dat", format="csv")
+    table.write('output.dat', format='csv')
     ```
 
 ### Format-Specific Options
@@ -236,16 +236,16 @@ the input's bbox covering column when it has one.
     ```python
     import geoparquet_io as gpio
 
-    table = gpio.read("data.parquet")
+    table = gpio.read('data.parquet')
 
     # Only the features in a bounding box
-    table.write("box.gpkg", bbox=(-0.5, 10.0, 0.5, 11.0))
+    table.write('box.gpkg', bbox=(-0.5, 10.0, 0.5, 11.0))
 
     # Features intersecting a geometry (GeoJSON or WKT text, or @file)
-    table.write("clipped.fgb", geometry="POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))")
+    table.write('clipped.fgb', geometry='POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))')
 
     # Attribute filter, DuckDB WHERE syntax
-    table.write("named.csv", where="name IS NOT NULL")
+    table.write('named.csv', where="name IS NOT NULL")
     ```
 
 **GeoJSON:**
@@ -292,14 +292,14 @@ All formats support cloud destinations via upload:
     import geoparquet_io as gpio
 
     # Write locally first
-    table = gpio.read("data.parquet")
-    table.write("local.gpkg")
+    table = gpio.read('data.parquet')
+    table.write('local.gpkg')
     ```
 
     <!-- doctest: skip="needs cloud credentials" -->
     ```python
     # Upload to cloud
-    gpio.upload("local.gpkg", "s3://bucket/output.gpkg")
+    gpio.upload('local.gpkg', 's3://bucket/output.gpkg')
     ```
 
 ## Multi-Layer Formats
@@ -329,11 +329,11 @@ GeoPackage and FileGDB files can contain multiple layers. By default, the first 
     <!-- doctest: skip="needs a multi-layer GeoPackage; gpio convert geopackage writes one layer" -->
     ```python
     # Read specific layer
-    gpio.convert("multilayer.gpkg", layer="buildings").write("buildings.parquet")
-    gpio.convert("multilayer.gpkg", layer="roads").write("roads.parquet")
+    gpio.convert('multilayer.gpkg', layer='buildings').write('buildings.parquet')
+    gpio.convert('multilayer.gpkg', layer='roads').write('roads.parquet')
 
     # Read first layer (default)
-    gpio.convert("multilayer.gpkg").write("output.parquet")
+    gpio.convert('multilayer.gpkg').write('output.parquet')
     ```
 
 !!! warning "Invalid Layer Names"
@@ -372,10 +372,10 @@ GeoParquet files can have multiple geometry columns (e.g., `geometry` for point 
     import geoparquet_io as gpio
 
     # Both geometry columns preserved automatically
-    gpio.convert("input_multi_geom.parquet").write("output.parquet")
+    gpio.convert('input_multi_geom.parquet').write('output.parquet')
 
     # With Hilbert sorting (uses primary geometry column)
-    gpio.convert("input_multi_geom.parquet").sort_hilbert().write("output.parquet")
+    gpio.convert('input_multi_geom.parquet').sort_hilbert().write('output.parquet')
     ```
 
 !!! note "Bbox and Hilbert Ordering"
@@ -468,12 +468,13 @@ detected. The returned `Table` carries the name actually used, so read it off
     import geoparquet_io as gpio
 
     # Honoured: the geometry is built from lat/lon, so it can take the name
-    table = gpio.convert("pts.csv", lat_column="lat", lon_column="lon", geometry_column="geom")
-    table.geometry_column  # 'geom'
+    table = gpio.convert('pts.csv', lat_column='lat', lon_column='lon',
+                         geometry_column='geom')
+    table.geometry_column   # 'geom'
 
     # Not honored: a GeoPackage's geometry is read, and reports back 'geometry'
-    table = gpio.convert("data.gpkg", geometry_column="geom")
-    table.geometry_column  # 'geometry'
+    table = gpio.convert('data.gpkg', geometry_column='geom')
+    table.geometry_column   # 'geometry'
     ```
 
 ### Edges Metadata Preservation
@@ -507,7 +508,7 @@ declaration unchanged. `gpio check spec` warns about files that carry
     import geoparquet_io as gpio
 
     # edges metadata is preserved through the pipeline
-    gpio.read("geography.parquet").sort_hilbert().write("output.parquet")
+    gpio.read('geography.parquet').sort_hilbert().write('output.parquet')
     ```
 
 The same holds for a native Parquet GEOGRAPHY column with no `geo` key, and
@@ -917,10 +918,12 @@ writes it as 2.0. A `geo` block that declares a version still wins over both.
     import geoparquet_io as gpio
 
     # Auto mode: a 2.0 or native-geo input stays/becomes 2.0
-    gpio.read("input_v2.parquet").write("output.parquet")
+    gpio.read('input_v2.parquet').write('output.parquet')
 
     # Explicit version always wins
-    gpio.read("input_v2.parquet").write("output.parquet", geoparquet_version="1.1")
+    gpio.read('input_v2.parquet').write(
+        'output.parquet', geoparquet_version='1.1'
+    )
     ```
 
 **Explicit versions:**
@@ -950,10 +953,14 @@ writes it as 2.0. A `geo` block that declares a version still wins over both.
     # Converts geometry from any input (GeoJSON, Shapefile, GeoPackage, CSV, WKB GeoParquet)
     # to native GeoArrow types. No bbox column is added.
     # Columns mixing incompatible geometry types fall back to WKB.
-    gpio.convert("input.geojson").write("output.parquet", geoparquet_version="1.1-geoarrow")
+    gpio.convert('input.geojson').write(
+        'output.parquet', geoparquet_version='1.1-geoarrow'
+    )
 
     # GeoParquet 1.0 with WKB encoding
-    gpio.convert("input.shp").write("output.parquet", geoparquet_version="1.0")
+    gpio.convert('input.shp').write(
+        'output.parquet', geoparquet_version='1.0'
+    )
     ```
 
 Available versions:
@@ -1006,7 +1013,7 @@ Shows:
     ```python
     import geoparquet_io as gpio
 
-    gpio.convert("buildings.shp").sort_hilbert().write("buildings.parquet")
+    gpio.convert('buildings.shp').sort_hilbert().write('buildings.parquet')
     ```
 
 ### Large Dataset Without Hilbert
@@ -1027,7 +1034,7 @@ Shows:
     <!-- doctest: setup="gpio convert geopackage input.parquet large_dataset.gpkg", prelude="import geoparquet_io as gpio" -->
     ```python
     # Python doesn't sort by default, so just skip sort_hilbert()
-    gpio.convert("large_dataset.gpkg").write("output.parquet")
+    gpio.convert('large_dataset.gpkg').write('output.parquet')
     ```
 
 Skips Hilbert ordering for faster processing on large files.
@@ -1097,7 +1104,9 @@ fail with "No geometry column detected".
     ```python
     gpio.convert("data.csv", wkt_column="geom_wkt").write("out.parquet")
     gpio.convert("data.csv", lat_column="lat", lon_column="lng").write("out.parquet")
-    gpio.convert("observations.parquet", lat_column="LAT", lon_column="LON").write("out.parquet")
+    gpio.convert(
+        "observations.parquet", lat_column="LAT", lon_column="LON"
+    ).write("out.parquet")
     ```
 
 The lat/lon columns are replaced by a single `geometry` column; every other
@@ -1199,7 +1208,7 @@ without a collision are unaffected.
     import geoparquet_io as gpio
 
     # columns land as 'id' and 'Id_1'
-    gpio.convert("counties.geojson").write("counties.parquet")
+    gpio.convert('counties.geojson').write('counties.parquet')
     ```
 
 ## Performance

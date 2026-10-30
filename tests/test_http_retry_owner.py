@@ -4,7 +4,10 @@ Outside the owner nothing may:
 
 * loop over an ``httpx``/``requests`` call (or a DuckDB remote read) with a sleep;
 * define ``DEFAULT_MAX_RETRIES`` / ``DEFAULT_RETRY_DELAY`` / ``DEFAULT_TIMEOUT``;
-* give ``max_retries`` / ``retry_delay`` a numeric default in a signature;
+* give ``max_retries`` / ``retry_delay`` a numeric default in a signature, or pass
+  a numeric literal for either as a call keyword (a caller that needs another
+  value passes a named constant from ``http_retry`` or its own module, with a
+  comment saying why);
 * write a status-code set containing 429 or a 5xx;
 * parse ``Retry-After``;
 * wrap the owner in a function that just passes its arguments through.
@@ -23,7 +26,7 @@ _NETWORK_CALLS = {"get", "post", "stream", "request", "send"}
 _NETWORK_ROOTS = {"httpx", "requests", "client", "conn", "con"}
 _POLICY_NAMES = {"DEFAULT_MAX_RETRIES", "DEFAULT_RETRY_DELAY", "DEFAULT_TIMEOUT"}
 _POLICY_ARGS = {"max_retries", "retry_delay"}
-_OWNER_CALLS = {"make_request_with_retry", "run_with_retry"}
+_OWNER_CALLS = {"make_request_with_retry", "run_with_retry", "get_shared_http_client"}
 
 
 def _is_sleep(node: ast.AST) -> bool:
@@ -102,6 +105,15 @@ def _policy_in(source: str, label: str) -> list[str]:
                 isinstance(e, ast.Constant) and _is_retry_status(e.value) for e in elts
             ):
                 found.append(f"{label}:{node.lineno} status-code set with 429/5xx")
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if (
+                    kw.arg in _POLICY_ARGS
+                    and isinstance(kw.value, ast.Constant)
+                    and isinstance(kw.value.value, (int, float))
+                    and not isinstance(kw.value.value, bool)
+                ):
+                    found.append(f"{label}:{node.lineno} passes a literal {kw.arg}")
         if isinstance(node, ast.Constant) and node.value == "Retry-After":
             found.append(f"{label}:{node.lineno} parses Retry-After")
     return found
@@ -180,9 +192,16 @@ def test_the_guard_flags_injected_private_policy():
         "def f(max_retries: int = 3, retry_delay=1.0): ...\n"
         "def g(r):\n"
         "    return r.headers.get('Retry-After')\n"
+        "h(max_retries=5)\n"
     )
     found = _policy_in(fault, "fault.py")
-    assert len(found) == 5, found
+    assert len(found) == 6, found
+    assert any("passes a literal max_retries" in f for f in found)
+
+
+def test_the_guard_flags_an_injected_client_wrapper():
+    fault = "def _client(timeout):\n    return get_shared_http_client(timeout=timeout)\n"
+    assert _wrappers_in(fault, "fault.py") == ["fault.py:1 _client wraps the owner"]
 
 
 def test_the_guard_flags_an_injected_wrapper():

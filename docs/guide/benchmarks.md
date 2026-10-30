@@ -263,12 +263,12 @@ Add the `--profile` flag to enable cProfile integration:
 
     # Run benchmarks with profiling enabled
     result = run_benchmark_suite(
-        input_files=[Path("path/to/file.parquet")],
-        operations=["add-bbox", "extract", "inspect"],
+        input_files=[Path('path/to/file.parquet')],
+        operations=['add-bbox', 'extract', 'inspect'],
         iterations=3,
         profile=True,
-        profile_dir=Path("./profiles"),
-        verbose=True,
+        profile_dir=Path('./profiles'),
+        verbose=True
     )
 
     # Profile files are saved in ./profiles/
@@ -296,7 +296,7 @@ This generates `.prof` files in the specified directory (default: `./profiles/`)
     from geoparquet_io.benchmarks.profile_report import format_profile_stats
 
     # Show top 20 slowest functions
-    summary = format_profile_stats("profiles/add-bbox_large_1.prof", top_n=20)
+    summary = format_profile_stats('profiles/add-bbox_large_1.prof', top_n=20)
     print(summary)
     ```
 

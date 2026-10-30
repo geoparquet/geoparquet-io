@@ -27,10 +27,13 @@ gpio check all optimized.parquet
 import geoparquet_io as gpio
 
 # Convert with all optimizations
-gpio.convert("buildings.shp").add_bbox().sort_hilbert().write("optimized.parquet")
+gpio.convert('buildings.shp') \
+    .add_bbox() \
+    .sort_hilbert() \
+    .write('optimized.parquet')
 
 # Verify
-table = gpio.read("optimized.parquet")
+table = gpio.read('optimized.parquet')
 table.info()
 ```
 
@@ -60,12 +63,14 @@ gpio add admin-divisions buildings.parquet | \
 import geoparquet_io as gpio
 
 # Partition by H3 cells
-gpio.read("buildings.parquet").add_h3(resolution=9).partition_by_h3("output/", resolution=6)
+gpio.read('buildings.parquet') \
+    .add_h3(resolution=9) \
+    .partition_by_h3('output/', resolution=6)
 
 # Partition by quadkey
-gpio.read("buildings.parquet").add_quadkey(resolution=12).partition_by_quadkey(
-    "output/", resolution=12, partition_resolution=4
-)
+gpio.read('buildings.parquet') \
+    .add_quadkey(resolution=12) \
+    .partition_by_quadkey('output/', resolution=12, partition_resolution=4)
 ```
 
 ---
@@ -92,9 +97,11 @@ gpio publish upload sf_buildings.parquet s3://my-bucket/data/sf_buildings.parque
 import geoparquet_io as gpio
 
 # Filter, optimize, and upload in one chain
-gpio.read("buildings.parquet").extract(
-    bbox=(-122.5, 37.5, -122.0, 38.0)
-).add_bbox().sort_hilbert().upload("s3://my-bucket/data/sf_buildings.parquet")
+gpio.read('buildings.parquet') \
+    .extract(bbox=(-122.5, 37.5, -122.0, 38.0)) \
+    .add_bbox() \
+    .sort_hilbert() \
+    .upload('s3://my-bucket/data/sf_buildings.parquet')
 ```
 
 ---
@@ -121,9 +128,12 @@ gpio inspect enriched.parquet
 ```python
 import geoparquet_io as gpio
 
-gpio.read("input.parquet").add_bbox().add_h3(resolution=9).add_quadkey(
-    resolution=12
-).sort_hilbert().write("enriched.parquet")
+gpio.read('input.parquet') \
+    .add_bbox() \
+    .add_h3(resolution=9) \
+    .add_quadkey(resolution=12) \
+    .sort_hilbert() \
+    .write('enriched.parquet')
 ```
 
 ---
@@ -150,7 +160,7 @@ gpio check all fixed.parquet
 ```python
 import geoparquet_io as gpio
 
-table = gpio.read("input.parquet")
+table = gpio.read('input.parquet')
 
 # Structure checks, spatial order and spec validation: what `gpio check all` runs
 results = [table.check(), table.check_spatial(), table.validate()]
@@ -158,7 +168,7 @@ for result in results:
     print(result.verdict(), result.failures(), result.warnings())
 
 # Manual fix using Python API
-table.add_bbox().sort_hilbert().write("fixed.parquet")
+table.add_bbox().sort_hilbert().write('fixed.parquet')
 ```
 
 ---
@@ -189,9 +199,10 @@ import geoparquet_io as gpio
 # Use the CLI for remote reads, or download first
 
 # For S3 uploads:
-gpio.read("local_data.parquet").add_bbox().sort_hilbert().upload(
-    "s3://my-bucket/data.parquet", profile="my-aws"
-)
+gpio.read('local_data.parquet') \
+    .add_bbox() \
+    .sort_hilbert() \
+    .upload('s3://my-bucket/data.parquet', profile='my-aws')
 ```
 
 ---
@@ -218,14 +229,14 @@ gpio.read_partition('partitioned_dir/') \
 import geoparquet_io as gpio
 
 # Read all partitions
-table = gpio.read_partition("partitioned_dir/")
+table = gpio.read_partition('partitioned_dir/')
 
 # Optionally re-sort
-table.sort_hilbert().write("merged.parquet")
+table.sort_hilbert().write('merged.parquet')
 
 # With schema differences allowed
-table = gpio.read_partition("partitioned_dir/", allow_schema_diff=True)
-table.write("merged.parquet")
+table = gpio.read_partition('partitioned_dir/', allow_schema_diff=True)
+table.write('merged.parquet')
 ```
 
 ---
@@ -252,12 +263,16 @@ gpio convert points.csv | \
 import geoparquet_io as gpio
 
 # Convert with lat/lon columns
-gpio.convert(
-    "points.csv", lat_column="latitude", lon_column="longitude"
-).add_bbox().sort_hilbert().write("output.parquet")
+gpio.convert('points.csv', lat_column='latitude', lon_column='longitude') \
+    .add_bbox() \
+    .sort_hilbert() \
+    .write('output.parquet')
 
 # Or with WKT geometry column
-gpio.convert("data.csv", wkt_column="geom").add_bbox().sort_hilbert().write("output.parquet")
+gpio.convert('data.csv', wkt_column='geom') \
+    .add_bbox() \
+    .sort_hilbert() \
+    .write('output.parquet')
 ```
 
 ---
@@ -279,8 +294,8 @@ optimize = pipe(
 )
 
 # Apply to multiple files
-for input_file in ["file1.parquet", "file2.parquet", "file3.parquet"]:
-    output_file = input_file.replace(".parquet", "_optimized.parquet")
+for input_file in ['file1.parquet', 'file2.parquet', 'file3.parquet']:
+    output_file = input_file.replace('.parquet', '_optimized.parquet')
     optimize(read(input_file)).write(output_file)
 ```
 

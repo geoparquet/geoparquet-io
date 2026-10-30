@@ -21,10 +21,10 @@ The `extract` command allows you to filter and subset GeoParquet files by column
     import geoparquet_io as gpio
 
     # Extract all data (useful for format conversion or compression change)
-    gpio.read("input.parquet").write("output.parquet")
+    gpio.read('input.parquet').write('output.parquet')
 
     # Extract with different compression
-    gpio.read("input.parquet").write("output.parquet", compression="GZIP")
+    gpio.read('input.parquet').write('output.parquet', compression='GZIP')
     ```
 
 ## Column Selection
@@ -51,12 +51,12 @@ Select only the columns you need. The geometry column and bbox column (if presen
     import geoparquet_io as gpio
 
     # Extract only the id and name columns (plus geometry and bbox)
-    gpio.read("places.parquet").extract(columns=["fsq_place_id", "name"]).write("subset.parquet")
+    gpio.read('places.parquet').extract(columns=['fsq_place_id', 'name']).write('subset.parquet')
 
     # Extract multiple attribute columns
-    gpio.read("places.parquet").extract(columns=["name", "address", "placemaker_url"]).write(
-        "attributes.parquet"
-    )
+    gpio.read('places.parquet').extract(
+        columns=['name', 'address', 'placemaker_url']
+    ).write('attributes.parquet')
     ```
 
 Unknown column names are rejected up front: `extract()` names the missing column
@@ -82,12 +82,12 @@ Remove unwanted columns from the output:
     import geoparquet_io as gpio
 
     # Exclude a large or unnecessary column
-    gpio.read("data.parquet").extract(exclude_columns=["placemaker_url"]).write("output.parquet")
+    gpio.read('data.parquet').extract(exclude_columns=['placemaker_url']).write('output.parquet')
 
     # Exclude multiple columns
-    gpio.read("data.parquet").extract(exclude_columns=["placemaker_url", "address"]).write(
-        "output2.parquet"
-    )
+    gpio.read('data.parquet').extract(
+        exclude_columns=['placemaker_url', 'address']
+    ).write('output2.parquet')
     ```
 
 ### Combining Include and Exclude
@@ -118,14 +118,16 @@ You can combine both to control exactly which columns appear, including removing
     # Include specific columns but exclude geometry (for non-spatial export).
     # Exclude bbox too: it is a covering of the geometry that was just dropped,
     # and is otherwise added back automatically.
-    gpio.read("data.parquet").extract(
-        columns=["fsq_place_id", "name", "address"], exclude_columns=["geometry", "bbox"]
-    ).write("output.parquet")
+    gpio.read('data.parquet').extract(
+        columns=['fsq_place_id', 'name', 'address'],
+        exclude_columns=['geometry', 'bbox']
+    ).write('output.parquet')
 
     # Include columns but exclude bbox to save space
-    gpio.read("data.parquet").extract(columns=["fsq_place_id", "name"], exclude_columns=["bbox"]).write(
-        "output2.parquet"
-    )
+    gpio.read('data.parquet').extract(
+        columns=['fsq_place_id', 'name'],
+        exclude_columns=['bbox']
+    ).write('output2.parquet')
     ```
 
 ## Spatial Filtering
@@ -160,12 +162,12 @@ Filter features by a rectangular bounding box. The bbox is specified as `xmin,ym
     import geoparquet_io as gpio
 
     # Extract features in San Francisco area (WGS84 coordinates)
-    gpio.read("places.parquet").extract(bbox=(-122.5, 37.7, -122.3, 37.8)).write("sf_places.parquet")
+    gpio.read('places.parquet').extract(bbox=(-122.5, 37.7, -122.3, 37.8)).write('sf_places.parquet')
 
     # Extract from remote FIBOA dataset (projected coordinates)
-    gpio.read("https://data.source.coop/fiboa/data/si/si-2024.parquet").extract(
+    gpio.read('https://data.source.coop/fiboa/data/si/si-2024.parquet').extract(
         bbox=(450000, 50000, 500000, 100000)
-    ).write("slovenia_subset.parquet")
+    ).write('slovenia_subset.parquet')
     ```
 
 !!! note "Remote file support"
@@ -250,11 +252,11 @@ Parquet's native geo types and their per-row-group `geo_bbox` statistics:
     import os
     import geoparquet_io as gpio
 
-    os.makedirs("staged", exist_ok=True)
-    gpio.read("data.parquet").write("staged/west.parquet")
+    os.makedirs('staged', exist_ok=True)
+    gpio.read('data.parquet').write('staged/west.parquet')
 
     # read() takes a directory (not a glob) and merges it
-    gpio.read("staged").write("merged.parquet", geoparquet_version="2.0")
+    gpio.read('staged').write('merged.parquet', geoparquet_version='2.0')
     ```
 
 !!! note "Use the CLI for a large merge"
@@ -371,20 +373,16 @@ Use SQL WHERE clauses to filter by attribute values. This uses DuckDB SQL syntax
     <!-- doctest: skip="filters on 'population', a column the sample data does not have" -->
     ```python
     # Filter by numeric value
-    gpio.read("data.parquet").extract(where="population > 10000").write("output.parquet")
+    gpio.read('data.parquet').extract(where="population > 10000").write('output.parquet')
 
     # Filter by string equality
-    gpio.read("data.parquet").extract(where="status = 'active'").write("output.parquet")
+    gpio.read('data.parquet').extract(where="status = 'active'").write('output.parquet')
 
     # Filter by multiple conditions
-    gpio.read("data.parquet").extract(where="population > 10000 AND area_km2 < 500").write(
-        "output.parquet"
-    )
+    gpio.read('data.parquet').extract(where="population > 10000 AND area_km2 < 500").write('output.parquet')
 
     # Filter with IN clause
-    gpio.read("data.parquet").extract(where="category IN ('restaurant', 'cafe', 'bar')").write(
-        "output.parquet"
-    )
+    gpio.read('data.parquet').extract(where="category IN ('restaurant', 'cafe', 'bar')").write('output.parquet')
     ```
 
 ### WHERE with Special Column Names
@@ -526,18 +524,18 @@ Combine column selection, spatial filtering, and WHERE clauses:
     import geoparquet_io as gpio
 
     # Extract specific columns in a bbox with attribute filter
-    gpio.read("places.parquet").extract(
-        columns=["name", "address", "rating"],
+    gpio.read('places.parquet').extract(
+        columns=['name', 'address', 'rating'],
         bbox=(-122.5, 37.7, -122.3, 37.8),
-        where="category = 'hotel' AND rating >= 4",
-    ).write("hotels.parquet")
+        where="category = 'hotel' AND rating >= 4"
+    ).write('hotels.parquet')
 
     # Extract from remote file with all filter types
-    gpio.read("https://data.source.coop/fiboa/data/si/si-2024.parquet").extract(
-        columns=["id", "area", "crop:name", "farm:organic"],
+    gpio.read('https://data.source.coop/fiboa/data/si/si-2024.parquet').extract(
+        columns=['id', 'area', 'crop:name', 'farm:organic'],
         bbox=(450000, 50000, 500000, 100000),
-        where="\"crop:name\" = 'wheat' AND area > 10000",
-    ).write("wheat_subset.parquet")
+        where='"crop:name" = \'wheat\' AND area > 10000'
+    ).write('wheat_subset.parquet')
     ```
 
 ## Limiting Results
@@ -567,12 +565,14 @@ Limit the number of rows extracted, useful for testing or sampling:
     import geoparquet_io as gpio
 
     # Extract first 1000 matching rows
-    gpio.read("data.parquet").extract(limit=1000).write("sample.parquet")
+    gpio.read('data.parquet').extract(limit=1000).write('sample.parquet')
 
     # Extract first 100 hotels in bbox
-    gpio.read("places.parquet").extract(
-        bbox=(-122.5, 37.7, -122.3, 37.8), where="category = 'hotel'", limit=100
-    ).write("hotels_sample.parquet")
+    gpio.read('places.parquet').extract(
+        bbox=(-122.5, 37.7, -122.3, 37.8),
+        where="category = 'hotel'",
+        limit=100
+    ).write('hotels_sample.parquet')
     ```
 
 ## Working with Remote Files
@@ -619,11 +619,11 @@ Extract data directly from BigQuery tables to GeoParquet. BigQuery `GEOGRAPHY` c
     import geoparquet_io as gpio
 
     # Read from BigQuery
-    table = gpio.Table.from_bigquery("myproject.geodata.buildings")
-    table.write("output.parquet")
+    table = gpio.Table.from_bigquery('myproject.geodata.buildings')
+    table.write('output.parquet')
 
     # With limit
-    table = gpio.Table.from_bigquery("myproject.geodata.buildings", limit=10000)
+    table = gpio.Table.from_bigquery('myproject.geodata.buildings', limit=10000)
     ```
 
 ### Filtering Data
@@ -657,10 +657,10 @@ Apply filters that are pushed down to BigQuery for efficient querying:
 
     # With filtering
     table = gpio.Table.from_bigquery(
-        "myproject.geodata.buildings",
+        'myproject.geodata.buildings',
         where="area_sqm > 1000",
-        columns=["id", "name", "geography", "area_sqm"],
-        limit=50000,
+        columns=['id', 'name', 'geography', 'area_sqm'],
+        limit=50000
     )
     ```
 
@@ -684,7 +684,10 @@ Filter data spatially using a bounding box:
     import geoparquet_io as gpio
 
     # Filter to San Francisco area
-    table = gpio.Table.from_bigquery("myproject.geodata.buildings", bbox="-122.52,37.70,-122.35,37.82")
+    table = gpio.Table.from_bigquery(
+        'myproject.geodata.buildings',
+        bbox="-122.52,37.70,-122.35,37.82"
+    )
     ```
 
 !!! note "Bbox format differences"
@@ -765,17 +768,23 @@ This heuristic balances the overhead of spatial function execution against data 
 
     # Force server-side filtering
     table = gpio.Table.from_bigquery(
-        "myproject.geodata.global_buildings", bbox="-122.52,37.70,-122.35,37.82", bbox_mode="server"
+        'myproject.geodata.global_buildings',
+        bbox="-122.52,37.70,-122.35,37.82",
+        bbox_mode="server"
     )
 
     # Force local filtering
     table = gpio.Table.from_bigquery(
-        "myproject.geodata.city_parks", bbox="-122.52,37.70,-122.35,37.82", bbox_mode="local"
+        'myproject.geodata.city_parks',
+        bbox="-122.52,37.70,-122.35,37.82",
+        bbox_mode="local"
     )
 
     # Custom threshold
     table = gpio.Table.from_bigquery(
-        "myproject.geodata.buildings", bbox="-122.52,37.70,-122.35,37.82", bbox_threshold=100000
+        'myproject.geodata.buildings',
+        bbox="-122.52,37.70,-122.35,37.82",
+        bbox_threshold=100000
     )
     ```
 
@@ -861,11 +870,11 @@ BigQuery query job and its result is what gets written.
                 AND acquired_at <  TIMESTAMP('2025-09-02')
             ) WHERE rn = 1
         """,
-        project="myproject",
-        geography_column="geometry",
-        geometry_format="geojson",
+        project='myproject',
+        geography_column='geometry',
+        geometry_format='geojson',
     )
-    table.write("output.parquet")
+    table.write('output.parquet')
     ```
 
 Four things to know.
@@ -965,9 +974,11 @@ If your geometry is stored as text in a VARCHAR column (WKT or GeoJSON format), 
 
     # Parse WKT geometry from VARCHAR column
     table = gpio.Table.from_bigquery(
-        "myproject.dataset.table", geography_column="geometry", geometry_format="wkt"
+        'myproject.dataset.table',
+        geography_column='geometry',
+        geometry_format='wkt'
     )
-    table.write("output.parquet")
+    table.write('output.parquet')
     ```
 
 #### No Geometry Column
@@ -1069,8 +1080,10 @@ Extract data directly from ArcGIS REST Feature Services to GeoParquet. Features 
     import geoparquet_io as gpio
 
     # Read from ArcGIS Feature Service
-    table = gpio.extract_arcgis(service_url="https://services.arcgis.com/.../FeatureServer/0")
-    table.write("output.parquet")
+    table = gpio.extract_arcgis(
+        service_url='https://services.arcgis.com/.../FeatureServer/0'
+    )
+    table.write('output.parquet')
     ```
 
 ### Server-Side Filtering
@@ -1109,20 +1122,22 @@ Filters are pushed to the ArcGIS server for efficient querying—only matching d
 
     # WHERE filter (server-side)
     table = gpio.extract_arcgis(
-        service_url="https://services.arcgis.com/.../FeatureServer/0", where="STATE_NAME = 'California'"
+        service_url="https://services.arcgis.com/.../FeatureServer/0",
+        where="STATE_NAME = 'California'"
     )
     table.write("output.parquet")
 
     # Bounding box filter (server-side)
     table = gpio.extract_arcgis(
-        service_url="https://services.arcgis.com/.../FeatureServer/0", bbox=(-122.5, 37.5, -122.0, 38.0)
+        service_url="https://services.arcgis.com/.../FeatureServer/0",
+        bbox=(-122.5, 37.5, -122.0, 38.0)
     )
     table.write("output.parquet")
 
     # Select specific columns (server-side)
     table = gpio.extract_arcgis(
         service_url="https://services.arcgis.com/.../FeatureServer/0",
-        include_cols="NAME,POPULATION,STATE_NAME",
+        include_cols="NAME,POPULATION,STATE_NAME"
     )
     table.write("output.parquet")
 
@@ -1132,7 +1147,7 @@ Filters are pushed to the ArcGIS server for efficient querying—only matching d
         bbox=(-122.5, 37.5, -122.0, 38.0),
         where="POPULATION > 100000",
         include_cols="NAME,POPULATION",
-        limit=500,
+        limit=500
     )
     table.write("output.parquet")
     ```
@@ -1173,13 +1188,15 @@ For protected services, provide credentials:
 
     # Using direct token
     table = gpio.extract_arcgis(
-        service_url="https://services.arcgis.com/.../FeatureServer/0", token="your_arcgis_token"
+        service_url="https://services.arcgis.com/.../FeatureServer/0",
+        token="your_arcgis_token"
     )
     table.write("output.parquet")
 
     # Using token file
     table = gpio.extract_arcgis(
-        service_url="https://services.arcgis.com/.../FeatureServer/0", token_file="/path/to/token.txt"
+        service_url="https://services.arcgis.com/.../FeatureServer/0",
+        token_file="/path/to/token.txt"
     )
     table.write("output.parquet")
 
@@ -1187,7 +1204,7 @@ For protected services, provide credentials:
     table = gpio.extract_arcgis(
         service_url="https://services.arcgis.com/.../FeatureServer/0",
         username="myuser",
-        password="mypassword",
+        password="mypassword"
     )
     table.write("output.parquet")
 
@@ -1196,7 +1213,7 @@ For protected services, provide credentials:
         service_url="https://enterprise.example.com/arcgis/rest/services/.../FeatureServer/0",
         username="myuser",
         password="mypassword",
-        portal_url="https://enterprise.example.com/portal",
+        portal_url="https://enterprise.example.com/portal"
     )
     table.write("output.parquet")
     ```
@@ -1231,17 +1248,23 @@ By default, ArcGIS extracts include bbox metadata and Hilbert spatial ordering f
 
     # Skip Hilbert ordering (faster extraction, less optimal queries)
     # Python API does not apply Hilbert sorting by default - just don't chain .sort_hilbert()
-    table = gpio.extract_arcgis(service_url="https://services.arcgis.com/.../FeatureServer/0")
+    table = gpio.extract_arcgis(
+        service_url="https://services.arcgis.com/.../FeatureServer/0"
+    )
     table.write("output.parquet")
 
     # Skip bbox column (smaller file, slower spatial filtering)
     # Python API does not add bbox by default - just don't chain .add_bbox()
-    table = gpio.extract_arcgis(service_url="https://services.arcgis.com/.../FeatureServer/0")
+    table = gpio.extract_arcgis(
+        service_url="https://services.arcgis.com/.../FeatureServer/0"
+    )
     table.write("output.parquet")
 
     # Custom compression (equivalent to --compression GZIP --compression-level 6)
     # Pass compression and compression_level to table.write()
-    table = gpio.extract_arcgis(service_url="https://services.arcgis.com/.../FeatureServer/0")
+    table = gpio.extract_arcgis(
+        service_url="https://services.arcgis.com/.../FeatureServer/0"
+    )
     table.write("output.parquet", compression="GZIP", compression_level=6)
     ```
 
@@ -1274,13 +1297,15 @@ By default, `gpio extract arcgis` fetches GeoJSON from the server and outputs WG
 
     # Preserve the layer's native CRS
     table = gpio.extract_arcgis(
-        service_url="https://services.arcgis.com/.../FeatureServer/0", output_crs="native"
+        service_url="https://services.arcgis.com/.../FeatureServer/0",
+        output_crs="native"
     )
     table.write("out.parquet")
 
     # Request a specific CRS
     table = gpio.extract_arcgis(
-        service_url="https://services.arcgis.com/.../FeatureServer/0", output_crs="EPSG:25830"
+        service_url="https://services.arcgis.com/.../FeatureServer/0",
+        output_crs="EPSG:25830"
     )
     table.write("out.parquet")
     ```
@@ -1440,9 +1465,10 @@ Web Feature Service (WFS) is an OGC standard for serving vector geospatial data 
     from geoparquet_io.api import Table
 
     # Extract and chain operations
-    Table.from_wfs("https://geo.example.com/wfs", "cities", limit=1000).add_bbox().sort_hilbert().write(
-        "cities.parquet"
-    )
+    Table.from_wfs('https://geo.example.com/wfs', 'cities', limit=1000) \
+        .add_bbox() \
+        .sort_hilbert() \
+        .write('cities.parquet')
     ```
 
 ### Bbox Filtering
@@ -1493,7 +1519,11 @@ If your box is lon/lat, try --bbox 231933,208131,232316,208468 (reprojected to E
     ```python
     from geoparquet_io.api import Table
 
-    table = Table.from_wfs("https://geo.example.com/wfs", "cities", bbox=(-122.5, 37.5, -122.0, 38.0))
+    table = Table.from_wfs(
+        'https://geo.example.com/wfs',
+        'cities',
+        bbox=(-122.5, 37.5, -122.0, 38.0)
+    )
     ```
 
 ### Parallel Fetching for Large Datasets
@@ -1521,19 +1551,22 @@ For datasets with 1 million+ features, use parallel pagination to avoid server t
     from geoparquet_io.api import Table
 
     # Parallel extraction
-    table = Table.from_wfs("https://geo.example.com/wfs", "large_layer", max_workers=4)
+    table = Table.from_wfs(
+        'https://geo.example.com/wfs',
+        'large_layer',
+        max_workers=4
+    )
 
     # Extract multiple layers (tune defaults for large datasets)
     from geoparquet_io.api import ops
-
     results = ops.from_wfs_layers(
-        "https://geo.example.com/wfs",
-        ["layer1", "layer2", "layer3"],
-        "./output/",
+        'https://geo.example.com/wfs',
+        ['layer1', 'layer2', 'layer3'],
+        './output/',
         parallel_layers=3,
-        max_workers=2,  # parallel page fetches per layer
-        page_size=100000,  # features per WFS request page
-        auto_tile=True,  # subdivide bbox when the server caps responses
+        max_workers=2,        # parallel page fetches per layer
+        page_size=100000,     # features per WFS request page
+        auto_tile=True        # subdivide bbox when the server caps responses
     )
     ```
 
@@ -1705,7 +1738,11 @@ Extract data from Carto SQL API endpoints directly to GeoParquet. Carto's SQL AP
     from geoparquet_io.api import ops
 
     # Extract from Carto
-    table = ops.from_carto("https://phl.carto.com/api/v2/sql", "opa_properties_public", limit=10000)
+    table = ops.from_carto(
+        'https://phl.carto.com/api/v2/sql',
+        'opa_properties_public',
+        limit=10000
+    )
     ```
 
 ### Server-Side Filtering
@@ -1747,11 +1784,11 @@ Filters are pushed to the Carto server for efficient querying:
 
     # With filters
     table = ops.from_carto(
-        "https://phl.carto.com/api/v2/sql",
-        "opa_properties_public",
+        'https://phl.carto.com/api/v2/sql',
+        'opa_properties_public',
         where="category_code_description = 'SINGLE FAMILY'",
         bbox=(-75.2, 39.9, -75.1, 40.0),
-        limit=5000,
+        limit=5000
     )
     ```
 
@@ -1817,14 +1854,14 @@ Use `--geometry` / `--no-geometry` to override auto-detection:
 
     # Auto-detect (default): returns a plain table for geometry-less sources
     table = ops.from_carto(
-        "https://phl.carto.com/api/v2/sql",
-        "my_lookup_table",
+        'https://phl.carto.com/api/v2/sql',
+        'my_lookup_table',
     )
 
     # Force tabular extraction
     table = ops.from_carto(
-        "https://phl.carto.com/api/v2/sql",
-        "my_lookup_table",
+        'https://phl.carto.com/api/v2/sql',
+        'my_lookup_table',
         geometry=False,
     )
     ```
@@ -1891,14 +1928,18 @@ Or in Python:
 <!-- doctest: skip="continues a Python session an earlier block started" -->
 ```python
 import os
-
 os.environ["CARTO_API_KEY"] = "your_api_key_here"
 
-table = ops.from_carto("https://your-org.carto.com/api/v2/sql", "private_table")
+table = ops.from_carto(
+    'https://your-org.carto.com/api/v2/sql',
+    'private_table'
+)
 
 # Or pass directly:
 table = ops.from_carto(
-    "https://your-org.carto.com/api/v2/sql", "private_table", api_key="your_api_key_here"
+    'https://your-org.carto.com/api/v2/sql',
+    'private_table',
+    api_key='your_api_key_here'
 )
 ```
 
@@ -2065,10 +2106,10 @@ gpio extract data.parquet output.parquet --row-group-size 100000
     import geoparquet_io as gpio
 
     # Get a small sample for testing
-    gpio.read("large_file.parquet").extract(limit=1000).write("sample.parquet")
+    gpio.read('large_file.parquet').extract(limit=1000).write('sample.parquet')
 
     # Get sample from specific area
-    gpio.read("large_file.parquet").extract(bbox=(0, 0, 1, 1), limit=100).write("sample.parquet")
+    gpio.read('large_file.parquet').extract(bbox=(0, 0, 1, 1), limit=100).write('sample.parquet')
     ```
 
 ### Extract by Category
@@ -2095,12 +2136,10 @@ gpio extract data.parquet output.parquet --row-group-size 100000
     <!-- doctest: skip="filters on 'category', a column the sample data does not have" -->
     ```python
     # Extract all features of a specific type
-    gpio.read("data.parquet").extract(where="category = 'restaurant'").write("restaurants.parquet")
+    gpio.read('data.parquet').extract(where="category = 'restaurant'").write('restaurants.parquet')
 
     # Extract multiple categories
-    gpio.read("data.parquet").extract(where="category IN ('restaurant', 'cafe', 'bakery')").write(
-        "food_places.parquet"
-    )
+    gpio.read('data.parquet').extract(where="category IN ('restaurant', 'cafe', 'bakery')").write('food_places.parquet')
     ```
 
 ### Extract Recent Data
@@ -2125,12 +2164,12 @@ gpio extract data.parquet output.parquet --row-group-size 100000
     import geoparquet_io as gpio
 
     # Extract data updated this year
-    gpio.read("data.parquet").extract(where="updated_at >= '2024-01-01'").write("recent.parquet")
+    gpio.read('data.parquet').extract(where="updated_at >= '2024-01-01'").write('recent.parquet')
 
     # Extract data from specific time range
-    gpio.read("data.parquet").extract(where="created_at BETWEEN '2024-01-01' AND '2024-06-30'").write(
-        "range.parquet"
-    )
+    gpio.read('data.parquet').extract(
+        where="created_at BETWEEN '2024-01-01' AND '2024-06-30'"
+    ).write('range.parquet')
     ```
 
 ### Extract Non-Spatial Subset
@@ -2152,9 +2191,10 @@ gpio extract data.parquet output.parquet --row-group-size 100000
     import geoparquet_io as gpio
 
     # Extract as attribute table (no geometry)
-    gpio.read("data.parquet").extract(
-        columns=["id", "name", "category", "population"], exclude_columns=["geometry", "bbox"]
-    ).write("attributes.parquet")
+    gpio.read('data.parquet').extract(
+        columns=['id', 'name', 'category', 'population'],
+        exclude_columns=['geometry', 'bbox']
+    ).write('attributes.parquet')
     ```
 
 ## Error Handling
@@ -2288,9 +2328,9 @@ For most files, no special configuration is needed:
     import geoparquet_io as gpio
 
     # Large files work automatically
-    gpio.read("huge_dataset.parquet").extract(bbox=(-122.5, 37.5, -122.0, 38.0)).write(
-        "filtered.parquet"
-    )
+    gpio.read('huge_dataset.parquet') \
+        .extract(bbox=(-122.5, 37.5, -122.0, 38.0)) \
+        .write('filtered.parquet')
     ```
 
 ### Memory Configuration
@@ -2314,7 +2354,7 @@ For containerized environments or when you need explicit control:
     import geoparquet_io as gpio
 
     # Memory limit is auto-detected; select a write strategy if needed
-    gpio.read("input.parquet").write("output.parquet", write_strategy="streaming")
+    gpio.read('input.parquet').write('output.parquet', write_strategy='streaming')
     ```
 
 For detailed information on write strategies, memory configuration, and container environments, see the [Write Strategies Guide](write-strategies.md).

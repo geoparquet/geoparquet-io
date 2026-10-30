@@ -188,16 +188,14 @@ In `gpio_myplugin/cli.py`:
 ```python
 import click
 
-
 @click.group()
 def myplugin():
     """My custom plugin commands."""
     pass
 
-
 @myplugin.command()
-@click.argument("input_file")
-@click.argument("output_file")
+@click.argument('input_file')
+@click.argument('output_file')
 def process(input_file, output_file):
     """Process a file with my plugin."""
     click.echo(f"Processing {input_file} -> {output_file}")

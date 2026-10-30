@@ -102,12 +102,12 @@ function, a join, a `GROUP BY`:
 
     gpio.Table.from_bigquery(
         sql="SELECT * EXCEPT(rn) FROM (SELECT *, ROW_NUMBER() OVER "
-        "(PARTITION BY item_id ORDER BY version DESC) AS rn "
-        "FROM `myproject.geodata.items` "
-        "WHERE acquired_at >= TIMESTAMP('2025-09-01')) WHERE rn = 1",
-        project="myproject",
-        geography_column="geometry",
-    ).write("output.parquet")
+            "(PARTITION BY item_id ORDER BY version DESC) AS rn "
+            "FROM `myproject.geodata.items` "
+            "WHERE acquired_at >= TIMESTAMP('2025-09-01')) WHERE rn = 1",
+        project='myproject',
+        geography_column='geometry',
+    ).write('output.parquet')
     ```
 
 With `--sql` there is no `TABLE_ID`, `--project` is required (the query job

@@ -49,7 +49,7 @@ else in gpio works as before.
     from geoparquet_io.api import ops
 
     # Table API, chainable
-    gpio.read("parcels.parquet").simplify(10).write("simplified.parquet")
+    gpio.read('parcels.parquet').simplify(10).write('simplified.parquet')
 
     # Pure function over a PyArrow table
     table = ops.simplify(my_arrow_table, tolerance=10, coverage=True)
