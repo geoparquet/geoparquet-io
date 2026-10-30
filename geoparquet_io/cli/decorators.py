@@ -125,11 +125,10 @@ def parse_row_group_options(
     if not row_group_size_mb:
         return None
 
-    from geoparquet_io.core.sizing import parse_size_string
+    from geoparquet_io.core.sizing import bytes_to_mb, parse_size_string
 
     try:
-        size_bytes = parse_size_string(row_group_size_mb)
-        return size_bytes / (1024 * 1024)
+        return bytes_to_mb(parse_size_string(row_group_size_mb))
     except ValueError as e:
         raise click.UsageError(f"Invalid row group size: {e}") from e
 

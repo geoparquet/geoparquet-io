@@ -1907,7 +1907,7 @@ for candidate in plan['candidates']:
 The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 (the files the threshold selected, with sizes and destinations) and `preview`.
 
-- `min_size` takes the CLI's `'100MB'` spelling or a plain byte count.
+- `min_size` takes the CLI's `'100MB'` spelling (MB/GB are powers of 1000, MiB/GiB of 1024) or a plain byte count.
 - A file whose sub-partitions do not hold all of its rows keeps its original —
   rows with a NULL or empty geometry get a NULL index cell and are dropped by
   partitioning — and is reported in `errors`.

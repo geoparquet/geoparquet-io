@@ -37,6 +37,7 @@ from geoparquet_io.core.duckdb_utils import (
     restore_duckdb_settings,
     sql_path,
 )
+from geoparquet_io.core.sizing import parse_size_string
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 GIB = 1024**3
@@ -101,7 +102,7 @@ class TestFastPathMemoryLimit:
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
         # Opened under the same stub, so the session limit *is* the 5.0GB default
         # the write then applies -- which is the case DuckDB's truncated display
-        # of a size used to hide (it reads "5.0GB" back as "4.6 GiB", a stricter
+        # of a size used to hide (it read "5.0GB" back as "4.6 GiB", a stricter
         # limit gpio must not loosen, so nothing was ever set and nothing logged).
         # A connection opened before the stub would carry the host's own share
         # instead, and on a small host that really is stricter than 5.0GB, so the
@@ -118,11 +119,11 @@ class TestFastPathMemoryLimit:
             )
         finally:
             connection.close()
-        assert "DuckDB memory limit: 5.0GB" in caplog.text
+        assert "DuckDB memory limit: 5.0GiB" in caplog.text
 
     def test_small_ceiling_formats_in_megabytes(self, monkeypatch):
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: GIB)
-        assert memory_limits.default_memory_limit() == "512MB"
+        assert memory_limits.default_memory_limit() == "512MiB"
 
     def test_unknown_ceiling_leaves_duckdb_default(self, tmp_path, monkeypatch, caplog, con):
         """No ceiling to measure: keep DuckDB's own limit rather than invent one."""
@@ -166,7 +167,7 @@ class TestFastPathMemoryLimit:
     def test_default_tightens_duckdbs_own_default(self, con, monkeypatch):
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: GIB)
         with memory_limits.scoped_write_memory_limit(con, None, verbose=False):
-            assert _setting(con, "memory_limit") == "488.2 MiB"  # 512MB
+            assert _setting(con, "memory_limit") == "512.0 MiB"  # 512MiB
 
     def test_threads_shrink_with_the_limit_and_come_back(self, con):
         """Under ~250MB a thread, DuckDB raises OutOfMemory instead of spilling."""
@@ -210,8 +211,8 @@ class TestResolveLimitReadsTheSessionThroughTheDisplay:
         connection.close()
 
     def test_the_connections_own_default_is_recognised_and_re_set(self, bounded):
-        assert _setting(bounded, "memory_limit") == "4.6 GiB"  # 5.0GB, truncated
-        assert memory_limits._resolve_limit(bounded, None) == "5.0GB"
+        assert _setting(bounded, "memory_limit") == "5.0 GiB"
+        assert memory_limits._resolve_limit(bounded, None) == "5.0GiB"
 
     def test_a_stricter_caller_limit_is_still_left_alone(self, bounded):
         bounded.execute("SET memory_limit = '300MB'")
@@ -219,7 +220,7 @@ class TestResolveLimitReadsTheSessionThroughTheDisplay:
 
     def test_a_looser_caller_limit_is_tightened_to_the_default(self, bounded):
         bounded.execute("SET memory_limit = '100GB'")
-        assert memory_limits._resolve_limit(bounded, None) == "5.0GB"
+        assert memory_limits._resolve_limit(bounded, None) == "5.0GiB"
 
     def test_an_explicit_limit_wins_whatever_the_session_says(self, bounded):
         bounded.execute("SET memory_limit = '300MB'")
@@ -236,23 +237,6 @@ class TestRestoreSettings:
     def test_setting_names_are_checked(self, con):
         with pytest.raises(ValueError, match="setting name"):
             restore_duckdb_settings(con, {"threads; DROP TABLE x": 1})
-
-
-class TestParseSize:
-    @pytest.mark.parametrize(
-        "text, expected",
-        [
-            ("2GB", 2 * 10**9),
-            ("14.3 GiB", int(14.3 * GIB)),
-            ("512MB", 512 * 10**6),
-            ("0 bytes", 0),
-            ("1.5GIB", int(1.5 * GIB)),
-            ("lots", None),
-            ("5 parsecs", None),
-        ],
-    )
-    def test_units(self, text, expected):
-        assert memory_limits.parse_size(text) == expected
 
 
 class TestDisplayedSizeMax:
@@ -379,7 +363,7 @@ class TestCgroupMemory:
             },
         )
         self._point_at(monkeypatch, proc, root, ram=512 * GIB)
-        assert memory_limits.get_default_memory_limit() == "60.0GB"
+        assert memory_limits.default_memory_limit() == "60.0GiB"
 
 
 class TestCeilingWithoutPsutil:
@@ -402,7 +386,7 @@ class TestCeilingWithoutPsutil:
         proc, root = _fake_cgroups(tmp_path, ["0::/job"], {"job/memory.max": str(2 * GIB)})
         self._point_at(monkeypatch, proc, root)
         assert memory_limits.memory_ceiling() == 2 * GIB
-        assert memory_limits.default_memory_limit() == "1.0GB"
+        assert memory_limits.default_memory_limit() == "1.0GiB"
 
     def test_ceiling_is_unknown_without_a_cgroup_cap(self, tmp_path, monkeypatch):
         self._point_at(monkeypatch, str(tmp_path / "missing"), str(tmp_path / "missing_root"))
@@ -557,8 +541,8 @@ class TestDirectCopyMemoryLimit:
 
         ((memory_limit_arg, during, _threads),) = seen
         assert memory_limit_arg is None
-        limit_bytes = memory_limits.parse_size(during)
-        assert limit_bytes is not None and limit_bytes <= 5 * 10**9  # half the ceiling
+        limit_bytes = parse_size_string(during)
+        assert limit_bytes is not None and limit_bytes <= 5 * GIB  # half the ceiling
         assert list(parts_dir.glob("chunk_*.parquet"))
 
     @pytest.mark.parametrize("write_memory", [None, "700MB"])
@@ -587,8 +571,8 @@ class TestDirectCopyMemoryLimit:
         assert memory_limit_arg == write_memory
         if write_memory is not None:
             assert during == "667.5 MiB"
-        limit_bytes = memory_limits.parse_size(during)
-        assert limit_bytes is not None and limit_bytes <= 5 * 10**9
+        limit_bytes = parse_size_string(during)
+        assert limit_bytes is not None and limit_bytes <= 5 * GIB
 
     def test_admin_per_level_cache_copy_is_memory_bounded(self, tmp_path, monkeypatch):
         """The Overture per-level cache COPY runs inside the scoped limit too.
@@ -644,8 +628,8 @@ class TestDirectCopyMemoryLimit:
 
         ((memory_limit_arg, during, _threads),) = seen
         assert memory_limit_arg is None
-        limit_bytes = memory_limits.parse_size(during)
-        assert limit_bytes is not None and limit_bytes <= 5 * 10**9
+        limit_bytes = parse_size_string(during)
+        assert limit_bytes is not None and limit_bytes <= 5 * GIB
 
 
 class TestDirectCopyRegressions:

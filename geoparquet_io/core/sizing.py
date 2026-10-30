@@ -1,61 +1,99 @@
-"""Byte sizes as humans write them: parsing an option value, rendering a total.
+"""Byte sizes as humans write them: the one parser and the one formatter (#1367).
 
-``parse_size_string`` reads the ``256MB``/``1GB``/``128`` spellings the CLI
-accepts; ``format_size`` renders a byte count back for display. They are the
-same fact in opposite directions, and neither knows anything about GeoParquet,
-which is why they no longer live in ``core/common.py``.
+``parse_size_string`` reads every size gpio accepts or DuckDB reports
+(``--write-memory``, ``--row-group-size-mb``, ``--min-size``, DuckDB's own
+``current_setting('memory_limit')``). The units are DuckDB's: ``KB``/``MB``/
+``GB``/``TB``/``PB`` are powers of 1000, ``KiB``/``MiB``/``GiB``/``TiB``/``PiB``
+powers of 1024, a bare number is MB, and case and surrounding whitespace do not
+matter. ``format_memory_limit`` renders a byte count as a ``SET memory_limit``
+value that means what it says; ``format_size`` renders a total for display.
 """
+
+from __future__ import annotations
 
 import re
 
+#: Bytes in one MB: a bare number, ``--row-group-size-mb`` and every "MB" gpio
+#: reads is this many bytes (approved change 5 of #1367).
+BYTES_PER_MB = 10**6
 
-def parse_size_string(size_str):
+_UNITS = {
+    "": BYTES_PER_MB,
+    "B": 1,
+    "BYTES": 1,
+    **{f"{p}{suffix}": 1000 ** (i + 1) for i, p in enumerate("KMGTP") for suffix in ("", "B")},
+    **{f"{p}IB": 1024 ** (i + 1) for i, p in enumerate("KMGTP")},
+}
+_SIZE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([A-Za-z]*)")
+
+
+def _split_size(size_str: str) -> tuple[str, str]:
+    """``(number, UPPER-CASED unit)`` of a non-blank size string; ``ValueError`` if it is not one."""
+    match = _SIZE_RE.fullmatch(str(size_str).strip())
+    unit = match.group(2).upper() if match else None
+    if match is None or unit not in _UNITS:
+        raise ValueError(
+            f"Invalid size format: {size_str!r} (expected e.g. '512MB', '2GB', '1GiB'; "
+            "KB/MB/GB are powers of 1000, KiB/MiB/GiB of 1024, a bare number is MB)"
+        )
+    return match.group(1), unit
+
+
+def parse_size_string(size_str: str | None) -> int | None:
+    """Bytes in a size string such as ``'256MB'``, ``'1GiB'``, ``'4.5 gb'`` or ``'128'``.
+
+    Returns ``None`` for ``None`` or a blank string, so an unset option stays
+    unset. Anything else that is not a size raises ``ValueError`` naming it.
     """
-    Parse a human-readable size string into bytes.
-
-    Args:
-        size_str: String like '256MB', '1GB', '128' (assumed MB if no unit)
-
-    Returns:
-        int: Size in bytes
-    """
-    if not size_str:
+    if size_str is None or not str(size_str).strip():
         return None
+    number, unit = _split_size(size_str)
+    return int(float(number) * _UNITS[unit])
 
-    # Handle plain numbers (assume MB)
-    try:
-        return int(size_str) * 1024 * 1024
-    except ValueError:
-        pass
 
-    # Parse with units
-    size_str = size_str.strip().upper()
-    match = re.match(r"^(\d+(?:\.\d+)?)\s*([KMGT]?B?)$", size_str)
-    if not match:
-        raise ValueError(f"Invalid size format: {size_str}")
+def normalize_size_string(size_str: str) -> str:
+    """The canonical spelling of a size: ``'4.5 gb'`` -> ``'4.5GB'``, ``'1gib'`` -> ``'1GiB'``, ``'512'`` -> ``'512MB'``.
 
-    value = float(match.group(1))
-    unit = match.group(2)
+    The same grammar as :func:`parse_size_string` (``ValueError`` otherwise),
+    and the same bytes: the canonical form parses back to the identical count.
+    """
+    number, unit = _split_size(size_str)
+    if not unit:
+        unit = "MB"
+    elif unit.endswith("IB"):
+        unit = f"{unit[0]}iB"
+    return f"{number}{unit}"
 
-    # Convert to bytes
-    multipliers = {
-        "B": 1,
-        "KB": 1024,
-        "MB": 1024 * 1024,
-        "GB": 1024 * 1024 * 1024,
-        "TB": 1024 * 1024 * 1024 * 1024,
-        "K": 1024,
-        "M": 1024 * 1024,
-        "G": 1024 * 1024 * 1024,
-        "T": 1024 * 1024 * 1024 * 1024,
-    }
 
-    multiplier = multipliers.get(unit, 1024 * 1024)  # Default to MB
-    return int(value * multiplier)
+def bytes_to_mb(size_bytes: float) -> float:
+    """``size_bytes`` in MB (10**6 bytes)."""
+    return size_bytes / BYTES_PER_MB
+
+
+def mb_to_bytes(size_mb: float) -> int:
+    """Bytes in ``size_mb`` MB (10**6 bytes each)."""
+    return int(round(size_mb * BYTES_PER_MB))
+
+
+#: The smallest memory limit gpio sets: below it DuckDB cannot hold a scan's buffers.
+_MIN_MEMORY_LIMIT = 128 * 1024**2
+
+
+def format_memory_limit(limit_bytes: int) -> str:
+    """``limit_bytes`` as a DuckDB ``memory_limit`` value, in binary units with binary suffixes.
+
+    One decimal of GiB at or above 1 GiB, else whole MiB, floored at 128 MiB.
+    (This used to divide by 1024**3 and write "GB", which DuckDB reads as
+    10**9: every limit landed 7% under the number computed for it.)
+    """
+    limit_bytes = max(int(limit_bytes), _MIN_MEMORY_LIMIT)
+    if limit_bytes >= 1024**3:
+        return f"{limit_bytes / 1024**3:.1f}GiB"
+    return f"{limit_bytes // 1024**2}MiB"
 
 
 def format_size(size_bytes):
-    """Convert bytes to human readable string."""
+    """Convert bytes to a human readable string for display (1024-based steps)."""
     for unit in ["B", "KB", "MB", "GB"]:
         if size_bytes < 1024:
             return f"{size_bytes:.2f} {unit}"

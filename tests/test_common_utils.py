@@ -32,7 +32,7 @@ from geoparquet_io.core.remote import (
     is_s3_url,
     needs_httpfs,
 )
-from geoparquet_io.core.sizing import format_size, parse_size_string
+from geoparquet_io.core.sizing import format_size
 
 
 class TestIsRemoteUrl:
@@ -194,46 +194,6 @@ class TestFormatSize:
         """Test formatting gigabytes."""
         result = format_size(1024 * 1024 * 1024)
         assert "GB" in result
-
-
-class TestParseSizeString:
-    """Tests for parse_size_string function."""
-
-    def test_parse_plain_number_assumes_mb(self):
-        """Test that plain numbers are treated as MB."""
-        # Plain numbers are assumed to be MB
-        assert parse_size_string("100") == 100 * 1024 * 1024
-        assert parse_size_string("1") == 1 * 1024 * 1024
-
-    def test_parse_bytes(self):
-        """Test parsing byte sizes."""
-        assert parse_size_string("100B") == 100
-        assert parse_size_string("100 B") == 100
-
-    def test_parse_kilobytes(self):
-        """Test parsing kilobyte sizes."""
-        assert parse_size_string("1KB") == 1024
-        assert parse_size_string("2KB") == 2048
-
-    def test_parse_megabytes(self):
-        """Test parsing megabyte sizes."""
-        assert parse_size_string("1MB") == 1024 * 1024
-        assert parse_size_string("100MB") == 100 * 1024 * 1024
-
-    def test_parse_gigabytes(self):
-        """Test parsing gigabyte sizes."""
-        assert parse_size_string("1GB") == 1024 * 1024 * 1024
-        assert parse_size_string("2GB") == 2 * 1024 * 1024 * 1024
-
-    def test_empty_returns_none(self):
-        """Test that empty string returns None."""
-        assert parse_size_string("") is None
-        assert parse_size_string(None) is None
-
-    def test_invalid_size_raises_error(self):
-        """Test that invalid sizes raise ValueError."""
-        with pytest.raises(ValueError):
-            parse_size_string("invalid")
 
 
 class TestValidateCompressionSettings:

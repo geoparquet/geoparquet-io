@@ -70,7 +70,7 @@ by_country/
 
 | Option | Python argument | Description |
 |--------|-----------------|-------------|
-| `--min-size` | `min_size=` | Size threshold (e.g., '100MB', '1GB', or a byte count from Python). Required for directory input. |
+| `--min-size` | `min_size=` | Size threshold (e.g., '100MB', '1GB', '1GiB', or a byte count from Python; MB/GB are powers of 1000, MiB/GiB of 1024, a bare number is MB). Required for directory input. |
 | `--in-place` | `in_place=` | Delete original files after successful sub-partitioning |
 | `--preview` | `preview=` | List the files that would be processed, then stop |
 | `--resolution` / `--level` | `resolution=` / `level=` | Spatial index resolution (or use `--auto`) |
