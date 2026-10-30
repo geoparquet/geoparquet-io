@@ -538,8 +538,8 @@ fields = ["type", "is_flag"]
 reason = "T5c: extract carto's --geometry is a bool flag where every other command takes a column name"
 [[G13.options]]
 option = "--geometry-column"
-fields = ["default", "callback"]
-reason = "T5c: process simplify declares its own --geometry-column without the 'geometry' default or the _validate_column_name callback the sort commands share"
+fields = ["default"]
+reason = "T5c, stopped: simplify now shares column_name_option; the defaults differ in meaning -- sort's 'geometry' is its auto-detect sentinel (hilbert_order/str_order), simplify's None the primary column -- and unifying them changes sort's rendered default, which T5c may not do unasked"
 [[G13.options]]
 option = "--geoparquet-version"
 fields = ["type"]

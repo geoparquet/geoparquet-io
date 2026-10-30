@@ -13,6 +13,7 @@ from geoparquet_io.cli.decorators import (
     aggregate_memory_option,
     breakdown_metric_option,
     bucket_point_options,
+    column_name_option,
     geoparquet_version_option,
     grid_aggregate_options,
     metric_nodata_option,
@@ -527,7 +528,7 @@ def process_aggregate_admin(
     default=None,
     help="Worker threads for coarsen (default: let the library decide).",
 )
-@click.option(
+@column_name_option(
     "--geometry-column",
     default=None,
     help="Geometry column to simplify (default: the file's primary geometry column).",
