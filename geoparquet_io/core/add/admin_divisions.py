@@ -7,15 +7,18 @@ The one "which admin region is this feature in" implementation: every admin
 dataset, with hierarchical level support.
 """
 
+from dataclasses import dataclass, field
+
+import duckdb
+
 from geoparquet_io.core.admin_datasets import (
-    AdminDatasetFactory,
+    AdminDataset,
+    AdminJoinStep,
     admin_column_ref,
-    admin_input_extent,
-    admin_side_reprojected,
-    build_admin_join_query,
-    build_admin_where_clause,
-    get_or_cache_dataset,
+    admin_input_reprojected,
     open_admin_join_connection,
+    resolve_admin_dataset,
+    run_admin_join,
 )
 from geoparquet_io.core.bbox_structure import check_bbox_structure, get_bbox_advice
 from geoparquet_io.core.common import get_parquet_metadata
@@ -35,7 +38,6 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
-from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_query
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import display_path
@@ -57,60 +59,6 @@ def _build_admin_select_clause(dataset, levels, partition_columns, prefix=None):
         admin_select_parts.append(f"{expr} as {quote_identifier(output_col_name)}")
 
     return ", ".join(admin_select_parts)
-
-
-def _format_input_ref(input_source, is_table_ref=False):
-    """Format input reference for SQL.
-
-    A DuckDB table/CTE name (``is_table_ref=True``) is emitted bare; a RAW file
-    path or URL goes through :func:`sql_path`, which quotes and escapes it. The
-    caller passes the flag explicitly rather than sniffing for a ``_gpio_``
-    prefix, so a real path beginning with ``_gpio_`` can never be emitted
-    unquoted (see todo 017).
-
-    ``input_source`` alternates between a path and a table name as the per-level
-    chain advances, so the path it carries must be RAW: escaping it earlier
-    would mean the escape survives into the branch that emits a table name
-    (#802).
-    """
-    if is_table_ref:
-        return input_source
-    return sql_path(input_source)
-
-
-def _build_level_join_query(
-    input_source,
-    admin_table_ref,
-    admin_select_clause,
-    input_bbox_col,
-    admin_bbox_col,
-    input_geom_col,
-    admin_geom_col,
-    *,
-    boundary_columns,
-    admin_where_sql="",
-    is_table_ref=False,
-    source_crs=None,
-):
-    """Build the per-level admin spatial join query.
-
-    The join itself -- the ON clause, the one-match dedup (#543) and which side
-    a non-CRS84 input reprojects (#525) -- is :func:`build_admin_join_query`'s.
-    This only formats ``input_source``: ``is_table_ref`` marks it as a DuckDB
-    table/CTE name (per-level chaining) vs a RAW file path.
-    """
-    return build_admin_join_query(
-        input_relation=_format_input_ref(input_source, is_table_ref),
-        admin_table_ref=admin_table_ref,
-        admin_select_clause=admin_select_clause,
-        input_geom_col=input_geom_col,
-        admin_geom_col=admin_geom_col,
-        input_bbox_col=input_bbox_col,
-        admin_bbox_col=admin_bbox_col,
-        boundary_columns=boundary_columns,
-        admin_where_sql=admin_where_sql,
-        source_crs=source_crs,
-    )
 
 
 def _handle_bbox_optimization(input_parquet, input_bbox_info, add_bbox_flag, verbose):
@@ -198,31 +146,21 @@ def _setup_dataset_and_columns(
 ):
     """Setup dataset and get column information."""
 
-    dataset = AdminDatasetFactory.create(dataset_name, dataset_source, verbose)
     # --write-memory also bounds the dataset's cache downloads (#1156), the
     # first of which may run right here.
-    dataset.memory_limit = memory_limit
+    dataset, partition_columns, admin_source = resolve_admin_dataset(
+        dataset_name,
+        levels,
+        cache=True,
+        source_path=dataset_source,
+        no_cache=no_cache,
+        memory_limit=memory_limit,
+        verbose=verbose,
+    )
 
-    if verbose:
-        debug(f"\nUsing admin dataset: {dataset.get_dataset_name()}")
-        debug(f"Adding admin levels: {', '.join(levels)}")
-
-    dataset.validate_levels(levels)
-    partition_columns = dataset.get_partition_columns(levels)
-
-    # RAW path: it is shown in the dry-run header, and it is also chained
-    # through ``current_source``, which alternately holds a temp-table name --
-    # so the escape has to happen at the SQL boundary, not here (#802).
+    # RAW path: it is shown in the dry-run header, and run_admin_join puts it
+    # through sql_path at the SQL boundary (#802).
     input_path = resolve_file_url(input_parquet, verbose)
-
-    # Per-level datasets resolve sources per-level in add_admin_divisions_multi
-    if dataset.supports_per_level_sources():
-        admin_source = None
-    else:
-        admin_source = get_or_cache_dataset(dataset, no_cache=no_cache, verbose=verbose)
-
-    if verbose and admin_source:
-        debug(f"Data source: {admin_source}")
 
     input_geom_col = find_primary_geometry_column(input_parquet, verbose)
     admin_geom_col = dataset.get_geometry_column()
@@ -253,42 +191,6 @@ def _setup_dataset_and_columns(
     )
 
 
-def _build_admin_where_clauses_list(
-    con,
-    dataset,
-    levels,
-    input_source,
-    input_bbox_col,
-    input_geom_col,
-    admin_bbox_col,
-    verbose,
-    dry_run,
-    is_table_ref=False,
-    source_crs=None,
-    admin_source=None,
-):
-    """The admin side's WHERE for this level: subtype filter and input extent."""
-    extent = (
-        admin_input_extent(
-            con,
-            _format_input_ref(input_source, is_table_ref),
-            input_bbox_col,
-            input_geom_col,
-            source_crs,
-        )
-        if admin_bbox_col
-        else None
-    )
-    return build_admin_where_clause(
-        dataset,
-        levels,
-        admin_bbox_col,
-        extent,
-        admin_source=admin_source,
-        verbose=verbose and not dry_run,
-    )
-
-
 def _report_join_strategy(
     has_native_geometry, input_bbox_col, admin_bbox_col, verbose, input_geom_rewritten=False
 ):
@@ -316,227 +218,85 @@ def _report_join_strategy(
         progress("No bbox columns available, using full geometry intersection...")
 
 
-def _build_query_components(
-    con,
-    dataset,
-    levels,
-    partition_columns,
-    input_source,
-    admin_source,
-    admin_geom_col,
-    admin_bbox_col,
-    input_geom_col,
-    input_bbox_col,
-    verbose,
-    dry_run,
-    prefix=None,
-    is_table_ref=False,
-    source_crs=None,
-    has_native_geometry=False,
-):
-    """Build all query components."""
-    admin_where_sql = _build_admin_where_clauses_list(
-        con,
-        dataset,
-        levels,
-        input_source,
-        input_bbox_col,
-        input_geom_col,
-        admin_bbox_col,
-        verbose,
-        dry_run,
-        is_table_ref=is_table_ref,
-        source_crs=source_crs,
-        admin_source=admin_source,
-    )
+@dataclass
+class _AdminAddRun:
+    """What ``add admin-divisions`` does around each step of :func:`run_admin_join`."""
 
-    admin_select_clause = _build_admin_select_clause(
-        dataset, levels, partition_columns, prefix=prefix
-    )
+    dataset: AdminDataset
+    prefix: str | None
+    dry_run: bool
+    verbose: bool
+    input_path: str
+    output_parquet: str
+    input_geom_col: str
+    input_bbox_col: str | None
+    admin_bbox_col: str | None
+    has_native_geometry: bool
+    input_rewritten: bool
+    write_kwargs: dict = field(default_factory=dict)
+    con: duckdb.DuckDBPyConnection | None = None
 
-    if not dry_run:
-        input_geom_rewritten = bool(source_crs) and not admin_side_reprojected(
-            source_crs, admin_bbox_col
-        )
+    def select_for(self, levels, columns):
+        return _build_admin_select_clause(self.dataset, levels, columns, prefix=self.prefix)
+
+    def report(self, step: AdminJoinStep) -> None:
+        """The dry run's SQL, or the join's status line, for one step."""
+        if self.dry_run:
+            self._print_dry_run(step)
+            return
         _report_join_strategy(
-            has_native_geometry,
-            input_bbox_col,
-            admin_bbox_col,
-            verbose,
-            input_geom_rewritten=input_geom_rewritten,
+            self.has_native_geometry,
+            self.input_bbox_col,
+            self.admin_bbox_col,
+            self.verbose,
+            input_geom_rewritten=self.input_rewritten,
         )
-
-    query = _build_level_join_query(
-        input_source,
-        dataset.table_reference(admin_source),
-        admin_select_clause,
-        input_bbox_col,
-        admin_bbox_col,
-        input_geom_col,
-        admin_geom_col,
-        boundary_columns=partition_columns,
-        admin_where_sql=admin_where_sql,
-        is_table_ref=is_table_ref,
-        source_crs=source_crs,
-    )
-
-    return query, admin_source
-
-
-def _handle_dry_run_mode(
-    dry_run,
-    input_path,
-    admin_source,
-    output_parquet,
-    input_geom_col,
-    admin_geom_col,
-    input_bbox_col,
-    admin_bbox_col,
-    query,
-    compression,
-    compression_level,
-    has_native_geometry=False,
-    input_geom_rewritten=False,
-    *,
-    con,
-    row_group_rows=None,
-    row_group_size_mb=None,
-):
-    """Handle dry-run mode output."""
-    if not dry_run:
-        return False
-
-    _print_dry_run_header(
-        input_path,
-        admin_source,
-        output_parquet,
-        input_geom_col,
-        admin_geom_col,
-        input_bbox_col,
-        admin_bbox_col,
-    )
-
-    info("-- Main spatial join query")
-    strategy = spatial_join_strategy(
-        has_native_geometry, input_bbox_col, admin_bbox_col, input_geom_rewritten
-    )
-    print_spatial_join_dry_run(
-        strategy,
-        query,
-        output_parquet,
-        compression,
-        compression_level,
-        resolve_row_group_rows_for_query(con, query, row_group_rows, row_group_size_mb),
-    )
-    return True
-
-
-def _execute_per_level_joins(
-    con,
-    dataset,
-    levels,
-    partition_columns,
-    input_source,
-    admin_geom_col,
-    admin_bbox_col,
-    input_geom_col,
-    input_bbox_col,
-    output_parquet,
-    metadata,
-    dry_run,
-    verbose,
-    compression,
-    compression_level,
-    row_group_size_mb,
-    row_group_rows,
-    profile,
-    geoparquet_version,
-    prefix,
-    no_cache,
-    extra_kv=None,
-    source_crs=None,
-    has_native_geometry=False,
-    memory_limit=None,
-):
-    """Run separate spatial joins per admin level for per-level-source datasets.
-
-    Each level joins against its own cache file, chaining results through DuckDB
-    temp tables. Each join keeps one row per input feature
-    (:func:`build_admin_join_query`, #543), so the row count is preserved.
-    """
-    current_source = input_source
-
-    for i, (level, col) in enumerate(zip(levels, partition_columns, strict=True)):
-        level_admin_source = dataset.get_source_for_level(level, no_cache=no_cache)
-        is_last = i == len(levels) - 1
-        # Level 0 reads the input file; later levels read the chained temp table.
-        is_table_ref = i != 0
-
-        level_query, _ = _build_query_components(
-            con,
-            dataset,
-            [level],
-            [col],
-            current_source,
-            level_admin_source,
-            admin_geom_col,
-            admin_bbox_col,
-            input_geom_col,
-            input_bbox_col,
-            verbose,
-            dry_run,
-            prefix=prefix,
-            is_table_ref=is_table_ref,
-            source_crs=source_crs,
-            has_native_geometry=has_native_geometry,
-        )
-
-        if dry_run:
-            output_col = dataset.get_output_column_name(level, prefix)
-            progress(f"\n-- Step {i + 1}: Add {output_col} from {level} boundaries")
-            progress(f"-- Source: {level_admin_source}")
-            progress(level_query)
-            if not is_last:
-                current_source = f"_gpio_admin_step_{i}"
-            continue
-
-        if verbose:
-            debug(f"Spatial join: adding {level} from {level_admin_source}...")
-
-        if is_last:
-            write_parquet_with_metadata(
-                con,
-                level_query,
-                output_parquet,
-                original_metadata=metadata,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
-                verbose=verbose,
-                profile=profile,
-                geoparquet_version=geoparquet_version,
-                extra_kv_metadata=extra_kv,
-                # Every level is `SELECT a.*` over the one before it, so the
-                # geometry column the last write emits is the input's own --
-                # the witness auto mode needs to keep a native-geo-only input
-                # native rather than rewriting it as 1.1 WKB (#993).
-                input_file=input_source,
-                memory_limit=memory_limit,
-            )
+        if not self.verbose:
+            return
+        if step.per_level:
+            debug(f"Spatial join: adding {step.levels[0]} from {step.source}...")
         else:
-            temp_table = f"_gpio_admin_step_{i}"
-            # The same memory policy as the final write below: this join
-            # materializes the whole input, so leaving it at DuckDB's own
-            # host-sized default is what reached the cgroup cap (#1174).
-            with scoped_write_memory_limit(con, memory_limit, verbose):
-                con.execute(f"CREATE OR REPLACE TEMP TABLE {temp_table} AS {level_query}")
-            current_source = temp_table
+            debug("Performing spatial join with admin boundaries...")
 
-    if dry_run:
-        return None, None, None
+    def _print_dry_run(self, step: AdminJoinStep) -> None:
+        if step.per_level:
+            output_col = self.dataset.get_output_column_name(step.levels[0], self.prefix)
+            progress(
+                f"\n-- Step {step.index + 1}: Add {output_col} from {step.levels[0]} boundaries"
+            )
+            progress(f"-- Source: {step.source}")
+            progress(step.query)
+            return
+        _print_dry_run_header(
+            self.input_path,
+            step.source,
+            self.output_parquet,
+            self.input_geom_col,
+            self.dataset.get_geometry_column(),
+            self.input_bbox_col,
+            self.admin_bbox_col,
+        )
+        info("-- Main spatial join query")
+        strategy = spatial_join_strategy(
+            self.has_native_geometry, self.input_bbox_col, self.admin_bbox_col, self.input_rewritten
+        )
+        print_spatial_join_dry_run(
+            strategy,
+            step.query,
+            self.output_parquet,
+            self.write_kwargs["compression"],
+            self.write_kwargs["compression_level"],
+            resolve_row_group_rows_for_query(
+                self.con,
+                step.query,
+                self.write_kwargs["row_group_rows"],
+                self.write_kwargs["row_group_size_mb"],
+            ),
+        )
 
-    return _get_result_stats(con, output_parquet, dataset, levels, verbose, prefix=prefix)
+    def write(self, step: AdminJoinStep) -> None:
+        """The last step: the join, written through the funnel."""
+        write_parquet_with_metadata(self.con, step.query, self.output_parquet, **self.write_kwargs)
 
 
 def add_admin_divisions_multi(
@@ -593,7 +353,7 @@ def add_admin_divisions_multi(
     # Setup dataset and columns
     (
         dataset,
-        partition_columns,
+        _partition_columns,
         input_path,
         admin_source,
         input_geom_col,
@@ -631,10 +391,40 @@ def add_admin_divisions_multi(
     # (issue #538); _setup_dataset_and_columns flags them via status == "native".
     has_native_geometry = input_bbox_info.get("status") == "native"
 
-    # Create DuckDB connection with ambient S3 config from dataset
+    run = _AdminAddRun(
+        dataset=dataset,
+        prefix=effective_prefix,
+        dry_run=dry_run,
+        verbose=verbose,
+        input_path=input_path,
+        output_parquet=output_parquet,
+        input_geom_col=input_geom_col,
+        input_bbox_col=input_bbox_col,
+        admin_bbox_col=admin_bbox_col,
+        has_native_geometry=has_native_geometry,
+        input_rewritten=admin_input_reprojected(source_crs, admin_bbox_col),
+        write_kwargs={
+            "original_metadata": metadata,
+            "compression": compression,
+            "compression_level": compression_level,
+            "row_group_size_mb": row_group_size_mb,
+            "row_group_rows": row_group_rows,
+            "verbose": verbose,
+            "profile": profile,
+            "geoparquet_version": geoparquet_version,
+            # The join is `SELECT a.*` plus admin columns at every level, so
+            # the geometry reaching the output is the input's own -- the
+            # witness auto mode needs to keep a native-geo-only input native
+            # rather than rewriting it as 1.1 WKB (#993).
+            "input_file": input_path,
+            "memory_limit": memory_limit,
+        },
+    )
 
+    # Create DuckDB connection with ambient S3 config from dataset
     with s3_config_scope(dataset.get_s3_config()):
         con = open_admin_join_connection(spill_to_cache=True)
+        run.con = con
         try:
             # Get total input count (skip in dry-run)
             if not dry_run:
@@ -644,111 +434,40 @@ def add_admin_divisions_multi(
                 progress(f"Processing {total_count:,} input features...")
 
             # Build Vecorel metadata if requested (applied to whichever write path runs)
-            extra_kv = None
             if vecorel:
                 from geoparquet_io.core.constants import (
                     VECOREL_ADMIN_SCHEMA,
                     build_collection_metadata,
                 )
 
-                extra_kv = build_collection_metadata([VECOREL_ADMIN_SCHEMA], metadata)
-
-            if dataset.supports_per_level_sources():
-                total_features, features_with_admin, unique_counts = _execute_per_level_joins(
-                    con,
-                    dataset,
-                    levels,
-                    partition_columns,
-                    input_path,
-                    admin_geom_col,
-                    admin_bbox_col,
-                    input_geom_col,
-                    input_bbox_col,
-                    output_parquet,
-                    metadata,
-                    dry_run,
-                    verbose,
-                    compression,
-                    compression_level,
-                    row_group_size_mb,
-                    row_group_rows,
-                    profile,
-                    geoparquet_version,
-                    effective_prefix,
-                    no_cache,
-                    extra_kv=extra_kv,
-                    source_crs=source_crs,
-                    has_native_geometry=has_native_geometry,
-                    memory_limit=memory_limit,
-                )
-                if dry_run:
-                    return
-            else:
-                query, admin_source = _build_query_components(
-                    con,
-                    dataset,
-                    levels,
-                    partition_columns,
-                    input_path,
-                    admin_source,
-                    admin_geom_col,
-                    admin_bbox_col,
-                    input_geom_col,
-                    input_bbox_col,
-                    verbose,
-                    dry_run,
-                    prefix=effective_prefix,
-                    source_crs=source_crs,
-                    has_native_geometry=has_native_geometry,
+                run.write_kwargs["extra_kv_metadata"] = build_collection_metadata(
+                    [VECOREL_ADMIN_SCHEMA], metadata
                 )
 
-                if _handle_dry_run_mode(
-                    dry_run,
-                    input_path,
-                    admin_source,
-                    output_parquet,
-                    input_geom_col,
-                    admin_geom_col,
-                    input_bbox_col,
-                    admin_bbox_col,
-                    query,
-                    compression,
-                    compression_level,
-                    has_native_geometry=has_native_geometry,
-                    input_geom_rewritten=(
-                        bool(source_crs) and not admin_side_reprojected(source_crs, admin_bbox_col)
-                    ),
-                    con=con,
-                    row_group_rows=row_group_rows,
-                    row_group_size_mb=row_group_size_mb,
-                ):
-                    return
+            run_admin_join(
+                con,
+                dataset,
+                levels,
+                input_path=input_path,
+                input_geom_col=input_geom_col,
+                input_bbox_col=input_bbox_col,
+                admin_bbox_col=admin_bbox_col,
+                select_for=run.select_for,
+                final_step=run.write,
+                admin_source=admin_source,
+                source_crs=source_crs,
+                no_cache=no_cache,
+                memory_limit=memory_limit,
+                verbose=verbose,
+                dry_run=dry_run,
+                on_step=run.report,
+            )
+            if dry_run:
+                return
 
-                if verbose:
-                    debug("Performing spatial join with admin boundaries...")
-
-                write_parquet_with_metadata(
-                    con,
-                    query,
-                    output_parquet,
-                    original_metadata=metadata,
-                    compression=compression,
-                    compression_level=compression_level,
-                    row_group_size_mb=row_group_size_mb,
-                    row_group_rows=row_group_rows,
-                    verbose=verbose,
-                    profile=profile,
-                    geoparquet_version=geoparquet_version,
-                    extra_kv_metadata=extra_kv,
-                    # The join is `SELECT a.*` plus admin columns, so the
-                    # geometry reaching the output is the input's own (#993).
-                    input_file=input_path,
-                    memory_limit=memory_limit,
-                )
-
-                total_features, features_with_admin, unique_counts = _get_result_stats(
-                    con, output_parquet, dataset, levels, verbose, prefix=effective_prefix
-                )
+            total_features, features_with_admin, unique_counts = _get_result_stats(
+                con, output_parquet, dataset, levels, verbose, prefix=effective_prefix
+            )
         finally:
             con.close()
 

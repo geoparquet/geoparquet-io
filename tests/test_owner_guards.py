@@ -84,7 +84,7 @@ EXPECTED_COUNTS = {
     "G2.exemptions": 28,
     "G3.pairs": 23,
     "G3.baseline": 23,
-    "G3.pylint": 52,
+    "G3.pylint": 50,
     "G13.options": 13,
     "G13.bbox_parsers": 3,
     "G4.whitelist": 181,
@@ -425,6 +425,12 @@ def _find_sql_escape_hand_quote(m: _Module) -> Iterator[Hit]:
     escaped value quoted lines later), and gets no NUL handling. Would have
     caught the ~45 hand-quoted literals that bypassed ``sql_literal`` (#1367
     T1e audit, finding 9).
+
+    The same escape reached the other way round is flagged too: a subscript of
+    a ``sql_path(...)`` or ``sql_literal(...)`` call -- ``sql_path(p)[1:-1]``,
+    the literal with its quotes cut off so a template can put them back -- is
+    a bare escape by another name, and with a NUL byte (``'a' || chr(0) ||
+    'b'``) is not even one quoted span (#1367 T1d+T1e audit 2, finding 4).
     """
     name = "_escape_sql_string"
     for node in ast.walk(m.tree):
@@ -432,6 +438,21 @@ def _find_sql_escape_hand_quote(m: _Module) -> Iterator[Hit]:
             yield m.hit(node)
         elif isinstance(node, ast.Attribute) and node.attr == name:
             yield m.hit(node)
+        elif isinstance(node, ast.Subscript) and _calls_a_literal_builder(node.value):
+            yield m.hit(node)
+
+
+#: The owners whose result is a whole SQL literal, never to be cut into.
+_LITERAL_BUILDERS = frozenset({"sql_literal", "sql_path"})
+
+
+def _calls_a_literal_builder(node: ast.AST) -> bool:
+    """``sql_path(...)`` / ``duckdb_utils.sql_literal(...)``: the call itself."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+    return name in _LITERAL_BUILDERS
 
 
 def _find_cgroup(m: _Module) -> Iterator[Hit]:
@@ -2286,6 +2307,18 @@ G1_AUDIT_SHAPES = [
         "json.dump to stdout",
         "import json, sys\ndef s(d):\n    json.dump(d, sys.stdout)\n",
     ),
+    (
+        "sql_escape_hand_quote",
+        "the quotes cut off sql_path",
+        "from geoparquet_io.core.duckdb_utils import sql_path\n"
+        "def q(p, t):\n    return t.replace('{file}', sql_path(p)[1:-1])\n",
+    ),
+    (
+        "sql_escape_hand_quote",
+        "an index into sql_literal through the module",
+        "from geoparquet_io.core import duckdb_utils\n"
+        'def q(v):\n    return "\'" + duckdb_utils.sql_literal(v)[1:-1] + "\'"\n',
+    ),
 ]
 
 #: Shapes close to the above that are not the pattern.
@@ -2309,6 +2342,17 @@ G1_AUDIT_NEAR_MISSES = [
     ("retry_status_sets", "a tile size", "SIZE = (512, 512)\n"),
     ("retry_param_defaults", "a bool switch", "def f(retry=False):\n    pass\n"),
     ("retry_constants", "a lowercase local", "def f():\n    retries = 3\n    return retries\n"),
+    (
+        "sql_escape_hand_quote",
+        "a subscript inside the sql_path argument",
+        "from geoparquet_io.core.duckdb_utils import sql_path\n"
+        'def q(paths):\n    return f"FROM {sql_path(paths[0])}"\n',
+    ),
+    (
+        "sql_escape_hand_quote",
+        "a subscript of another call",
+        "def q(p):\n    return str(p)[1:-1]\n",
+    ),
 ]
 
 

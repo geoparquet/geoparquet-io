@@ -191,8 +191,8 @@ def fake_admin_dataset(tmp_path, monkeypatch):
     )
     con.close()
     monkeypatch.setattr(
-        "geoparquet_io.core.process.aggregate.by_admin._setup_admin_dataset",
-        lambda dataset, verbose, levels: (_FakeAdminDataset(admin_path), None),
+        "geoparquet_io.core.process.aggregate.by_admin.resolve_admin_dataset",
+        lambda dataset, levels, **k: (_FakeAdminDataset(admin_path), None, None),
     )
 
 
@@ -224,8 +224,8 @@ def test_admin_validates_before_resolving_boundaries(tmp_path, monkeypatch):
     from geoparquet_io.core.process.aggregate.by_admin import aggregate_by_admin
 
     monkeypatch.setattr(
-        "geoparquet_io.core.process.aggregate.by_admin._setup_admin_dataset",
-        lambda dataset, verbose, levels: (_FakeAdminDataset(None, fail_on_source=True), None),
+        "geoparquet_io.core.process.aggregate.by_admin.resolve_admin_dataset",
+        lambda dataset, levels, **k: (_FakeAdminDataset(None, fail_on_source=True), None, None),
     )
     src = tmp_path / "pts.parquet"
     _write_points(src)

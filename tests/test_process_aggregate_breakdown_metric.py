@@ -362,8 +362,8 @@ def test_admin_engine_pivots_and_keeps_off_a_metric_name(tmp_path, monkeypatch):
     con.close()
     monkeypatch.setattr(
         by_admin,
-        "_setup_admin_dataset",
-        lambda *a, **k: (_SquareAdmin(tmp_path / "admin.parquet"), []),
+        "resolve_admin_dataset",
+        lambda *a, **k: (_SquareAdmin(tmp_path / "admin.parquet"), [], None),
     )
     monkeypatch.setattr(by_admin, "extract_crs_from_parquet", lambda *a, **k: None)
 

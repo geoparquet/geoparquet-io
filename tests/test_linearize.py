@@ -815,7 +815,7 @@ class TestStreamingLinearizedRead:
 
         read = _LinearizedRead.__new__(_LinearizedRead)
         read.con = con
-        read.input_url = "fake.gdb"
+        read.input_file = "fake.gdb"
         read.layer = None
         read.max_angle_deg = 4.0
         read.wkb_col = "geom"

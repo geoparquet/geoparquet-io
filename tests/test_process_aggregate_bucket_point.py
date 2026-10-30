@@ -771,8 +771,8 @@ def _run_admin_offline(monkeypatch, admin_path):
 
     monkeypatch.setattr(
         by_admin,
-        "_setup_admin_dataset",
-        lambda dataset, verbose, levels: (_FakeAdminDataset(admin_path), None),
+        "resolve_admin_dataset",
+        lambda dataset, levels, **k: (_FakeAdminDataset(admin_path), None, None),
     )
 
 

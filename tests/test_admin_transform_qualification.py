@@ -6,11 +6,8 @@ two-sided join (`a.*` forwards the user's columns) makes the bare reference
 ambiguous and DuckDB raises `BinderException: Ambiguous reference ... "region"`.
 """
 
-from geoparquet_io.core.add.admin_divisions import (
-    _build_admin_select_clause,
-    _build_level_join_query,
-)
-from geoparquet_io.core.admin_datasets import AdminDatasetFactory
+from geoparquet_io.core.add.admin_divisions import _build_admin_select_clause
+from geoparquet_io.core.admin_datasets import AdminDatasetFactory, build_admin_join_query
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
 
@@ -52,8 +49,8 @@ def test_admin_divisions_handles_input_with_region_column():
             """
         )
 
-        query = _build_level_join_query(
-            input_source="_gpio_test_input",
+        query = build_admin_join_query(
+            input_relation="_gpio_test_input",
             admin_table_ref="_admin",
             admin_select_clause=select_clause,
             input_bbox_col=None,
@@ -61,7 +58,6 @@ def test_admin_divisions_handles_input_with_region_column():
             input_geom_col="geometry",
             admin_geom_col="geometry",
             boundary_columns=["region"],
-            is_table_ref=True,
         )
         con.execute(f"CREATE OR REPLACE TEMP TABLE _res AS {query}")
         out_col = dataset.get_output_column_name("region")

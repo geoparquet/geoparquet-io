@@ -1574,7 +1574,7 @@ def _write_points_fixture(con, tmp_path, points, name="input.parquet"):
 
 class TestPerLevelJoinKeepsEveryFeatureOnce:
     """``add admin-divisions`` on the real per-level join path
-    (``_execute_per_level_joins``) emits each input feature exactly once.
+    (``run_admin_join``) emits each input feature exactly once.
 
     Uses a local, offline ``--admin-source`` (Overture-shaped, per #819) so no
     network access or real cache is involved.

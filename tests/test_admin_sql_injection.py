@@ -24,10 +24,9 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import add
-from geoparquet_io.core.partition.admin_hierarchical import (
-    _build_enrichment_query,
-    partition_by_admin_hierarchical,
-)
+from geoparquet_io.core.admin_datasets import build_admin_join_query
+from geoparquet_io.core.duckdb_utils import sql_path
+from geoparquet_io.core.partition.admin_hierarchical import partition_by_admin_hierarchical
 
 # A column name that breaks out of an unquoted ST_Intersects(...) / ST_XMin(...)
 # call if it is not properly quoted.
@@ -168,7 +167,7 @@ def _patch_dataset(monkeypatch, admin_path):
         return CurrentAdminDataset(source_path=admin_path, verbose=verbose)
 
     monkeypatch.setattr(
-        "geoparquet_io.core.partition.admin_hierarchical.AdminDatasetFactory.create",
+        "geoparquet_io.core.admin_datasets.AdminDatasetFactory.create",
         staticmethod(fake_create),
     )
 
@@ -179,18 +178,16 @@ def _patch_dataset(monkeypatch, admin_path):
 
 
 def test_enrichment_query_quotes_hostile_bbox_column():
-    """`_build_enrichment_query` quotes the input bbox column in the pre-filter."""
-    query = _build_enrichment_query(
-        "input.parquet",
-        "'admin.parquet'",
-        "",
-        "b.iso as _admin_c",
-        "geometry",
-        "bbox",
-        ["iso"],
-        "geometry",
-        MALICIOUS_BBOX_NAME,
-        "_enriched",
+    """The admin join quotes the input bbox column in the pre-filter."""
+    query = build_admin_join_query(
+        input_relation=sql_path("input.parquet"),
+        admin_table_ref="'admin.parquet'",
+        admin_select_clause="b.iso as _admin_c",
+        input_geom_col="geometry",
+        admin_geom_col="geometry",
+        input_bbox_col=MALICIOUS_BBOX_NAME,
+        admin_bbox_col="bbox",
+        boundary_columns=["iso"],
     )
     # Embedded double-quote doubled inside a quoted identifier; the raw breakout
     # never appears as executable SQL.

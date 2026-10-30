@@ -3178,7 +3178,7 @@ class TestOpsPartition:
             return CurrentAdminDataset(source_path=admin, verbose=verbose)
 
         monkeypatch.setattr(
-            "geoparquet_io.core.partition.admin_hierarchical.AdminDatasetFactory.create",
+            "geoparquet_io.core.admin_datasets.AdminDatasetFactory.create",
             staticmethod(fake_create),
         )
 

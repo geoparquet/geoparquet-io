@@ -575,11 +575,14 @@ def sql_path(path: str | os.PathLike[str]) -> str:
     it had already written the file (issue #718).
 
     The argument must be **RAW**: the path as the user typed it, or as
-    :func:`~geoparquet_io.core.file_utils.resolve_file_url` resolved it, never a
-    value already escaped for SQL; escaping is not idempotent, so a second pass
+    :func:`~geoparquet_io.core.file_utils.resolve_file_url` resolved it -- never
+    an already-escaped value; escaping is not idempotent, so a second pass
     doubles the doubling. No guard can catch that automatically -- a filename
     may legally contain two apostrophes in a row -- so the rule is structural: a
-    path is escaped exactly once, here.
+    path is escaped exactly once, here, and the result is used whole. Slicing
+    the quotes off it (``sql_path(p)[1:-1]``) to quote it again by hand is the
+    shape the ``sql_escape_hand_quote`` guard refuses: with a NUL byte the
+    literal is ``'a' || chr(0) || 'b'``, not one quoted span.
 
     For a non-path SQL value use :func:`sql_literal`, which supplies the quotes
     too; for an identifier use :func:`quote_identifier`. A path is a string

@@ -16,7 +16,7 @@ from geoparquet_io.core.crs_utils import (
     source_crs_string,
     transform_geom_sql,
 )
-from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 
 EPSG_28992 = {"id": {"authority": "EPSG", "code": 28992}}
 
@@ -430,12 +430,12 @@ class TestAdminJoinIsCrsAware:
     """
 
     def test_admin_divisions_join_assigns_with_reprojection(self, fields_5070_file):
-        from geoparquet_io.core.add.admin_divisions import _build_level_join_query
+        from geoparquet_io.core.admin_datasets import build_admin_join_query
 
         con = _con_with_admin()
         try:
             kwargs = {
-                "input_source": fields_5070_file,
+                "input_relation": sql_path(fields_5070_file),
                 "admin_table_ref": "_admin",
                 "admin_select_clause": 'b."region" AS region',
                 "input_bbox_col": None,
@@ -444,8 +444,8 @@ class TestAdminJoinIsCrsAware:
                 "admin_geom_col": "geom",
                 "boundary_columns": ["region"],
             }
-            with_crs = _build_level_join_query(source_crs="EPSG:5070", **kwargs)
-            without = _build_level_join_query(source_crs=None, **kwargs)
+            with_crs = build_admin_join_query(source_crs="EPSG:5070", **kwargs)
+            without = build_admin_join_query(source_crs=None, **kwargs)
             assigned = fetch_one(
                 con.execute(f"SELECT COUNT(*) FROM ({with_crs}) WHERE region IS NOT NULL")
             )[0]
@@ -458,24 +458,22 @@ class TestAdminJoinIsCrsAware:
         assert not_assigned == 0  # raw projected metres match nothing
 
     def test_admin_hierarchical_enrichment_assigns_with_reprojection(self, fields_5070_file):
-        from geoparquet_io.core.partition.admin_hierarchical import _build_enrichment_query
+        from geoparquet_io.core.admin_datasets import build_admin_join_query
 
         con = _con_with_admin()
         try:
-            sql = _build_enrichment_query(
-                input_source=fields_5070_file,
+            sql = build_admin_join_query(
+                input_relation=sql_path(fields_5070_file),
                 admin_table_ref="_admin",
-                admin_where_clause="",
                 admin_select_clause='b."region" AS region',
                 admin_geom_col="geom",
                 admin_bbox_col=None,
                 boundary_columns=["region"],
                 input_geom_col="geometry",
                 input_bbox_col=None,
-                enriched_table="_enriched",
                 source_crs="EPSG:5070",
             )
-            con.execute(sql)
+            con.execute(f"CREATE TEMP TABLE _enriched AS {sql}")
             assigned = fetch_one(
                 con.execute("SELECT COUNT(*) FROM _enriched WHERE region IS NOT NULL")
             )[0]
@@ -494,10 +492,10 @@ class TestAdminReprojectsAdminSideWithBbox:
     """
 
     def test_join_query_keeps_bbox_prefilter_and_leaves_input_untransformed(self):
-        from geoparquet_io.core.add.admin_divisions import _build_level_join_query
+        from geoparquet_io.core.admin_datasets import build_admin_join_query
 
-        sql = _build_level_join_query(
-            input_source="x.parquet",
+        sql = build_admin_join_query(
+            input_relation=sql_path("x.parquet"),
             admin_table_ref="admin",
             admin_select_clause='b."region" AS region',
             input_bbox_col="bbox",
@@ -527,19 +525,17 @@ class TestAdminReprojectsAdminSideWithBbox:
         assert "struct_pack" in sq  # source-CRS bbox synthesized for the pre-filter
 
     def test_enrichment_query_reprojects_admin_side_keeps_prefilter(self):
-        from geoparquet_io.core.partition.admin_hierarchical import _build_enrichment_query
+        from geoparquet_io.core.admin_datasets import build_admin_join_query
 
-        sql = _build_enrichment_query(
-            input_source="x.parquet",
+        sql = build_admin_join_query(
+            input_relation=sql_path("x.parquet"),
             admin_table_ref="admin",
-            admin_where_clause="",
             admin_select_clause='b."region" AS region',
             admin_geom_col="geom",
             admin_bbox_col="bbox",
             boundary_columns=["region"],
             input_geom_col="geometry",
             input_bbox_col="bbox",
-            enriched_table="_enriched",
             source_crs="EPSG:5070",
         )
         assert "ST_Transform" in sql  # admin reprojected
@@ -550,7 +546,7 @@ class TestAdminReprojectsAdminSideWithBbox:
 
     def test_enrichment_reproject_path_runs_and_assigns(self, fields_5070_file):
         """The reproject-admin SQL executes in DuckDB and assigns via the prefilter."""
-        from geoparquet_io.core.partition.admin_hierarchical import _build_enrichment_query
+        from geoparquet_io.core.admin_datasets import build_admin_join_query
 
         con = _con_with_admin()
         try:
@@ -567,21 +563,18 @@ class TestAdminReprojectsAdminSideWithBbox:
                 "ymin := ST_YMin(geometry), ymax := ST_YMax(geometry)) AS bbox "
                 f"FROM '{fields_5070_file}'"
             )
-            sql = _build_enrichment_query(
-                input_source="_inp",
+            sql = build_admin_join_query(
+                input_relation="_inp",
                 admin_table_ref="_admin_b",
-                admin_where_clause="",
                 admin_select_clause='b."region" AS region',
                 admin_geom_col="geom",
                 admin_bbox_col="bbox",
                 boundary_columns=["region"],
                 input_geom_col="geometry",
                 input_bbox_col="bbox",
-                enriched_table="_enriched",
-                input_is_table_ref=True,
                 source_crs="EPSG:5070",
             )
-            con.execute(sql)
+            con.execute(f"CREATE TEMP TABLE _enriched AS {sql}")
             assigned = fetch_one(
                 con.execute("SELECT COUNT(*) FROM _enriched WHERE region IS NOT NULL")
             )[0]

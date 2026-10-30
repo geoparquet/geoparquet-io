@@ -539,8 +539,8 @@ def fake_admin_dataset(tmp_path, monkeypatch):
     )
     con.close()
     monkeypatch.setattr(
-        "geoparquet_io.core.process.aggregate.by_admin._setup_admin_dataset",
-        lambda dataset, verbose, levels: (_FakeAdminDataset(admin_path), None),
+        "geoparquet_io.core.process.aggregate.by_admin.resolve_admin_dataset",
+        lambda dataset, levels, **k: (_FakeAdminDataset(admin_path), None, None),
     )
 
 

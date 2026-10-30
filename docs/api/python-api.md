@@ -1592,7 +1592,7 @@ print(result)
 # Custom query
 result = Table.explain_analyze(
     'data.parquet',
-    query="SELECT * FROM read_parquet('{file}') WHERE id > 10"
+    query="SELECT * FROM read_parquet({file}) WHERE id > 10"
 )
 ```
 

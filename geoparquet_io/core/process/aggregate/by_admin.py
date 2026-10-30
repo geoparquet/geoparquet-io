@@ -9,6 +9,7 @@ from geoparquet_io.core.admin_datasets import (
     admin_column_ref,
     build_admin_join_query,
     open_admin_join_connection,
+    resolve_admin_dataset,
 )
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet
@@ -23,9 +24,6 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
-from geoparquet_io.core.partition.admin_hierarchical import (
-    _setup_admin_dataset,
-)
 from geoparquet_io.core.process.aggregate.common import (
     VALID_OUT_GEOMETRY,
     MetricSpec,
@@ -245,7 +243,9 @@ def aggregate_by_admin(
     # Fail on a bad keying column before the (possibly network-bound) dataset setup.
     _validate_keying_columns_for_file(input_parquet, bucket_point, bbox_column, verbose)
 
-    admin_dataset, _boundary_columns = _setup_admin_dataset(dataset, verbose, [level])
+    admin_dataset, _boundary_columns, _ = resolve_admin_dataset(
+        dataset, [level], cache=False, verbose=verbose
+    )
     mapping = admin_dataset.get_level_column_mapping()
     code_col = mapping[level]
     # Overture per-level caches store only the code column (e.g. ISO-2 country code

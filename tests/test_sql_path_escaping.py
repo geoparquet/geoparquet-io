@@ -657,50 +657,33 @@ class TestEscapedValuesDoNotCrossFunctionBoundaries:
 
         assert input_path == apostrophe_file
 
-    def test_admin_divisions_input_ref_escapes_a_raw_path(self, apostrophe_file):
-        """``current_source`` alternately holds a table name, so the RAW path
-        has to be the thing that reaches the SQL boundary."""
-        from geoparquet_io.core.add.admin_divisions import _format_input_ref
+    def test_admin_join_chain_escapes_the_raw_path_and_keeps_its_tables_bare(self, apostrophe_file):
+        """The chain's relation alternates between the input path and a temp
+        table, so the RAW path is what reaches the SQL boundary, once (#802)."""
+        from geoparquet_io.core.admin_datasets import OvertureAdminDataset, run_admin_join
 
-        assert _format_input_ref(apostrophe_file) == sql_path(apostrophe_file)
-        assert _format_input_ref("_gpio_admin_step_0", is_table_ref=True) == "_gpio_admin_step_0"
+        steps = []
+        con = get_duckdb_connection(load_spatial=True)
+        try:
+            run_admin_join(
+                con,
+                OvertureAdminDataset(source_path="admin.parquet"),
+                ["country", "region"],
+                input_path=apostrophe_file,
+                input_geom_col="geometry",
+                input_bbox_col=None,
+                admin_bbox_col=None,
+                select_for=lambda levels, columns: "b.country AS admin_country",
+                final_step=steps.append,
+                dry_run=True,
+                on_step=steps.append,
+            )
+        finally:
+            con.close()
 
-    def test_admin_hierarchical_enrichment_query_escapes_a_raw_path(self, apostrophe_file):
-        from geoparquet_io.core.partition.admin_hierarchical import _build_enrichment_query
-
-        query = _build_enrichment_query(
-            apostrophe_file,
-            "admin_tbl",
-            "",
-            "b.country AS admin_country",
-            "geometry",
-            None,
-            ["country"],
-            "geometry",
-            None,
-            "_enriched",
-        )
-
-        assert f"FROM {sql_path(apostrophe_file)})" in query
-
-    def test_admin_hierarchical_enrichment_query_keeps_a_table_ref_bare(self, apostrophe_file):
-        from geoparquet_io.core.partition.admin_hierarchical import _build_enrichment_query
-
-        query = _build_enrichment_query(
-            "_admin_step_0",
-            "admin_tbl",
-            "",
-            "b.country AS admin_country",
-            "geometry",
-            None,
-            ["country"],
-            "geometry",
-            None,
-            "_enriched",
-            input_is_table_ref=True,
-        )
-
-        assert "FROM _admin_step_0)" in query
+        first, second = (step.query for step in steps)
+        assert f"FROM {sql_path(apostrophe_file)})" in first
+        assert "FROM _gpio_admin_step_0)" in second
 
 
 class TestBboxMetadataFallbackPath:

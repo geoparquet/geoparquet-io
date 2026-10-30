@@ -473,9 +473,9 @@ ADMIN_CALLERS = (
 
 #: What each admin caller used to spell for itself, and the owner that spells it now.
 ADMIN_SIDE_LITERALS = {
-    "MIN(ST_XMin(": "admin_input_extent",
-    "MIN({": "admin_input_extent",
-    ".xmin <= ": "build_admin_where_clause",
+    "MIN(ST_XMin(": "run_admin_join",
+    "MIN({": "run_admin_join",
+    ".xmin <= ": "run_admin_join",
     "_col_": "admin_column_ref",
     "read_parquet(": "AdminDataset.table_reference",
     "geometry_always_xy": "get_duckdb_connection",
@@ -521,33 +521,33 @@ def _projected_points(tmp_path):
     return str(out)
 
 
-def test_one_reprojection_rule_for_partition_and_add():
-    """A non-CRS84 input with no bbox, against an admin dataset with one: both
-    commands reproject the admin side (it has a bbox to rebuild), never the
-    input (#525). partition used to reproject the input here."""
-    from geoparquet_io.core.add.admin_divisions import _build_level_join_query
-    from geoparquet_io.core.partition.admin_hierarchical import _build_enrichment_query
-
-    common = {
-        "admin_select_clause": 'b."country" AS country',
-        "admin_geom_col": "geometry",
-        "admin_bbox_col": "bbox",
-        "input_geom_col": "geometry",
-        "input_bbox_col": None,
-        "source_crs": "EPSG:3857",
-    }
-    add_sql = _build_level_join_query("in.parquet", "admin", boundary_columns=["country"], **common)
-    part_sql = _build_enrichment_query(
-        input_source="in.parquet",
-        admin_table_ref="admin",
-        admin_where_clause="",
-        boundary_columns=["country"],
-        enriched_table="_e",
-        **common,
-    )
-    assert "ST_Transform(\"geometry\", 'OGC:CRS84', 'EPSG:3857')" in add_sql
-    assert 'ST_Transform(a."geometry"' not in add_sql
-    assert part_sql == f"CREATE TEMP TABLE _e AS\n{add_sql}"
+def test_one_reprojection_rule_for_partition_and_add(tmp_path):
+    """A non-CRS84 input with no bbox, against an admin dataset with one: the
+    admin side is reprojected (it has a bbox to rebuild), never the input
+    (#525). partition used to reproject the input here; both commands now
+    build the join in run_admin_join."""
+    steps = []
+    con = du.get_duckdb_connection(load_spatial=True)
+    try:
+        admin_datasets.run_admin_join(
+            con,
+            admin_datasets.OvertureAdminDataset(source_path="admin.parquet"),
+            ["country"],
+            input_path=_projected_points(tmp_path),
+            input_geom_col="geometry",
+            input_bbox_col=None,
+            admin_bbox_col="bbox",
+            select_for=lambda levels, columns: 'b."country" AS country',
+            final_step=steps.append,
+            source_crs="EPSG:3857",
+            dry_run=True,
+            on_step=steps.append,
+        )
+    finally:
+        con.close()
+    (step,) = steps
+    assert "ST_Transform(\"geometry\", 'OGC:CRS84', 'EPSG:3857')" in step.query
+    assert 'ST_Transform(a."geometry"' not in step.query
 
 
 def test_partition_admin_assigns_a_projected_input_without_bbox(tmp_path, local_admin):
@@ -592,3 +592,203 @@ def test_admin_join_connection_materialize_carries_the_memory_limit():
         con.close()
     with pytest.raises(ValueError, match="spill_to_cache"):
         admin_datasets.open_admin_join_connection(spill_to_cache=True, materialize=True)
+
+
+# --- one chain, one predicate, one resolver (#1367 T1d+T1e audit 2) -----------
+
+
+@pytest.mark.parametrize(
+    ("source_crs", "admin_bbox_col", "expected"),
+    [
+        (None, None, False),
+        (None, "bbox", False),
+        ("EPSG:3857", None, True),
+        ("EPSG:3857", "bbox", False),
+    ],
+)
+def test_admin_input_reprojected_is_the_other_side_of_the_rule(
+    source_crs, admin_bbox_col, expected
+):
+    """A non-CRS84 input moves when the admin side cannot (no admin bbox, #525)."""
+    assert admin_datasets.admin_input_reprojected(source_crs, admin_bbox_col) is expected
+    if source_crs:
+        assert expected is not admin_datasets.admin_side_reprojected(source_crs, admin_bbox_col)
+
+
+#: The admin commands that chain one join per level (add, partition).
+CHAIN_CALLERS = ("core/add/admin_divisions.py", "core/partition/admin_hierarchical.py")
+CHAIN_CALLS = {
+    "admin_side_reprojected": "admin_input_reprojected",
+    "admin_input_extent": "run_admin_join",
+    "build_admin_where_clause": "run_admin_join",
+    "build_admin_join_query": "run_admin_join",
+    "get_source_for_level": "run_admin_join",
+    "get_or_cache_dataset": "resolve_admin_dataset",
+    "_setup_admin_dataset": "resolve_admin_dataset",
+}
+
+
+def chain_spellings(source: str) -> list[str]:
+    found = [name for name in CHAIN_CALLS if _calls_named(source, name)]
+    return found + (["_step_"] if _literals_containing(source, "_step_") else [])
+
+
+def test_add_and_partition_leave_the_join_chain_to_admin_datasets():
+    """Reading each level's source, its WHERE (extent read once), the join, the
+    chained temp tables and the table-vs-path rule are run_admin_join's."""
+    found = {}
+    for rel in CHAIN_CALLERS:
+        spelled = chain_spellings((PACKAGE / rel).read_text())
+        if spelled:
+            found[rel] = spelled
+    assert found == {}
+
+
+def test_chain_guard_sees_a_second_chain():
+    source = 'def f(con, i, q):\n    con.execute(f"CREATE TEMP TABLE _x_step_{i} AS {q}")\n'
+    assert chain_spellings(source) == ["_step_"]
+
+
+def test_no_admin_module_imports_the_partition_dataset_setup():
+    """aggregate admin and overview rollup took partition's private setup."""
+    for rel in (*ADMIN_CALLERS, "core/process/overview/rollup.py"):
+        assert "_setup_admin_dataset" not in (PACKAGE / rel).read_text(), rel
+
+
+def _two_level_admin(tmp_path, monkeypatch, *, per_level=True):
+    """An Overture-shaped local file with country and region rows."""
+    admin_file = _write_admin(tmp_path / "admin.parquet")
+    con = duckdb.connect()
+    con.execute("INSTALL spatial; LOAD spatial;")
+    con.execute(
+        f"COPY (SELECT * FROM {sql_path(admin_file)} UNION ALL "
+        f"SELECT 'region', country, country || '-1', geometry, bbox FROM {sql_path(admin_file)}) "
+        f"TO {sql_path(str(tmp_path / 'admin2.parquet'))} (FORMAT PARQUET)"
+    )
+    con.close()
+    path = str(tmp_path / "admin2.parquet")
+
+    class Local(admin_datasets.OvertureAdminDataset):
+        def supports_per_level_sources(self):
+            return per_level
+
+    monkeypatch.setattr(
+        admin_datasets.AdminDatasetFactory,
+        "create",
+        classmethod(
+            lambda cls, dataset_name, source_path=None, verbose=False: Local(
+                source_path=path, verbose=verbose
+            )
+        ),
+    )
+
+
+def _add_two_levels(tmp_path, input_file, *extra):
+    return CliRunner().invoke(
+        cli,
+        [
+            "add",
+            "admin-divisions",
+            input_file,
+            str(tmp_path / "out2.parquet"),
+            "--dataset",
+            "overture",
+            "--levels",
+            "country,region",
+            *extra,
+        ],
+    )
+
+
+def test_per_level_dry_run_prints_every_level(tmp_path, monkeypatch):
+    """The second level's WHERE read its extent off the step-1 temp table, which
+    a dry run never creates: the dry run died on a Catalog Error."""
+    _two_level_admin(tmp_path, monkeypatch)
+    result = _add_two_levels(tmp_path, _write_points(tmp_path / "in.parquet"), "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert "-- Step 2: Add" in result.output
+    assert "FROM _gpio_admin_step_0" in result.output
+
+
+@pytest.mark.parametrize("per_level", [True, False], ids=["per-level", "single-source"])
+def test_the_input_extent_is_read_once(tmp_path, monkeypatch, per_level):
+    _two_level_admin(tmp_path, monkeypatch, per_level=per_level)
+    real = admin_datasets._admin_input_extent
+    relations = []
+
+    def spy(con, input_relation, *args, **kwargs):
+        relations.append(input_relation)
+        return real(con, input_relation, *args, **kwargs)
+
+    monkeypatch.setattr(admin_datasets, "_admin_input_extent", spy)
+    src = _write_points(tmp_path / "in.parquet")
+    result = _add_two_levels(tmp_path, src)
+    assert result.exit_code == 0, result.output
+    assert relations == [sql_path(src)]
+    rows = pq.read_table(tmp_path / "out2.parquet").to_pylist()
+    assert [(r["id"], r["overture_country"], r["overture_region"]) for r in rows] == [
+        (1, "AA", "1"),  # the region code loses its country prefix
+        (2, "AA", "1"),
+        (3, "BB", "1"),
+        (4, None, None),
+    ]
+
+
+def test_no_extent_is_read_without_an_admin_bbox(tmp_path, monkeypatch):
+    """The extent only feeds the admin bbox filter, so without one it is not read."""
+    calls = []
+    monkeypatch.setattr(
+        admin_datasets, "_admin_input_extent", lambda *a, **k: calls.append(a) or (0, 1, 0, 1)
+    )
+    con = du.get_duckdb_connection(load_spatial=True)
+    try:
+        dataset = admin_datasets.OvertureAdminDataset(source_path="admin.parquet")
+        admin_datasets.run_admin_join(
+            con,
+            dataset,
+            ["country"],
+            input_path="in.parquet",
+            input_geom_col="geometry",
+            input_bbox_col=None,
+            admin_bbox_col=None,
+            select_for=lambda levels, columns: 'b."country" AS c',
+            final_step=lambda step: None,
+            dry_run=True,
+        )
+    finally:
+        con.close()
+    assert calls == []
+
+
+def test_one_admin_dataset_resolver_caches_only_for_add(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        admin_datasets,
+        "get_or_cache_dataset",
+        lambda dataset, no_cache=False, verbose=False: calls.append(no_cache) or "cached.parquet",
+    )
+    _, columns, source = admin_datasets.resolve_admin_dataset(
+        "gaul", ["continent"], cache=True, no_cache=True
+    )
+    assert (source, calls) == ("cached.parquet", [True])
+    _, columns_again, source = admin_datasets.resolve_admin_dataset(
+        "gaul", ["continent"], cache=False
+    )
+    assert (source, calls, columns_again) == (None, [True], columns)
+    dataset, _, source = admin_datasets.resolve_admin_dataset("overture", ["country"], cache=True)
+    assert (source, calls) == (None, [True])  # per-level: each level reads its own source
+
+
+def test_admin_join_connection_refuses_a_memory_limit_it_would_not_apply():
+    """Only the materialize shape carries the limit itself; the others run
+    under scoped_write_memory_limit, so a limit passed to them was dropped."""
+    for spill in (True, False):
+        with pytest.raises(ValueError, match="memory_limit"):
+            admin_datasets.open_admin_join_connection(spill_to_cache=spill, memory_limit="1GB")
+
+
+def test_a_single_source_dataset_refuses_a_per_level_source():
+    dataset = admin_datasets.AdminDatasetFactory.create("gaul")
+    assert not dataset.supports_per_level_sources()
+    with pytest.raises(NotImplementedError, match="no per-level sources"):
+        dataset.get_source_for_level("country")

@@ -707,18 +707,27 @@ class TestDirectCopyRegressions:
         self, tmp_path, monkeypatch, places_test_file
     ):
         """--write-memory reaches the admin dataset whose downloads it bounds."""
+        from geoparquet_io.core import admin_datasets
         from geoparquet_io.core.partition import admin_hierarchical as ah
 
         class Stop(Exception):
             pass
 
-        dataset = SimpleNamespace(memory_limit=None)
-        monkeypatch.setattr(ah, "_setup_admin_dataset", lambda *a, **k: (dataset, ["country"]))
+        seen = []
 
-        def stop(*args, **kwargs):
-            raise Stop
+        class FakeDataset:
+            memory_limit = None
 
-        monkeypatch.setattr(ah, "_get_input_file_info", stop)
+            def get_dataset_name(self):
+                return "fake"
+
+            def validate_levels(self, levels):
+                seen.append(self.memory_limit)
+                raise Stop
+
+        monkeypatch.setattr(
+            admin_datasets.AdminDatasetFactory, "create", lambda *a, **k: FakeDataset()
+        )
 
         with pytest.raises(Stop):
             ah.partition_by_admin_hierarchical(
@@ -728,7 +737,7 @@ class TestDirectCopyRegressions:
                 levels=["country"],
                 memory_limit="700MB",
             )
-        assert dataset.memory_limit == "700MB"
+        assert seen == ["700MB"]
 
     def test_add_admin_divisions_hands_write_memory_to_the_dataset(
         self, monkeypatch, places_test_file
@@ -751,7 +760,11 @@ class TestDirectCopyRegressions:
                 seen.append(self.memory_limit)
                 raise Stop
 
-        monkeypatch.setattr(ad.AdminDatasetFactory, "create", lambda *a, **k: FakeDataset())
+        from geoparquet_io.core import admin_datasets
+
+        monkeypatch.setattr(
+            admin_datasets.AdminDatasetFactory, "create", lambda *a, **k: FakeDataset()
+        )
 
         with pytest.raises(Stop):
             ad._setup_dataset_and_columns(

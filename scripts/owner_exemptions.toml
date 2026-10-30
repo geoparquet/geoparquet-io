@@ -621,12 +621,6 @@ reason = "permanent: the same keyword-argument list forwarded to one callee (API
 block = "core.add.a5:add_a5_table|core.add.h3:add_h3_table"
 reason = "index add workflow per index; T5b's index_ops driver"
 [[G3.pylint]]
-block = "core.add.admin_divisions:_execute_per_level_joins|core.str_order:_str_order_file_based"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.add.admin_divisions:add_admin_divisions_multi|core.str_order:_str_order_file_based"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
 block = "core.add.bbox:_add_bbox_streaming|core.stream_io:execute_transform"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
