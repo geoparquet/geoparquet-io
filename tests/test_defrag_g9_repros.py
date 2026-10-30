@@ -394,3 +394,142 @@ def test_1362_output_query_schema_survives_a_variant_column():
     finally:
         con.close()
     assert "id" in schema.names
+
+
+# ---------------------------------------------------------------------------
+# #1030 -- geometry-free aggregate and overview outputs skip the facade's
+# row-group count (one row group for the whole file)
+# ---------------------------------------------------------------------------
+
+#: More rows than one default row group, each in its own H3 cell at r14 and r15,
+#: so a geometry-free output has as many rows as its input.
+ROWS_1030 = 60_000
+
+
+def _row_group_sizes(path) -> list[int]:
+    md = pq.ParquetFile(str(path)).metadata
+    return [md.row_group(i).num_rows for i in range(md.num_row_groups)]
+
+
+def _facade_groups(num_rows: int) -> int:
+    from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
+
+    return -(-num_rows // DEFAULT_ROW_GROUP_ROWS)
+
+
+def test_1030_geometry_free_aggregate_and_overview_get_the_facade_row_groups(tmp_path):
+    """Base (3185269f) wrote ``[60000]`` for both; the geometry branch ``[49152, 10848]``.
+
+    ``grid_common`` and ``overview/run`` called ``pq.write_table`` with no
+    ``row_group_size`` on the ``--out-geometry none`` branch.
+    """
+    from tests._defrag_fixtures import grid_points_table
+
+    src = tmp_path / "pts.parquet"
+    pq.write_table(
+        grid_points_table(ROWS_1030, with_bbox=False).replace_schema_metadata(
+            {b"geo": json.dumps(geo_block()).encode()}
+        ),
+        str(src),
+    )
+    agg = tmp_path / "cells.parquet"
+    result = _run(
+        "process", "aggregate", "h3", src, agg, "--resolution", "15", "--out-geometry", "none"
+    )
+    assert result.exit_code == 0, _explain(result)
+    overview_dir = tmp_path / "levels"
+    overview_dir.mkdir()
+    result = _run("process", "overview", agg, "--levels", "14", "--output-dir", overview_dir)
+    assert result.exit_code == 0, _explain(result)
+    (level,) = sorted(overview_dir.glob("*.parquet"))
+
+    for out in (agg, level):
+        sizes = _row_group_sizes(out)
+        assert sum(sizes) == ROWS_1030, f"{out.name}: the fixture lost its one-row-per-cell shape"
+        assert len(sizes) == _facade_groups(ROWS_1030), f"{out.name}: {sizes}"
+
+
+# ---------------------------------------------------------------------------
+# #1098 -- `check spatial --fix` collapses a file below the input's row groups
+# ---------------------------------------------------------------------------
+
+
+def test_1098_check_spatial_fix_keeps_the_input_row_group_count(tmp_path):
+    """Base: 12 groups of 5,000 shuffled points came back as ``[49152, 10848]``.
+
+    ``fix_spatial_ordering`` wrote ``DEFAULT_ROW_GROUP_ROWS`` whatever the input
+    had, so a file the spatial check could judge (12 groups) left ``--fix`` with
+    two, below the eight it needs to judge at all.
+    """
+    import random
+
+    from tests._defrag_fixtures import grid_points_table
+
+    table = grid_points_table(60_000, with_bbox=False)
+    order = list(range(table.num_rows))
+    random.Random(1098).shuffle(order)
+    src = tmp_path / "unsorted.parquet"
+    pq.write_table(
+        table.take(order).replace_schema_metadata({b"geo": json.dumps(geo_block()).encode()}),
+        str(src),
+        row_group_size=5_000,
+    )
+    out = tmp_path / "fixed.parquet"
+    result = _run("check", "spatial", src, "--fix", "--fix-output", out)
+    assert result.exit_code == 0, _explain(result)
+    assert pq.read_table(str(out)).num_rows == 60_000
+    assert len(_row_group_sizes(out)) >= 12, _row_group_sizes(out)
+
+
+# ---------------------------------------------------------------------------
+# #1215 -- `--row-group-size-mb` is ignored on the plain COPY path and by the
+# streaming strategy
+# ---------------------------------------------------------------------------
+
+
+def _mb_fixture(tmp_path) -> Path:
+    """60,000 rows of about 350 bytes each in one row group, as GeoParquet 2.0."""
+    from tests._defrag_fixtures import grid_points_table
+
+    table = grid_points_table(60_000, with_bbox=False)
+    table = table.append_column(
+        "pad", pa.array([f"{i:08d}" * 40 for i in range(table.num_rows)])
+    ).replace_schema_metadata({b"geo": json.dumps(geo_block()).encode()})
+    v1 = tmp_path / "v1.parquet"
+    pq.write_table(table, str(v1), row_group_size=table.num_rows)
+    v2 = tmp_path / "v2.parquet"
+    result = _run("convert", "geoparquet", v1, v2, "--geoparquet-version", "2.0")
+    assert result.exit_code == 0, _explain(result)
+    return v2
+
+
+def _mb_expected_groups(path, mb: float) -> int:
+    from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+
+    table = pq.read_table(str(path))
+    return -(-table.num_rows // resolve_row_group_rows_for_table(table, None, mb))
+
+
+@pytest.mark.parametrize("path", ["convert", "sort_hilbert", "extract", "table_write_streaming"])
+def test_1215_row_group_size_mb_is_applied_on_every_path(tmp_path, path):
+    """Base: a 2.0 input's plain COPY wrote ``[60000]``, ``streaming`` ``[49152, 10848]``.
+
+    ``resolve_row_group_rows`` answers ``None`` for an MB target (a byte target
+    needs data to measure), and only the strategies measured it: the plain-COPY
+    fast path a 2.0 input takes wrote DuckDB's own 122,880-row default, and the
+    streaming strategy its own 100,000.
+    """
+    import geoparquet_io as gpio
+
+    src = _mb_fixture(tmp_path)
+    out = tmp_path / "out.parquet"
+    if path == "table_write_streaming":
+        gpio.read(str(src)).write(str(out), write_strategy="streaming", row_group_size_mb=4)
+    else:
+        command = {"convert": ("convert", "geoparquet"), "sort_hilbert": ("sort", "hilbert")}
+        args = command.get(path, (path,))
+        result = _run(*args, src, out, "--row-group-size-mb", "4")
+        assert result.exit_code == 0, _explain(result)
+    sizes = _row_group_sizes(out)
+    assert sum(sizes) == 60_000
+    assert len(sizes) == _mb_expected_groups(src, 4) > 1, sizes

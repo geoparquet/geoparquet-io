@@ -70,7 +70,10 @@ from geoparquet_io.core.geometry_repair import (
     repair_query_geometry,
 )
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
-from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+from geoparquet_io.core.parquet_writer import (
+    resolve_output_geoparquet_version,
+    resolve_row_group_rows_for_query,
+)
 from geoparquet_io.core.partition.reader import build_read_parquet_expr, require_parquet_files
 from geoparquet_io.core.remote import (
     _sanitize_url_for_logging,
@@ -1071,6 +1074,13 @@ def _extract_streaming(
             success(f"Extracted data to {output_path}")
 
 
+def _extract_connection(input_parquet: str):
+    """The connection an extraction reads ``input_parquet`` with (S3 auto-detected)."""
+    if needs_httpfs(input_parquet):
+        return get_duckdb_connection_for_s3(input_parquet, load_spatial=True)
+    return get_duckdb_connection(load_spatial=True, load_httpfs=False)
+
+
 def _print_dry_run_output(
     input_parquet: str,
     output_parquet: str,
@@ -1084,6 +1094,8 @@ def _print_dry_run_output(
     query: str,
     compression: str,
     compression_level: int | None,
+    row_group_rows: int | None = None,
+    row_group_size_mb: float | None = None,
 ) -> None:
     """Print dry run output."""
     warn("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n")
@@ -1113,8 +1125,12 @@ def _print_dry_run_output(
 
     from geoparquet_io.core.compression import print_copy_dry_run
 
+    # The count the funnel will resolve, measured the same way for an MB target,
+    # so the printed COPY writes what gpio writes.
+    with _extract_connection(input_parquet) as con:
+        rows = resolve_row_group_rows_for_query(con, query, row_group_rows, row_group_size_mb)
     info("-- Main query:")
-    print_copy_dry_run(query, output_parquet, compression, compression_level)
+    print_copy_dry_run(query, output_parquet, compression, compression_level, rows)
 
 
 def _advise_spatial_stats_on_merge(
@@ -1210,10 +1226,7 @@ def _execute_extraction(
             debug(f"Limiting to {limit:,} rows")
 
     # Use auto-detecting S3 connection for S3 paths
-    if needs_httpfs(input_parquet):
-        con = get_duckdb_connection_for_s3(input_parquet, load_spatial=True)
-    else:
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+    con = _extract_connection(input_parquet)
 
     try:
         # Get total row count from input file metadata (fast - reads footer only)
@@ -1498,6 +1511,8 @@ def _extract_impl(
             query,
             compression,
             compression_level,
+            row_group_rows,
+            row_group_size_mb,
         )
     else:
         _advise_spatial_stats_on_merge(

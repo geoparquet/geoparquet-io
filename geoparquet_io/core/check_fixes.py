@@ -15,6 +15,7 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.add.bbox import add_bbox_column
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata
 from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.duckdb_metadata import get_file_metadata
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
@@ -39,7 +40,10 @@ from geoparquet_io.core.parquet_footer import (
     FooterPatchUnsupported,
     patch_footer_kv,
 )
-from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
+from geoparquet_io.core.parquet_writer import (
+    DEFAULT_ROW_GROUP_ROWS,
+    resolve_row_group_rows_for_rewrite,
+)
 from geoparquet_io.core.remote import (
     get_remote_error_hint,
     is_remote_url,
@@ -540,6 +544,12 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
     # lift that (#941). Same staging as the three COPY-based fixes; a remote
     # in-place fix is not staged, so hilbert_order's own refusal is what the
     # user sees rather than a half-finished upload.
+    # A sort for spatial order must leave as many row groups as it found, or a
+    # file the spatial check could judge comes back as one it cannot (#1098).
+    file_meta = get_file_metadata(parquet_file)
+    row_group_rows = resolve_row_group_rows_for_rewrite(
+        file_meta.get("num_rows", 0), file_meta.get("num_row_groups", 0)
+    )
     with _staged_output(output_file) as destination:
         hilbert_order(
             input_parquet=parquet_file,
@@ -548,7 +558,7 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
             verbose=verbose,
             compression=None,
             compression_level=None,
-            row_group_rows=DEFAULT_ROW_GROUP_ROWS,
+            row_group_rows=row_group_rows,
             profile=profile,
             overwrite=True,  # check --fix manages file lifecycle
         )

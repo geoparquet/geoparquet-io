@@ -36,7 +36,7 @@ from geoparquet_io.core.compression import (
     resolve_process_compression_level,
 )
 from geoparquet_io.core.derive_geo_from_file import _rewrite_writer_kwargs
-from geoparquet_io.core.parquet_writer import ParquetWriteSettings
+from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS, ParquetWriteSettings
 
 requires_coarsen = pytest.mark.skipif(
     find_spec("coarsen") is None, reason="requires the simplify extra (coarsen)"
@@ -131,7 +131,10 @@ class TestGlobalDefaultIsUnchanged:
 
     def test_the_write_facade_leaves_the_default_to_the_owner(self):
         assert ParquetWriteSettings().compression_level is None
-        assert ParquetWriteSettings().get_pyarrow_kwargs()["compression_level"] == 15
+        assert (
+            ParquetWriteSettings().get_pyarrow_kwargs(DEFAULT_ROW_GROUP_ROWS)["compression_level"]
+            == 15
+        )
 
     def test_a_plain_funnel_write_lands_on_fifteen(self, tmp_path, levels):
         from geoparquet_io.core.write_funnels import write_geoparquet_table

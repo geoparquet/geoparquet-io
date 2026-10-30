@@ -280,6 +280,13 @@ _ROW_GROUP_SIZE_HELP = (
     f"{DEFAULT_ROW_GROUP_ROWS:,} if --row-group-size-mb not set)"
 )
 
+_ROW_GROUP_SIZE_MB_HELP = (
+    "Target row group size (e.g. '256MB', '1GB', '128' assumes MB). The rows' "
+    "average size is measured once and the target becomes a row count, snapped "
+    f"to a whole {WRITER_VECTOR_ROWS:,}-row writer vector and never below one "
+    "vector. Mutually exclusive with --row-group-size"
+)
+
 
 def row_group_options(func):
     """
@@ -302,9 +309,7 @@ def row_group_options(func):
         default=None,
         help=_ROW_GROUP_SIZE_HELP,
     )(func)
-    func = click.option(
-        "--row-group-size-mb", help="Target row group size (e.g. '256MB', '1GB', '128' assumes MB)"
-    )(func)
+    func = click.option("--row-group-size-mb", help=_ROW_GROUP_SIZE_MB_HELP)(func)
     return func
 
 

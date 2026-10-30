@@ -18,7 +18,6 @@ from geoparquet_io.core.column_selection import (
     resolve_columns_against_schema,
     split_column_list,
 )
-from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     describe_query,
@@ -41,9 +40,7 @@ from geoparquet_io.core.logging_config import (
     warn,
 )
 from geoparquet_io.core.memory_limits import bound_open_connection
-from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
-from geoparquet_io.core.remote import remote_write_context, upload_if_remote
-from geoparquet_io.core.write_funnels import write_geoparquet_table
+from geoparquet_io.core.write_funnels import write_geoparquet_table, write_plain_parquet_table
 
 # Regex patterns for GCP resource validation
 # Project IDs: 6-30 chars, lowercase letters, digits, hyphens, must start with letter
@@ -1567,38 +1564,22 @@ def _execute_bigquery_extraction(
                     edges=final_edges,
                 )
             else:
-                # No geometry: plain Parquet, but with the row-group count the
-                # geometry branch above gets. This used to hand pq.write_table a
-                # byte count where a row count goes -- `--row-group-size-mb 128`
-                # asked for 134,217,728 rows per group -- and None when no flag
-                # was given, so DEFAULT_ROW_GROUP_ROWS never applied and the
-                # output was one row group for the whole file (#1021).
-                #
-                # It stays a direct write rather than routing through
-                # write_geoparquet_table because that helper reads
-                # geometry_column=None as "auto-detect by name": it would call a
-                # plain VARCHAR column named `geom` or `shape` geometry and
-                # stamp a geo key on it, which is precisely what BigQuery's own
-                # schema said this table does not have.
-                #
-                # The codec and level still resolve through the owner (an
-                # unvalidated `UNCOMPRESSED` raised from pyarrow, and an unset
-                # level was pyarrow's ZSTD 1), and a remote URL is staged and
-                # uploaded as the geometry branch does (#1026).
-                import pyarrow.parquet as pq
-
-                codec = resolve_codec(compression, compression_level, context="write")
-                with remote_write_context(output_parquet, verbose=verbose) as (local, is_remote):
-                    pq.write_table(
-                        result,
-                        local,
-                        **codec.pyarrow_kwargs(),
-                        row_group_size=resolve_row_group_rows_for_table(
-                            result, row_group_rows, row_group_size_mb
-                        ),
-                    )
-                    if is_remote:
-                        upload_if_remote(local, output_parquet, verbose=verbose)
+                # No geometry: plain Parquet through the geometry-free funnel,
+                # which takes the row-group count, codec and level the geometry
+                # branch above gets and stages a remote output (#1021, #1026).
+                # Not write_geoparquet_table: it reads geometry_column=None as
+                # "auto-detect by name" and would stamp a geo key on a plain
+                # VARCHAR column named `geom` or `shape`, which is precisely
+                # what BigQuery's own schema said this table does not have.
+                write_plain_parquet_table(
+                    result,
+                    output_parquet,
+                    compression=compression,
+                    compression_level=compression_level,
+                    row_group_size_mb=row_group_size_mb,
+                    row_group_rows=row_group_rows,
+                    verbose=verbose,
+                )
 
             success(f"Extracted {row_count:,} rows to {output_parquet}")
             return None

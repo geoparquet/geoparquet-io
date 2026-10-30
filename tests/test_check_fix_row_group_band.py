@@ -153,7 +153,10 @@ class TestTheFixDefaultIsDerivedRatherThanTyped:
         """
         requested = set(re.findall(r"row_group_rows=([^,\n)]+)", CHECK_FIXES_SOURCE))
 
-        assert requested == {"DEFAULT_ROW_GROUP_ROWS"}, (
+        # `row_group_rows` is fix_spatial_ordering's answer from the facade's
+        # resolve_row_group_rows_for_rewrite, which keeps the input's group
+        # count (#1098) and is DEFAULT_ROW_GROUP_ROWS whenever that already does.
+        assert requested == {"DEFAULT_ROW_GROUP_ROWS", "row_group_rows"}, (
             "core/check_fixes.py asks a writer for a row-group size that is not "
             "the derived sort default. Use DEFAULT_ROW_GROUP_ROWS so the "
             f"value stays inside SPATIAL_ROW_COUNT_RANGE (#972). Found: {sorted(requested)}"

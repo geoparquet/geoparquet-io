@@ -954,9 +954,10 @@ def test_1026_bigquery_plain_branch_writes_to_a_remote_url(tmp_path, monkeypatch
     def fake_upload(local_path, remote_path, *args, **kwargs):
         uploaded[remote_path] = Path(local_path).read_bytes()
 
-    import geoparquet_io.core.extract_bigquery as bq
+    # The geometry-free branch stages and uploads through the plain-table funnel.
+    import geoparquet_io.core.write_funnels as funnels
 
-    monkeypatch.setattr(bq, "upload_if_remote", fake_upload, raising=False)
+    monkeypatch.setattr(funnels, "upload_if_remote", fake_upload)
     _bigquery_plain("s3://bucket/plain.parquet")
     assert list(uploaded) == ["s3://bucket/plain.parquet"]
     local = tmp_path / "landed.parquet"
@@ -1155,6 +1156,7 @@ def test_add_computed_column_dry_run_prints_the_owner_clauses(caplog):
     import logging
 
     from geoparquet_io.core.common import add_computed_column
+    from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
 
     with caplog.at_level(logging.INFO, logger="geoparquet_io"):
         add_computed_column(
@@ -1165,7 +1167,7 @@ def test_add_computed_column_dry_run_prints_the_owner_clauses(caplog):
             dry_run=True,
             compression="GZIP",
         )
-    assert "COMPRESSION GZIP);" in caplog.text
+    assert f"COMPRESSION GZIP, ROW_GROUP_SIZE {DEFAULT_ROW_GROUP_ROWS});" in caplog.text
     assert "Using GZIP:6 compression" in caplog.text
 
 
@@ -1184,10 +1186,11 @@ def test_one_spatial_join_dry_run_display(caplog, strategy, note):
     from geoparquet_io.core.duckdb_utils import print_spatial_join_dry_run
 
     with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-        print_spatial_join_dry_run(strategy, " SELECT 1 ", "o'brien.parquet", "BROTLI", None)
+        print_spatial_join_dry_run(strategy, " SELECT 1 ", "o'brien.parquet", "BROTLI", None, 2_048)
     assert note in caplog.text
-    assert "COPY (SELECT 1)\nTO 'o''brien.parquet'\n(FORMAT PARQUET, COMPRESSION BROTLI);" in (
-        caplog.text
+    assert (
+        "COPY (SELECT 1)\nTO 'o''brien.parquet'\n(FORMAT PARQUET, COMPRESSION BROTLI, ROW_GROUP_SIZE 2048);"
+        in (caplog.text)
     )
     assert "Using BROTLI:11 compression" in caplog.text
 
@@ -1240,8 +1243,11 @@ def test_one_copy_dry_run_body(caplog, codec, level, clause, note):
     from geoparquet_io.core.compression import print_copy_dry_run
 
     with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-        print_copy_dry_run(" SELECT 1 ", "o'brien.parquet", codec, level)
-    assert f"COPY (SELECT 1)\nTO 'o''brien.parquet'\n(FORMAT PARQUET, {clause});" in caplog.text
+        print_copy_dry_run(" SELECT 1 ", "o'brien.parquet", codec, level, 4_096)
+    assert (
+        f"COPY (SELECT 1)\nTO 'o''brien.parquet'\n(FORMAT PARQUET, {clause}, ROW_GROUP_SIZE 4096);"
+        in caplog.text
+    )
     assert f"Using {note} compression" in caplog.text
 
 

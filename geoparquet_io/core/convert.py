@@ -2877,9 +2877,9 @@ def _read_spatial_to_arrow(
 #: point of streaming. Stroking multiplies a geometry's size (an arc becomes
 #: ~90 vertices), so the batch has to be small: on a 50k-row curved GeoPackage,
 #: peak RSS was 503 MB at the default and 100k rows, 395 MB at 20k, 370 MB at
-#: 5k, with no measurable difference in wall time. The repo's generic
-#: ``DEFAULT_BATCH_SIZE`` (100k, write_strategies/arrow_streaming.py) is too
-#: coarse here for that reason.
+#: 5k, with no measurable difference in wall time. A write's row-group-sized
+#: batch (49,152 rows, ``parquet_writer.DEFAULT_ROW_GROUP_ROWS``) is too coarse
+#: here for that reason.
 _LINEARIZE_BATCH_ROWS = 20_000
 
 

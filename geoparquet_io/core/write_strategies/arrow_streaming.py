@@ -51,6 +51,8 @@ from geoparquet_io.core.geoarrow_encoding import (
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.parquet_writer import (
     apply_output_kv_metadata,
+    resolve_row_group_rows_for_query,
+    resolve_row_group_rows_for_table,
     without_geometry_dictionary,
 )
 from geoparquet_io.core.write_strategies.base import (
@@ -62,9 +64,6 @@ from geoparquet_io.core.write_strategies.base import (
 
 if TYPE_CHECKING:
     import duckdb
-
-# Default batch size for streaming (100K rows per batch)
-DEFAULT_BATCH_SIZE = 100_000
 
 
 def _is_wkb_carrier(field: pa.Field) -> bool:
@@ -323,7 +322,12 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         # One owner validates and resolves the codec; the writers take its kwargs.
         codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
 
-        batch_size = row_group_rows or DEFAULT_BATCH_SIZE
+        # Each batch becomes one row group, so the batch size is the facade's
+        # row-group count -- an MB target included. This read 100,000 whenever
+        # no row count came in, a second default beside the facade's (#1215).
+        batch_size = resolve_row_group_rows_for_query(
+            con, query, row_group_rows, row_group_size_mb, verbose
+        )
 
         # Handle non-geo queries: write plain Parquet without geo metadata
         if geometry_column is None:
@@ -738,7 +742,10 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
 
         codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
 
-        batch_size = row_group_rows or DEFAULT_BATCH_SIZE
+        # Each batch becomes one row group; see write_from_query.
+        batch_size = resolve_row_group_rows_for_table(
+            table, row_group_rows, row_group_size_mb, verbose=verbose
+        )
 
         # Handle non-geo tables: write plain Parquet without geo metadata
         if geometry_column is None:
@@ -877,7 +884,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         batches_written = 0
 
         with pq.ParquetWriter(output_path, schema_with_meta, **writer_kwargs) as writer:
-            for batch in table.to_batches(max_chunksize=batch_size):
+            for batch in _rebatch(table.to_batches(), batch_size):
                 rows, groups = self._write_batch(
                     writer,
                     batch,
@@ -1064,7 +1071,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             debug(f"Writing plain Parquet in batches of {batch_size:,}...")
 
         with pq.ParquetWriter(output_path, table.schema, **writer_kwargs) as writer:
-            for batch in table.to_batches(max_chunksize=batch_size):
+            for batch in _rebatch(table.to_batches(), batch_size):
                 table_batch = pa.Table.from_batches([batch], schema=table.schema)
                 writer.write_table(table_batch)
                 rows_written += batch.num_rows

@@ -20,6 +20,7 @@ from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
+from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_query
 from geoparquet_io.core.remote import _sanitize_url_for_logging, is_remote_url
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
@@ -377,13 +378,17 @@ def _print_dry_run_query(
     input_bbox_col,
     countries_bbox_col,
     has_native_geometry=False,
+    *,
+    row_group_rows,
 ):
-    """Print the dry-run query output."""
+    """Print the dry-run query output, with the row-group count the write resolves."""
     final_step = "3" if using_default else "1"
     info(f"-- Step {final_step}: Main spatial join query")
 
     strategy = spatial_join_strategy(has_native_geometry, input_bbox_col, countries_bbox_col)
-    print_spatial_join_dry_run(strategy, query, output_parquet, compression, compression_level)
+    print_spatial_join_dry_run(
+        strategy, query, output_parquet, compression, compression_level, row_group_rows
+    )
 
 
 def _output_has_subdivision(con, output_parquet):
@@ -702,6 +707,9 @@ def add_country_codes(
                 input_bbox_col,
                 countries_bbox_col,
                 has_native_geometry,
+                row_group_rows=resolve_row_group_rows_for_query(
+                    con, query, row_group_rows, row_group_size_mb
+                ),
             )
             return
 

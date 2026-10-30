@@ -611,9 +611,14 @@ class TestDirectCopyMemoryLimit:
         assert scopes == [None] * len(dataset.get_available_levels())
 
     def test_bbox_metadata_rewrite_fallback_is_memory_bounded(self, monkeypatch, places_v11_file):
-        """The full-file rewrite behind an unpatchable footer is bounded too."""
+        """The full-file rewrite behind an unpatchable footer is bounded too.
+
+        It is the query funnel's write now, so the bound is the funnel's: the
+        duckdb-kv strategy wraps its COPY in ``scoped_write_memory_limit``.
+        """
         from geoparquet_io.core.add import bbox_metadata as bm
         from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
+        from geoparquet_io.core.write_strategies import duckdb_kv
 
         def refuse(*args, **kwargs):
             raise FooterPatchUnsupported("forced for the test")
@@ -621,7 +626,7 @@ class TestDirectCopyMemoryLimit:
         monkeypatch.setattr(bm, "patch_footer_kv", refuse)
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
         seen = []
-        self._spy_scoped_limit(monkeypatch, bm, seen)
+        self._spy_scoped_limit(monkeypatch, duckdb_kv, seen)
 
         bm.add_bbox_metadata(places_v11_file)
 

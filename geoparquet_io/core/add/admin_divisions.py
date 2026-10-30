@@ -30,6 +30,7 @@ from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
+from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_query
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import _sanitize_url_for_logging, is_remote_url
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
@@ -649,6 +650,10 @@ def _handle_dry_run_mode(
     compression_level,
     has_native_geometry=False,
     input_geom_rewritten=False,
+    *,
+    con,
+    row_group_rows=None,
+    row_group_size_mb=None,
 ):
     """Handle dry-run mode output."""
     if not dry_run:
@@ -668,7 +673,14 @@ def _handle_dry_run_mode(
     strategy = spatial_join_strategy(
         has_native_geometry, input_bbox_col, admin_bbox_col, input_geom_rewritten
     )
-    print_spatial_join_dry_run(strategy, query, output_parquet, compression, compression_level)
+    print_spatial_join_dry_run(
+        strategy,
+        query,
+        output_parquet,
+        compression,
+        compression_level,
+        resolve_row_group_rows_for_query(con, query, row_group_rows, row_group_size_mb),
+    )
     return True
 
 
@@ -965,6 +977,9 @@ def add_admin_divisions_multi(
                     input_geom_rewritten=(
                         bool(source_crs) and not _admin_reprojected(source_crs, admin_bbox_col)
                     ),
+                    con=con,
+                    row_group_rows=row_group_rows,
+                    row_group_size_mb=row_group_size_mb,
                 ):
                     return
 

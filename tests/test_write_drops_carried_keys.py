@@ -351,7 +351,7 @@ def test_caller_extras_named_like_carried_keys_survive(strategy, tmp_path):
 def test_query_write_in_memory_keeps_a_caller_pandas_extra(tmp_path):
     """The in-memory ``write_from_query`` must hand its extras to the final write too.
 
-    ``_write_table_with_settings`` applies the facade again just before
+    ``parquet_writer.write_arrow_table`` applies the facade again just before
     ``pq.write_table``. Without the extras there, it drops a ``pandas`` extra.
     """
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection

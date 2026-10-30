@@ -30,7 +30,6 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.arrow_geo_metadata import (
     _apply_geoparquet_metadata,
     _normalize_arrow_large_types,
-    _write_table_with_settings,
     nonplanar_edges_from_schema,
     with_planar_edge_types,
 )
@@ -111,6 +110,8 @@ from geoparquet_io.core.parquet_writer import (
     resolve_input_crs,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
+    resolve_row_group_rows_for_query,
+    write_arrow_table,
 )
 from geoparquet_io.core.remote import remote_write_context, upload_if_remote
 from geoparquet_io.core.write_strategies import (
@@ -1350,7 +1351,13 @@ def write_parquet_with_metadata(
     # Answering only the version made the output native 2.0 while leaving its
     # `geo` block with no `crs` key -- EPSG:5070 in the Parquet GEOMETRY logical
     # type, OGC:CRS84 in the geo block, one file disagreeing with itself (#993).
-    row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
+    #
+    # An MB target is measured here, once, so the plain-COPY fast path a 2.0
+    # input takes honours it too -- it used to reach DuckDB's own 122,880-row
+    # default while the strategies measured it each for themselves (#1215).
+    row_group_rows = resolve_row_group_rows_for_query(
+        con, query, row_group_rows, row_group_size_mb, verbose
+    )
     geoparquet_version = resolve_output_geoparquet_version(
         geoparquet_version,
         input_file=input_file,
@@ -1818,7 +1825,7 @@ def write_geoparquet_table(
             )
 
         # Write to disk with proper settings
-        _write_table_with_settings(
+        write_arrow_table(
             table,
             actual_output,
             compression=codec.name,
@@ -1851,3 +1858,95 @@ def write_geoparquet_table(
                 is_directory=False,
                 verbose=verbose,
             )
+
+
+def write_plain_parquet_table(
+    table,
+    output_file: str,
+    compression: str | None = None,
+    compression_level: int | None = None,
+    row_group_size_mb: float | None = None,
+    row_group_rows: int | None = None,
+    verbose: bool = False,
+    profile: str | None = None,
+) -> None:
+    """Write a PyArrow Table that has no geometry, as plain Parquet.
+
+    The geometry-free sibling of :func:`write_geoparquet_table`, for outputs
+    that have no geometry by request -- ``process aggregate`` and
+    ``process overview`` with ``--out-geometry none``, a BigQuery table with no
+    geography column. Those branches called ``pq.write_table`` themselves and so
+    decided the facade's questions for themselves: no ``row_group_size`` (one
+    row group for the whole file, #1030), a byte count where a row count goes
+    (#1021), the codec unvalidated and the level pyarrow's (#1026).
+
+    It is a separate funnel rather than ``write_geoparquet_table`` with
+    ``geometry_column=None``, because that reads ``None`` as "auto-detect by
+    name" and would call a plain column named ``geom`` or ``shape`` geometry.
+    Here nothing is geometry: no ``geo`` key is written (the facade's fourth
+    decision for a geometry-less output), every other file-level key the table
+    carries is kept, and a remote output is staged and uploaded.
+    """
+    # Validated before any staging, so a bad value fails the same way it does
+    # on every other write.
+    resolve_row_group_rows(row_group_rows, row_group_size_mb)
+    with remote_write_context(output_file, is_directory=False, verbose=verbose) as (
+        actual_output,
+        is_remote,
+    ):
+        write_arrow_table(
+            table,
+            actual_output,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_rows=row_group_rows,
+            row_group_size_mb=row_group_size_mb,
+            geoparquet_version="parquet-geo-only",
+            geometry_column=None,
+            verbose=verbose,
+        )
+        if is_remote:
+            upload_if_remote(
+                actual_output, output_file, profile=profile, is_directory=False, verbose=verbose
+            )
+
+
+def write_aggregate_table(
+    table,
+    output_file: str,
+    out_geometry: str,
+    *,
+    compression: str | None = None,
+    compression_level: int | None = None,
+    geoparquet_version: str | None = None,
+    verbose: bool = False,
+    geo_bbox: list[float] | None = None,
+) -> None:
+    """Write a ``process aggregate`` / ``process overview`` result: the door chooses.
+
+    Those commands take ``--out-geometry``, and ``none`` means the output has no
+    geometry by request. The answer to "which table door" is the funnel's, so it
+    is asked here once: ``none`` goes to :func:`write_plain_parquet_table`, any
+    other value to :func:`write_geoparquet_table` with the result's
+    ``geometry`` column. Each command used to carry the same ``if`` and both
+    calls itself.
+    """
+    if out_geometry == "none":
+        write_plain_parquet_table(
+            table,
+            output_file,
+            compression=compression,
+            compression_level=compression_level,
+            verbose=verbose,
+        )
+        return
+    write_geoparquet_table(
+        table,
+        output_file,
+        geometry_column="geometry",
+        compression=compression,
+        compression_level=compression_level,
+        geoparquet_version=geoparquet_version,
+        verbose=verbose,
+        geo_bbox=geo_bbox,
+    )

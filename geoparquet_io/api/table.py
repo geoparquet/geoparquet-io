@@ -1443,7 +1443,7 @@ class Table:
 
         from geoparquet_io.core.parquet_writer import (
             note_duckdb_copy_rounding,
-            resolve_row_group_rows,
+            resolve_row_group_rows_for_table,
         )
         from geoparquet_io.core.remote import is_remote_url
         from geoparquet_io.core.upload import upload
@@ -1458,8 +1458,10 @@ class Table:
         # 50000` wrote 49,152 (#971), and passing nothing at all inherited
         # DuckDB's 122,880. The parameter name travels with the call so a
         # rejected value blames `row_group_rows`, not a CLI flag this caller
-        # never typed.
-        row_group_rows = resolve_row_group_rows(
+        # never typed. An MB target is measured on this table here, once, so
+        # the four strategies write the same groups for it (#1215).
+        row_group_rows = resolve_row_group_rows_for_table(
+            self._table,
             row_group_rows,
             row_group_size_mb,
             param_name="row_group_rows",

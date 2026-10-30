@@ -18,7 +18,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.parquet_writer import ParquetWriteSettings, dictionary_columns
+from geoparquet_io.core.parquet_writer import (
+    DEFAULT_ROW_GROUP_ROWS,
+    ParquetWriteSettings,
+    dictionary_columns,
+)
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 DICT = "RLE_DICTIONARY"
@@ -103,12 +107,15 @@ class TestDictionaryColumns:
     def test_settings_pass_the_list_to_pyarrow(self):
         schema = pa.schema([("name", pa.string()), ("geometry", pa.binary())])
         kwargs = ParquetWriteSettings().get_pyarrow_kwargs(
-            schema=schema, geometry_columns=["geometry"]
+            DEFAULT_ROW_GROUP_ROWS, schema=schema, geometry_columns=["geometry"]
         )
         assert kwargs["use_dictionary"] == ["name"]
 
     def test_settings_without_a_schema_keep_the_default(self):
-        assert ParquetWriteSettings().get_pyarrow_kwargs()["use_dictionary"] is True
+        assert (
+            ParquetWriteSettings().get_pyarrow_kwargs(DEFAULT_ROW_GROUP_ROWS)["use_dictionary"]
+            is True
+        )
 
 
 class TestArrowFunnel:
@@ -360,12 +367,6 @@ _EXEMPT = {
     ("api/ops.py", "_file_round_trip"): "scratch copy of the input table",
     ("api/ops.py", "_table_to_temp_parquet_and_convert"): "scratch copy of the input table",
     ("benchmarks/operations.py", "_run_write"): "measures a plain pyarrow write",
-    ("core/extract_bigquery.py", "_execute_bigquery_extraction"): (
-        "the no-geography branch, BigQuery said there is no geometry"
-    ),
-    ("core/process/aggregate/by_admin.py", "aggregate_by_admin"): "out_geometry none",
-    ("core/process/aggregate/grid_common.py", "aggregate_grid_file"): "out_geometry none",
-    ("core/process/overview/run.py", "_write_overview"): "out_geometry none",
     ("core/write_strategies/arrow_streaming.py", "_write_all_batches"): (
         "takes writer_kwargs from write_from_query, which asks the facade"
     ),
@@ -377,9 +378,6 @@ _EXEMPT = {
         "core/write_strategies/arrow_streaming.py",
         "_write_plain_parquet_from_query",
     ): "no geometry column",
-    ("core/write_strategies/disk_rewrite.py", "_write_plain_parquet_from_table"): (
-        "no geometry column"
-    ),
 }
 
 

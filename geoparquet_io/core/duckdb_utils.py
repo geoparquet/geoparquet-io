@@ -964,17 +964,19 @@ def print_spatial_join_dry_run(
     output_parquet: str,
     compression: str | None,
     compression_level: int | None,
+    row_group_rows: int,
 ) -> None:
     """Print the dry run of a spatial-join ``COPY`` (``add admin-divisions``/``country-codes``).
 
     The strategy note says which predicate runs (#538); the COPY itself is
-    printed by the one display body, ``core.compression.print_copy_dry_run``.
+    printed by the one display body, ``core.compression.print_copy_dry_run``,
+    with the row-group count the caller's funnel resolves.
     """
     from geoparquet_io.core.compression import print_copy_dry_run
     from geoparquet_io.core.logging_config import info
 
     info(_SPATIAL_JOIN_NOTES[strategy])
-    print_copy_dry_run(query, output_parquet, compression, compression_level)
+    print_copy_dry_run(query, output_parquet, compression, compression_level, row_group_rows)
     info("-- Original metadata would also be preserved in the output file")
 
 
