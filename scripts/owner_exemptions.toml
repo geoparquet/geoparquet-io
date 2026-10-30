@@ -701,10 +701,18 @@ block = "cli.commands.add:add_h3|cli.commands.sort:str_order_command"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
 block = "cli.commands.process:process_aggregate_a5|core.process.aggregate.by_h3:aggregate_by_h3"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+count = 2
+reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
 [[G3.pylint]]
 block = "cli.commands.process:process_aggregate_h3|core.process.aggregate.by_a5:aggregate_by_a5"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+count = 2
+reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
+[[G3.pylint]]
+block = "api.ops:_sub_partition|cli.commands.partition:partition_h3"
+reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
+[[G3.pylint]]
+block = "cli.commands.partition:partition_s2|cli.decorators:handle_directory_sub_partition"
+reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
 [[G3.pylint]]
 block = "core.add.a5:_add_a5_streaming.make_query|core.add.bbox:_make_streaming_bbox_query"
 reason = "the LIMIT 0 probe, STANDARD_GEOMETRY_NAMES loop and literal 'geometry' fallback (concept 7); T3c's primary_geometry_column"
