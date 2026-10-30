@@ -161,7 +161,7 @@ def test_the_detector_flags_a_raw_report_and_passes_a_sanitized_one():
 
 def test_the_detector_flags_a_click_error_built_from_an_exception_argument():
     """No ``except`` body here: the helper is handed the exception."""
-    by_name = "def to_click(exc):\n    return click.ClickException(exc.reason)\n"
+    by_name = "def to_click(exc):\n    return click.ClickException(exc.args[0])\n"
     by_annotation = "def to_click(problem: Exception):\n    raise click.UsageError(str(problem))\n"
     clean = "def to_click(exc):\n    return click.ClickException(clean_error_text(str(exc)))\n"
     assert unsanitized_reports(by_name) == [("to_click", 2)]
