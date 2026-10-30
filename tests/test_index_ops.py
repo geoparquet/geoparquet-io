@@ -19,6 +19,31 @@ from geoparquet_io.core.index_ops import (
 )
 from tests.test_spatial_index_golden import A5_BUILD_CELLS, GOLDEN, INDEX_SPECS, golden_fixture
 
+#: The names only an index streaming copy calls. ``computed_column_query`` is not
+#: one of them: it is the general ``duckdb_utils`` composer every computed-column
+#: write uses, so keying on it flagged any ``make_query`` that adds a column.
+INDEX_ONLY_NAMES = frozenset(
+    {"index_expression", "load_index"}
+    | {f"_make_add_{name}_query" for name in ("h3", "a5", "s2", "quadkey")}
+)
+
+
+def _index_workflow_copies(path: Path, source: str) -> list[str]:
+    copies = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        ensure_copy = node.name.startswith("_ensure_") and node.name.endswith("_column")
+        called = {
+            child.id if isinstance(child, ast.Name) else child.attr
+            for child in ast.walk(node)
+            if isinstance(child, (ast.Name, ast.Attribute))
+        }
+        streaming_copy = node.name == "make_query" and bool(called & INDEX_ONLY_NAMES)
+        if ensure_copy or streaming_copy:
+            copies.append(f"{path}:{node.name}")
+    return copies
+
 
 def test_index_workflows_have_one_owner():
     root = Path(__file__).parents[1] / "geoparquet_io"
@@ -26,22 +51,36 @@ def test_index_workflows_have_one_owner():
     for path in root.rglob("*.py"):
         if path.name == "index_ops.py":
             continue
-        for node in ast.walk(ast.parse(path.read_text())):
-            if not isinstance(node, ast.FunctionDef):
-                continue
-            ensure_copy = node.name.startswith("_ensure_") and node.name.endswith("_column")
-            streaming_copy = node.name == "make_query" and any(
-                isinstance(child, ast.Name)
-                and (
-                    child.id == "computed_column_query"
-                    or child.id
-                    in {f"_make_add_{name}_query" for name in ("h3", "a5", "s2", "quadkey")}
-                )
-                for child in ast.walk(node)
-            )
-            if ensure_copy or streaming_copy:
-                copies.append(f"{path.relative_to(root)}:{node.name}")
+        copies += _index_workflow_copies(path.relative_to(root), path.read_text())
     assert copies == [], f"{len(copies)} index workflow copies: {copies}"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "    return computed_column_query(src, 'h3', index_expression(spec, 'g', 9))\n",
+        "    load_index(con, spec)\n    return q\n",
+        "    return index_ops.index_expression(spec, 'g', 9)\n",
+        "    return _make_add_h3_query(src)\n",
+    ],
+)
+def test_index_workflow_guard_catches_a_streaming_copy(body):
+    source = f"def make_query(src, con, crs, md):\n{body}"
+    assert _index_workflow_copies(Path("plant.py"), source) == ["plant.py:make_query"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # A general computed-column streaming add is not an index copy (S1).
+        "def make_query(src, con, crs, md):\n"
+        "    return computed_column_query(src, 'area', 'ST_Area(geometry)')\n",
+        # The index names outside a make_query are a caller, not a copy.
+        "def run(spec):\n    return index_expression(spec, 'g', 9)\n",
+    ],
+)
+def test_index_workflow_guard_leaves_near_misses_alone(source):
+    assert _index_workflow_copies(Path("plant.py"), source) == []
 
 
 INDICES = ("h3", "a5", "s2", "quadkey")
