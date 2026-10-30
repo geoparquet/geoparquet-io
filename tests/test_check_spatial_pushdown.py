@@ -3,9 +3,9 @@
 import pytest
 
 from geoparquet_io.core.check_spatial_order import (
+    _axis_overlap_share,
     _compute_data_extent,
-    _compute_skip_rate_for_query,
-    _generate_sample_query_bboxes,
+    _weighted_skip_rate,
     check_spatial_pushdown_readiness,
 )
 
@@ -35,87 +35,60 @@ class TestComputeDataExtent:
             _compute_data_extent([])
 
 
-class TestGenerateSampleQueryBboxes:
-    """Tests for _generate_sample_query_bboxes helper."""
+class TestAxisOverlapShare:
+    """Tests for the one-axis closed form the expected skip rate is built from."""
 
-    def test_generates_requested_count(self):
-        """Should generate the requested number of sample bboxes."""
+    def test_source_inside_the_grown_target_is_always_hit(self):
+        assert _axis_overlap_share(0.0, 100.0, 0.0, 100.0, 10.0) == 1.0
+
+    def test_source_beside_the_target_overlaps_by_the_grown_margin(self):
+        """Centre uniform on [0, 10]; target [10, 20] grown by 5 starts at 5 -> 5/10."""
+        assert _axis_overlap_share(0.0, 10.0, 10.0, 20.0, 5.0) == pytest.approx(0.5)
+
+    def test_disjoint_source_and_target_never_overlap(self):
+        assert _axis_overlap_share(0.0, 10.0, 50.0, 60.0, 5.0) == 0.0
+
+    def test_larger_window_hits_more(self):
+        small = _axis_overlap_share(0.0, 40.0, 40.0, 50.0, 5.0)
+        large = _axis_overlap_share(0.0, 40.0, 40.0, 50.0, 25.0)
+        assert large > small
+
+    def test_degenerate_span_is_an_indicator(self):
+        """A zero-width span puts all its probability on one coordinate."""
+        assert _axis_overlap_share(5.0, 5.0, 5.0, 5.0, 0.0) == 1.0
+        assert _axis_overlap_share(5.0, 5.0, 6.0, 7.0, 0.5) == 0.0
+        assert _axis_overlap_share(5.0, 5.0, 5.5, 7.0, 0.5) == 1.0
+
+
+class TestWeightedSkipRate:
+    """Tests for _weighted_skip_rate, the closed form of the spec's skip rate."""
+
+    def test_boxes_covering_the_extent_skip_nothing(self):
         extent = {"xmin": 0.0, "ymin": 0.0, "xmax": 100.0, "ymax": 100.0}
-        samples = _generate_sample_query_bboxes(extent, num_samples=5, query_fraction=0.1)
-        assert len(samples) == 5
+        rg_bboxes = [{"row_group_id": i, **extent} for i in range(2)]
+        assert _weighted_skip_rate(rg_bboxes, query_fraction=0.1) == 0.0
 
-    def test_sample_within_extent(self):
-        """Generated bboxes should be within the data extent."""
-        extent = {"xmin": -180.0, "ymin": -90.0, "xmax": 180.0, "ymax": 90.0}
-        samples = _generate_sample_query_bboxes(extent, num_samples=10, query_fraction=0.1)
-        for s in samples:
-            assert s["xmin"] >= extent["xmin"]
-            assert s["ymin"] >= extent["ymin"]
-            assert s["xmax"] <= extent["xmax"]
-            assert s["ymax"] <= extent["ymax"]
-            assert s["xmin"] < s["xmax"]
-            assert s["ymin"] < s["ymax"]
+    def test_disjoint_strips_skip_most(self):
+        """Ten disjoint strips, window 10% of the strip it lands in.
 
-    def test_query_fraction_affects_size(self):
-        """Larger query_fraction means larger sample bboxes."""
-        extent = {"xmin": 0.0, "ymin": 0.0, "xmax": 100.0, "ymax": 100.0}
-        small = _generate_sample_query_bboxes(extent, num_samples=1, query_fraction=0.05, seed=42)
-        large = _generate_sample_query_bboxes(extent, num_samples=1, query_fraction=0.5, seed=42)
-        small_area = (small[0]["xmax"] - small[0]["xmin"]) * (small[0]["ymax"] - small[0]["ymin"])
-        large_area = (large[0]["xmax"] - large[0]["xmin"]) * (large[0]["ymax"] - large[0]["ymin"])
-        assert large_area > small_area
-
-    def test_deterministic_with_seed(self):
-        """Same seed produces same bboxes."""
-        extent = {"xmin": 0.0, "ymin": 0.0, "xmax": 100.0, "ymax": 100.0}
-        a = _generate_sample_query_bboxes(extent, num_samples=3, query_fraction=0.1, seed=123)
-        b = _generate_sample_query_bboxes(extent, num_samples=3, query_fraction=0.1, seed=123)
-        assert a == b
-
-
-class TestComputeSkipRateForQuery:
-    """Tests for _compute_skip_rate_for_query helper."""
-
-    def test_all_overlap(self):
-        """Query covering everything skips nothing."""
-        query_bbox = {"xmin": 0.0, "ymin": 0.0, "xmax": 100.0, "ymax": 100.0}
+        A window from strip i (width 10, so half-window 0.5) overlaps the own
+        strip always and a neighbour when the centre is within 0.5 of the
+        shared edge: 0.5/10 per adjacent side.
+        """
         rg_bboxes = [
-            {"row_group_id": 0, "xmin": 10.0, "ymin": 10.0, "xmax": 20.0, "ymax": 20.0},
-            {"row_group_id": 1, "xmin": 50.0, "ymin": 50.0, "xmax": 60.0, "ymax": 60.0},
+            {"row_group_id": i, "xmin": i * 10.0, "ymin": 0.0, "xmax": (i + 1) * 10.0, "ymax": 10.0}
+            for i in range(10)
         ]
-        skip_rate = _compute_skip_rate_for_query(query_bbox, rg_bboxes)
-        assert skip_rate == 0.0
+        neighbour = 0.5 / 10
+        sides = 2 * 9  # each interior edge counts once from each side
+        expected_read = (10 + sides * neighbour) / (10 * 10)
+        assert _weighted_skip_rate(rg_bboxes, query_fraction=0.1) == pytest.approx(
+            1 - expected_read
+        )
 
-    def test_none_overlap(self):
-        """Query outside all RGs skips all."""
-        query_bbox = {"xmin": 200.0, "ymin": 200.0, "xmax": 210.0, "ymax": 210.0}
-        rg_bboxes = [
-            {"row_group_id": 0, "xmin": 0.0, "ymin": 0.0, "xmax": 10.0, "ymax": 10.0},
-            {"row_group_id": 1, "xmin": 20.0, "ymin": 20.0, "xmax": 30.0, "ymax": 30.0},
-        ]
-        skip_rate = _compute_skip_rate_for_query(query_bbox, rg_bboxes)
-        assert skip_rate == 1.0
-
-    def test_partial_overlap(self):
-        """Query overlapping 1 of 4 RGs gives 75% skip rate."""
-        query_bbox = {"xmin": 0.0, "ymin": 0.0, "xmax": 5.0, "ymax": 5.0}
-        rg_bboxes = [
-            {"row_group_id": 0, "xmin": 0.0, "ymin": 0.0, "xmax": 10.0, "ymax": 10.0},
-            {"row_group_id": 1, "xmin": 20.0, "ymin": 20.0, "xmax": 30.0, "ymax": 30.0},
-            {"row_group_id": 2, "xmin": 40.0, "ymin": 40.0, "xmax": 50.0, "ymax": 50.0},
-            {"row_group_id": 3, "xmin": 60.0, "ymin": 60.0, "xmax": 70.0, "ymax": 70.0},
-        ]
-        skip_rate = _compute_skip_rate_for_query(query_bbox, rg_bboxes)
-        assert skip_rate == 0.75
-
-    def test_single_rg_overlap(self):
-        """With 1 RG, either 0% or 100% skip."""
-        query_bbox = {"xmin": 0.0, "ymin": 0.0, "xmax": 5.0, "ymax": 5.0}
-        rg_bboxes = [
-            {"row_group_id": 0, "xmin": 0.0, "ymin": 0.0, "xmax": 10.0, "ymax": 10.0},
-        ]
-        skip_rate = _compute_skip_rate_for_query(query_bbox, rg_bboxes)
-        assert skip_rate == 0.0
+    def test_single_box_equal_to_the_extent(self):
+        extent = {"xmin": 0.0, "ymin": 0.0, "xmax": 10.0, "ymax": 10.0}
+        assert _weighted_skip_rate([{"row_group_id": 0, **extent}], query_fraction=0.5) == 0.0
 
 
 class TestCheckSpatialPushdownReadiness:
@@ -168,30 +141,18 @@ class TestCheckSpatialPushdownReadinessUnit:
 
     def test_well_sorted_data_high_skip_rate(self):
         """Well-sorted data (non-overlapping RGs) should have high skip rate."""
-        # Create mock row group bboxes that are spatially disjoint
         mock_bboxes = [
             {"row_group_id": i, "xmin": i * 10.0, "ymin": 0.0, "xmax": (i + 1) * 10.0, "ymax": 10.0}
             for i in range(10)
         ]
-        # A query covering 10% of extent should skip ~90% of RGs
-        extent = _compute_data_extent(mock_bboxes)
-        samples = _generate_sample_query_bboxes(extent, num_samples=20, query_fraction=0.1, seed=42)
-        skip_rates = [_compute_skip_rate_for_query(s, mock_bboxes) for s in samples]
-        avg_skip = sum(skip_rates) / len(skip_rates)
-        # With 10 disjoint RGs and 10% query, expect high skip rate
-        assert avg_skip >= 0.5
+        # With 10 disjoint RGs and a 10% query, expect a high skip rate
+        assert _weighted_skip_rate(mock_bboxes, query_fraction=0.1) >= 0.5
 
     def test_poorly_sorted_data_low_skip_rate(self):
         """Poorly sorted data (all overlapping RGs) should have low skip rate."""
-        # Create mock row group bboxes that all cover the same area
         mock_bboxes = [
             {"row_group_id": i, "xmin": 0.0, "ymin": 0.0, "xmax": 100.0, "ymax": 100.0}
             for i in range(10)
         ]
         # Any query overlapping anything will hit all 10 RGs
-        extent = _compute_data_extent(mock_bboxes)
-        samples = _generate_sample_query_bboxes(extent, num_samples=20, query_fraction=0.1, seed=42)
-        skip_rates = [_compute_skip_rate_for_query(s, mock_bboxes) for s in samples]
-        avg_skip = sum(skip_rates) / len(skip_rates)
-        # All RGs overlap, so skip rate should be 0
-        assert avg_skip == 0.0
+        assert _weighted_skip_rate(mock_bboxes, query_fraction=0.1) == 0.0

@@ -50,6 +50,15 @@ EMPTY_INPUT_SUBCOMMANDS = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _no_ordering_size_floor(monkeypatch):
+    """The fixtures here are kilobytes; the spec's 5 MB floor would withhold
+    every spatial verdict these reporting tests pin."""
+    from geoparquet_io.core import check_spatial_order
+
+    monkeypatch.setattr(check_spatial_order, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
+
+
 @pytest.fixture
 def empty_partition_dir(tmp_path):
     """A directory that looks like a partition but holds no parquet files."""

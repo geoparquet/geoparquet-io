@@ -216,9 +216,13 @@ class TestCheckFixSpatial:
         )
 
         assert result.exit_code == 0
-        if "No fix needed" not in result.output:
-            assert os.path.exists(fixed_file)
-            assert_places_output_is_sound(fixed_file, version="1.1", covering=True)
+        # The places fixture sits under the 5 MB floor, so the verdict is
+        # withheld — which is not "already ordered", so the requested fix
+        # still sorts into the named output (#755, #1098).
+        assert "Spatial ordering not judged" in result.output
+        assert "No fix needed" not in result.output, "a withheld verdict is not a pass"
+        assert "Applying Hilbert spatial ordering" in result.output
+        assert os.path.exists(fixed_file)
 
 
 class TestCheckFixAll:

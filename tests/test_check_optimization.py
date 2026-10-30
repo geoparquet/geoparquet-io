@@ -32,6 +32,22 @@ class TestCheckOptimization:
         assert "row_group_size" in checks
         assert "compression" in checks
 
+    def test_spatial_sorting_is_not_a_failure_on_a_one_row_group_file(self):
+        """The spatial-order check withholds its verdict below eight row groups.
+
+        A withheld verdict is not a failure: this sub-check reads only
+        ``passed`` from it and must not tell every small file to re-sort. It
+        did once, when the verdict was carried as ``None`` (review of #774).
+        """
+        from geoparquet_io.core.check_optimization import check_optimization
+
+        result = check_optimization(
+            "tests/data/fields_pgo_5070_snappy.parquet", return_results=True, quiet=True
+        )
+
+        assert result["checks"]["spatial_sorting"]["passed"] is True
+        assert not any("spatial sorting" in r.lower() for r in result["recommendations"])
+
     def test_each_subcheck_has_passed_and_detail(self, places_test_file):
         """Each sub-check should have passed (bool) and detail (str)."""
         from geoparquet_io.core.check_optimization import check_optimization

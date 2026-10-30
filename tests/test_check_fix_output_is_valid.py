@@ -158,17 +158,22 @@ def make_tiny_row_groups(source: Path, target: Path, rows_per_group: int = 5) ->
 
 
 def make_unsorted(source: Path, target: Path, compression: str = "ZSTD") -> Path:
-    """Shuffled into tiny row groups: ``check spatial --fix`` has work.
+    """Shuffled into ten tiny row groups: ``check spatial --fix`` has work.
 
-    Both halves matter. A single-row-group file has no pairs of group bounding
-    boxes to compare, so the spatial check calls it well ordered whatever the
-    rows contain (#940).
+    Both halves matter. The spatial check judges from the row-group boxes and
+    only from eight row groups up (#755): with fewer it withholds the verdict,
+    whatever the rows contain, and ``--fix`` then declines. A single-row-group
+    file was the older form of the same trap (#940).
     """
     table = _read(source)
     order = np.random.RandomState(0).permutation(table.num_rows)
     pq.write_table(
-        table.take(pa.array(order)), str(target), compression=compression, row_group_size=10
+        table.take(pa.array(order)),
+        str(target),
+        compression=compression,
+        row_group_size=max(1, table.num_rows // 10),
     )
+    assert pq.read_metadata(str(target)).num_row_groups >= 8, "below the verdict floor"
     return target
 
 

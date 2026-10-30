@@ -548,12 +548,41 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
             verbose=verbose,
             compression="ZSTD",
             compression_level=15,
-            row_group_rows=DEFAULT_ROW_GROUP_ROWS,
+            row_group_rows=_judgeable_row_group_rows(parquet_file),
             profile=profile,
             overwrite=True,  # check --fix manages file lifecycle
         )
 
     return {"fix_applied": "Applied Hilbert spatial ordering", "success": True}
+
+
+def _judgeable_row_group_rows(parquet_file) -> int:
+    """A row-group size that never makes the spatial fix's output unjudgeable.
+
+    Writing the facade's default turned any input under eight default-size
+    groups into a file the spatial check withholds its verdict on: a 12-group
+    file at efficiency 0.00 came back as one unskippable group (#1098). The
+    fix keeps at least the input's group count, and at least the eight groups
+    a footer pass needs, when the row count allows; the facade still snaps the
+    request to the writer's 2,048-row vector, which is the floor a group can
+    have.
+    """
+    from math import ceil
+
+    from geoparquet_io.core.check_spatial_order import SPATIAL_ORDER_MIN_ROW_GROUPS
+
+    try:
+        from geoparquet_io.core.duckdb_metadata import get_file_metadata
+
+        meta = get_file_metadata(parquet_file)
+        num_rows = int(meta.get("num_rows") or 0)
+        num_groups = int(meta.get("num_row_groups") or 0)
+    except Exception:
+        return DEFAULT_ROW_GROUP_ROWS
+    if num_rows <= 0:
+        return DEFAULT_ROW_GROUP_ROWS
+    groups = max(num_groups, SPATIAL_ORDER_MIN_ROW_GROUPS)
+    return max(1, min(DEFAULT_ROW_GROUP_ROWS, ceil(num_rows / groups)))
 
 
 def _staging_path_beside(output_file):
@@ -741,6 +770,8 @@ def _apply_spatial_ordering_fix(check_results, current_file, temp_files, verbose
     spatial_result = check_results.get("spatial", {})
     if not spatial_result or not spatial_result.get("fix_available", False):
         return current_file, []
+    if not _batch_sort_wanted(spatial_result):
+        return current_file, []
 
     # Generate temp file path without creating the file (fixes issue #278)
     # Use mkstemp to get unique name, then close and delete to avoid collision
@@ -755,6 +786,24 @@ def _apply_spatial_ordering_fix(check_results, current_file, temp_files, verbose
 
     fix_spatial_ordering(current_file, temp_file, verbose, profile)
     return temp_file, ["Applied Hilbert spatial ordering"]
+
+
+def _batch_sort_wanted(spatial_result: dict) -> bool:
+    """Whether ``check all --fix`` should Hilbert-sort this file.
+
+    An explicit ``check spatial --fix`` sorts on any verdict short of a judged
+    pass, because the user asked for exactly that. The batch fix is quieter: a
+    withheld verdict whose efficiency is unknown, or already at the pass bar,
+    is no reason to rewrite an otherwise sound file -- only a judged failure,
+    or a withheld verdict whose measured efficiency sits under the bar, earns
+    the sort.
+    """
+    if spatial_result.get("judged", True):
+        return True
+    from geoparquet_io.core.check_spatial_order import SPATIAL_ORDER_MIN_EFFICIENCY
+
+    efficiency = spatial_result.get("skip_rate_efficiency")
+    return efficiency is not None and efficiency < SPATIAL_ORDER_MIN_EFFICIENCY
 
 
 def _place_result(result_file: str, output_file: str, *, owned: bool) -> None:

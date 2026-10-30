@@ -308,16 +308,20 @@ def apply_check_all_fixes(
         the run's summary, so a multi-file ``check all --fix`` names every file
         it touched (#1041).
     """
-    from geoparquet_io.core.check_fixes import apply_all_fixes
+    from geoparquet_io.core.check_fixes import _batch_sort_wanted, apply_all_fixes
 
     no_backup = confirmation.no_backup
 
-    # Check if any fixes are needed
-    needs_fixes = any(
-        result.get("fix_available", False)
-        for result in all_results.values()
-        if isinstance(result, dict)
-    )
+    # Check if any fixes are needed. Spatial asks the batch gate too: a
+    # withheld verdict keeps its fix available for an explicit `check spatial
+    # --fix`, but `check all --fix` does not rewrite a file over it unless the
+    # measured efficiency sits under the bar (#774).
+    def _fix_wanted(key: str, result: object) -> bool:
+        if not isinstance(result, dict) or not result.get("fix_available", False):
+            return False
+        return _batch_sort_wanted(result) if key == "spatial" else True
+
+    needs_fixes = any(_fix_wanted(key, result) for key, result in all_results.items())
 
     if not needs_fixes:
         problem = (all_results.get("bbox") or {}).get("covering_problem")

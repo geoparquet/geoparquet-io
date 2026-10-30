@@ -121,16 +121,35 @@ class TestEveryFixAsksForTheSortDefault:
 
         assert _row_group_kwarg(recorded) == DEFAULT_ROW_GROUP_ROWS
 
-    def test_fix_spatial_ordering_inherits_the_sort_default(
+    def test_fix_spatial_ordering_asks_the_judgeable_size(
         self, monkeypatch, places_test_file, tmp_path
     ):
-        """#795: the Hilbert repair asked for 100,000 while ``gpio sort hilbert``
-        wrote 49,152, so the two spellings of the same operation disagreed."""
+        """#795 made the Hilbert repair inherit the sort default; #1098 caps it
+        so the output keeps at least the input's group count and the eight
+        groups a footer pass needs. The request is the derived value, never a
+        literal, and never above the sort default."""
         recorded = _spy(monkeypatch, "hilbert_order")
 
         check_fixes.fix_spatial_ordering(places_test_file, str(tmp_path / "out.parquet"))
 
-        assert _row_group_kwarg(recorded) == DEFAULT_ROW_GROUP_ROWS
+        derived = check_fixes._judgeable_row_group_rows(places_test_file)
+        assert _row_group_kwarg(recorded) == derived
+        assert derived <= DEFAULT_ROW_GROUP_ROWS
+
+    def test_fix_spatial_ordering_asks_the_sort_default_when_rows_allow(
+        self, monkeypatch, tmp_path
+    ):
+        """A file with plenty of rows per group still gets the sort default:
+        the #1098 cap only binds when the default would shrink the group
+        count below what a footer verdict needs."""
+        meta = {
+            "num_rows": DEFAULT_ROW_GROUP_ROWS * 10,
+            "num_row_groups": 10,
+        }
+        with mock.patch("geoparquet_io.core.duckdb_metadata.get_file_metadata", return_value=meta):
+            derived = check_fixes._judgeable_row_group_rows(str(tmp_path / "in.parquet"))
+
+        assert derived == DEFAULT_ROW_GROUP_ROWS
 
 
 class TestTheFixDefaultIsDerivedRatherThanTyped:
@@ -153,10 +172,11 @@ class TestTheFixDefaultIsDerivedRatherThanTyped:
         """
         requested = set(re.findall(r"row_group_rows=([^,\n)]+)", CHECK_FIXES_SOURCE))
 
-        assert requested == {"DEFAULT_ROW_GROUP_ROWS"}, (
-            "core/check_fixes.py asks a writer for a row-group size that is not "
-            "the derived sort default. Use DEFAULT_ROW_GROUP_ROWS so the "
-            f"value stays inside SPATIAL_ROW_COUNT_RANGE (#972). Found: {sorted(requested)}"
+        assert requested == {"DEFAULT_ROW_GROUP_ROWS", "_judgeable_row_group_rows(parquet_file"}, (
+            "core/check_fixes.py asks a writer for a row-group size that is "
+            "neither the derived sort default nor the #1098 judgeable cap "
+            "(which never exceeds it). A literal can drift out of "
+            f"SPATIAL_ROW_COUNT_RANGE (#972). Found: {sorted(requested)}"
         )
 
     def test_the_summary_line_reports_the_size_actually_written(self, monkeypatch, tmp_path):
