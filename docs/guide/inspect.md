@@ -7,10 +7,12 @@ The `inspect` command provides quick, human-readable summaries of GeoParquet fil
 
 !!! note "Works without the spatial extension on DuckDB 2.0"
     On DuckDB 2.0+, `gpio inspect`, `inspect head`/`tail`, and `inspect meta` run
-    on DuckDB's built-in GEOMETRY support and never install or load the spatial
-    extension: they start faster (the load costs 40-90 ms per connection) and
+    on DuckDB's built-in GEOMETRY support and do not load the spatial extension
+    up front: they start faster (the load costs 40-90 ms per connection) and
     keep working on air-gapped hosts where DuckDB extensions cannot be
-    downloaded. On DuckDB 1.5 the extension is loaded as before.
+    downloaded. The preview loads the extension on demand only if a file
+    requires a function outside DuckDB's core set. On DuckDB 1.5 the extension
+    is loaded as before.
 
 ## Basic Usage
 

@@ -8,6 +8,7 @@ extensions. On DuckDB 1.5 nothing changes: spatial is loaded exactly as before.
 """
 
 import os
+import struct
 
 import duckdb
 import pytest
@@ -19,9 +20,22 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     has_core_geometry,
 )
-from geoparquet_io.core.inspect_utils import _preview_table_from_query
+from geoparquet_io.core.inspect_utils import _preview_table_from_query, wkb_to_wkt_preview
 
 DUCKDB_MAJOR = int(duckdb.__version__.split(".")[0])
+
+# Standard ISO WKB point (x=1, y=2).
+WKB_POINT = b"\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf0?\x00\x00\x00\x00\x00\x00\x00@"
+
+# A spatial-1.x *internal*-format POLYGON blob (type byte 0x02 first, not a WKB
+# byte-order byte): header (type, properties, hash, padding), body (type,
+# ring count, ring length + pad, vertex doubles).
+SPATIAL_1X_INTERNAL_POLYGON = (
+    struct.pack("<BBHI", 2, 0, 0, 0)
+    + struct.pack("<II", 2, 1)
+    + struct.pack("<II", 4, 0)
+    + struct.pack("<8d", 0, 0, 1, 0, 1, 1, 0, 0)
+)
 
 requires_core_geometry = pytest.mark.skipif(
     DUCKDB_MAJOR < 2, reason="DuckDB without core GEOMETRY (needs >= 2.0)"
@@ -157,7 +171,7 @@ def test_inspect_head_still_loads_spatial_without_core_geometry(runner, test_fil
 # --- the on-demand fallback ----------------------------------------------------
 
 
-def test_preview_query_loads_spatial_on_demand():
+def test_preview_query_loads_spatial_on_demand(extension_loads):
     """A function outside DuckDB's core set loads spatial and retries (any version)."""
     con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
     try:
@@ -170,6 +184,9 @@ def test_preview_query_loads_spatial_on_demand():
         assert table.column("area")[0].as_py() == pytest.approx(0.5)
     finally:
         con.close()
+    # The fallback path must actually have run: if a future DuckDB adds the
+    # function to core, this test would otherwise go vacuous.
+    assert "spatial" in extension_loads
 
 
 def test_preview_query_with_spatial_reraises():
@@ -180,3 +197,74 @@ def test_preview_query_with_spatial_reraises():
             _preview_table_from_query(con, "SELECT ST_NoSuchFunction(1) AS x", has_spatial=True)
     finally:
         con.close()
+
+
+@pytest.mark.usefixtures("spatial_unavailable")
+def test_preview_fallback_surfaces_the_querys_own_error_when_load_fails():
+    """Air-gapped host + a file that genuinely needs a non-core function.
+
+    The user's problem is the missing function, so the original
+    CatalogException must surface -- not a "cannot download extension spatial"
+    error from the retry's load. The failed load rides along as __context__.
+    """
+    con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
+    try:
+        with pytest.raises(duckdb.CatalogException) as excinfo:
+            _preview_table_from_query(
+                con,
+                "SELECT ST_Area('POLYGON((0 0, 1 0, 1 1, 0 0))'::GEOMETRY) AS area",
+                has_spatial=False,
+            )
+    finally:
+        con.close()
+    message = str(excinfo.value).lower()
+    assert "st_area" in message or "geometry" in message
+    assert "sabotaged" not in message
+    assert excinfo.value.__context__ is not None
+
+
+def test_preview_fallback_ignores_non_catalog_errors(extension_loads):
+    """Only a missing-function CatalogException means "this needs spatial".
+
+    Any other duckdb.Error (a syntax error here; an interrupt or an IO/OOM
+    failure in the field) must propagate as itself, without an INSTALL/LOAD
+    attempt and without re-running the whole scan.
+    """
+    con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
+    try:
+        with pytest.raises(duckdb.Error) as excinfo:
+            _preview_table_from_query(con, "SELECT FROM WHERE", has_spatial=False)
+    finally:
+        con.close()
+    assert not isinstance(excinfo.value, duckdb.CatalogException)
+    assert "spatial" not in extension_loads
+
+
+# --- the load_spatial=None auto sentinel ----------------------------------------
+
+
+def test_factory_resolves_auto_spatial_from_core_geometry(extension_loads):
+    """load_spatial=None loads spatial exactly where DuckDB's core lacks GEOMETRY."""
+    get_duckdb_connection(load_spatial=None, load_httpfs=False).close()
+    assert ("spatial" in extension_loads) is (not has_core_geometry())
+
+
+# --- wkb_to_wkt_preview on a no-spatial connection (DuckDB >= 2.0) ---------------
+
+
+@requires_core_geometry
+def test_wkb_preview_renders_iso_wkb_without_spatial(extension_loads):
+    """ISO WKB renders to WKT through DuckDB core alone, no `<GEOMETRY>` fallback."""
+    assert wkb_to_wkt_preview(WKB_POINT) == "POINT (1 2)"
+    assert "spatial" not in extension_loads
+
+
+def test_wkb_preview_internal_format_blob_falls_back_everywhere():
+    """A spatial-1.x 0x02 internal blob never renders, with or without spatial.
+
+    The BLOB -> GEOMETRY cast reads WKB only (DuckDB 1.5 with spatial:
+    "Unimplemented type for cast"; 2.0 with or without spatial: "Unsupported
+    geometry type in WKB"), so the type-tag fallback is the pinned behavior on
+    every lane -- skipping spatial (#1353) changed nothing here.
+    """
+    assert wkb_to_wkt_preview(SPATIAL_1X_INTERNAL_POLYGON) == "<GEOMETRY>"

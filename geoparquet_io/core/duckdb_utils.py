@@ -1395,9 +1395,10 @@ def has_core_geometry() -> bool:
     the Parquet scan, and the serialize/deserialize functions (``ST_AsText``,
     ``ST_GeomFromWKB``, ``ST_AsWKB``, ``ST_CRS``, ...) without the spatial
     extension. Read-only paths that touch nothing beyond that set (the
-    ``gpio inspect`` preview and metadata paths) pass
-    ``load_spatial=not has_core_geometry()`` so they start faster and keep
-    working where extensions cannot be downloaded (#1353). There are no core
+    ``gpio inspect`` preview and metadata paths) pass ``load_spatial=None``,
+    which :func:`get_duckdb_connection` resolves through this gate, so they
+    start faster and keep working where extensions cannot be downloaded
+    (#1353). There are no core
     bounds or measure functions (``ST_Extent``, ``ST_Area``, ...), so
     everything else still loads spatial.
 
@@ -1446,7 +1447,12 @@ def get_duckdb_connection(
     discovery for private S3 buckets.
 
     Args:
-        load_spatial: Whether to load spatial extension (default: True)
+        load_spatial: Whether to load spatial extension (default: True).
+                    If None, loads it only when DuckDB's core lacks the
+                    GEOMETRY type (``not has_core_geometry()``, #1353): the
+                    auto mode for read-only paths that need nothing beyond
+                    DuckDB core's serialize/deserialize set, mirroring
+                    load_httpfs's None-means-auto convention.
         load_httpfs: Whether to load httpfs extension for S3/Azure/GCS.
                     If None (default), auto-detects based on usage.
         use_s3_auth: Whether to configure AWS credential chain for S3 (default: False).
@@ -1521,7 +1527,10 @@ def get_duckdb_connection(
     con.execute(f"SET temp_directory = '{safe_temp_dir}';")
     _apply_connection_limits(con, memory_limit, threads)
 
-    # Always load spatial extension by default (core use case)
+    # Always load spatial extension by default (core use case). None is the
+    # auto mode: spatial only where DuckDB's own core lacks GEOMETRY (#1353).
+    if load_spatial is None:
+        load_spatial = not has_core_geometry()
     if load_spatial:
         load_spatial_extension(con)
 
@@ -1634,7 +1643,7 @@ def require_community_extension(name: str, feature: str | None = None) -> None:
 
 def get_duckdb_connection_for_s3(
     path: str,
-    load_spatial: bool = True,
+    load_spatial: bool | None = True,
     s3_endpoint: str | None = None,
     s3_region: str | None = None,
     s3_use_ssl: bool | None = None,
@@ -1648,7 +1657,9 @@ def get_duckdb_connection_for_s3(
 
     Args:
         path: S3 path to access (used to determine bucket and access mode)
-        load_spatial: Whether to load spatial extension (default: True)
+        load_spatial: Whether to load spatial extension (default: True; None
+            means only when DuckDB's core lacks GEOMETRY, resolved by
+            :func:`get_duckdb_connection`)
         s3_endpoint: Custom S3 endpoint (e.g., 'minio.local:9000')
         s3_region: S3 region for custom endpoints
         s3_use_ssl: Whether to use SSL for the S3 endpoint
