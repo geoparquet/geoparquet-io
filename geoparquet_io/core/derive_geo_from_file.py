@@ -359,7 +359,7 @@ def derive_v2_geo_metadata(
         pf.close()
 
 
-def _rewrite_writer_kwargs(compression: str, compression_level: int | None) -> dict:
+def _rewrite_writer_kwargs(compression: str | None, compression_level: int | None) -> dict:
     """ParquetWriter kwargs mirroring the codec the original writer used.
 
     The codec and level resolve through the one owner
