@@ -1,7 +1,7 @@
 name: Tests
 on:
   push:
-    branches: [ main, refactor ]
+    branches: [ main, refactor, "defrag/**" ]
   pull_request:
     branches: [ main ]
     # 'labeled' lets adding the "run-slow-tests" label trigger the slow suite

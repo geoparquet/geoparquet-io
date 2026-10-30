@@ -205,6 +205,18 @@ class TestAllChecksJob:
         )
 
 
+class TestTriggers:
+    def test_push_runs_on_defrag_integration_branches(self):
+        # #1367's tracks merge into a defrag/* integration branch, not main;
+        # without this pattern those merges get no CI run at all.
+        workflow = _load_workflow("tests.yml")
+        # PyYAML reads the bare key `on` as the boolean True.
+        triggers = workflow.get("on", workflow.get(True))
+        branches = triggers["push"]["branches"]
+        assert "defrag/**" in branches, f"tests.yml push branches lack defrag/**: {branches}"
+        assert triggers["pull_request"]["branches"] == ["main"]
+
+
 def _ruleset_contexts() -> list[str]:
     text = BRANCH_PROTECTION.read_text(encoding="utf-8")
     return re.findall(r'\{\s*context:\s*"([^"]+)"\s*\}', text)
