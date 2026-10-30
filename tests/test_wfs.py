@@ -5923,7 +5923,7 @@ class TestStartIndexProbeErrorVisibility:
 
         with (
             patch(
-                "geoparquet_io.core.wfs._get_shared_http_client",
+                "geoparquet_io.core.wfs.get_shared_http_client",
                 side_effect=httpx.ConnectError("nodename nor servname provided"),
             ),
             caplog.at_level(logging.WARNING, logger="geoparquet_io"),
@@ -5956,7 +5956,7 @@ class TestStartIndexProbeErrorVisibility:
         client.get.return_value = response
 
         with (
-            patch("geoparquet_io.core.wfs._get_shared_http_client", return_value=client),
+            patch("geoparquet_io.core.wfs.get_shared_http_client", return_value=client),
             caplog.at_level(logging.WARNING, logger="geoparquet_io"),
         ):
             result = _probe_startindex_limit("http://mock/wfs", "layer", "2.0.0")
@@ -5975,7 +5975,7 @@ class TestStartIndexProbeErrorVisibility:
         client.get.return_value = response
 
         with (
-            patch("geoparquet_io.core.wfs._get_shared_http_client", return_value=client),
+            patch("geoparquet_io.core.wfs.get_shared_http_client", return_value=client),
             caplog.at_level(logging.WARNING, logger="geoparquet_io"),
         ):
             result = _probe_startindex_limit("http://mock/wfs", "layer", "2.0.0")

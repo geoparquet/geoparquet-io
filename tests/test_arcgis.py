@@ -253,7 +253,7 @@ class TestValidateArcgisUrl:
 class TestGenerateToken:
     """Tests for token generation."""
 
-    @patch("geoparquet_io.core.arcgis._make_request")
+    @patch("geoparquet_io.core.arcgis.make_request_with_retry")
     def test_successful_generation(self, mock_request):
         """Test successful token generation."""
         from geoparquet_io.core.arcgis import generate_token
@@ -265,7 +265,7 @@ class TestGenerateToken:
         assert result == "new_token"
         mock_request.assert_called_once()
 
-    @patch("geoparquet_io.core.arcgis._make_request")
+    @patch("geoparquet_io.core.arcgis.make_request_with_retry")
     def test_invalid_credentials(self, mock_request):
         """Test error on invalid credentials."""
         from geoparquet_io.core.arcgis import generate_token
@@ -282,7 +282,7 @@ class TestGenerateToken:
 class TestGetLayerInfo:
     """Tests for layer info retrieval."""
 
-    @patch("geoparquet_io.core.arcgis._make_request")
+    @patch("geoparquet_io.core.arcgis.make_request_with_retry")
     @patch("geoparquet_io.core.arcgis.get_feature_count")
     def test_successful_info(self, mock_count, mock_request):
         """Test successful layer info retrieval."""
@@ -298,7 +298,7 @@ class TestGetLayerInfo:
         assert result.max_record_count == 1000
         assert result.total_count == 100
 
-    @patch("geoparquet_io.core.arcgis._make_request")
+    @patch("geoparquet_io.core.arcgis.make_request_with_retry")
     @patch("geoparquet_io.core.arcgis.get_feature_count")
     def test_spatial_reference_from_extent(self, mock_count, mock_request):
         """Many servers advertise the layer SR only under extent.spatialReference."""
@@ -317,7 +317,7 @@ class TestGetLayerInfo:
 
         assert result.spatial_reference == {"wkid": 25830, "latestWkid": 25830}
 
-    @patch("geoparquet_io.core.arcgis._make_request")
+    @patch("geoparquet_io.core.arcgis.make_request_with_retry")
     @patch("geoparquet_io.core.arcgis.get_feature_count")
     def test_spatial_reference_from_source_sr(self, mock_count, mock_request):
         from geoparquet_io.core.arcgis import get_layer_info
@@ -335,7 +335,7 @@ class TestGetLayerInfo:
 
         assert result.spatial_reference == {"wkid": 4269}
 
-    @patch("geoparquet_io.core.arcgis._make_request")
+    @patch("geoparquet_io.core.arcgis.make_request_with_retry")
     @patch("geoparquet_io.core.arcgis.get_feature_count")
     def test_spatial_reference_missing_is_empty_not_4326(self, mock_count, mock_request):
         """No advertised SR must not silently default to 4326 (native would lie)."""

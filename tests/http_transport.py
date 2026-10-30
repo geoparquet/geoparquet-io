@@ -3,7 +3,7 @@
 `gpio extract wfs` and `gpio extract arcgis` reach their servers through one
 seam: ``geoparquet_io.core.http_retry.get_shared_http_client``. ArcGIS calls it
 via ``make_request_with_retry``; WFS re-exports it as
-``geoparquet_io.core.wfs._get_shared_http_client_base``. Swap what that seam
+``geoparquet_io.core.wfs.get_shared_http_client``. Swap what that seam
 returns for an ``httpx.Client`` built on ``httpx.MockTransport`` and the whole
 of both modules — paging, retries, content-type dispatch, the file that gets
 written — runs with no network and no new dependency.
@@ -45,7 +45,8 @@ import httpx
 import pytest
 
 # Modules whose ``time`` name is replaced so their sleeps are recorded and
-# instant. Both call ``time.sleep`` for backoff and ``time.time`` for timing.
+# instant. Backoff sleeps happen only in ``http_retry`` (the one retry owner);
+# ``wfs`` is patched too for its ``time.time`` timing.
 _TIME_PATCHED_MODULES = (
     "geoparquet_io.core.http_retry",
     "geoparquet_io.core.wfs",
@@ -55,7 +56,7 @@ _TIME_PATCHED_MODULES = (
 # (module, getter attribute, reset attribute).
 _CLIENT_SEAMS = (
     ("geoparquet_io.core.http_retry", "get_shared_http_client", "reset_http_client"),
-    ("geoparquet_io.core.wfs", "_get_shared_http_client_base", "_reset_http_client_base"),
+    ("geoparquet_io.core.wfs", "get_shared_http_client", None),
 )
 
 
@@ -268,7 +269,8 @@ class FakeTransport:
 
         for module_name, getter, resetter in _CLIENT_SEAMS:
             monkeypatch.setattr(f"{module_name}.{getter}", _get_client)
-            monkeypatch.setattr(f"{module_name}.{resetter}", _reset)
+            if resetter is not None:
+                monkeypatch.setattr(f"{module_name}.{resetter}", _reset)
 
         shim = _TimeShim(fake.sleeps)
         for module_name in _TIME_PATCHED_MODULES:

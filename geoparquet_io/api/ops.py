@@ -31,8 +31,10 @@ from geoparquet_io.core.add.s2 import add_s2_table
 from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
 from geoparquet_io.core.add.stac_metadata import add_stac_metadata as _add_stac_metadata_file
 from geoparquet_io.core.add.stac_metadata import add_stac_metadata_table as _add_stac_metadata_table
+from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT
 from geoparquet_io.core.extract import extract_table
 from geoparquet_io.core.hilbert_order import hilbert_order_table
+from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
 from geoparquet_io.core.reproject import reproject_table
 from geoparquet_io.core.sort_by_column import sort_by_column_table
 from geoparquet_io.core.sort_quadkey import sort_by_quadkey_table
@@ -2452,7 +2454,7 @@ def from_arcgis(
     output_crs: str | None = None,
     max_allowable_offset: float | None = None,
     repair_geometry: bool = True,
-    timeout: float = 60.0,
+    timeout: float = DEFAULT_TIMEOUT,
     # Convention: `ops` signatures are positional-or-keyword, so a new parameter
     # is appended last (as max_allowable_offset was in d9c9282) rather than
     # grouped with its core neighbour; inserting mid-signature would silently
@@ -2689,7 +2691,7 @@ def from_carto(
     include_cols: str | None = None,
     exclude_cols: str | None = None,
     api_key: str | None = None,
-    timeout: float = 120.0,
+    timeout: float = CARTO_REQUEST_TIMEOUT,
     repair_geometry: bool = True,
     geometry: bool | None = None,
 ) -> pa.Table:
@@ -2712,7 +2714,7 @@ def from_carto(
         include_cols: Comma-separated columns to include
         exclude_cols: Comma-separated columns to exclude
         api_key: API key for authenticated requests (or set CARTO_API_KEY env var)
-        timeout: Request timeout in seconds (default: 120)
+        timeout: Request timeout in seconds (default: 120; carto.CARTO_REQUEST_TIMEOUT)
         repair_geometry: Repair invalid geometry with ST_MakeValid (geometry
             tables only; default: True)
         geometry: Extraction mode. ``None`` (default) auto-detects from the

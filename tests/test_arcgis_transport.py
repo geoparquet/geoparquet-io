@@ -472,7 +472,7 @@ def test_a_page_surfaces_an_esri_error_envelope(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_a_503_is_retried_with_linear_backoff(monkeypatch):
+def test_a_503_is_retried_with_exponential_backoff(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(_is_count, error_reply(503), error_reply(503), json_reply({"count": 3}))
 
@@ -522,12 +522,12 @@ def test_an_http_date_retry_after_is_honoured_and_capped(monkeypatch):
     assert http.sleeps == [MAX_RETRY_AFTER]
 
 
-def test_an_unreadable_retry_after_degrades_to_linear_backoff(monkeypatch):
+def test_an_unreadable_retry_after_degrades_to_the_plain_backoff(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(_is_count, error_reply(429, retry_after="soon"), json_reply({"count": 1}))
 
     assert get_feature_count(SERVICE) == 1
-    assert http.sleeps == [1.0]  # retry_delay * (attempt + 1)
+    assert http.sleeps == [1.0]  # retry_delay * 2**attempt
 
 
 def test_retries_are_exhausted_and_then_reported(monkeypatch):
@@ -1934,3 +1934,33 @@ class TestExcludeColsThatLeavesNothing:
         table = arcgis_to_table(SERVICE, exclude_cols="OBJECTID,name,pop")
 
         assert table.column_names == ["geometry"]
+
+
+def test_extract_arcgis_retries_a_503_through_the_shared_owner(monkeypatch, tmp_path):
+    """`gpio extract arcgis` rides out a 503 via ``http_retry.make_request_with_retry``."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+    from geoparquet_io.core import arcgis as arcgis_module
+    from geoparquet_io.core import http_retry
+
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=5, page_replies=(error_reply(503), _offset_aware(5)))
+    seen = []
+    real = http_retry.make_request_with_retry
+
+    def recording(*args, **kwargs):
+        seen.append(args[:2])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(arcgis_module, "make_request_with_retry", recording)
+    out = tmp_path / "retried.parquet"
+
+    result = CliRunner().invoke(
+        cli, ["extract", "arcgis", SERVICE, str(out), "--skip-hilbert", "--skip-bbox"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert pq.read_metadata(out).num_rows == 5
+    assert seen, "requests were made without going through http_retry"
+    assert http.sleeps == [1.0]
