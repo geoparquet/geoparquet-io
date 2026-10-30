@@ -23,6 +23,7 @@ from geoparquet_io.cli.decorators import (
     GlobAwareCommand,
     handle_geoparquet_errors,
 )
+from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.logging_config import setup_cli_logging
 
 
@@ -186,7 +187,7 @@ def skills(show: bool, copy_to: str | None, name: str):
             click.echo("  gpio skills --show       # Print to stdout")
             click.echo("  gpio skills --copy .     # Copy to current directory")
     except FileNotFoundError as e:
-        raise click.ClickException(str(e)) from e
+        raise click_error_for(e) from e
 
 
 def _process_status(code: object) -> int:

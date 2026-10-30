@@ -24,6 +24,7 @@ from geoparquet_io.cli.decorators import (
     verbose_option,
     where_option,
 )
+from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.crs_utils import UnresolvableCRSError
 from geoparquet_io.core.exceptions import InvalidParameterError, ValidationError
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5 as aggregate_by_a5_impl
@@ -49,7 +50,7 @@ def _aggregate_error(exc: Exception, where: str | None) -> click.ClickException:
     errors (validation, bad parameters) already read well and pass through.
     """
     if not isinstance(exc, duckdb.Error):
-        return click.ClickException(str(exc))
+        return click_error_for(exc)
     message = str(exc).split("\nLINE ")[0].strip()
     if where:
         message += (
@@ -216,7 +217,7 @@ def process_overview(
             else:
                 create_overviews_impl(input_parquet, memory_limit=write_memory, **kwargs)
         except (InvalidParameterError, ValueError, duckdb.Error) as exc:
-            raise click.ClickException(str(exc)) from exc
+            raise click_error_for(exc) from exc
 
 
 @process.group(name="aggregate")
@@ -648,7 +649,7 @@ def process_simplify(
                 verbose=verbose,
             )
         except ValueError as exc:
-            raise click.ClickException(str(exc)) from exc
+            raise click_error_for(exc) from exc
 
 
 def _parse_float_csv(value: str | None, option_name: str) -> list[float] | None:
@@ -746,7 +747,7 @@ def process_polygonize(
                 verbose=verbose,
             )
         except ValueError as exc:
-            raise click.ClickException(str(exc)) from exc
+            raise click_error_for(exc) from exc
 
 
 @process.command(name="contour")
@@ -858,4 +859,4 @@ def process_contour(
                 verbose=verbose,
             )
         except ValueError as exc:
-            raise click.ClickException(str(exc)) from exc
+            raise click_error_for(exc) from exc

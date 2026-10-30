@@ -11,6 +11,7 @@ import click
 
 from geoparquet_io.cli._shared import _activate_s3, create_default_group, init_group_context
 from geoparquet_io.cli.decorators import GlobAwareCommand, verbose_option
+from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.inspect import (
     display_metadata,
     format_preview_output,
@@ -143,7 +144,7 @@ def _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_
             click.echo(output)
 
     except ValueError as e:
-        raise click.ClickException(str(e)) from e
+        raise click_error_for(e) from e
     except Exception as e:
         raise _friendly_parquet_error(e, parquet_file) from e
 
@@ -428,11 +429,11 @@ def inspect_layers(ctx, input_file, json_output, verbose):
         try:
             layers = list_layers(input_file)
         except FileNotFoundError as e:
-            raise click.ClickException(str(e)) from e
+            raise click_error_for(e) from e
         except ValueError as e:
-            raise click.ClickException(str(e)) from e
+            raise click_error_for(e) from e
         except RuntimeError as e:
-            raise click.ClickException(str(e)) from e
+            raise click_error_for(e) from e
 
     if layers is None:
         if json_output:

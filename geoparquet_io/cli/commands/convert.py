@@ -25,6 +25,7 @@ from geoparquet_io.cli.decorators import (
     verbose_option,
     where_option,
 )
+from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.crs_utils import transform_source_label
 from geoparquet_io.core.file_utils import validate_parquet_extension
@@ -440,7 +441,7 @@ def _reproject_impl_cli(
             assume_crs84=assume_crs84,
         )
     except ValueError as e:
-        raise click.ClickException(str(e)) from None
+        raise click_error_for(e) from None
 
     # result is None for streaming mode (stdout)
     if result:

@@ -15,6 +15,7 @@ from geoparquet_io.core.duckdb_utils import (
     describe_query,
     duckdb_type_is_geometry,
     fetch_one,
+    is_interrupt,
     parse_duckdb_geo_type,
     quote_identifier,
     register_arrow,
@@ -210,6 +211,8 @@ def native_geometry_types_from_query(con, query: str, verbose: bool = False) -> 
     try:
         described = describe_query(con, query)
     except Exception as e:  # noqa: BLE001 - a probe, never the write's failure
+        if is_interrupt(e):
+            raise
         if verbose:
             debug(f"Could not read geometry types off the output query: {e}")
         return {}
@@ -274,6 +277,8 @@ def _detect_geometry_from_query(
         return None
 
     except Exception as e:
+        if is_interrupt(e):
+            raise
         if verbose:
             debug(f"Error detecting geometry from query: {e}")
         return None

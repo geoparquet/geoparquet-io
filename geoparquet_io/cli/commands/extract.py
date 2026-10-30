@@ -33,6 +33,7 @@ from geoparquet_io.cli.decorators import (
     verbose_option,
     write_strategy_option,
 )
+from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT
 from geoparquet_io.core.extract import extract as extract_impl
 from geoparquet_io.core.file_utils import validate_parquet_extension
@@ -1055,7 +1056,7 @@ def extract_wfs_cmd(
             else:
                 layers = list_available_layers(service_url, version=wfs_version)
         except WFSError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None
 
         if not layers:
             click.echo("No layers found in WFS service.")
@@ -1181,7 +1182,7 @@ def extract_wfs_cmd(
                 repair_geometry=repair_geometry,
             )
     except WFSError as e:
-        raise click.ClickException(str(e)) from None
+        raise click_error_for(e) from None
 
 
 @extract.command(name="carto")
@@ -1362,4 +1363,4 @@ def extract_carto_cmd(
                 geometry=geometry,
             )
         except CartoError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None

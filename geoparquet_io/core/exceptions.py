@@ -17,7 +17,12 @@ Exception Hierarchy:
 
 from __future__ import annotations
 
+import enum
+import json
 import re
+import socket
+import xml.etree.ElementTree
+from typing import NamedTuple
 
 
 def sanitize_url_for_logging(url: str) -> str:
@@ -65,7 +70,17 @@ _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
-def sanitize_error_message(text: str) -> str:
+#: ``name=value`` / ``name: value`` credential pairs in free text. A server's
+#: error body often echoes the request it rejected, ``api_key=...`` included,
+#: and that text is not inside a URL, so the URL pass cannot see it.
+_CREDENTIAL_PAIR = re.compile(
+    r"(?i)\b((?:[a-z0-9_.-]*(?:api[_-]?key|apikey|token|secret|password|passwd|signature|"
+    r"credential|authorization))(?:\s*[=:]\s*)|key=)"
+    r"(?:(?:bearer|basic)\s+)?(?:\"[^\"]*\"|'[^']*'|[^\s&'\"<>,;]+)"
+)
+
+
+def sanitize_error_message(text: str, *, truncate: bool = True) -> str:
     """Make a low-level error message safe to print as gpio's own error line.
 
     Two things can ride into an error message from outside gpio, and neither is
@@ -81,10 +96,19 @@ def sanitize_error_message(text: str) -> str:
       ANSI escapes in it can rewrite the line, so an input could author a clean
       ``Error:`` line of its own choosing. They are stripped; tab and newline
       stay.
+    * **Echoed credential pairs.** ``api_key=...``, ``token: ...``,
+      ``password=...`` and the like in the text itself (a server body quoting
+      the request) have their value replaced by ``***``.
     """
     if not text:
         return text
-    text = _URL_IN_TEXT.sub(lambda m: sanitize_url_for_logging(m.group(0)), text)
+    if truncate:
+        text = _URL_IN_TEXT.sub(lambda m: sanitize_url_for_logging(m.group(0)), text)
+    else:
+        # A gpio error that names the destination on purpose keeps the whole
+        # path; only the query string (where credentials ride) goes.
+        text = _URL_IN_TEXT.sub(lambda m: m.group(0).split("?")[0], text)
+    text = _CREDENTIAL_PAIR.sub(lambda m: f"{m.group(1)}***", text)
     text = _ANSI_ESCAPE.sub("", text)
     return _CONTROL_CHARS.sub("", text)
 
@@ -93,8 +117,12 @@ class GeoParquetError(Exception):
     """Base exception for all geoparquet-io errors."""
 
     def __init__(self, message: str) -> None:
-        self.message = message
-        super().__init__(message)
+        # The one place a gpio error's text is cleaned: whatever a caller
+        # interpolated into it (an httpx / OWSLib / DuckDB message that names
+        # the request URL, credentials and all) is sanitized here, once, so
+        # ``str(error)`` is safe for the CLI and the API alike (#1034).
+        self.message = sanitize_error_message(message, truncate=False)
+        super().__init__(self.message)
 
 
 class FileNotFoundGeoParquetError(GeoParquetError):
@@ -348,3 +376,154 @@ class BatchTooLargeError(GeoParquetError):
         self.batch_size = batch_size
         self.reason = reason
         super().__init__(f"Batch size {batch_size} too large for {self.url}: {reason}")
+
+
+# ---------------------------------------------------------------------------
+# Failure classification: one table, keyed on exception type and structured
+# fields, never on message text (#1020, #1034). The message of an HTTP or
+# DuckDB failure embeds the request URL, which embeds the user's own layer
+# name, filter and API key, so substring tests on it let input decide the
+# verdict. WFS, Carto and ArcGIS ask here.
+# ---------------------------------------------------------------------------
+
+
+class FailureKind(enum.Enum):
+    """What kind of failure a caught exception was."""
+
+    #: Happened on this machine (memory, interrupt, a bad query of our own);
+    #: no response exists to classify and retrying cannot help.
+    LOCAL = "local"
+    #: The request timed out.
+    TIMEOUT = "timeout"
+    #: No connection was made: refused, DNS, reset, protocol error.
+    UNREACHABLE = "unreachable"
+    #: The server answered with an HTTP status (see ``FailureClass.status``).
+    HTTP_STATUS = "http_status"
+    #: The server answered but the body could not be parsed.
+    MALFORMED_RESPONSE = "malformed_response"
+    #: Not recognised; the caller keeps its generic message.
+    UNKNOWN = "unknown"
+
+
+class FailureClass(NamedTuple):
+    """The verdict of :func:`classify_failure`."""
+
+    kind: FailureKind
+    status: int | None = None
+
+
+def _status_of(exc: BaseException) -> int | None:
+    """The HTTP status a library exception carries as a structured field.
+
+    ``duckdb.HTTPException.status_code`` reports 0 when the request produced no
+    status of its own (some auth failures do this), so 0 reads as "none".
+    """
+    response = getattr(exc, "response", None)
+    code = getattr(response, "status_code", None)
+    if code is None:
+        code = getattr(exc, "status_code", None)
+    if isinstance(code, int) and not isinstance(code, bool) and code > 0:
+        return code
+    return None
+
+
+def _classify_one(exc: BaseException) -> FailureClass:
+    import duckdb
+
+    if isinstance(exc, (MemoryError, KeyboardInterrupt, SystemExit)):
+        return FailureClass(FailureKind.LOCAL)
+    if isinstance(exc, _local_duckdb_errors(duckdb)):
+        return FailureClass(FailureKind.LOCAL)
+
+    status = _status_of(exc)
+    if status is not None:
+        return FailureClass(FailureKind.HTTP_STATUS, status)
+
+    import httpx
+    import requests
+
+    if isinstance(exc, (httpx.TimeoutException, requests.Timeout, TimeoutError)):
+        return FailureClass(FailureKind.TIMEOUT)
+    if isinstance(
+        exc,
+        (httpx.TransportError, requests.ConnectionError, ConnectionError, socket.gaierror),
+    ):
+        return FailureClass(FailureKind.UNREACHABLE)
+    if isinstance(exc, _MALFORMED_RESPONSE_TYPES) or _is_xml_syntax_error(exc):
+        return FailureClass(FailureKind.MALFORMED_RESPONSE)
+    return FailureClass(FailureKind.UNKNOWN)
+
+
+def _local_duckdb_errors(duckdb) -> tuple[type[BaseException], ...]:
+    return (
+        duckdb.OutOfMemoryException,
+        duckdb.InterruptException,
+        duckdb.BinderException,
+        duckdb.CatalogException,
+        duckdb.ParserException,
+        duckdb.InvalidInputException,
+    )
+
+
+_MALFORMED_RESPONSE_TYPES: tuple[type[BaseException], ...] = (
+    xml.etree.ElementTree.ParseError,
+    json.JSONDecodeError,
+    UnicodeDecodeError,
+)
+
+
+def _is_xml_syntax_error(exc: BaseException) -> bool:
+    """lxml's parse error, by type, without making lxml a hard import."""
+    return any(
+        base.__module__.startswith("lxml.") and base.__name__ == "XMLSyntaxError"
+        for base in type(exc).__mro__
+    )
+
+
+def classify_failure(exc: BaseException) -> FailureClass:
+    """Classify a caught exception by its type and structured fields.
+
+    The exception and then its ``__cause__`` / ``__context__`` chain are walked
+    and the first recognised link decides, so a library error wrapped by
+    another still classifies. The message text is never read.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        verdict = _classify_one(cur)
+        if verdict.kind is not FailureKind.UNKNOWN:
+            return verdict
+        cur = cur.__cause__ or cur.__context__
+    return FailureClass(FailureKind.UNKNOWN)
+
+
+#: The statuses that are the *caller's* problem and never worth a retry, and
+#: the sentence each one gets. One mapping for WFS, ArcGIS and Carto: they used
+#: to carry three, each with its own wording. Lives here (not in ``http_retry``)
+#: because it classifies a status into gpio's vocabulary; ``http_retry`` only
+#: decides whether to try again.
+FATAL_STATUS_MESSAGES: dict[int, str] = {
+    401: "Authentication required for {subject}. {credentials}",
+    403: "Access denied to {subject}. {credentials}",
+    404: "{subject} not found (404). Check the name and the URL.",
+}
+
+
+def fatal_status_message(status: int, *, subject: str, credentials: str) -> str | None:
+    """The message for a 401/403/404, or ``None`` for any other status.
+
+    Args:
+        status: HTTP status the server answered with.
+        subject: What was asked for, e.g. ``"the WFS service"`` or
+            ``"table 'cities'"``; its first letter is capitalized when it
+            opens the 404 sentence.
+        credentials: The service-specific remedy for 401/403 (which flag or
+            variable carries the credential).
+    """
+    template = FATAL_STATUS_MESSAGES.get(status)
+    if template is None:
+        return None
+    if status == 404:
+        subject = subject[:1].upper() + subject[1:]
+    return template.format(subject=subject, credentials=credentials).strip()

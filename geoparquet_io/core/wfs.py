@@ -16,6 +16,7 @@ Key features:
 from __future__ import annotations
 
 import json
+import os
 import re
 import tempfile
 import time
@@ -56,6 +57,13 @@ from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
     sql_path,
 )
+from geoparquet_io.core.exceptions import (
+    FailureKind,
+    GeoParquetError,
+    classify_failure,
+    fatal_status_message,
+    sanitize_error_message,
+)
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
     DEFAULT_MAX_RETRIES,
@@ -76,11 +84,22 @@ from geoparquet_io.core.logging_config import (
 from geoparquet_io.core.reproject import reproject_table
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
-# Maximum JSON object size for DuckDB parsing (1GB)
+# Bounds for DuckDB's ``maximum_object_size`` when parsing a GeoJSON response.
+# A FeatureCollection is one JSON object, so the limit must reach the payload's
+# own size; but DuckDB's reader allocates a multiple of the limit per active
+# reader, so a fixed 1 GiB ran small responses out of memory on modest hosts
+# (#1344). The limit is sized per response, with a floor, and capped at 1 GiB.
+_MIN_JSON_OBJECT_SIZE = 16 * 1024 * 1024
 _MAX_JSON_OBJECT_SIZE = 1073741824
 
 
-class WFSError(Exception):
+def _json_object_size_for(path: str) -> int:
+    """``maximum_object_size`` for the downloaded response at ``path``."""
+    size = os.path.getsize(path)
+    return min(_MAX_JSON_OBJECT_SIZE, max(_MIN_JSON_OBJECT_SIZE, size))
+
+
+class WFSError(GeoParquetError):
     """Exception raised for WFS-related errors."""
 
     pass
@@ -239,16 +258,13 @@ def _make_request(
         return bytes(run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay))
     except httpx.HTTPStatusError as e:
         status = e.response.status_code
-        if status == 401:
-            raise WFSAuthenticationError(
-                url, 401, "Authentication required. WFS server requires credentials."
-            ) from e
-        if status == 403:
-            raise WFSAuthenticationError(
-                url, 403, "Access denied. Check your permissions for this WFS service."
-            ) from e
-        if status == 404:
-            raise WFSError(f"WFS service not found (404). Check the URL: {url}") from e
+        message = fatal_status_message(
+            status, subject="the WFS service", credentials="Check the credentials in the URL."
+        )
+        if status in (401, 403):
+            raise WFSAuthenticationError(url, status, message) from e
+        if message is not None:
+            raise WFSError(f"{message} URL: {url}") from e
         raise WFSError(f"HTTP error {status}: {e}") from e
     except RetryExhaustedError as e:
         last = e.last_exception
@@ -374,16 +390,29 @@ def get_wfs_capabilities(service_url: str, version: str = "1.1.0"):
         wfs = WebFeatureService(url=clean_url, version=version)
         return wfs
     except Exception as e:
-        error_msg = str(e).lower()
-        if "connection" in error_msg or "timeout" in error_msg:
+        # Classified by exception type and status (`exceptions.classify_failure`),
+        # never by the message: OWSLib's text embeds the request URL, so the
+        # user's own layer name or filter could decide the verdict (#1034).
+        verdict = classify_failure(e)
+        if verdict.kind in (FailureKind.UNREACHABLE, FailureKind.TIMEOUT):
             raise WFSError(f"Could not connect to WFS service: {clean_url}\nError: {e}") from e
-        elif "xml" in error_msg or "parse" in error_msg:
+        if verdict.kind is FailureKind.MALFORMED_RESPONSE:
             raise WFSError(
                 f"Invalid WFS response from: {clean_url}\n"
                 f"The server may not be a valid WFS service. Error: {e}"
             ) from e
-        else:
-            raise WFSError(f"Failed to get WFS capabilities: {e}") from e
+        if verdict.kind is FailureKind.HTTP_STATUS and verdict.status in (401, 403):
+            raise WFSAuthenticationError(
+                clean_url,
+                verdict.status,
+                fatal_status_message(
+                    verdict.status,
+                    subject="the WFS service",
+                    credentials="Check the credentials in the URL.",
+                )
+                or "",
+            ) from e
+        raise WFSError(f"Failed to get WFS capabilities: {e}") from e
 
 
 # WFS versions in preference order (newest first)
@@ -1634,7 +1663,10 @@ def _reproject_bbox_for_local_filter(
         xmin, ymin, xmax, ymax = transformer.transform_bounds(*bbox)
         return (xmin, ymin, xmax, ymax)
     except Exception as e:
-        warn(f"Could not reproject bbox from {source_crs} to {target_crs} for local filter: {e}")
+        warn(
+            f"Could not reproject bbox from {source_crs} to {target_crs} for local filter: "
+            f"{sanitize_error_message(str(e))}"
+        )
         return bbox
 
 
@@ -2402,13 +2434,15 @@ def _fetch_wfs_page(
             return _with_server_crs(empty, server_crs)
 
         # Detect property type and build extraction query
-        props_type, can_unnest_props = _probe_properties_type(con, tmp_path, _MAX_JSON_OBJECT_SIZE)
+        props_type, can_unnest_props = _probe_properties_type(
+            con, tmp_path, _json_object_size_for(tmp_path)
+        )
         if not can_unnest_props:
             debug(f"Properties type is {props_type}, cannot unnest - returning geometry-only table")
 
         parse_start = time.time()
         query = _build_wfs_feature_query(
-            tmp_path, extract_fid, can_unnest_props, _MAX_JSON_OBJECT_SIZE
+            tmp_path, extract_fid, can_unnest_props, _json_object_size_for(tmp_path)
         )
 
         result = con.sql(query)
@@ -2742,7 +2776,7 @@ def _probe_startindex_limit(
         # re-enables unbounded pagination. Programming errors still surface.
         warn(
             f"startIndex limit probe failed for '{typename}' at WFS {version}: "
-            f"{type(e).__name__}: {e}. Continuing without a known startIndex "
+            f"{type(e).__name__}: {sanitize_error_message(str(e))}. Continuing without a known startIndex "
             "cap — pagination past a server's limit may return truncated or "
             "rejected pages."
         )
@@ -3228,7 +3262,9 @@ def _get_tiling_bbox(
             return None
         return _lon_lat_bbox_in_crs(lon_lat, crs)
     except Exception as e:
-        warn(f"Could not reproject the layer bbox into {crs}, so auto-tiling is off: {e}")
+        warn(
+            f"Could not reproject the layer bbox into {crs}, so auto-tiling is off: {sanitize_error_message(str(e))}"
+        )
         return None
 
 

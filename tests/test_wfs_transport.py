@@ -296,17 +296,22 @@ def test_capabilities_are_parsed_into_layer_contents(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("message", "needle"),
+    ("make_error", "needle"),
     [
-        ("Connection refused by host", "Could not connect to WFS service"),
-        ("timeout while reading", "Could not connect to WFS service"),
-        ("not well-formed xml at line 3", "Invalid WFS response"),
-        ("something else entirely", "Failed to get WFS capabilities"),
+        (lambda: __import__("requests").exceptions.ConnectionError("x"), "Could not connect"),
+        (lambda: __import__("requests").exceptions.ReadTimeout("x"), "Could not connect"),
+        (
+            lambda: __import__("xml.etree.ElementTree").etree.ElementTree.ParseError("x"),
+            "Invalid WFS",
+        ),
+        (lambda: RuntimeError("something else entirely"), "Failed to get WFS capabilities"),
+        # The message never decides: these words on an unclassified type stay generic.
+        (lambda: RuntimeError("connection timeout xml parse"), "Failed to get WFS capabilities"),
     ],
 )
-def test_capability_failures_are_classified(monkeypatch, message, needle):
+def test_capability_failures_are_classified(monkeypatch, make_error, needle):
     def _boom(*_args, **_kwargs):
-        raise RuntimeError(message)
+        raise make_error()
 
     monkeypatch.setattr("owslib.wfs.WebFeatureService", _boom)
 
@@ -1126,3 +1131,37 @@ def test_extract_wfs_retries_a_503_through_the_shared_owner(monkeypatch, tmp_pat
     assert pq.read_metadata(out).num_rows == 6
     assert seen, "the page was fetched without going through http_retry.run_with_retry"
     assert http.sleeps == [1.0]  # the shared default retry_delay
+
+
+def test_json_object_limit_is_sized_per_response_not_one_gibibyte(monkeypatch):
+    """#1344: a small response must not ask DuckDB for a 1 GiB object limit.
+
+    The JSON reader allocates a multiple of ``maximum_object_size`` per active
+    reader, so the fixed 1 GiB ran a 3 KB page out of memory on a 7 GiB host.
+    """
+    from geoparquet_io.core import wfs as wfs_module
+
+    seen = []
+    real_probe = wfs_module._probe_properties_type
+    real_query = wfs_module._build_wfs_feature_query
+
+    def probe(con, path, size):
+        seen.append(size)
+        return real_probe(con, path, size)
+
+    def query(path, fid, unnest, size):
+        seen.append(size)
+        return real_query(path, fid, unnest, size)
+
+    monkeypatch.setattr(wfs_module, "_probe_properties_type", probe)
+    monkeypatch.setattr(wfs_module, "_build_wfs_feature_query", query)
+    http = FakeTransport.install(monkeypatch)
+    wfs_capabilities(monkeypatch, CAPABILITIES, SCHEMA)
+    stub_service(http, total=5)
+
+    table = fetch_all_features_duckdb(SERVICE, TYPENAME, "1.1.0", page_size=100)
+
+    assert table.num_rows == 5
+    assert seen, "the JSON reader was never sized"
+    assert all(16 * 1024 * 1024 <= size < 1024**3 for size in seen), seen
+    assert max(seen) <= 16 * 1024 * 1024  # a few KB of GeoJSON gets the floor

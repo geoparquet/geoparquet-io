@@ -39,7 +39,11 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any, cast
 
-from geoparquet_io.core.exceptions import BatchTooLargeError, RemoteAccessError
+from geoparquet_io.core.exceptions import (
+    BatchTooLargeError,
+    RemoteAccessError,
+    fatal_status_message,
+)
 from geoparquet_io.core.logging_config import warn
 
 if TYPE_CHECKING:
@@ -307,16 +311,11 @@ def run_with_retry(
 def _status_error(url: str, exc: Any) -> RemoteAccessError:
     """The user-facing error for an HTTP status that will not be retried further."""
     status = exc.response.status_code
-    if status == 401:
-        return RemoteAccessError(
-            url, "Authentication required. Use --token or --username/--password."
-        )
-    if status == 403:
-        return RemoteAccessError(
-            url, "Access denied. Check your credentials and service permissions."
-        )
-    if status == 404:
-        return RemoteAccessError(url, "Service not found (404). Check the URL.")
+    message = fatal_status_message(
+        status, subject="the service", credentials="Use --token or --username/--password."
+    )
+    if message is not None:
+        return RemoteAccessError(url, message)
     # Not str(exc): httpx spells out the full request URL there, and on
     # ArcGIS the token rides in the query string.
     return RemoteAccessError(url, f"HTTP error {status} {exc.response.reason_phrase}".rstrip())

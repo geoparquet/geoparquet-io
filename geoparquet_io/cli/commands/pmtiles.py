@@ -14,6 +14,7 @@ from geoparquet_io.cli.decorators import (
     repair_geometry_option,
     verbose_option,
 )
+from geoparquet_io.cli.exception_handler import click_error_for
 
 # =============================================================================
 # PMTiles Commands (requires tippecanoe)
@@ -197,7 +198,7 @@ def pmtiles_create(
         )
         click.echo(click.style(f"✓ Created {output_file}", fg="green"))
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise click_error_for(e) from e
 
 
 @pmtiles.command(name="pyramid")
@@ -340,4 +341,4 @@ def pmtiles_pyramid(
         )
         click.echo(click.style(f"✓ Created {output_pmtiles}", fg="green"))
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise click_error_for(e) from e

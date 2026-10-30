@@ -60,6 +60,7 @@ from geoparquet_io.core.check_verdict import (
     worst,
 )
 from geoparquet_io.core.duckdb_utils import is_interrupt
+from geoparquet_io.core.exceptions import sanitize_error_message
 from geoparquet_io.core.file_utils import is_same_file_path
 from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT
 from geoparquet_io.core.logging_config import configure_verbose
@@ -337,11 +338,13 @@ class MultiFileCheckRunner:
             self._raise_if_interrupt(e)
             if not self.is_multi_file:
                 raise
-            self.fix_failures.append((file_path, str(e)))
+            self.fix_failures.append((file_path, sanitize_error_message(str(e))))
             click.echo("\r" + " " * 80 + "\r", nl=False)
             click.echo(
                 click.style(
-                    f"  {FAILURE_GLYPH} {stage} failed: {Path(file_path).name} - {e}", fg="red"
+                    f"  {FAILURE_GLYPH} {stage} failed: {Path(file_path).name} - "
+                    f"{sanitize_error_message(str(e))}",
+                    fg="red",
                 )
             )
             return None
@@ -970,7 +973,8 @@ def check_all(
                 except Exception as e:
                     click.echo(
                         click.style(
-                            f"{FAILURE_GLYPH} PMTiles failed for {file_path}: {e}", fg="red"
+                            f"{FAILURE_GLYPH} PMTiles failed for {file_path}: {sanitize_error_message(str(e))}",
+                            fg="red",
                         )
                     )
 

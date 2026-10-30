@@ -76,6 +76,9 @@ def cli_error_for(exc: BaseException) -> click.ClickException | None:
         unpublished_extension_hint,
     )
 
+    if isinstance(exc, GeoParquetError):
+        return handle_core_exception(exc)
+
     message = sanitize_error_message(str(exc))
 
     # Running out of room to spill is a DuckDB error too, and it needs the extra
@@ -95,6 +98,22 @@ def cli_error_for(exc: BaseException) -> click.ClickException | None:
         return click.ClickException(message)
 
     return None
+
+
+def click_error_for(exc: BaseException) -> click.ClickException:
+    """An error line for any exception a command wants to report, sanitized once.
+
+    The replacement for ``click.ClickException(str(e))``: ``cli_error_for``'s
+    verdict (with its hints) when the exception is one it claims, otherwise the
+    exception's text through ``sanitize_error_message``. A ``GeoParquetError``
+    is already clean (its constructor sanitized it) and keeps its own message
+    and plain ``ClickException`` shape, so exit codes do not move.
+    """
+    from geoparquet_io.core.exceptions import sanitize_error_message
+
+    if isinstance(exc, GeoParquetError):
+        return click.ClickException(exc.message)
+    return cli_error_for(exc) or click.ClickException(sanitize_error_message(str(exc)))
 
 
 def core_exception_handler(func: F) -> F:
