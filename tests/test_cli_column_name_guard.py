@@ -98,16 +98,24 @@ REVIEWED_UNGUARDED = {
     # A skill lookup key on disk, never SQL; an unknown name already reports
     # cleanly.
     ("skills",): ["--name"],
-    # --geometry-column is resolved against the table's own schema first
-    # ("geometry column '   ' not found in table", core/process/simplify.py);
-    # the raster column names are Arrow field names the output table is
+    # The raster column names are Arrow field names the output table is
     # *created* with (core/process/raster/). Polygonize's repair scan does run
     # DuckDB SQL, but only the geometry column crosses into it, under the
     # owner's quoting (core/geometry_repair.py) and a hard-coded "geometry"
     # name -- --value-column never reaches SQL.
-    ("process", "simplify"): ["--geometry-column"],
     ("process", "polygonize"): ["--value-column"],
     ("process", "contour"): ["--max-column", "--min-column"],
+}
+
+# Options that should carry the guard and do not yet: each names the #1367 track
+# that adds it. G13 (tests/test_cli_shared_options.py, [[G13.options]]) pins the
+# same fact from the shared-option side: these differ from the guarded spelling
+# of the same flag. When the track adds column_name_option(), the pending test
+# below fails: move the option to GUARDED_OPTIONS and drop its G13 entry.
+PENDING_GUARD = {
+    # T5c: the sort commands' --geometry-column uses column_name_option();
+    # simplify declares its own without the callback or the "geometry" default.
+    ("process", "simplify"): ["--geometry-column"],
 }
 
 
@@ -182,9 +190,25 @@ class TestGuardCoverage:
     def test_no_unreviewed_name_option_appeared(self):
         """A newly added column-naming option must be guarded or excluded here."""
         reviewed = {path: sorted(flags) for path, flags in REVIEWED_UNGUARDED.items()}
+        for path, flags in PENDING_GUARD.items():
+            reviewed.setdefault(path, []).extend(flags)
         for path, flag in GUARDED_OPTIONS.items():
             reviewed.setdefault(path, []).append(flag)
         assert _column_name_options() == {path: sorted(f) for path, f in reviewed.items()}
+
+    @pytest.mark.parametrize(
+        ("path", "flag"), [(p, f) for p, flags in PENDING_GUARD.items() for f in flags]
+    )
+    def test_a_pending_option_is_still_unguarded(self, path, flag):
+        """Once its track adds the guard, move it to GUARDED_OPTIONS."""
+        command = cli
+        for part in path:
+            command = command.commands[part]
+        option = next(opt for opt in command.params if flag in opt.opts)
+        assert option.callback is not _validate_column_name, (
+            f"{' '.join(path)} {flag} is guarded now: move it from PENDING_GUARD to "
+            "GUARDED_OPTIONS and delete its [[G13.options]] entry"
+        )
 
 
 class TestEmptyColumnNameIsRejected:

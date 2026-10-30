@@ -112,6 +112,7 @@ dev = [
     "mypy>=1.0.0",
     "tomli>=2.0.0;python_version<'3.11'",
     "vulture>=2.14",
+    "pylint>=3.3",
     "radon>=6.0.1",
     "xenon>=0.9.3",
     "commitizen>=4.0",
@@ -444,6 +445,20 @@ tag_format = "v$version"
 update_changelog_on_bump = false
 changelog_file = "CHANGELOG.md"
 major_version_zero = true
+
+# Guard G3 of #1367, second layer: pylint runs only R0801 (duplicate-code),
+# 8 or more similar lines with comments, docstrings and imports ignored. The
+# pairs it reports today are pinned in scripts/owner_exemptions.toml [G3.pylint];
+# scripts/check_pylint_duplicates.py fails when the count differs.
+[tool.pylint.main]
+disable = ["all"]
+enable = ["R0801"]
+
+[tool.pylint.similarities]
+min-similarity-lines = 8
+ignore-comments = true
+ignore-docstrings = true
+ignore-imports = true
 
 # Guard G4 of #1367. At 80 vulture reports only unused imports and arguments;
 # unused functions score 60, so 80 let a function with no caller pass. The

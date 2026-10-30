@@ -230,6 +230,17 @@ repos:
         pass_filenames: false
         always_run: true
 
+      # Guard G3 of #1367: a new near-duplicate function pair (>= 8 statements,
+      # >= 0.90 similar after renaming identifiers) fails; the pairs that exist
+      # are in scripts/duplicate_pairs_baseline.txt, which only falls.
+      - id: check-duplicates
+        name: check-duplicates
+        description: Near-duplicate functions (G3) against scripts/duplicate_pairs_baseline.txt
+        entry: uv run python scripts/check_duplicates.py
+        language: system
+        types: [python]
+        pass_filenames: false
+
       # The process CWD is shared state: pytest-xdist runs many tests in one
       # worker process, so a test that changes the working directory (and
       # fails, or forgets to restore it) moves every later test on that worker
@@ -340,6 +351,15 @@ repos:
         entry: uv run vulture
         language: system
         pass_filenames: false
+        stages: [pre-push]
+
+      - id: pylint-duplicates
+        name: pylint-duplicates
+        description: pylint R0801 (G3), held to the pairs pinned in owner_exemptions.toml [G3.pylint]
+        entry: uv run python scripts/check_pylint_duplicates.py
+        language: system
+        pass_filenames: false
+        always_run: true
         stages: [pre-push]
 
       - id: vulture-tests

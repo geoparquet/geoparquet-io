@@ -76,6 +76,11 @@ EXPECTED_COUNTS = {
     "G1.retry_wrappers": 0,
     "G1.json_dumps": 40,
     "G2.exemptions": 33,
+    "G3.pairs": 27,
+    "G3.baseline": 27,
+    "G3.pylint": 58,
+    "G13.options": 13,
+    "G13.bbox_parsers": 3,
     "G4.whitelist": 186,
     "G4.tests_whitelist": 99,
 }
@@ -1239,6 +1244,95 @@ def test_g4_every_whitelist_entry_still_names_something(key):
 
 
 # ---------------------------------------------------------------------------
+# G3: near-duplicate functions (scripts/check_duplicates.py; pylint R0801)
+# ---------------------------------------------------------------------------
+
+CHECK_DUPLICATES = REPO / "scripts" / "check_duplicates.py"
+CHECK_PYLINT_DUPLICATES = REPO / "scripts" / "check_pylint_duplicates.py"
+
+
+def _script(path: Path):
+    """Import a scripts/ module by path (scripts/ is not a package)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[path.stem] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _g3_baseline() -> list[str]:
+    dups = _script(CHECK_DUPLICATES)
+    return dups.read_baseline(REPO / load_exemptions()["G3"]["baseline"])
+
+
+@functools.lru_cache(maxsize=1)
+def _g3_pairs_on_the_tree() -> frozenset[str]:
+    dups = _script(CHECK_DUPLICATES)
+    return frozenset(p.key for p in dups.scan(dups.collect(REPO)))
+
+
+def test_g3_the_tree_has_no_pair_outside_the_baseline():
+    """A near-duplicate of an existing function (>= 8 statements, >= 0.90
+    after renaming identifiers): call the existing function instead."""
+    new = sorted(_g3_pairs_on_the_tree() - set(_g3_baseline()))
+    assert not new, "new near-duplicate pairs:\n  " + "\n  ".join(new)
+
+
+def test_g3_the_baseline_has_no_gone_pair():
+    """The baseline only falls: a pair whose copy is gone leaves it
+    (``check_duplicates.py --update``)."""
+    gone = sorted(set(_g3_baseline()) - _g3_pairs_on_the_tree())
+    assert not gone, "run scripts/check_duplicates.py --update:\n  " + "\n  ".join(gone)
+
+
+def test_g3_every_baseline_pair_has_a_reason_and_only_those():
+    pairs = load_exemptions()["G3"]["pairs"]
+    reasons = {e["pair"]: e["reason"] for e in pairs}
+    assert len(reasons) == len(pairs), "a pair is listed twice under [[G3.pairs]]"
+    assert set(reasons) == set(_g3_baseline())
+    assert all(r.strip() for r in reasons.values())
+    assert len(set(_g3_baseline())) == len(_g3_baseline()), "a baseline line is repeated"
+
+
+def test_g3_every_pylint_entry_has_a_reason():
+    entries = load_exemptions()["G3"]["pylint"]
+    assert all(e["reason"].strip() and "|" in e["block"] for e in entries)
+    assert len({e["block"] for e in entries}) == len(entries)
+
+
+def test_g3_hooks_run_both_layers():
+    dups = hook_entry("check-duplicates")
+    assert dups["entry"] == "uv run python scripts/check_duplicates.py"
+    assert dups["types"] == ["python"] and dups["pass_filenames"] is False
+    assert "stages" not in dups  # commit stage
+    pylint = hook_entry("pylint-duplicates")
+    assert pylint["entry"] == "uv run python scripts/check_pylint_duplicates.py"
+    assert pylint["stages"] == ["pre-push"]
+
+
+def test_g3_pylint_runs_r0801_alone_at_8_lines():
+    tool = _pyproject()["tool"]["pylint"]
+    assert tool["main"] == {"disable": ["all"], "enable": ["R0801"]}
+    assert tool["similarities"] == {
+        "min-similarity-lines": 8,
+        "ignore-comments": True,
+        "ignore-docstrings": True,
+        "ignore-imports": True,
+    }
+    assert any(
+        dep.startswith("pylint") for dep in _pyproject()["project"]["optional-dependencies"]["dev"]
+    )
+
+
+def test_g3_the_lint_job_runs_the_pre_push_stage():
+    """pylint-duplicates is a pre-push hook, so CI runs it only through this step."""
+    workflow = (REPO / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    assert "pre-commit run --all-files --hook-stage pre-push" in " ".join(workflow.split())
+
+
+# ---------------------------------------------------------------------------
 # The counts, and the shape of the file
 # ---------------------------------------------------------------------------
 
@@ -1248,6 +1342,11 @@ def _measured_counts() -> dict[str, int]:
     counts = {f"G1.{arm}": len(data.get("G1", {}).get(arm, [])) for arm in ARMS}
     counts["G1.tid251"] = len(data["G1"]["tid251"])
     counts["G2.exemptions"] = len(data["G2"]["exemptions"])
+    counts["G3.pairs"] = len(data["G3"]["pairs"])
+    counts["G3.baseline"] = len(_g3_baseline())
+    counts["G3.pylint"] = sum(e.get("count", 1) for e in data["G3"]["pylint"])
+    counts["G13.options"] = len(data["G13"]["options"])
+    counts["G13.bbox_parsers"] = len(data["G13"]["bbox_parsers"])
     counts["G4.whitelist"] = len(_whitelist_entries())
     counts["G4.tests_whitelist"] = len(_whitelist_entries("tests_whitelist"))
     return counts
@@ -1269,6 +1368,8 @@ def _all_entries(data: dict) -> Iterator[tuple[str, dict]]:
 def test_every_exemption_entry_names_a_path_and_a_reason():
     problems = []
     for where, entry in _all_entries(load_exemptions()):
+        if where.startswith(("G3.", "G13.")):  # pairs/options, not paths: own tests
+            continue
         if not str(entry.get("reason", "")).strip():
             problems.append(f"{where} {entry.get('path')}: no reason")
         if not (REPO / entry.get("path", "")).is_file():
@@ -1897,3 +1998,189 @@ def test_g12_the_whitelist_stale_check_reads_the_ast_not_the_text(tmp_path):
     module.write_text("# old_helper was here\nNOTE = 'old_helper'\n\ndef kept():\n    pass\n")
     entries = [("old_helper", "geoparquet_io/m.py"), ("kept", "geoparquet_io/m.py")]
     assert stale_whitelist_entries(tmp_path, entries) == ["geoparquet_io/m.py: old_helper"]
+
+
+_TEN_STATEMENTS = """
+def {name}(rows, limit):
+    total = 0
+    seen = set()
+    for row in rows:
+        if row in seen:
+            continue
+        seen.add(row)
+        total += row
+        if total > limit:
+            break
+    result = [total, len(seen)]
+    return result
+"""
+
+
+def _g3_tree(tmp_path: Path, files: dict[str, str]) -> Path:
+    for rel, text in files.items():
+        target = tmp_path / "geoparquet_io" / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    return tmp_path
+
+
+def _run_check_duplicates(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(CHECK_DUPLICATES), "--repo", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+_G3_KEY = "geoparquet_io/a.py:first|geoparquet_io/b.py:second"
+
+
+def test_g12_g3_flags_two_functions_that_differ_only_in_names(tmp_path):
+    second = _TEN_STATEMENTS.format(name="second").replace("total", "acc").replace("seen", "done")
+    repo = _g3_tree(tmp_path, {"a.py": _TEN_STATEMENTS.format(name="first"), "b.py": second})
+    result = _run_check_duplicates(repo)
+    assert result.returncode == 1, result.stdout
+    assert _G3_KEY in result.stdout
+
+
+def test_g12_g3_a_baselined_pair_passes(tmp_path):
+    second = _TEN_STATEMENTS.format(name="second").replace("total", "acc")
+    repo = _g3_tree(tmp_path, {"a.py": _TEN_STATEMENTS.format(name="first"), "b.py": second})
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text(f"# reason\n{_G3_KEY}\n", encoding="utf-8")
+    assert _run_check_duplicates(repo, "--baseline", str(baseline)).returncode == 0
+
+
+def test_g12_g3_a_gone_pair_warns_and_update_drops_it_but_never_adds(tmp_path):
+    repo = _g3_tree(tmp_path, {"a.py": _TEN_STATEMENTS.format(name="first")})
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text(f"# keep me\n{_G3_KEY}\n", encoding="utf-8")
+    warned = _run_check_duplicates(repo, "--baseline", str(baseline))
+    assert warned.returncode == 0 and "warning: baseline pair gone" in warned.stdout
+    assert _run_check_duplicates(repo, "--baseline", str(baseline), "--update").returncode == 0
+    assert baseline.read_text(encoding="utf-8") == "# keep me\n"
+    (repo / "geoparquet_io" / "b.py").write_text(
+        _TEN_STATEMENTS.format(name="second"), encoding="utf-8"
+    )
+    added = _run_check_duplicates(repo, "--baseline", str(baseline), "--update")
+    assert added.returncode == 1 and baseline.read_text(encoding="utf-8") == "# keep me\n"
+
+
+def test_g12_g3_short_or_different_functions_are_not_pairs(tmp_path):
+    short = "def first(a):\n    b = a\n    return b\n"
+    other = "def second(xs):\n" + "".join(f"    print('step {i}', xs[{i}])\n" for i in range(10))
+    repo = _g3_tree(
+        tmp_path,
+        {
+            "a.py": short,
+            "b.py": short.replace("first", "second"),
+            "c.py": other,
+            "d.py": _TEN_STATEMENTS.format(name="third"),
+        },
+    )
+    assert _run_check_duplicates(repo).returncode == 0
+
+
+_PYLINT_REPORT = """************* Module geoparquet_io.x
+geoparquet_io/x.py:1:0: R0801: Similar lines in 2 files
+==geoparquet_io.x:[1:12]
+==geoparquet_io.y:[3:14]
+    a = 1
+"""
+
+
+def _pylint_tree(tmp_path: Path, y_source: str) -> Path:
+    pkg = tmp_path / "geoparquet_io"
+    pkg.mkdir(exist_ok=True)
+    (pkg / "x.py").write_text("def f():\n" + "    a = 1\n" * 14, encoding="utf-8")
+    (pkg / "y.py").write_text(y_source, encoding="utf-8")
+    return tmp_path
+
+
+_Y_COPY_IN_G = "def g():\n" + "    a = 1\n" * 14
+_Y_COPY_IN_H = "def g():\n    return 0\ndef h():\n" + "    a = 1\n" * 12
+
+
+def _run_pylint_wrapper(
+    tmp_path: Path, pinned: str, y_source: str = _Y_COPY_IN_G
+) -> subprocess.CompletedProcess[str]:
+    repo = _pylint_tree(tmp_path, y_source)
+    report = tmp_path / "report.txt"
+    report.write_text(_PYLINT_REPORT, encoding="utf-8")
+    toml = tmp_path / "owner_exemptions.toml"
+    toml.write_text(pinned, encoding="utf-8")
+    return subprocess.run(
+        [
+            sys.executable,
+            str(CHECK_PYLINT_DUPLICATES),
+            "--repo",
+            str(repo),
+            "--report",
+            str(report),
+            "--exemptions",
+            str(toml),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+_PINNED_BLOCK = '[[G3.pylint]]\nblock = "x:f|y:g"\nreason = "r"\n'
+
+
+def test_g12_g3_pylint_wrapper_fails_an_unpinned_pair_and_passes_a_pinned_one(tmp_path):
+    assert _run_pylint_wrapper(tmp_path, "").returncode == 1
+    assert _run_pylint_wrapper(tmp_path, _PINNED_BLOCK).returncode == 0
+    stale = _PINNED_BLOCK + '[[G3.pylint]]\nblock = "p:a|q:b"\nreason = "r"\n'
+    result = _run_pylint_wrapper(tmp_path, stale)
+    assert result.returncode == 1 and "stale" in result.stdout
+
+
+def test_g12_g3_pylint_wrapper_fails_a_copy_swapped_between_the_same_modules(tmp_path):
+    """The pin names the functions, so trading the copy in y.g for one in y.h fails."""
+    result = _run_pylint_wrapper(tmp_path, _PINNED_BLOCK, _Y_COPY_IN_H)
+    assert result.returncode == 1, result.stdout
+    assert "x:f|y:h" in result.stdout
+
+
+_BODY = """
+    total = 0
+    seen = set()
+    for row in rows:
+        if row in seen:
+            continue
+        seen.add(row)
+        total += row
+        if total > limit:
+            break
+    return [total, len(seen)]
+"""
+
+
+def test_g12_g3_the_signature_does_not_shift_the_numbering(tmp_path):
+    """Byte-identical bodies under signatures that differ by an annotation, a
+    default and an extra leading parameter are one pair (the T0c audit's
+    normaliser defect hid the stats twins this way)."""
+    repo = _g3_tree(
+        tmp_path,
+        {
+            "a.py": "def first(rows, limit):" + _BODY,
+            "b.py": "def second(ctx, rows: list[int], limit: int = 5) -> list:" + _BODY,
+        },
+    )
+    result = _run_check_duplicates(repo)
+    assert result.returncode == 1 and _G3_KEY in result.stdout, result.stdout
+    assert "(1.00)" in result.stdout
+
+
+def test_g12_g3_update_refuses_to_write_on_a_failing_run(tmp_path):
+    second = _TEN_STATEMENTS.format(name="second")
+    repo = _g3_tree(tmp_path, {"a.py": _TEN_STATEMENTS.format(name="first"), "b.py": second})
+    baseline = tmp_path / "baseline.txt"
+    original = "geoparquet_io/a.py:gone|geoparquet_io/b.py:gone\n"
+    baseline.write_text(original, encoding="utf-8")
+    result = _run_check_duplicates(repo, "--baseline", str(baseline), "--update")
+    assert result.returncode == 1 and "not updating" in result.stdout
+    assert baseline.read_text(encoding="utf-8") == original
