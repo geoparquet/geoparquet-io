@@ -10,6 +10,8 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
+    describe_query,
+    duckdb_type_is_geometry,
     fetch_one,
     get_duckdb_connection,
     planar_view,
@@ -187,12 +189,8 @@ def _centroid_sql(con, input_path, geom_col) -> str:
     does not bind (#1222). ``input_path`` is RAW, escaped here by ``sql_path``.
     """
     quoted = quote_identifier(geom_col)
-    (column_type,) = fetch_one(
-        con.execute(
-            f"SELECT column_type FROM (DESCRIBE SELECT {quoted} FROM {sql_path(input_path)})"
-        )
-    )
-    if column_type.upper().startswith("GEOMETRY"):
+    ((_, column_type),) = describe_query(con, f"SELECT {quoted} FROM {sql_path(input_path)}")
+    if duckdb_type_is_geometry(column_type):
         return f"ST_Centroid({quoted})"
     return f"ST_Centroid(ST_GeomFromWKB({quoted}))"
 

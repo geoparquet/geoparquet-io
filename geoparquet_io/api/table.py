@@ -333,6 +333,8 @@ def read_partition(
     """
     from geoparquet_io.core.duckdb_utils import (
         _wrap_query_with_wkb_conversion,
+        describe_query,
+        duckdb_type_is_geometry,
         get_duckdb_connection,
         s3_config_scope,
     )
@@ -357,9 +359,10 @@ def read_partition(
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path_str))
         try:
             query = f"SELECT * FROM {expr}"
-            for row in con.execute(f"DESCRIBE ({query})").fetchall():
-                if row[1] and row[1].upper() == "GEOMETRY":
-                    query = _wrap_query_with_wkb_conversion(query, row[0], con=con)
+            for name, type_ in describe_query(con, query):
+                # A CRS-typed GEOMETRY crosses Arrow with its CRS; only a bare one is wrapped.
+                if duckdb_type_is_geometry(type_, allow_crs=False):
+                    query = _wrap_query_with_wkb_conversion(query, name, con=con)
 
             arrow_table = con.sql(query).arrow().read_all()
         finally:

@@ -2783,24 +2783,17 @@ def get_row_group_geo_stats(parquet_file: str) -> list[dict]:
         Empty list if no geo stats are available.
     """
     from geoparquet_io.core.bbox_structure import check_bbox_structure
-    from geoparquet_io.core.duckdb_metadata import (
-        get_file_metadata,
-        get_per_row_group_bbox_stats,
-        get_per_row_group_native_geo_stats,
-    )
+    from geoparquet_io.core.duckdb_metadata import get_file_metadata, get_row_group_bbox_stats
     from geoparquet_io.core.metadata_utils import (
         _get_num_rows_per_row_group,
         _merge_row_counts,
     )
 
-    # Try native geo stats first (GeoParquet 2.0 / parquet-geo-only)
-    rg_stats = get_per_row_group_native_geo_stats(parquet_file)
-
-    # Fall back to bbox column if no native stats
-    if not rg_stats:
-        bbox_col_name = check_bbox_structure(parquet_file).get("bbox_column_name")
-        if bbox_col_name:
-            rg_stats = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
+    # Native geo stats first (GeoParquet 2.0 / parquet-geo-only), then the bbox column.
+    rg_stats, _source = get_row_group_bbox_stats(
+        parquet_file,
+        bbox_column=lambda: check_bbox_structure(parquet_file).get("bbox_column_name"),
+    )
 
     if not rg_stats:
         return []

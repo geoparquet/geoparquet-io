@@ -33,6 +33,8 @@ from geoparquet_io.core.duckdb_metadata import (
     get_row_count,
 )
 from geoparquet_io.core.duckdb_utils import (
+    _type_contains_variant,
+    describe_query,
     fetch_one,
     fetch_row,
     get_duckdb_connection,
@@ -43,7 +45,6 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geo_metadata import _type_contains_variant
 from geoparquet_io.core.json_output import dumps_json, to_jsonable
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.metadata_utils import (
@@ -682,9 +683,7 @@ def get_preview_data(
             geo_columns.update(columns_meta.keys())
 
         # Get all column names and DuckDB types from the parquet file
-        schema_result = con.execute(
-            f"SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_parquet({sql_path(raw_url)}))"
-        ).fetchall()
+        schema_result = describe_query(con, f"SELECT * FROM read_parquet({sql_path(raw_url)})")
         all_columns = [row[0] for row in schema_result]
         col_types = {row[0]: row[1] for row in schema_result}
 
@@ -873,13 +872,13 @@ def compute_column_stats(
 def _source_column_types(con, source: str) -> dict[str, str]:
     """Each column's DuckDB type from one DESCRIBE of ``source``, empty if that fails."""
     try:
-        rows = con.execute(f"DESCRIBE SELECT * FROM {source}").fetchall()
+        rows = describe_query(con, f"SELECT * FROM {source}")
     except duckdb.Error as e:
         if is_interrupt(e):
             raise
         debug(f"Could not describe {source}, so each stats query is described instead: {e}")
         return {}
-    return {row[0]: row[1] for row in rows}
+    return dict(rows)
 
 
 def get_column_statistics(

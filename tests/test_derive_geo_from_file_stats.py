@@ -75,3 +75,29 @@ def test_no_statistics_anywhere_gives_types_only(tmp_path):
     meta = _geo_col_meta_from_stats(pf, 0, "Geometry", str(tmp_path / "unused.parquet"))
 
     assert meta == {"encoding": "WKB", "geometry_types": []}
+
+
+def test_derive_v2_geo_metadata_describes_a_native_geography_column(tmp_path):
+    """A file whose only geo column is a native GEOGRAPHY (no ``geo`` key) gets a block.
+
+    Pins the logical-type test in ``derive_v2_geo_metadata`` itself: a check that
+    knew only ``Geometry`` would find no geo column here and return None.
+    """
+    import geoarrow.pyarrow as ga
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.derive_geo_from_file import derive_v2_geo_metadata
+
+    wkb = ga.as_wkb(["POINT (1 2)", "POINT (3 4)"]).storage
+    geography = ga.wkb().with_edge_type(ga.EdgeType.SPHERICAL).wrap_array(wkb)
+    path = tmp_path / "geography.parquet"
+    pq.write_table(pa.table({"id": [1, 2], "geometry": geography}), str(path))
+    logical = str(pq.ParquetFile(str(path)).metadata.schema.column(1).logical_type)
+    assert logical == "Geography(crs=, algorithm=spherical)"
+
+    block = derive_v2_geo_metadata(str(path))
+
+    assert block is not None
+    assert block["primary_column"] == "geometry"
+    assert block["columns"]["geometry"]["edges"] == "spherical"

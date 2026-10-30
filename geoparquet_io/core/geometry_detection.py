@@ -12,7 +12,10 @@ from dataclasses import dataclass
 
 from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
+    describe_query,
+    duckdb_type_is_geometry,
     fetch_one,
+    parse_duckdb_geo_type,
     quote_identifier,
     register_arrow,
     sql_path,
@@ -25,14 +28,6 @@ from geoparquet_io.core.remote import needs_httpfs
 
 # Standard geometry column names for fallback detection
 STANDARD_GEOMETRY_NAMES = ["geometry", "geom", "wkb_geometry", "shape", "the_geom"]
-
-# How DuckDB's DESCRIBE renders a geometry type: `GEOMETRY`, or
-# `GEOMETRY('EPSG:3857')` once it carries a CRS. Anchored at both ends so a
-# struct or list type that merely mentions GEOMETRY is not matched. The CRS is a
-# SQL string literal, so an embedded `'` arrives doubled (`O''Brien`).
-_DESCRIBE_GEO_TYPE = re.compile(
-    r"^(GEOMETRY|GEOGRAPHY)(?:\(\s*'((?:[^']|'')*)'\s*\))?$", re.IGNORECASE | re.DOTALL
-)
 
 
 def detect_geometry_column_from_names(column_names) -> str | None:
@@ -90,7 +85,7 @@ def detect_parquet_geometry_column(parquet_file: str, verbose: bool = False) -> 
     con = None
     try:
         con = get_duckdb_connection(load_httpfs=needs_httpfs(raw_url))
-        result = con.execute(f"DESCRIBE SELECT * FROM read_parquet({sql_path(raw_url)})").fetchall()
+        result = describe_query(con, f"SELECT * FROM read_parquet({sql_path(raw_url)})")
         col = detect_geometry_column_from_names(row[0] for row in result)
         if col:
             if verbose:
@@ -211,21 +206,21 @@ def native_geometry_types_from_query(con, query: str, verbose: bool = False) -> 
     Best-effort: a ``DESCRIBE`` that fails answers ``{}`` rather than failing the
     write.
     """
+
     try:
-        described = con.execute(f"DESCRIBE ({query})").fetchall()
+        described = describe_query(con, query)
     except Exception as e:  # noqa: BLE001 - a probe, never the write's failure
         if verbose:
             debug(f"Could not read geometry types off the output query: {e}")
         return {}
 
     native: dict[str, str] = {}
-    for row in described:
-        name, col_type = row[0], str(row[1] if len(row) > 1 else "")
-        match = _DESCRIBE_GEO_TYPE.match(col_type.strip())
-        if not name or not match:
+    for name, col_type in described:
+        parsed = parse_duckdb_geo_type(col_type)
+        if not name or parsed is None:
             continue
-        family = "Geography" if match.group(1).upper() == "GEOGRAPHY" else "Geometry"
-        crs = match.group(2).replace("''", "'") if match.group(2) else None
+        family = "Geography" if parsed[0] == "GEOGRAPHY" else "Geometry"
+        crs = parsed[1]
         native[name] = f"{family}Type(crs={crs})" if crs else f"{family}Type()"
     return native
 
@@ -245,8 +240,9 @@ def _detect_geometry_from_query(
     Returns:
         The name of the detected geometry column, or None if not found.
     """
+
     try:
-        describe_result = con.execute(f"DESCRIBE ({query})").fetchall()
+        describe_result = describe_query(con, query)
         # Lowercase key -> the column's own spelling. The match below is
         # case-insensitive, but what is returned has to be the name the schema
         # actually carries: it becomes the `geo.columns` key, and a lowercased
@@ -267,8 +263,8 @@ def _detect_geometry_from_query(
                 return columns[std_name]
 
         for row in describe_result:
-            col_name, col_type = row[0], row[1] if len(row) > 1 else ""
-            if col_type and "GEOMETRY" in str(col_type).upper():
+            col_name, col_type = row
+            if duckdb_type_is_geometry(col_type):
                 if verbose:
                     debug(f"Found geometry column by type in query: {col_name}")
                 return col_name
@@ -314,8 +310,9 @@ def _geoarrow_struct_depth(duckdb_type: str) -> int | None:
 def _read_kind(duckdb_type: str | None) -> str:
     if duckdb_type is None:
         return "missing"
+
     text = duckdb_type.strip()
-    if _DESCRIBE_GEO_TYPE.match(text):
+    if parse_duckdb_geo_type(text) is not None:
         return "native"
     if text.upper() == "BLOB":
         return "wkb"
@@ -484,7 +481,7 @@ def resolve_geometry_read(con, raw_url: str, column: str) -> GeometryRead:
     presents a WKB column as GEOMETRY and decodes it lazily, so a caller that
     must see the stored bytes calls ``disable_geoparquet_conversion`` first.
     """
-    described = con.execute(f"DESCRIBE SELECT * FROM read_parquet({sql_path(raw_url)})").fetchall()
+    described = describe_query(con, f"SELECT * FROM read_parquet({sql_path(raw_url)})")
     return GeometryRead.for_type(column, _find_described_type(described, column))
 
 
@@ -514,7 +511,7 @@ def register_geometry_column(
         columns[row_index] = pa.array(np.arange(table.num_rows, dtype=np.int64))
     columns[column] = geometry
     register_arrow(con, name, pa.table(columns))
-    described = con.execute(f"DESCRIBE {quote_identifier(name)}").fetchall()
+    described = describe_query(con, f"SELECT * FROM {quote_identifier(name)}")
     return GeometryRead.for_type(column, _find_described_type(described, column), flat=True)
 
 

@@ -8,7 +8,14 @@ import re
 import string
 from dataclasses import dataclass
 
-from geoparquet_io.core.duckdb_utils import fetch_one, fetch_rows, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    describe_query,
+    duckdb_type_is_numeric,
+    fetch_one,
+    fetch_rows,
+    quote_identifier,
+    sql_path,
+)
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import warn
 
@@ -33,28 +40,6 @@ VALID_OUT_GEOMETRY = {"polygon", "centroid", "both", "none"}
 # Unicode digits, underscores, inf/Infinity -- none of which are valid SQL).
 _NUMERIC_TOKEN_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$", re.ASCII)
 _NAN_TOKEN_RE = re.compile(r"^[+-]?nan$", re.IGNORECASE | re.ASCII)
-
-# DuckDB numeric type names (DESCRIBE output). REAL columns report as FLOAT.
-_NUMERIC_SQL_TYPES = {
-    "TINYINT",
-    "SMALLINT",
-    "INTEGER",
-    "BIGINT",
-    "HUGEINT",
-    "UTINYINT",
-    "USMALLINT",
-    "UINTEGER",
-    "UBIGINT",
-    "UHUGEINT",
-    "FLOAT",
-    "REAL",
-    "DOUBLE",
-}
-
-
-def _is_numeric_sql_type(col_type: str) -> bool:
-    t = col_type.upper()
-    return t in _NUMERIC_SQL_TYPES or t.startswith(("DECIMAL", "NUMERIC"))
 
 
 def aggregate_source_relation(input_url: str) -> str:
@@ -346,7 +331,7 @@ def resolve_metric_column_types(con, select_sql: str, metrics: list[MetricSpec])
     columns = sorted({m.column for m in metrics})
     col_list = ", ".join(quote_identifier(c) for c in columns)
     try:
-        rows = con.execute(f"DESCRIBE SELECT {col_list} FROM ({select_sql})").fetchall()
+        rows = describe_query(con, f"SELECT {col_list} FROM ({select_sql})")
     except Exception:  # noqa: BLE001 - typing is best-effort; real query reports errors
         return {}
     # One DESCRIBE row per selected column, in SELECT order.
@@ -399,7 +384,7 @@ def _aggregated_column_expr(
     if not nodata_values:
         return quote_identifier(column)
     col_type = (column_types or {}).get(column)
-    if col_type is not None and not _is_numeric_sql_type(col_type):
+    if col_type is not None and not duckdb_type_is_numeric(col_type):
         raise InvalidParameterError(
             "metric-nodata",
             f"NoData sentinels apply only to numeric metric columns; "
@@ -447,7 +432,7 @@ def _pct_cell_expr(
     if cell_area_expr is None:
         reject_pct_cell_metrics([m])
     col_type = (column_types or {}).get(m.column)
-    if col_type is not None and not _is_numeric_sql_type(col_type):
+    if col_type is not None and not duckdb_type_is_numeric(col_type):
         raise InvalidParameterError(
             "metric",
             f"'{PCT_CELL_FUNC}:{m.column}' needs a numeric per-feature area column; "
@@ -650,9 +635,7 @@ def resolve_breakdown_values(con, source_sql: str, column: str, limit: int) -> t
     if limit < 1:
         raise InvalidParameterError("breakdown-limit", f"must be at least 1, got {limit}")
     qcol = quote_identifier(column)
-    (_, col_type, *_rest), *_ = con.execute(
-        f"DESCRIBE SELECT {qcol} FROM ({source_sql})"
-    ).fetchall()
+    (_, col_type), *_ = describe_query(con, f"SELECT {qcol} FROM ({source_sql})")
     if not _is_scalar_sql_type(str(col_type)):
         raise InvalidParameterError(
             "breakdown",

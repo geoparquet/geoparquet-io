@@ -27,7 +27,12 @@ from geoparquet_io.core.crs_utils import (
     is_default_crs,
     is_unknown_type_crs,
 )
-from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier
+from geoparquet_io.core.duckdb_utils import (
+    _escape_sql_string,
+    describe_query,
+    duckdb_type_is_geometry,
+    quote_identifier,
+)
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     NATIVE_GEOMETRY_VERSIONS,
@@ -158,11 +163,7 @@ def wrap_query_with_secondary_crs(
     wanted = secondary_type_crs(geo_columns, primary)
     if not wanted:
         return query
-    native = {
-        row[0]
-        for row in con.execute(f"DESCRIBE ({query})").fetchall()
-        if str(row[1]).upper().startswith("GEOMETRY")
-    }
+    native = {name for name, type_ in describe_query(con, query) if duckdb_type_is_geometry(type_)}
     replacements = []
     for name in sorted(set(wanted) & native):
         crs = wanted[name]

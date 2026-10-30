@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
     import duckdb
+    import pyarrow as pa
 
 from geoparquet_io.core.exceptions import ExtensionUnavailableError, ValidationError
 from geoparquet_io.core.logging_config import debug, warn
@@ -1818,9 +1819,200 @@ _TIMESTAMPTZ = "TIMESTAMP WITH TIME ZONE"
 _UTC = datetime.timezone.utc
 
 
+def _as_subquery(sql: str) -> str:
+    """``sql`` ready to sit inside parentheses: its own lines, no trailing ``;``.
+
+    On its own lines so a trailing ``--`` comment cannot swallow the closing
+    parenthesis.
+    """
+    return f"(\n{sql.rstrip().rstrip(';')}\n)"
+
+
+def describe_query(con, sql: str, params=None) -> list[tuple[str, str]]:
+    """``(name, DuckDB type)`` for each output column of ``sql``, without a scan.
+
+    The DuckDB-type view of :func:`query_schema`: for the questions only
+    DuckDB's own type names answer (GEOMETRY vs GEOGRAPHY vs BLOB, a GeoArrow
+    STRUCT's nesting depth, TIMESTAMP WITH TIME ZONE, an ENUM), which an Arrow
+    schema has already translated away. ``DESCRIBE`` binds the query and never
+    crosses Arrow, so no column type can make it fail. Raises whatever the
+    bind raises; a caller that tolerates a miss catches it itself.
+    """
+    rows = con.execute(f"DESCRIBE {_as_subquery(sql)}", params).fetchall()
+    return [(row[0], str(row[1])) for row in rows]
+
+
+#: A DuckDB type name (``DESCRIBE`` / ``TYPEOF`` / a relation's ``.types``) that is
+#: a top-level GEOMETRY or GEOGRAPHY: bare, or ``GEOMETRY('EPSG:3857')`` once it
+#: carries a CRS. Anchored at both ends so a STRUCT or LIST type that merely
+#: mentions GEOMETRY is not matched. The CRS is a SQL string literal, so an
+#: embedded ``'`` arrives doubled (``O''Brien``).
+_DUCKDB_GEO_TYPE = re.compile(
+    r"^(GEOMETRY|GEOGRAPHY)(?:\(\s*'((?:[^']|'')*)'\s*\))?$", re.IGNORECASE | re.DOTALL
+)
+
+
+def parse_duckdb_geo_type(type_name: object) -> tuple[str, str | None] | None:
+    """``("GEOMETRY"|"GEOGRAPHY", crs or None)`` for a DuckDB type name, else None.
+
+    The DuckDB-type twin of :func:`native_geo_type` (which reads *Parquet*
+    logical types): the one answer to "is this DESCRIBE/TYPEOF type a geometry,
+    and with which CRS?" (#1367 concept 10).
+    """
+    match = _DUCKDB_GEO_TYPE.match(str(type_name or "").strip())
+    if match is None:
+        return None
+    crs = match.group(2).replace("''", "'") if match.group(2) else None
+    return match.group(1).upper(), crs
+
+
+def duckdb_type_is_geometry(type_name: object, *, allow_crs: bool = True) -> bool:
+    """Whether a DuckDB type name is GEOMETRY, with or without a CRS (not GEOGRAPHY).
+
+    ``allow_crs=False`` answers only for a CRS-less ``GEOMETRY``. It is for a
+    caller deciding whether to wrap the column in ``ST_AsWKB`` before an Arrow
+    export: a CRS-typed ``GEOMETRY('EPSG:4326')`` already crosses Arrow as
+    ``geoarrow.wkb`` carrying that CRS, and the wrap would drop it
+    (``api.table.read_partition``, the streaming write strategy).
+    """
+    parsed = parse_duckdb_geo_type(type_name)
+    if parsed is None or parsed[0] != "GEOMETRY":
+        return False
+    return allow_crs or parsed[1] is None
+
+
+#: DuckDB's numeric type names as DESCRIBE renders them, with the parameters cut
+#: off (``DECIMAL(18,3)`` -> ``DECIMAL``). ``REAL`` and ``NUMERIC`` are the aliases
+#: DuckDB accepts for ``FLOAT`` and ``DECIMAL``.
+_DUCKDB_NUMERIC_TYPES = frozenset(
+    {
+        "TINYINT",
+        "SMALLINT",
+        "INTEGER",
+        "BIGINT",
+        "HUGEINT",
+        "UTINYINT",
+        "USMALLINT",
+        "UINTEGER",
+        "UBIGINT",
+        "UHUGEINT",
+        "FLOAT",
+        "REAL",
+        "DOUBLE",
+        "DECIMAL",
+        "NUMERIC",
+    }
+)
+
+
+def duckdb_type_is_numeric(type_name: object) -> bool:
+    """Whether a DuckDB type name (DESCRIBE / TYPEOF output) is a numeric type.
+
+    Case-insensitive, and a parameterized ``DECIMAL(18,3)`` counts. The one
+    answer for the coordinate-column test in ``convert`` and the metric-column
+    test in ``process aggregate``, which used to keep two lists that disagreed
+    (one lacked ``REAL``, the other ``DECIMAL`` without its prefix test).
+    """
+    base = str(type_name or "").split("(", 1)[0].strip().upper()
+    return base in _DUCKDB_NUMERIC_TYPES
+
+
+def duckdb_type_contains_geometry(type_name: object) -> bool:
+    """Whether a DuckDB type name mentions GEOMETRY at any depth (``STRUCT(g GEOMETRY)``, ``GEOMETRY[]``).
+
+    The nested question beside :func:`duckdb_type_is_geometry`: the GeoJSON
+    writers render a nested geometry property differently, so the native writer
+    declines any property type that holds one. A plain case-insensitive substring
+    test, as the native-writer gate has always used (a struct field merely named
+    ``geometry_x`` also counts, which only sends the write to the hand-built writer).
+    """
+    return "GEOMETRY" in str(type_name or "").upper()
+
+
+def query_schema(con, sql: str, params=None) -> pa.Schema:
+    """The Arrow schema ``sql`` produces, without reading a row (#1367 concept 17).
+
+    The one schema probe: every "what does this query/relation output" question
+    gpio asks in Arrow terms comes here. Output names are the ones a written
+    file gets (duplicates de-duplicated as ``a``, ``a_1``), and the fields carry
+    their extension metadata (CRS, edges).
+
+    DuckDB 1.5 cannot export a VARIANT column over the Arrow C interface
+    (``OSError: Not implemented Error: Unsupported Arrow type VARIANT``), so a
+    file DuckDB wrote with VARIANT properties used to kill every write path at
+    this probe (#1352, #1362). On that one failure it is re-run with a sentinel
+    non-struct field standing in for each VARIANT column, so the bbox-covering
+    gates still see the column exists and judge a covering declared over it
+    exactly as 2.0's real export does. Any other failure raises.
+    """
+    try:
+        return _zero_row_schema(con, f"SELECT * FROM {_as_subquery(sql)} LIMIT 0", params)
+    except OSError as exc:
+        if "Unsupported Arrow type VARIANT" not in str(exc):
+            raise
+        return _query_schema_without_variant(con, sql, params)
+
+
+def _zero_row_schema(con, sql: str, params=None) -> pa.Schema:
+    # read_all() drains the (empty) reader, so the connection is free afterwards.
+    return con.sql(sql, params=params).arrow().read_all().schema
+
+
+_VARIANT_TYPE_KEYWORD = re.compile(r"\bVARIANT\b")
+
+
+def _type_contains_variant(type_str: str) -> bool:
+    """Whether a DESCRIBE-rendered DuckDB type carries the ``VARIANT`` keyword.
+
+    Case-sensitive and word-bounded on the uppercase keyword ``DESCRIBE``
+    renders. Nested matching is load-bearing — ``STRUCT(a VARIANT)`` and
+    ``VARIANT[]`` cannot cross Arrow on DuckDB 1.5 any more than a top-level
+    ``VARIANT`` — while a struct *field* merely named ``variant_id`` has no
+    word boundary before the ``_`` and a lowercase ``variant`` never matches.
+    Shared by the probe fallback below and ``inspect``'s preview: a substring
+    match here dropped such a struct from the fallback schema and rendered it
+    as JSON text in previews (#1352 review).
+    """
+    return _VARIANT_TYPE_KEYWORD.search(type_str) is not None
+
+
+def _query_schema_without_variant(con, sql: str, params=None) -> pa.Schema:
+    """The probe's schema with a sentinel standing in for every VARIANT column.
+
+    ``DESCRIBE`` never crosses Arrow, so it names the columns safely; a type
+    whose rendering carries the ``VARIANT`` keyword (top-level, or nested in a
+    STRUCT/LIST) is exactly the set DuckDB 1.5 refuses to export. Each such
+    column stays in the schema as a sentinel non-struct ``binary`` field rather
+    than being dropped: ``strip_illegal_bbox_covering`` treats a covering
+    naming a column *absent* from the schema as somebody else's question and
+    keeps it, so dropping the column let a ``covering.bbox`` declared over a
+    VARIANT column ship untouched on 1.5 while 2.0's real export strips it. The
+    sentinel gives both versions the same verdict. This path runs only after a
+    real VARIANT broke the export.
+    """
+    import pyarrow as pa
+
+    described = describe_query(con, f"SELECT * FROM {_as_subquery(sql)} LIMIT 0", params)
+    kept = [
+        quote_identifier(name) for name, type_ in described if not _type_contains_variant(type_)
+    ]
+    exported = (
+        _zero_row_schema(con, f"SELECT {', '.join(kept)} FROM {_as_subquery(sql)} LIMIT 0", params)
+        if kept
+        else pa.schema([])
+    )
+    exported_fields = iter(exported)
+    return pa.schema(
+        [
+            pa.field(name, pa.binary()) if _type_contains_variant(type_) else next(exported_fields)
+            for name, type_ in described
+        ]
+    )
+
+
 def _output_types(con, query: str, params=None) -> list[str]:
-    """The SQL type of each output column of ``query``. DESCRIBE binds it without a scan."""
-    return [column[1] for column in con.execute(f"DESCRIBE {query}", params).fetchall()]
+    """The SQL type of each output column of ``query`` (a view of :func:`describe_query`)."""
+    return [type_ for _, type_ in describe_query(con, query, params)]
 
 
 def _without_timestamptz(
@@ -1921,30 +2113,16 @@ def fetch_row(
 
 
 def _get_query_columns(con, query: str) -> list[str]:
-    """
-    Get column names from a SQL query without executing it fully.
-
-    Args:
-        con: DuckDB connection
-        query: SQL query to analyze
-
-    Returns:
-        List of column names in the query result
-    """
-    result = con.execute(f"DESCRIBE ({query})").fetchall()
-    return [row[0] for row in result]
+    """Output column names of ``query`` (a view of :func:`describe_query`)."""
+    return [name for name, _ in describe_query(con, query)]
 
 
 def _get_query_column_type(con, query: str, column_name: str) -> str | None:
-    """Return the DuckDB type string for a named column in a query, or None."""
+    """The DuckDB type of one output column of ``query``, or None if absent or unbindable."""
     try:
-        rows = con.execute(f"DESCRIBE ({query})").fetchall()
-        for row in rows:
-            if row[0] == column_name:
-                return row[1]
+        return next((t for name, t in describe_query(con, query) if name == column_name), None)
     except Exception:
-        pass
-    return None
+        return None
 
 
 # Clauses that must not follow a trailing ORDER BY for it to be safely strippable
@@ -2150,8 +2328,7 @@ def _wrap_query_with_blob_conversion(
     col_info: dict[str, str] = {}
     if con is not None:
         try:
-            rows = con.execute(f"DESCRIBE ({query})").fetchall()
-            col_info = {row[0]: row[1] for row in rows}
+            col_info = dict(describe_query(con, query))
         except Exception:
             col_info = {}
 
@@ -2162,7 +2339,7 @@ def _wrap_query_with_blob_conversion(
         # already the correct 1.x carrier and ST_AsWKB(BLOB) does not bind, so
         # the whole write aborted; worse, ST_AsWKB(VARCHAR) *does* bind and
         # silently reinterprets the text as WKT.
-        if col_info.get(geometry_column, "").upper().startswith("GEOMETRY"):
+        if duckdb_type_is_geometry(col_info.get(geometry_column)):
             targets.append(geometry_column)
     else:
         # DESCRIBE failed, so we know nothing about the types. Convert the
@@ -2173,8 +2350,8 @@ def _wrap_query_with_blob_conversion(
     for name in secondary_columns or ():
         if name in targets or name == geometry_column:
             continue
-        # A STRUCT is a bbox-style column, not geometry: startswith() excludes it.
-        if col_info.get(name, "").upper().startswith("GEOMETRY"):
+        # A STRUCT is a bbox-style column, not geometry: the owner excludes it.
+        if duckdb_type_is_geometry(col_info.get(name)):
             targets.append(name)
 
     if not targets:

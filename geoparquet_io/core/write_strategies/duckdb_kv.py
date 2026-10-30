@@ -35,6 +35,8 @@ from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     _wrap_query_with_blob_conversion,
     build_kv_metadata_clause,
+    describe_query,
+    duckdb_type_is_geometry,
     quote_identifier,
     register_arrow,
     sql_path,
@@ -529,11 +531,10 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         }
         if not gaps:
             return
-        column_types = {
-            row[0]: str(row[1]).upper() for row in con.execute(f"DESCRIBE ({query})").fetchall()
-        }
+        column_types = dict(describe_query(con, query))
         for name in sorted(gaps):
-            if column_types.get(name, "").startswith(("GEOMETRY", "STRUCT")):
+            type_ = column_types.get(name, "")
+            if duckdb_type_is_geometry(type_) or type_.upper().startswith("STRUCT"):
                 self._compute_missing_metadata(con, query, name, gaps[name], verbose)
 
     def write_from_table(

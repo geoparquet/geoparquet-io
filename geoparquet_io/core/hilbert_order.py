@@ -11,6 +11,7 @@ import pyarrow as pa
 from geoparquet_io.core.bbox_structure import get_bbox_advice
 from geoparquet_io.core.common import add_bbox, get_dataset_bounds, get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
+    describe_query,
     fetch_one,
     get_duckdb_connection,
     quote_identifier,
@@ -450,8 +451,7 @@ def _hilbert_order_streaming(
 
     with open_input(input_path, verbose=verbose) as (source, metadata, is_stream, con):
         # Get column names from query result (works with both table names and read_parquet)
-        sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
-        col_names = [col[0] for col in sample]
+        col_names = [name for name, _ in describe_query(con, f"SELECT * FROM {source}")]
 
         # Find geometry column
         geom_col = geometry_column

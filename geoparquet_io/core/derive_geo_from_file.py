@@ -16,7 +16,6 @@ single copies in ``geo_metadata``.
 
 import json
 import os
-import re
 from typing import Any
 
 import pyarrow as pa
@@ -27,6 +26,7 @@ from geoparquet_io.core.crs_utils import NULL_CRS_HINT, is_default_crs, is_unkno
 from geoparquet_io.core.duckdb_metadata import (
     get_geo_metadata,
     get_schema_info,
+    native_geo_type,
     parse_geometry_logical_type,
     resolve_crs_reference,
 )
@@ -61,10 +61,10 @@ def _geography_edges_from_logical(logical: str) -> str | None:
     to "spherical" (the Parquet spec default) when none is spelled out.
     Returns None for non-Geography logical types.
     """
-    if not logical.startswith("Geography"):
+    if native_geo_type(logical) != "GEOGRAPHY":
         return None
-    match = re.search(r"algorithm=([A-Za-z_]+)", logical)
-    return match.group(1).lower() if match else "spherical"
+    parsed = parse_geometry_logical_type(logical) or {}
+    return parsed.get("algorithm", "spherical")
 
 
 def _crs_from_geo_logical(logical: str, parquet_file: str) -> tuple[bool, Any]:
@@ -170,7 +170,7 @@ def _secondary_geometry_names(input_file: str) -> tuple[dict[str, str], dict[str
     native: dict[str, str] = {}
     for column in root_schema_columns(get_schema_info(input_file)):
         logical = column.get("logical_type") or ""
-        if logical.startswith(("Geometry", "Geography")):
+        if native_geo_type(logical) is not None:
             native[column["name"]] = logical
     declared: dict[str, dict] = {}
     try:
@@ -336,7 +336,7 @@ def derive_v2_geo_metadata(
         geo_cols: dict[int, tuple[str, str]] = {}
         for i in range(len(schema)):
             logical = str(schema.column(i).logical_type)
-            if logical.startswith(("Geometry", "Geography")):
+            if native_geo_type(logical) is not None:
                 geo_cols[i] = (schema.column(i).name, logical)
         if not geo_cols:
             return None

@@ -28,10 +28,13 @@ from geoparquet_io.core.duckdb_metadata import (
     get_geo_metadata,
     get_row_count,
     get_schema_info,
+    native_geo_type,
     parse_geometry_logical_type,
 )
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
+    _get_query_columns,
+    describe_query,
     fetch_one,
     get_duckdb_connection,
     get_duckdb_connection_for_s3,
@@ -165,11 +168,7 @@ def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | No
             if name != geometry_col:
                 continue
             logical_type = col.get("logical_type") or ""
-            # DuckDB returns GeometryType(...) and GeographyType(...) from parquet_schema()
-            if logical_type and (
-                logical_type.startswith("GeometryType(")
-                or logical_type.startswith("GeographyType(")
-            ):
+            if native_geo_type(logical_type) is not None:
                 parsed = parse_geometry_logical_type(logical_type)
                 if parsed and "crs" in parsed:
                     return parsed["crs"]
@@ -468,8 +467,7 @@ def get_schema_columns(input_parquet: str) -> list[str]:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         raw_url = resolve_file_url(file_to_check, verbose=False)
-        result = con.execute(f"DESCRIBE SELECT * FROM read_parquet({sql_path(raw_url)})").fetchall()
-        return [row[0] for row in result]
+        return _get_query_columns(con, f"SELECT * FROM read_parquet({sql_path(raw_url)})")
     finally:
         con.close()
 
@@ -699,8 +697,8 @@ def _setup_geometry_view(
 
     Returns (source_ref, needs_wkb_conversion).
     """
-    columns_info = con.execute("DESCRIBE __input_table").fetchall()
-    geom_is_blob = any(col[0] == geom_col and "BLOB" in col[1].upper() for col in columns_info)
+    columns_info = describe_query(con, "SELECT * FROM __input_table")
+    geom_is_blob = any(name == geom_col and "BLOB" in type_.upper() for name, type_ in columns_info)
 
     if not (geom_is_blob and geom_col in table.column_names):
         return "__input_table", False
@@ -979,8 +977,8 @@ def _extract_streaming(
         input_path, verbose=verbose, stream_output=should_stream_output(output_path)
     ) as (source, metadata, is_stream, con):
         # Get column names from query result (works with both table names and read_parquet)
-        sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
-        all_columns = [col[0] for col in sample]
+        # One relation: its reader has already de-duplicated the names.
+        all_columns = [name for name, _ in describe_query(con, f"SELECT * FROM {source}")]
 
         # Find geometry column
         geom_col = find_geometry_column_from_metadata(metadata)

@@ -19,10 +19,10 @@ from geoparquet_io.core.duckdb_metadata import (
     get_geo_metadata,
     get_per_row_group_bbox_stats,
     get_per_row_group_native_geo_stats,
+    get_row_group_bbox_stats,
     get_schema_info,
     parse_geometry_logical_type,
 )
-from geoparquet_io.core.duckdb_utils import sql_path
 from geoparquet_io.core.geo_metadata import is_covering_path
 from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.parquet_schema import root_schema_columns
@@ -571,36 +571,25 @@ def format_parquet_geo_metadata(
 
     geo_columns_info = _build_geo_columns_info(schema_info, geo_columns)
 
-    # Add row group stats: try bbox column first, then native geo_bbox
-    if bbox_col_name:
-        rg_bbox_stats = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
-        for col_name in geo_columns_info:
-            for rg_stat in rg_bbox_stats:
-                geo_columns_info[col_name]["row_group_stats"].append(
-                    {
-                        "row_group": rg_stat["row_group_id"],
-                        "xmin": rg_stat["xmin"],
-                        "ymin": rg_stat["ymin"],
-                        "xmax": rg_stat["xmax"],
-                        "ymax": rg_stat["ymax"],
-                    }
-                )
-    else:
-        for col_name in geo_columns_info:
-            native_stats = get_per_row_group_native_geo_stats(
-                parquet_file, geometry_column=col_name
-            )
-            if native_stats:
-                for rg_stat in native_stats:
-                    geo_columns_info[col_name]["row_group_stats"].append(
-                        {
-                            "row_group": rg_stat["row_group_id"],
-                            "xmin": rg_stat["xmin"],
-                            "ymin": rg_stat["ymin"],
-                            "xmax": rg_stat["xmax"],
-                            "ymax": rg_stat["ymax"],
-                        }
-                    )
+    # Row group stats per column, from the one reader: native geo stats, then the bbox column.
+    for col_name in geo_columns_info:
+        rg_stats, _source = get_row_group_bbox_stats(
+            parquet_file,
+            native=lambda col=col_name: get_per_row_group_native_geo_stats(
+                parquet_file, geometry_column=col
+            ),
+            bbox_column=lambda: bbox_col_name,
+        )
+        geo_columns_info[col_name]["row_group_stats"].extend(
+            {
+                "row_group": rg_stat["row_group_id"],
+                "xmin": rg_stat["xmin"],
+                "ymin": rg_stat["ymin"],
+                "xmax": rg_stat["xmax"],
+                "ymax": rg_stat["ymax"],
+            }
+            for rg_stat in rg_stats
+        )
 
     num_rg_to_show = num_row_groups
     if row_groups_limit is not None:
@@ -839,14 +828,11 @@ def format_row_group_geo_stats(
         row_groups: Limit output to first N row groups (None = all)
     """
 
-    # Try native geo stats first (GeoParquet 2.0 / parquet-geo-only)
-    rg_stats = get_per_row_group_native_geo_stats(parquet_file)
-
-    # Fall back to bbox column if no native stats
-    if not rg_stats:
-        bbox_col_name = check_bbox_structure(parquet_file).get("bbox_column_name")
-        if bbox_col_name:
-            rg_stats = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
+    # Native geo stats first (GeoParquet 2.0 / parquet-geo-only), then the bbox column.
+    rg_stats, _source = get_row_group_bbox_stats(
+        parquet_file,
+        bbox_column=lambda: check_bbox_structure(parquet_file).get("bbox_column_name"),
+    )
 
     if not rg_stats:
         if json_output:
@@ -885,20 +871,9 @@ def _get_num_rows_per_row_group(parquet_file: str, file_meta: dict) -> dict[int,
 
     Returns a mapping of row_group_id to row count.
     """
-    from geoparquet_io.core.duckdb_metadata import _get_connection_for_file, _metadata_path
+    from geoparquet_io.core.duckdb_metadata import get_row_group_sizes
 
-    connection, should_close = _get_connection_for_file(parquet_file)
-    try:
-        result = connection.execute(f"""
-            SELECT row_group_id, row_group_num_rows
-            FROM parquet_metadata({sql_path(_metadata_path(parquet_file))})
-            GROUP BY row_group_id, row_group_num_rows
-            ORDER BY row_group_id
-        """).fetchall()
-        return {row[0]: row[1] for row in result}
-    finally:
-        if should_close:
-            connection.close()
+    return {rg["row_group_id"]: rg["num_rows"] for rg in get_row_group_sizes(parquet_file)}
 
 
 def _merge_row_counts(rg_stats: list[dict], num_rows_per_rg: dict[int, int]) -> list[dict]:

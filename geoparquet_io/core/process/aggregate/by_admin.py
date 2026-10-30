@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.compression import resolve_codec, resolve_process_compression_level
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet
 from geoparquet_io.core.duckdb_utils import (
+    describe_query,
     quote_identifier,
     s3_config_scope,
     sql_path,
@@ -282,9 +283,9 @@ def aggregate_by_admin(
             # path subtracts them: the narrowed projection drops a requested name
             # that collides with one, so validating against it would pass a column
             # the query then cannot bind.
-            cols = {
-                r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {read_rel}").fetchall()
-            } - set(_RESERVED_INTERNAL)
+            cols = {name for name, _ in describe_query(con, f"SELECT * FROM {read_rel}")} - set(
+                _RESERVED_INTERNAL
+            )
             validate_agg_columns(cols, metrics, breakdown, bd_metric)
 
         admin_ref = _get_admin_ref(admin_dataset, con, level)

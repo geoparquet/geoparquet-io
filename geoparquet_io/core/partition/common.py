@@ -11,6 +11,7 @@ from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     fetch_rows,
     get_duckdb_connection,
+    query_schema,
     quote_identifier,
     sql_path,
     uses_aws_profile,
@@ -855,8 +856,7 @@ def partition_by_column(
             # so it is the other place a non-conformant input surfaces -- probed
             # before the output directory exists, so a refusal leaves nothing behind.
             with readable_geoparquet(input_parquet):
-                describe = con.execute(f"SELECT * FROM {sql_path(input_url)} LIMIT 0").description
-            input_cols = [d[0] for d in describe]
+                input_cols = query_schema(con, f"SELECT * FROM {sql_path(input_url)}").names
             alias = make_partition_aliases(1, input_cols)[0]
 
             # Create output directory

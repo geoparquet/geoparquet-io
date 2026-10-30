@@ -386,7 +386,21 @@ reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 # atomic_write lives in write_strategies/base.py until T2f moves it to
 # file_utils (re-exported from write_funnels); T2f changes this owner with the move.
 "atomic_write" = ["geoparquet_io/core/write_strategies/base.py"]
+# T1c: the native-geo-type probe (was _is_geography_column, copied in validate.py) and
+# the query-schema probes (was geo_metadata.output_query_schema / LIMIT 0 / DESCRIBE copies).
 "_is_geography_column" = ["geoparquet_io/core/duckdb_metadata.py"]
+"native_geo_type" = ["geoparquet_io/core/duckdb_metadata.py"]
+"is_native_geo_column" = ["geoparquet_io/core/duckdb_metadata.py"]
+"*query_schema" = ["geoparquet_io/core/duckdb_utils.py"]
+"describe_query" = ["geoparquet_io/core/duckdb_utils.py"]
+# T1c audit: the per-row-group spatial-stats ladder, the parquet_metadata() runner,
+# and the DuckDB-type (DESCRIBE/TYPEOF) geometry test.
+"get_row_group_bbox_stats" = ["geoparquet_io/core/duckdb_metadata.py"]
+"_parquet_metadata_rows" = ["geoparquet_io/core/duckdb_metadata.py"]
+"duckdb_type_is_geometry" = ["geoparquet_io/core/duckdb_utils.py"]
+"duckdb_type_contains_geometry" = ["geoparquet_io/core/duckdb_utils.py"]
+"duckdb_type_is_numeric" = ["geoparquet_io/core/duckdb_utils.py"]
+"parse_duckdb_geo_type" = ["geoparquet_io/core/duckdb_utils.py"]
 "_compute_geometry_types" = ["geoparquet_io/core/geo_metadata.py"]
 "_compute_bbox_from_data" = ["geoparquet_io/core/geo_metadata.py"]
 "handle_output_overwrite" = ["geoparquet_io/core/file_utils.py"]
@@ -500,10 +514,6 @@ path = "geoparquet_io/core/format_writers.py"
 name = "_normalize_bbox"
 reason = "parse_bbox copy; T5c"
 [[G2.exemptions]]
-path = "geoparquet_io/core/geo_metadata.py"
-name = "_get_query_columns"
-reason = "copy of duckdb_utils'; T1c"
-[[G2.exemptions]]
 path = "geoparquet_io/core/hilbert_order.py"
 name = "_resolve_output_version"
 reason = "re-derives the DEFAULT_GEOPARQUET_VERSION fallback beside the owner call; T2b"
@@ -543,11 +553,6 @@ reason = "version resolver copy; T2b"
 path = "geoparquet_io/core/streaming.py"
 name = "detect_version_for_output"
 reason = "version resolver copy; T2b"
-[[G2.exemptions]]
-path = "geoparquet_io/core/validate.py"
-name = "_is_geography_column"
-count = 2
-reason = "two definitions in validate.py, the first shadowed; T1c"
 [[G2.exemptions]]
 path = "geoparquet_io/core/validate.py"
 name = "_crs_equals"
@@ -608,9 +613,6 @@ reason = "index add workflow, one copy per index; T5b's index_ops driver replace
 [[G3.pairs]]
 pair = "geoparquet_io/core/add/h3.py:_add_h3_streaming|geoparquet_io/core/add/s2.py:_add_s2_streaming"
 reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/s2.py:_create_geometry_view|geoparquet_io/core/extract.py:_setup_geometry_view"
-reason = "BLOB-vs-native geometry view with a DESCRIBE probe (concept 7, resolve_geometry_read); T3c"
 [[G3.pairs]]
 pair = "geoparquet_io/core/arrow_geo_metadata.py:_compute_bbox_from_data|geoparquet_io/core/geo_metadata.py:_compute_bbox_from_data"
 reason = "geometry stats twin (concept 5); T3b"
@@ -714,9 +716,6 @@ reason = "kwarg list forwarded to one callee; identical since T2a removed the pe
 block = "cli.commands.partition:partition_s2|cli.decorators:handle_directory_sub_partition"
 reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
 [[G3.pylint]]
-block = "core.add.a5:_add_a5_streaming.make_query|core.add.bbox:_make_streaming_bbox_query"
-reason = "the LIMIT 0 probe, STANDARD_GEOMETRY_NAMES loop and literal 'geometry' fallback (concept 7); T3c's primary_geometry_column"
-[[G3.pylint]]
 block = "core.add.a5:_add_a5_streaming.make_query|core.add.h3:_add_h3_streaming.make_query"
 reason = "index add workflow per index; T5b's index_ops driver"
 [[G3.pylint]]
@@ -744,14 +743,8 @@ reason = "permanent: the same keyword-argument list forwarded to one callee (API
 block = "core.add.bbox:_add_bbox_streaming|core.stream_io:execute_transform"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
-block = "core.add.geometry_metrics:_add_metrics_streaming.make_query|core.add.s2:_add_s2_streaming.make_query"
-reason = "the LIMIT 0 probe, STANDARD_GEOMETRY_NAMES loop and literal 'geometry' fallback (concept 7); T3c's primary_geometry_column"
-[[G3.pylint]]
 block = "core.add.geometry_metrics:_add_metrics_streaming|core.sort_by_column:_sort_by_column_streaming"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.add.h3:_add_h3_streaming.make_query|core.add.quadkey:_add_quadkey_streaming"
-reason = "index add workflow per index; T5b's index_ops driver"
 [[G3.pylint]]
 block = "core.add.h3:_add_h3_streaming|core.sort_by_column:_sort_by_column_streaming"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
@@ -774,13 +767,10 @@ reason = "geometry stats twins; T3b"
 block = "core.arrow_geo_metadata:_detect_version_from_table|core.streaming:extract_version_from_metadata"
 reason = "version read from the geo key, copied; T2b"
 [[G3.pylint]]
-block = "core.convert:<module>|core.process.aggregate.common:<module>"
-reason = "DuckDB integer type-name list copied; T1c's type owner"
-[[G3.pylint]]
 block = "core.crs_utils:<module>|core.duckdb_metadata:_get_pyarrow_logical_type"
 reason = "GeoArrow extension-name list copied; T3a's decoder owner"
 [[G3.pylint]]
-block = "core.duckdb_metadata:get_per_row_group_native_geo_stats|core.validate:<module>"
+block = "core.duckdb_metadata:_format_geo_types|core.validate:<module>"
 reason = "WKB_TYPE_CODES table copied into validate; T3b"
 [[G3.pylint]]
 block = "core.extract:_execute_extraction|core.str_order:_str_order_file_based"

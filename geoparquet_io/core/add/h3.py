@@ -12,8 +12,10 @@ from geoparquet_io.core.crs_utils import (
     transform_geom_sql,
 )
 from geoparquet_io.core.duckdb_utils import (
+    describe_query,
     get_duckdb_connection,
     load_community_extension,
+    query_schema,
     quote_identifier,
     register_arrow,
 )
@@ -79,7 +81,7 @@ def add_h3_table(
         registered = register_arrow(con, "__input_table", table)
 
         # Check if geometry column is BLOB (needs conversion)
-        columns_info = con.execute("DESCRIBE __input_table").fetchall()
+        columns_info = describe_query(con, "SELECT * FROM __input_table")
         geom_is_blob = any(col[0] == geom_col and "BLOB" in col[1].upper() for col in columns_info)
 
         if geom_is_blob and geom_col in table.column_names:
@@ -314,8 +316,7 @@ def _add_h3_streaming(
         load_community_extension(con, "h3")
 
         # Get column names from query result
-        sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
-        col_names = [col[0] for col in sample]
+        col_names = query_schema(con, f"SELECT * FROM {source}").names
 
         # Find geometry column from common names
         geom_col = None

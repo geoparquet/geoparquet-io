@@ -6,6 +6,10 @@ from geoparquet_io.core.validate import (
 
 
 class _Result:
+    # The owner's parquet_metadata() runner names each row's columns from the
+    # result's description, as DuckDB's execute() result reports it.
+    description = [("row_group_id",), ("geo_bbox",), ("geo_types",)]
+
     def __init__(self, row=None, rows=None):
         self._row = row
         self._rows = rows

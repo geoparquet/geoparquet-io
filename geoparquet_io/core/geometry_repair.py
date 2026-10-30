@@ -19,7 +19,12 @@ This module provides three injection styles:
   memory (WFS, ArcGIS, BigQuery, Carto).
 """
 
-from geoparquet_io.core.duckdb_utils import fetch_one, quote_identifier
+from geoparquet_io.core.duckdb_utils import (
+    describe_query,
+    duckdb_type_is_geometry,
+    fetch_one,
+    quote_identifier,
+)
 from geoparquet_io.core.geo_metadata import GEOGRAPHY_EDGE_ALGORITHMS
 from geoparquet_io.core.logging_config import debug, warn
 
@@ -220,14 +225,14 @@ def repair_query_geometry(
         return query
     col = quote_identifier(geometry_column)
     try:
-        desc = con.execute(f"DESCRIBE ({query})").fetchall()
+        desc = describe_query(con, query)
     except Exception:
         return query
     col_type = next((d[1].upper() for d in desc if d[0] == geometry_column), None)
     if col_type is None:
         return query
 
-    if "GEOMETRY" in col_type:
+    if duckdb_type_is_geometry(col_type):
         # Native GEOMETRY: no decode needed; it cannot be a malformed-bytes case.
         parsed = col
         repaired_expr = repair_geometry_sql(parsed)

@@ -75,10 +75,11 @@ EXPECTED_COUNTS = {
     "G1.retry_after": 0,
     "G1.retry_wrappers": 0,
     "G1.json_dumps": 40,
-    "G2.exemptions": 33,
-    "G3.pairs": 27,
-    "G3.baseline": 27,
-    "G3.pylint": 60,
+    "G1.parquet_metadata": 0,
+    "G2.exemptions": 31,
+    "G3.pairs": 26,
+    "G3.baseline": 26,
+    "G3.pylint": 56,
     "G13.options": 13,
     "G13.bbox_parsers": 3,
     "G4.whitelist": 184,
@@ -303,8 +304,10 @@ class _Module:
         return None
 
 
-def _identifier_tokens(node: ast.AST) -> Iterator[str]:
+def _identifier_tokens(node: ast.AST, skip: frozenset[int] = frozenset()) -> Iterator[str]:
     for sub in ast.walk(node):
+        if id(sub) in skip:
+            continue
         if isinstance(sub, ast.Name):
             yield from sub.id.lower().split("_")
         elif isinstance(sub, ast.Attribute):
@@ -313,13 +316,19 @@ def _identifier_tokens(node: ast.AST) -> Iterator[str]:
 
 def _mentions_geo(node: ast.AST) -> bool:
     """The ``geo`` key by constant (``b"geo"``, or ``key = 'geo'`` in a footer
-    query) or by an identifier token (``geo_bytes``)."""
+    query) or by an identifier token (``geo_bytes``).
+
+    A callee's own name is not read: ``parse_duckdb_geo_type(t)`` is a call whose
+    result is whatever that function returns, not the footer key. (Only this arm
+    skips callees; the retry arms read a callee's name on purpose.)
+    """
     for sub in ast.walk(node):
         if isinstance(sub, ast.Constant) and sub.value in ("geo", b"geo"):
             return True
         if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and "'geo'" in sub.value:
             return True
-    return "geo" in set(_identifier_tokens(node))
+    callees = frozenset(id(sub.func) for sub in ast.walk(node) if isinstance(sub, ast.Call))
+    return "geo" in set(_identifier_tokens(node, callees))
 
 
 def _geo_bound(m: _Module, node: ast.AST, depth: int = 2) -> bool:
@@ -410,6 +419,22 @@ def _find_cgroup(m: _Module) -> Iterator[Hit]:
     """
     for node in m.strings():
         if "/sys/fs/cgroup" in node.value:
+            yield m.hit(node)
+
+
+_PARQUET_METADATA_CALL = re.compile(r"(?i)\bparquet_metadata\s*\(")
+
+
+def _find_parquet_metadata(m: _Module) -> Iterator[Hit]:
+    """A ``parquet_metadata(...)`` table-function call outside ``core/duckdb_metadata.py``.
+
+    Would have caught the per-row-group readers of #1367 concept 17 (T1c audit):
+    ``metadata_utils._get_num_rows_per_row_group`` and validate's ``geo_types``
+    query each opened their own connection over ``parquet_metadata()`` beside
+    the owner's ``_parquet_metadata_rows`` runner and its typed views.
+    """
+    for node in m.strings():
+        if _PARQUET_METADATA_CALL.search(node.value):
             yield m.hit(node)
 
 
@@ -903,6 +928,7 @@ ARMS = {
     "sql_escape": Arm(_find_sql_escape, ("geoparquet_io/core/duckdb_utils.py",)),
     "cgroup": Arm(_find_cgroup, ("geoparquet_io/core/memory_limits.py",)),
     "duckdb_version": Arm(_find_duckdb_version, ("geoparquet_io/core/duckdb_utils.py",)),
+    "parquet_metadata": Arm(_find_parquet_metadata, ("geoparquet_io/core/duckdb_metadata.py",)),
     "retry_loop": Arm(_find_retry_loop, _HTTP_OWNER),
     "retry_constants": Arm(_find_retry_constants, _HTTP_OWNER, needs_repo=True),
     "retry_param_defaults": Arm(_find_retry_param_defaults, _HTTP_OWNER),
@@ -1409,6 +1435,10 @@ G1_PLANTS = {
     "retry_after": 'def wait(resp):\n    return resp.headers.get("Retry-After")\n',
     "retry_wrappers": "def fetch(url):\n    return make_request_with_retry('GET', url)\n",
     "json_dumps": "import json\n\ndef show(d):\n    print(json.dumps(d))\n",
+    "parquet_metadata": (
+        "def rows(con, path):\n"
+        "    return con.execute(f\"SELECT * FROM parquet_metadata('{path}')\").fetchall()\n"
+    ),
 }
 
 #: Near-misses each arm must not flag, so a planted hit is the pattern itself.
@@ -1431,6 +1461,10 @@ G1_CLEAN = {
         "    log(rows)\n    return [r for r in rows if r]\n"
     ),
     "json_dumps": "from geoparquet_io.core.json_output import dumps_json\n",
+    "parquet_metadata": (
+        '"""Reads parquet_metadata() through the owner."""\n'
+        "from geoparquet_io.core.duckdb_metadata import get_row_group_sizes\n"
+    ),
 }
 
 
@@ -1645,6 +1679,42 @@ def test_g12_the_owner_is_exempt_and_only_the_owner(arm_name, tmp_path):
         (tmp_path / rel).write_text(G1_PLANTS[arm_name], encoding="utf-8")
 
     assert [h.path for h in arm_hits(tmp_path, arm_name)] == [nested]
+
+
+def test_g12_geo_parse_ignores_geo_in_a_callee_name(tmp_path):
+    """The footer key, not the token ``geo`` in the name of a function whose result is parsed.
+
+    ``crs_utils._crs_from_read_type`` parses the CRS out of
+    ``parse_duckdb_geo_type(t)``; the key read by subscript or ``.get`` still flags.
+    """
+    clean = (
+        "import json\n\ndef crs(t):\n    parsed = parse_duckdb_geo_type(t)\n"
+        "    value = parsed[1]\n    return json.loads(value)\n"
+    )
+    assert arm_hits(_plant(tmp_path / "a", "geo_parse", clean), "geo_parse") == []
+    for source in (
+        "import json\n\ndef read(md):\n    raw = md.get(b'geo')\n    return json.loads(raw)\n",
+        "import json\n\ndef read(geo_bytes):\n    return json.loads(geo_bytes)\n",
+    ):
+        repo = _plant(tmp_path / str(len(source)), "geo_parse", source)
+        assert len(arm_hits(repo, "geo_parse")) == 1, source
+
+
+@pytest.mark.parametrize(
+    "request_line",
+    ["return make_client().get(x)", "return c.fetch(build_url(x))"],
+    ids=["client-factory-receiver", "url-builder-argument"],
+)
+def test_g12_retry_loop_reads_a_callee_name(tmp_path, request_line):
+    """The retry arms read a callee's name (a client factory, a URL builder);
+    only geo_parse ignores callees, so its fix must not blind them."""
+    source = (
+        "import time\n\ndef fetch(c, x):\n    for attempt in range(3):\n        try:\n"
+        f"            {request_line}\n"
+        "        except Exception:\n            time.sleep(attempt)\n"
+    )
+    repo = _plant(tmp_path, "retry_loop", source)
+    assert arm_hits(repo, "retry_loop"), source
 
 
 def test_g12_an_exemption_excuses_exactly_its_count(tmp_path):
