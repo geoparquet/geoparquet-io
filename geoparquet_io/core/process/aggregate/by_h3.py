@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pyarrow as pa
 
+from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.constants import DEFAULT_H3_COLUMN_NAME
 from geoparquet_io.core.process.aggregate.grid_common import (
     GridScheme,
@@ -62,6 +63,7 @@ def aggregate_by_h3(
     memory_limit: str | None = None,
 ) -> None:
     """Aggregate a GeoParquet file into H3 cells. Writes the output file."""
+    compression_level = resolve_process_compression_level(compression, compression_level)
     aggregate_grid_file(
         H3_SCHEME,
         input_parquet,

@@ -10,6 +10,7 @@ from bisect import bisect_left
 
 import pyarrow as pa
 
+from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import info
 from geoparquet_io.core.optional_deps import load_module, require_contourrs
@@ -174,6 +175,7 @@ def contour_file(
     verbose: bool = False,
 ) -> None:
     """Extract contour bands from one raster band into a GeoParquet file."""
+    compression_level = resolve_process_compression_level(compression, compression_level)
     table = contour_raster(
         input_raster,
         levels=levels,
