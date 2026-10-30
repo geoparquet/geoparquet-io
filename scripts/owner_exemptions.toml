@@ -387,10 +387,8 @@ reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 "*unique_name*" = ["free_column_name", "_suffixed_to_unique"]
 "parse_bbox" = ["_normalize_bbox", "_validated_bbox"]
 
-# Owners named above that do not exist yet. bbox_parse.py is a placeholder
-# (T5c decides parse_bbox's home).
+# Owners named above that do not exist yet (none today).
 [G2.pending_owners]
-"geoparquet_io/core/bbox_parse.py" = "placeholder home for parse_bbox; T5c decides"
 
 # The definitions outside their owner today, each with the track that deletes
 # it. count = how many defs of that name the file holds (default 1); the check
@@ -424,21 +422,9 @@ path = "geoparquet_io/core/extract.py"
 name = "is_geographic_crs"
 reason = "is-geographic copy (approved change 8); T4c"
 [[G2.exemptions]]
-path = "geoparquet_io/core/extract.py"
-name = "parse_bbox"
-reason = "parse_bbox copy; T5c"
-[[G2.exemptions]]
-path = "geoparquet_io/core/format_writers.py"
-name = "_normalize_bbox"
-reason = "parse_bbox copy; T5c"
-[[G2.exemptions]]
 path = "geoparquet_io/core/inspect_utils.py"
 name = "_crs_are_equivalent"
 reason = "CRS equality copy (approved change 9); T4c"
-[[G2.exemptions]]
-path = "geoparquet_io/core/preview.py"
-name = "_validated_bbox"
-reason = "parse_bbox copy; T5c"
 [[G2.exemptions]]
 path = "geoparquet_io/core/process/aggregate/common.py"
 name = "_unique_name"
@@ -553,8 +539,10 @@ reason = "sort result read back with the input's schema metadata carried verbati
 # Option names declared on more than one command whose type, default, callback,
 # multiple or is_flag differ, with the fields that differ. The set is exact: a
 # new difference fails, and a unified option must leave the list.
-# Not here: --bbox (its parsing differs in the command bodies, not in the Click
-# declaration: pinned below as [[G13.bbox_parsers]]) and --json/--markdown
+# Not here: --bbox (every declaration is the same str; the parse layer has its
+# own arm, tests/test_cli_shared_options.py's inline_bbox_parsers, which finds
+# none since T5c routed them to core/bbox_parse.parse_bbox: add a
+# [[G13.bbox_parsers]] entry only if one must stay) and --json/--markdown
 # (declared repeatedly but identically).
 [[G13.options]]
 option = "--auto"
@@ -609,21 +597,6 @@ option = "--where"
 fields = ["default"]
 reason = "permanent: ArcGIS REST requires a where clause, so extract arcgis defaults to its select-all '1=1'"
 
-# Inline --bbox parsers in cli/ (tests/test_cli_shared_options.py's parse arm):
-# each splits on "," and casts floats itself instead of calling
-# core/extract.parse_bbox, and NaN handling differs (#1367's G13 evidence).
-[[G13.bbox_parsers]]
-path = "geoparquet_io/cli/commands/extract.py"
-name = "extract_arcgis"
-reason = "inline --bbox parser beside core/extract.parse_bbox; T5c"
-[[G13.bbox_parsers]]
-path = "geoparquet_io/cli/commands/extract.py"
-name = "extract_wfs_cmd"
-reason = "inline --bbox parser beside core/extract.parse_bbox; T5c"
-[[G13.bbox_parsers]]
-path = "geoparquet_io/cli/commands/extract.py"
-name = "extract_carto_cmd"
-reason = "inline --bbox parser beside core/extract.parse_bbox; T5c"
 
 # ---------------------------------------------------------------------------
 # G4: dead code (vulture at min_confidence = 60)

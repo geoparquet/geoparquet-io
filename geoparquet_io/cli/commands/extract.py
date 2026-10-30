@@ -32,7 +32,7 @@ from geoparquet_io.cli.decorators import (
     verbose_option,
     write_strategy_option,
 )
-from geoparquet_io.cli.exception_handler import error_text
+from geoparquet_io.core.bbox_parse import parse_bbox
 from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT
 from geoparquet_io.core.edges import PLANAR, SPHERICAL
 from geoparquet_io.core.extract import extract as extract_impl
@@ -454,18 +454,7 @@ def extract_arcgis(
     # Validate mutual exclusivity of row group options and get MB value
     row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
-    # Parse bbox string if provided
-    bbox_tuple = None
-    if bbox:
-        try:
-            parts = [float(x.strip()) for x in bbox.split(",")]
-            if len(parts) != 4:
-                raise ValueError("bbox must have exactly 4 values")
-            bbox_tuple = tuple(parts)
-        except ValueError as e:
-            raise click.BadParameter(
-                f"Invalid bbox format: {error_text(e)}. Use xmin,ymin,xmax,ymax"
-            ) from e
+    bbox_tuple = parse_bbox(bbox) if bbox else None
 
     with _activate_s3(ctx, aws_profile=aws_profile):
         convert_arcgis_to_geoparquet(
@@ -1097,19 +1086,7 @@ def extract_wfs_cmd(
     # Parse row group options
     row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
-    # Parse bbox if provided
-    bbox_tuple = None
-    if bbox:
-        try:
-            parts = [float(x.strip()) for x in bbox.split(",")]
-            if len(parts) != 4:
-                raise ValueError("Expected 4 values")
-            bbox_tuple = tuple(parts)
-        except ValueError as e:
-            raise click.ClickException(
-                f"Invalid bbox format: {bbox}\n"
-                "Expected: xmin,ymin,xmax,ymax (e.g., -122.5,37.5,-122.0,38.0)"
-            ) from e
+    bbox_tuple = parse_bbox(bbox) if bbox else None
 
     if is_multi_layer:
         # Multi-layer parallel extraction
@@ -1308,19 +1285,7 @@ def extract_carto_cmd(
     # Parse row group options
     row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
-    # Parse bbox if provided
-    bbox_tuple = None
-    if bbox:
-        try:
-            parts = [float(x.strip()) for x in bbox.split(",")]
-            if len(parts) != 4:
-                raise ValueError("Expected 4 values")
-            bbox_tuple = tuple(parts)
-        except ValueError as e:
-            raise click.ClickException(
-                f"Invalid bbox format: {bbox}\n"
-                "Expected: xmin,ymin,xmax,ymax (e.g., -75.2,39.9,-75.1,40.0)"
-            ) from e
+    bbox_tuple = parse_bbox(bbox) if bbox else None
 
     with _activate_s3(ctx, aws_profile=aws_profile):
         convert_carto_to_geoparquet(

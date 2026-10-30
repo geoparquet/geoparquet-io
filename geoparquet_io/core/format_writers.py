@@ -11,7 +11,6 @@ Writers handle local file output only; remote uploads are handled by the upload 
 """
 
 import json
-import math
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
@@ -19,6 +18,7 @@ from typing import cast
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.bbox_parse import parse_bbox
 from geoparquet_io.core.crs_utils import (
     _extract_crs_identifier,
     extract_crs_from_parquet,
@@ -191,29 +191,6 @@ _STAGED_TABLE = "__gpio_convert_staged"
 _MULTI_TYPES = {"Point": "MultiPoint", "LineString": "MultiLineString", "Polygon": "MultiPolygon"}
 
 
-def _normalize_bbox(
-    bbox: str | Sequence[float] | None,
-) -> tuple[float, float, float, float] | None:
-    """Parse a bbox given as ``"xmin,ymin,xmax,ymax"`` text or four numbers."""
-    if bbox is None:
-        return None
-    from geoparquet_io.core.extract import parse_bbox
-
-    if not isinstance(bbox, str):
-        try:
-            bbox = ",".join(str(float(value)) for value in bbox)
-        except (TypeError, ValueError) as e:
-            raise InvalidParameterError(
-                "bbox", f"expected 4 numeric values (xmin,ymin,xmax,ymax), got {bbox!r}"
-            ) from e
-    parsed = parse_bbox(bbox)
-    if not all(math.isfinite(value) for value in parsed):
-        # NaN slips past parse_bbox's reversed-coordinate check (NaN compares
-        # False) and would be interpolated as the bare SQL token ``nan``.
-        raise InvalidParameterError("bbox", f"coordinates must be finite, got {bbox!r}")
-    return parsed
-
-
 def _build_convert_filter(
     input_path: str,
     geometry_col: str | None,
@@ -242,7 +219,7 @@ def _build_convert_filter(
 
     if where:
         validate_where_clause(where)
-    bbox_tuple = _normalize_bbox(bbox)
+    bbox_tuple = parse_bbox(bbox) if bbox is not None else None
     geometry_wkt = parse_geometry_input(geometry, use_first_geometry) if geometry else None
     spatial_filter = None
     if bbox_tuple or geometry_wkt:

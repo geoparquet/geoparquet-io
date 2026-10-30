@@ -14,6 +14,7 @@ import re
 import duckdb
 import pyarrow as pa
 
+from geoparquet_io.core.bbox_parse import parse_bbox
 from geoparquet_io.core.column_selection import (
     resolve_columns_against_schema,
     split_column_list,
@@ -30,7 +31,6 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.edges import SPHERICAL
 from geoparquet_io.core.exceptions import ValidationError
-from geoparquet_io.core.extract import parse_bbox
 from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.logging_config import (

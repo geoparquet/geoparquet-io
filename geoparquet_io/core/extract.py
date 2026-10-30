@@ -18,6 +18,8 @@ from pathlib import Path
 import pyarrow as pa
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure, dataset_bounds
+from geoparquet_io.core.bbox_parse import parse_bbox
+from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.column_selection import (
     reject_blank_column_entries,
     split_column_list,
@@ -225,43 +227,6 @@ def _warn_if_crs_mismatch(
         msg += "\nIf you get 0 results, try using coordinates in the data's CRS."
 
         warn(msg)
-
-
-def parse_bbox(bbox_str: str) -> tuple[float, float, float, float]:
-    """
-    Parse bounding box string into tuple of floats.
-
-    Args:
-        bbox_str: Comma-separated string "xmin,ymin,xmax,ymax"
-
-    Returns:
-        tuple: (xmin, ymin, xmax, ymax)
-
-    Raises:
-        InvalidParameterError: If format is invalid or coordinates are reversed
-    """
-    try:
-        parts = [float(x.strip()) for x in bbox_str.split(",")]
-        if len(parts) != 4:
-            raise InvalidParameterError(
-                "bbox", f"expected 4 values (xmin,ymin,xmax,ymax), got {len(parts)}"
-            )
-        xmin, ymin, xmax, ymax = parts
-
-        # Validate coordinate ordering
-        if xmin > xmax or ymin > ymax:
-            raise InvalidParameterError(
-                "bbox",
-                f"coordinates appear to be reversed. "
-                f"xmin ({xmin}) must be <= xmax ({xmax}), and ymin ({ymin}) must be <= ymax ({ymax}). "
-                "Expected order: xmin,ymin,xmax,ymax.",
-            )
-
-        return (xmin, ymin, xmax, ymax)
-    except ValueError as e:
-        raise InvalidParameterError(
-            "bbox", f"expected numeric values: xmin,ymin,xmax,ymax. Error: {e}"
-        ) from e
 
 
 def convert_geojson_to_wkt(geojson: dict) -> str:

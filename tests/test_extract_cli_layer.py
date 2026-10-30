@@ -98,7 +98,7 @@ class TestExtractArcgisCliLayer:
             )
 
         assert result.exit_code != 0
-        assert "Invalid bbox format" in result.output
+        assert "Invalid value for bbox" in result.output
         assert "xmin,ymin,xmax,ymax" in result.output
         mock_convert.assert_not_called()
 
@@ -111,7 +111,7 @@ class TestExtractArcgisCliLayer:
             )
 
         assert result.exit_code != 0
-        assert "Invalid bbox format" in result.output
+        assert "Invalid value for bbox" in result.output
         mock_convert.assert_not_called()
 
 
@@ -342,7 +342,7 @@ class TestExtractWfsArgumentValidation:
             )
 
         assert result.exit_code != 0
-        assert "Invalid bbox format" in result.output
+        assert "Invalid value for bbox" in result.output
         assert "xmin,ymin,xmax,ymax" in result.output
         mock_convert.assert_not_called()
 
@@ -498,7 +498,7 @@ class TestExtractCartoCliLayer:
             )
 
         assert result.exit_code != 0
-        assert "Invalid bbox format" in result.output
+        assert "Invalid value for bbox" in result.output
         assert "xmin,ymin,xmax,ymax" in result.output
         mock_convert.assert_not_called()
 

@@ -240,7 +240,7 @@ class TestNativeStats:
 
 class TestBboxValidation:
     def test_wrong_arity_raises(self):
-        with pytest.raises(InvalidParameterError, match="four numbers"):
+        with pytest.raises(InvalidParameterError, match="expected 4 values"):
             preview_bbox_filter(str(PLACES), (0.0, 1.0, 2.0))
 
     def test_inverted_bbox_raises(self):

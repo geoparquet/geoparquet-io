@@ -237,8 +237,8 @@ def test_g12_the_walk_passes_identical_declarations_and_one_off_options():
 # ---------------------------------------------------------------------------
 # Every --bbox declaration is the same ``str``, so the declaration walk above
 # cannot see the ticket's own evidence: three commands parse the string
-# themselves, and differ on NaN (#1367). The owner is core/extract.parse_bbox
-# (T5c decides its final home). This arm finds a function in cli/ that splits a
+# themselves, and differed on NaN (#1367). The owner is core/bbox_parse.parse_bbox
+# (T5c). This arm finds a function in cli/ that splits a
 # string on "," and casts the parts with float() (a comprehension or map of
 # float() over ``.split(",")``, or four float() calls on its parts) and is about
 # four values (compares a length with 4, or names a bbox).
@@ -350,7 +350,7 @@ def test_no_unpinned_inline_bbox_parser_in_cli():
     live = set(inline_bbox_parsers())
     pinned = _pinned_bbox_parsers()
     assert live == set(pinned), (
-        "inline --bbox parsing in cli/ (call core/extract.parse_bbox instead):\n"
+        "inline --bbox parsing in cli/ (call core/bbox_parse.parse_bbox instead):\n"
         f"  new: {sorted(live - set(pinned))}\n"
         f"  pinned but gone (delete the [[G13.bbox_parsers]] entry): {sorted(set(pinned) - live)}"
     )

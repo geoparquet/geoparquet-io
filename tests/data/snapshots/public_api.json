@@ -378,7 +378,6 @@
     "get_schema_columns",
     "is_geographic_crs",
     "looks_like_latlong_bbox",
-    "parse_bbox",
     "parse_geometry_input",
     "validate_columns"
   ],

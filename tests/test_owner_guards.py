@@ -83,12 +83,12 @@ EXPECTED_COUNTS = {
     "G1.overwrite_check": 0,
     "G1.output_version": 0,
     "G1.geometry_stats": 0,
-    "G2.exemptions": 15,
+    "G2.exemptions": 12,
     "G3.pairs": 1,
     "G3.baseline": 1,
     "G3.pylint": 26,
     "G13.options": 13,
-    "G13.bbox_parsers": 3,
+    "G13.bbox_parsers": 0,
     "G4.whitelist": 177,
     "G4.tests_whitelist": 95,
 }
@@ -2216,7 +2216,7 @@ def _measured_counts() -> dict[str, int]:
     counts["G3.baseline"] = len(_g3_baseline())
     counts["G3.pylint"] = sum(e.get("count", 1) for e in data["G3"]["pylint"])
     counts["G13.options"] = len(data["G13"]["options"])
-    counts["G13.bbox_parsers"] = len(data["G13"]["bbox_parsers"])
+    counts["G13.bbox_parsers"] = len(data["G13"].get("bbox_parsers", []))
     counts["G4.whitelist"] = len(_whitelist_entries())
     counts["G4.tests_whitelist"] = len(_whitelist_entries("tests_whitelist"))
     return counts

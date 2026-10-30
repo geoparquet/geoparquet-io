@@ -21,12 +21,11 @@ duckdb into the process.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.bbox_parse import parse_bbox
 
 #: The one reason a preview carries no estimate.
 NO_STATS_REASON = (
@@ -98,7 +97,7 @@ def preview_bbox_filter(
             ``xmin <= xmax`` and ``ymin <= ymax``, or if ``geometry_column``
             names a column the file does not have.
     """
-    query_bbox = _validated_bbox(bbox)
+    query_bbox = parse_bbox(bbox)
 
     from geoparquet_io.core.duckdb_metadata import get_row_group_sizes
 
@@ -131,25 +130,6 @@ def preview_bbox_filter(
         est_bytes=sum(group.compressed_bytes for group in matched),
         **totals,
     )
-
-
-def _validated_bbox(bbox: Sequence[float]) -> tuple[float, float, float, float]:
-    """``bbox`` as four floats, or the InvalidParameterError saying what it must be."""
-    try:
-        xmin, ymin, xmax, ymax = (float(value) for value in bbox)
-    except (TypeError, ValueError) as exc:
-        raise InvalidParameterError(
-            "bbox", "must be four numbers: (xmin, ymin, xmax, ymax)"
-        ) from exc
-    if not all(math.isfinite(value) for value in (xmin, ymin, xmax, ymax)):
-        # NaN compares False against everything, so letting it through would
-        # silently "match" every row group instead of estimating anything.
-        raise InvalidParameterError("bbox", f"must be finite numbers: {bbox!r}")
-    if xmin > xmax or ymin > ymax:
-        raise InvalidParameterError(
-            "bbox", f"xmin > xmax or ymin > ymax: ({xmin}, {ymin}, {xmax}, {ymax})"
-        )
-    return (xmin, ymin, xmax, ymax)
 
 
 def _row_group_spatial_stats(
