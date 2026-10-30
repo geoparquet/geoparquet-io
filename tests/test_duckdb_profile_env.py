@@ -183,13 +183,13 @@ def test_fetchone_profile_is_written_only_once_the_result_is_exhausted(tmp_path,
 
     # A bare fetchone() on purpose (fetch_one would complete the result).
     once = con.execute("SELECT 'fetched-once'")
-    assert once.fetchone() == ("fetched-once",)
+    assert once.fetchone() == ("fetched-once",)  # guard: open-result ok
     con.execute("SELECT 'next'").fetchall()
     assert _query_names(tmp_path) == ["SELECT 'next'"]
 
     result = con.execute("SELECT 'drained'")
-    assert result.fetchone() == ("drained",)
-    assert result.fetchone() is None  # exhausted: now DuckDB writes it
+    assert result.fetchone() == ("drained",)  # guard: open-result ok
+    assert result.fetchone() is None  # exhausted; guard: open-result ok
     assert "SELECT 'drained'" in _query_names(tmp_path)
 
 

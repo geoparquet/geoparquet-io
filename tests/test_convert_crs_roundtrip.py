@@ -155,7 +155,7 @@ class TestGeoPackageCRSExport:
             FROM gpkg_spatial_ref_sys
             WHERE srs_id = 4326
         """)
-        result = cursor.fetchone()
+        result = cursor.fetchone()  # sqlite3 cursor; guard: open-result ok
         con.close()
 
         # Should have EPSG:4326 entry

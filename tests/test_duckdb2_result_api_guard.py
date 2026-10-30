@@ -52,8 +52,19 @@ def _execute_bound_names(func: ast.AST) -> set[str]:
     return names
 
 
+# Not removed on 2.0, but a partial read leaves the result open; see fetch_one.
+LEAVES_RESULT_OPEN = {"fetchone", "fetchmany"}
+
+#: A test that deliberately leaves an execute() result open (to pin the open-
+#: result behavior itself) marks the call line with this and the guard skips it.
+#: Only the open-result arm honors it: the removed API crashes on 2.0 regardless.
+EXEMPT_MARK = "guard: open-result ok"
+
+
 def _violations(path: Path) -> list[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    source = path.read_text(encoding="utf-8")
+    lines = source.splitlines()
+    tree = ast.parse(source)
     found: list[str] = []
     scopes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
     for scope in [tree, *scopes]:
@@ -62,20 +73,22 @@ def _violations(path: Path) -> list[str]:
             if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
                 continue
             attr, receiver = node.func.attr, node.func.value
+            exempt = attr in LEAVES_RESULT_OPEN and EXEMPT_MARK in lines[node.lineno - 1]
+            on_bound_name = isinstance(receiver, ast.Name) and receiver.id in bound
             if attr == "fetch_record_batch":
                 found.append(f"{path.name}:{node.lineno} .fetch_record_batch()")
             elif attr in REMOVED_ON_EXECUTE_RESULTS and _is_execute_call(receiver):
                 found.append(f"{path.name}:{node.lineno} .execute(...).{attr}()")
-            elif attr == "fetchone" and _is_execute_call(receiver):
-                # Not removed, but on 2.0 it leaves the result open; see fetch_one.
-                found.append(f"{path.name}:{node.lineno} .execute(...).fetchone() (use fetch_one)")
-            elif (
-                attr in REMOVED_ON_EXECUTE_RESULTS
-                and isinstance(receiver, ast.Name)
-                and receiver.id in bound
-            ):
+            elif attr in LEAVES_RESULT_OPEN and _is_execute_call(receiver) and not exempt:
+                found.append(f"{path.name}:{node.lineno} .execute(...).{attr}() (use fetch_one)")
+            elif attr in REMOVED_ON_EXECUTE_RESULTS and on_bound_name:
                 found.append(
                     f"{path.name}:{node.lineno} {receiver.id}.{attr}() on an execute result"
+                )
+            elif attr in LEAVES_RESULT_OPEN and on_bound_name and not exempt:
+                found.append(
+                    f"{path.name}:{node.lineno} {receiver.id}.{attr}() on an execute "
+                    "result (use fetch_one)"
                 )
     return sorted(set(found))
 
@@ -149,12 +162,28 @@ def test_the_lambda_guard_tells_sql_from_prose(tmp_path, text, flagged):
         "def f(con):\n    return con.execute('q').fetch_record_batch(10)\n",
         "def f(cur):\n    return cur.execute('q', [1]).pl()\n",
         "def f(con):\n    return con.execute('q').fetchone()[0]\n",
+        "def f(con):\n    return con.execute('q').fetchmany(5)\n",
+        "def f(con):\n    r = con.execute('q')\n    return r.fetchone()[0]\n",
+        "def f(con):\n    r = con.execute('q')\n    return r.fetchmany(5)\n",
     ],
 )
 def test_the_guard_catches_each_removed_form(tmp_path, snippet):
     probe = tmp_path / "probe.py"
     probe.write_text(snippet, encoding="utf-8")
     assert _violations(probe)
+
+
+def test_the_marked_line_is_exempt_from_the_open_result_arm_only(tmp_path):
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "def f(con):\n"
+        "    r = con.execute('q')\n"
+        f"    a = r.fetchone()  # {EXEMPT_MARK}\n"
+        f"    b = con.execute('q').fetchone()  # {EXEMPT_MARK}\n"
+        f"    return a, b, r.arrow()  # {EXEMPT_MARK} (must not exempt removed API)\n",
+        encoding="utf-8",
+    )
+    assert _violations(probe) == ["probe.py:5 r.arrow() on an execute result"]
 
 
 def test_the_guard_passes_the_relation_forms(tmp_path):

@@ -168,7 +168,7 @@ both DuckDB 1.5.x and 2.0.
 | `.to_arrow_table()` | `con.sql(q).arrow().read_all()` |
 | `con.execute(q).arrow()` (gone in 2.0) | `con.sql(q).arrow().read_all()` (`params=` for parameters) |
 | `con.execute(q).fetch_record_batch(n)` (gone in 2.0) | `con.sql(q).to_arrow_reader(batch_size=n)` |
-| `con.execute(q).fetchone()` (2.0 leaves the result open) | `fetch_one(con.execute(q))` |
+| `con.execute(q).fetchone()` / `.fetchmany(n)` (2.0 leaves the result open) | `fetch_one(con.execute(q))`; drain a multi-row read |
 | `con.sql(q).fetchone()` / `.fetchmany()` (gone in 2.0) | `fetch_one(con.execute(q))` / `.fetchall()` |
 | `list_transform(l, x -> x + 1)` (2.0 rejects `->`) | `list_transform(l, lambda x: x + 1)` |
 | `TRY_CAST(x AS GEOMETRY)` | `TRY(ST_GeomFromText(x))` |

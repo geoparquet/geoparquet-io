@@ -413,7 +413,7 @@ def _stream_to_stdout(
     try:
         with _utf8_stdout() as output:
             while True:
-                row = result.fetchone()
+                row = result.fetchone()  # drains to None; guard: open-result ok
                 if row is None:
                     break
 
@@ -476,7 +476,7 @@ def _stream_feature_collection(
 
     # Collect all features
     while True:
-        row = result.fetchone()
+        row = result.fetchone()  # drains to None; guard: open-result ok
         if row is None:
             break
         features.append(json.loads(row[0]))

@@ -1902,6 +1902,18 @@ class TestViewPushesFiltersIntoTheQueryJob:
 
         assert _where_portability_problem("-- x", duckdb.token_type.comment) == "a comment"
 
+    @pytest.mark.parametrize("where", ["-- only a comment", "/* x */", "   ", ""])
+    def test_a_tokenless_where_is_refused_not_crashed(self, where):
+        """A clause that tokenizes to nothing (1.5 skips comments; blank input
+        on both versions) must be a clean refusal, not a zip() ValueError.
+        The CLI path never gets here (validate_where_clause rejects these
+        first); this pins the guard's own behavior for any future caller."""
+        from geoparquet_io.core.exceptions import ValidationError
+        from geoparquet_io.core.extract_bigquery import _require_where_portable_to_googlesql
+
+        with pytest.raises(ValidationError, match="--where contains"):
+            _require_where_portable_to_googlesql(where)
+
     def test_the_table_path_still_filters_in_duckdb(self):
         """Unchanged behaviour for a physical table: no silent push-down."""
         from geoparquet_io.core.extract_bigquery import _build_bigquery_query

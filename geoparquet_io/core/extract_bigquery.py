@@ -594,10 +594,15 @@ def _require_where_portable_to_googlesql(where: str) -> None:
         ValidationError: If any token falls outside that subset.
     """
     tokens = duckdb.tokenize(where)
-    problem = "a comment" if tokens and where[: tokens[0][0]].strip() else None
+    if not tokens:
+        # Whitespace-only, or all comment on a tokenizer that skips comments:
+        # refuse cleanly instead of crashing on the zip's length mismatch.
+        problem = "a comment" if where.strip() else "no SQL at all"
+    else:
+        problem = "a comment" if where[: tokens[0][0]].strip() else None
     if "\\" in where:
         problem = "a backslash"
-    ends = [pos for pos, _ in tokens[1:]] + [len(where)]
+    ends = ([pos for pos, _ in tokens[1:]] + [len(where)]) if tokens else []
     for (start, kind), end in zip(tokens, ends, strict=True):
         problem = problem or _where_portability_problem(where[start:end], kind)
     if problem:

@@ -935,9 +935,11 @@ def _try_detect_wkt_column(con, csv_read, col_names_lower):
                     )
                 )
                 if sample and sample[0]:
-                    # Validate WKT by parsing it — execute without fetchone to avoid
-                    # DuckDB 1.5+ GEOMETRY serialization error
-                    con.execute("SELECT ST_GeomFromText(?)", [sample[0]])
+                    # Validate WKT by parsing it — no fetchone, which would hit
+                    # DuckDB 1.5+'s GEOMETRY serialization error. complete() (2.0)
+                    # discards the rows unconverted so the result isn't left open.
+                    probe = con.execute("SELECT ST_GeomFromText(?)", [sample[0]])
+                    getattr(probe, "complete", lambda: None)()
                     return actual_col
             except Exception:
                 continue

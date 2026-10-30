@@ -52,7 +52,8 @@ dependencies = [
     # deliberate step once the extension is published for the next release.
     #
     # That release is 2.0 (2026-10-21; 1.6 never left dev builds). The code
-    # runs on both 1.5.x and 2.0, and the `test-duckdb-2` CI job keeps it so
+    # runs on both 1.5.x and 2.0, and the `test-duckdb-2` CI job exercises 2.0
+    # on every push (not a required check yet)
     # (#1345), but 'geography' is not published for 2.0 yet, so the cap stays
     # until it is (#1346). 2.0 wheels need Python 3.11+, so 3.10 stays on 1.5.x.
     "duckdb>=1.5.6,<1.6",
