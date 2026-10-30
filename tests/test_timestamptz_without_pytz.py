@@ -258,10 +258,8 @@ def test_partition_string_preview_timestamptz_without_pytz(temporal_file):
 
 
 def test_aggregate_breakdown_values_timestamptz_without_pytz(temporal_file):
-    from geoparquet_io.core.process.aggregate.common import (
-        resolve_breakdown_values,
-        sql_literal,
-    )
+    from geoparquet_io.core.duckdb_utils import sql_literal
+    from geoparquet_io.core.process.aggregate.common import resolve_breakdown_values
 
     con = get_duckdb_connection(load_spatial=True)
     try:
@@ -426,10 +424,8 @@ def test_aggregate_breakdown_out_of_range_temporal_values(edge_file):
 @pytest.mark.parametrize("column", ["tstz_bc", "tstz_far"])
 def test_breakdown_out_of_range_timestamptz_counts_its_rows_in_any_zone(edge_file, zone, column):
     """The breakdown spells each kept value back as a SQL literal, read in the session zone."""
-    from geoparquet_io.core.process.aggregate.common import (
-        resolve_breakdown_values,
-        sql_literal,
-    )
+    from geoparquet_io.core.duckdb_utils import sql_literal
+    from geoparquet_io.core.process.aggregate.common import resolve_breakdown_values
 
     con = get_duckdb_connection(load_spatial=True)
     try:

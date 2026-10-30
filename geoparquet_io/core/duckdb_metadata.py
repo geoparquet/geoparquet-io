@@ -24,7 +24,12 @@ from geoparquet_io.core.crs_utils import (
     geoarrow_crs_to_projjson,
     merge_longitude_ranges,
 )
-from geoparquet_io.core.duckdb_utils import _escape_sql_string, describe_query, fetch_one, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    describe_query,
+    fetch_one,
+    sql_literal,
+    sql_path,
+)
 from geoparquet_io.core.exceptions import (
     FailureKind,
     GeoParquetError,
@@ -1044,17 +1049,20 @@ def get_bbox_from_row_group_stats(
 
 def _bbox_stats_aggregates(bbox_column: str) -> str:
     """The four ``MIN/MAX(stats) FILTER`` columns over a bbox struct's chunk statistics."""
-    # path_in_schema is compared against a string LITERAL: _escape_sql_string.
-    escaped = _escape_sql_string(bbox_column)
+
+    # path_in_schema is compared against a string LITERAL, not an identifier.
+    def field(axis: str) -> str:
+        return sql_literal(f"{bbox_column}, {axis}")
+
     return f"""
                 MIN(TRY_CAST(stats_min AS DOUBLE))
-                    FILTER (WHERE path_in_schema = '{escaped}, xmin') as xmin,
+                    FILTER (WHERE path_in_schema = {field("xmin")}) as xmin,
                 MIN(TRY_CAST(stats_min AS DOUBLE))
-                    FILTER (WHERE path_in_schema = '{escaped}, ymin') as ymin,
+                    FILTER (WHERE path_in_schema = {field("ymin")}) as ymin,
                 MAX(TRY_CAST(stats_max AS DOUBLE))
-                    FILTER (WHERE path_in_schema = '{escaped}, xmax') as xmax,
+                    FILTER (WHERE path_in_schema = {field("xmax")}) as xmax,
                 MAX(TRY_CAST(stats_max AS DOUBLE))
-                    FILTER (WHERE path_in_schema = '{escaped}, ymax') as ymax"""
+                    FILTER (WHERE path_in_schema = {field("ymax")}) as ymax"""
 
 
 def get_per_row_group_bbox_stats(
@@ -1093,7 +1101,7 @@ def get_compression_info(parquet_file: str, column_name: str | None = None, con=
 
     Returns dict mapping column path to compression algorithm.
     """
-    where = f" WHERE path_in_schema = '{_escape_sql_string(column_name)}'" if column_name else ""
+    where = f" WHERE path_in_schema = {sql_literal(column_name)}" if column_name else ""
 
     def query(source: str) -> str:
         return f"""
@@ -1284,7 +1292,7 @@ def get_native_geo_stats_by_row_group(
         it as a missing geometry column.
     """
     # path_in_schema is compared against a string LITERAL, not an
-    # identifier, so the guard is _escape_sql_string, not quote_identifier.
+    # identifier, so the guard is sql_literal, not quote_identifier.
     rows = _parquet_metadata_rows(
         parquet_file,
         con,
@@ -1292,7 +1300,7 @@ def get_native_geo_stats_by_row_group(
             f"""
             SELECT row_group_id, geo_bbox, geo_types
             FROM {source}
-            WHERE path_in_schema = '{_escape_sql_string(geometry_column)}'
+            WHERE path_in_schema = {sql_literal(geometry_column)}
             ORDER BY row_group_id
         """
         ),

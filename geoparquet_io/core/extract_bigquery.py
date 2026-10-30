@@ -19,12 +19,12 @@ from geoparquet_io.core.column_selection import (
     split_column_list,
 )
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     describe_query,
     duckdb_type_is_geometry,
     fetch_one,
     get_duckdb_connection,
     quote_identifier,
+    sql_literal,
     validate_where_clause,
     where_condition_fragment,
 )
@@ -284,6 +284,29 @@ def _setup_bigquery_connection() -> duckdb.DuckDBPyConnection:
         raise
 
 
+def _googlesql_string(value: str) -> str:
+    """Quote a RAW value as a **GoogleSQL** single-quoted string literal.
+
+    The string-literal twin of :func:`_quote_bigquery_identifier`: GoogleSQL
+    backslash-escapes inside quotes, so a backslash and the delimiter are
+    escaped with a backslash (DuckDB's ``''`` doubling would end the string).
+
+    This is not a second copy of :func:`~geoparquet_io.core.duckdb_utils.sql_literal`:
+    GoogleSQL and DuckDB SQL are different dialects with different escape
+    rules, and each literal is built by its own dialect's owner. For SQL that
+    BigQuery runs, never for DuckDB SQL; a GoogleSQL statement that travels
+    inside DuckDB SQL is then escaped once more, as a DuckDB literal, by
+    :func:`_bigquery_query_relation`.
+
+    Raises:
+        ValueError: If the value contains a NUL byte.
+    """
+    if "\x00" in value:
+        raise ValueError(f"GoogleSQL string contains a NUL byte: {value!r}")
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
 def _get_table_row_count(
     con: duckdb.DuckDBPyConnection,
     table_id: str,
@@ -313,20 +336,16 @@ def _get_table_row_count(
         else:
             return None
 
-        # Build metadata query using __TABLES__
-        if project:
-            metadata_table = f"`{project}.{dataset}.__TABLES__`"
-            query_project = project
-        else:
-            metadata_table = f"`{dataset}.__TABLES__`"
-            query_project = ""
-
-        query = f"""
-        SELECT * FROM bigquery_query(
-            '{query_project}',
-            'SELECT row_count FROM {metadata_table} WHERE table_id = "{table}"'
+        # Build metadata query using __TABLES__. The GoogleSQL quotes the
+        # dataset path as a backtick identifier and the table as a GoogleSQL
+        # string; _bigquery_query_relation then escapes the whole statement
+        # once into the DuckDB literal.
+        path = f"{project}.{dataset}.__TABLES__" if project else f"{dataset}.__TABLES__"
+        googlesql = (
+            f"SELECT row_count FROM {_quote_bigquery_identifier(path)} "
+            f"WHERE table_id = {_googlesql_string(table)}"
         )
-        """
+        query = f"SELECT * FROM {_bigquery_query_relation(project or '', googlesql)}"
         result = fetch_one(con.execute(query))
         return result[0] if result else None
     except Exception:
@@ -490,8 +509,8 @@ def _bigquery_query_relation(project: str, googlesql: str) -> str:
     fallback in :func:`_bigquery_view_relation` and the ``--sql`` source --
     come through here, so the escaping contract is stated once: the statement
     travels inside a DuckDB **single-quoted string literal** and is escaped
-    exactly once, here, at the point of interpolation. ``_escape_sql_string``
-    is not idempotent, so no caller may pre-escape.
+    exactly once, here, at the point of interpolation, by ``sql_literal``.
+    Escaping is not idempotent, so no caller may pre-escape.
 
     Containment, not sanitation, is what this guarantees. ``--sql`` exists to
     run arbitrary BigQuery SQL, so there is nothing to sanitize on the
@@ -506,7 +525,7 @@ def _bigquery_query_relation(project: str, googlesql: str) -> str:
             :func:`_validate_project_id` or taken from a normalized table id
         googlesql: The statement BigQuery should run, raw and unescaped
     """
-    return f"bigquery_query('{_escape_sql_string(project)}', '{_escape_sql_string(googlesql)}')"
+    return f"bigquery_query({sql_literal(project)}, {sql_literal(googlesql)})"
 
 
 def _bigquery_view_relation(
@@ -661,7 +680,7 @@ def _schema_rows(
     """
     if relation is None:
         if table_source == "bigquery":
-            relation = f"bigquery_scan('{table_id}')"
+            relation = f"bigquery_scan({sql_literal(table_id)})"
         else:
             relation = quote_identifier(table_id)
     return describe_query(con, f"SELECT * FROM {relation}")
@@ -929,7 +948,7 @@ def _build_dry_run_query(
 ) -> str:
     """Build a dry run query string for display."""
     if not bbox:
-        return f"SELECT {select_cols} FROM bigquery_scan('{table_id}')"
+        return f"SELECT {select_cols} FROM bigquery_scan({sql_literal(table_id)})"
 
     # Show bbox mode info
     if bbox_mode == "auto":
@@ -942,7 +961,7 @@ def _build_dry_run_query(
     wkt = f"POLYGON(({xmin} {ymin}, {xmax} {ymin}, {xmax} {ymax}, {xmin} {ymax}, {xmin} {ymin}))"
 
     if bbox_mode == "local":
-        query = f"SELECT {select_cols} FROM bigquery_scan('{table_id}')"
+        query = f"SELECT {select_cols} FROM bigquery_scan({sql_literal(table_id)})"
         query += f" WHERE ST_Intersects(<geometry_column>, ST_GeomFromText('{wkt}'))"
     else:
         # Server or auto mode - show server-side as example. Escaped once here,
@@ -950,7 +969,7 @@ def _build_dry_run_query(
         bq_filter = f"ST_INTERSECTS(<geometry_column>, ST_GEOGFROMTEXT('{wkt}'))"
         query = (
             f"SELECT {select_cols} FROM bigquery_scan("
-            f"'{table_id}', filter='{_escape_sql_string(bq_filter)}')"
+            f"{sql_literal(table_id)}, filter={sql_literal(bq_filter)})"
         )
 
     return query
@@ -1638,13 +1657,13 @@ def _build_bigquery_query(
         # The GoogleSQL filter travels inside a DuckDB string literal, so it is
         # escaped once, here, at the point of interpolation. A BigQuery flexible
         # column name may legally contain an apostrophe (gpio #932).
-        filter_str = _escape_sql_string(" AND ".join(bq_filters))
+        filter_literal = sql_literal(" AND ".join(bq_filters))
         query = (
-            f"SELECT {select_cols} FROM bigquery_scan('{validated_table_id}', "
-            f"filter='{filter_str}')"
+            f"SELECT {select_cols} FROM bigquery_scan({sql_literal(validated_table_id)}, "
+            f"filter={filter_literal})"
         )
     else:
-        query = f"SELECT {select_cols} FROM bigquery_scan('{validated_table_id}')"
+        query = f"SELECT {select_cols} FROM bigquery_scan({sql_literal(validated_table_id)})"
 
     # Add WHERE clause
     conditions = local_conditions.copy()

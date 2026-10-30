@@ -288,7 +288,7 @@ def test_partition_admin_reprojects_projected_input_single_source(
 ):
     """``partition admin`` joins a projected input against CRS84 boundaries.
 
-    Exercises the single-source enrichment path (``_perform_enrichment_join``):
+    Exercises the single-source join (one ``run_admin_join`` step):
     without reprojecting the projected (EPSG:5070) input to the admin CRS the
     join raises a CRS-mismatch error; with it every feature falls inside the
     covering ``XX`` polygon and lands in a single partition.
@@ -302,7 +302,7 @@ def test_partition_admin_reprojects_projected_input_single_source(
         return CurrentAdminDataset(source_path=local_admin_dataset, verbose=verbose)
 
     monkeypatch.setattr(
-        "geoparquet_io.core.partition.admin_hierarchical.AdminDatasetFactory.create",
+        "geoparquet_io.core.admin_datasets.AdminDatasetFactory.create",
         staticmethod(fake_create),
     )
 
@@ -328,7 +328,7 @@ def test_partition_admin_reprojects_projected_input_per_level(
     """``partition admin`` reprojects a projected input on the per-level path.
 
     Exercises the chained temp-table enrichment path
-    (``_perform_per_level_enrichment_join``) used by Overture-shaped datasets:
+    (``run_admin_join``'s per-level chain) used by Overture-shaped datasets:
     each level's join must see the input reprojected to the admin (CRS84) CRS.
     The fields fixture lies within lon 16-20 / lat 45-49 (in CRS84), split here
     into two regions; every feature must be attributed to the covering country
@@ -367,7 +367,7 @@ def test_partition_admin_reprojects_projected_input_per_level(
         return OvertureAdminDataset(source_path=admin_file, verbose=verbose)
 
     monkeypatch.setattr(
-        "geoparquet_io.core.partition.admin_hierarchical.AdminDatasetFactory.create",
+        "geoparquet_io.core.admin_datasets.AdminDatasetFactory.create",
         staticmethod(fake_create),
     )
 

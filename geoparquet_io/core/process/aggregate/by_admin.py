@@ -5,13 +5,18 @@ from __future__ import annotations
 
 import gc
 
+from geoparquet_io.core.admin_datasets import (
+    admin_column_ref,
+    build_admin_join_query,
+    open_admin_join_connection,
+    resolve_admin_dataset,
+)
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     quote_identifier,
     s3_config_scope,
-    sql_path,
     validate_where_clause,
     where_sql_fragment,
 )
@@ -19,11 +24,6 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
-from geoparquet_io.core.memory_limits import open_bounded_connection
-from geoparquet_io.core.partition.admin_hierarchical import (
-    _build_admin_table_reference,
-    _setup_admin_dataset,
-)
 from geoparquet_io.core.process.aggregate.common import (
     VALID_OUT_GEOMETRY,
     MetricSpec,
@@ -49,23 +49,15 @@ from geoparquet_io.core.process.aggregate.grid_common import (
 from geoparquet_io.core.write_funnels import write_aggregate_table
 
 
-def _get_admin_ref(dataset, con, level: str) -> str:
+def _get_admin_ref(dataset, level: str) -> str:
     """Return an SQL table-reference for the admin dataset at the given level.
 
-    For datasets with per-level caches (Overture), uses the pre-filtered
-    level-specific cache file directly.  For others, falls back to the
-    generic prepare_data_source + read_parquet options path.
-
-    ``get_source_for_level`` returns a RAW path -- the user's
-    ``--dataset-source`` or a cache file under the user's home directory -- so
-    :func:`sql_path` quotes and escapes it here (#802).
+    For datasets with per-level caches (Overture), the pre-filtered
+    level-specific cache file; for others, the dataset's own source. Either
+    way :meth:`AdminDataset.table_reference` builds it, from a RAW path (#802).
     """
-    if dataset.supports_per_level_sources():
-        path = dataset.get_source_for_level(level)
-        return f"read_parquet({sql_path(path)})"
-    admin_source = dataset.prepare_data_source(con)
-    admin_ref: str = _build_admin_table_reference(dataset, admin_source)
-    return admin_ref
+    ref: str = dataset.table_reference(dataset.source_for_level(level))
+    return ref
 
 
 def _build_joined_sql(
@@ -88,9 +80,12 @@ def _build_joined_sql(
     The admin geometry is stored as WKB (ST_AsWKB) so that _wrap_admin_geometry
     can treat __admin_geom uniformly as WKB binary.
 
-    When admin_bbox_col is provided, a cheap bbox prefilter is added to the ON
-    clause so ST_Intersects is only evaluated for admin polygons whose bounding
-    box contains the feature point.
+    When admin_bbox_col is provided, a cheap point-in-bbox prefilter is added
+    to the ON clause so ST_Intersects is only evaluated for admin polygons whose
+    bounding box contains the feature point. The owner quotes every identifier
+    in it (#942 class), and keeps one admin region per input feature -- the
+    smallest admin code where polygons overlap -- so no feature is counted in
+    two regions (#543, see :func:`build_spatial_join_query`).
 
     ``where`` is applied to the inner input scan, so the spatial join, metrics,
     and breakdowns all see only the filtered rows (#568). The caller validates
@@ -102,28 +97,29 @@ def _build_joined_sql(
     relation so a geometry-less bbox-only input never trips a binder error on a
     column it does not have.
     """
-    if admin_bbox_col:
-        bbox_filter = (
-            f"b.{admin_bbox_col}.xmin <= ST_X(s.__cen) AND "
-            f"b.{admin_bbox_col}.xmax >= ST_X(s.__cen) AND "
-            f"b.{admin_bbox_col}.ymin <= ST_Y(s.__cen) AND "
-            f"b.{admin_bbox_col}.ymax >= ST_Y(s.__cen) AND "
-        )
-    else:
-        bbox_filter = ""
-    return f"""
-        SELECT s.*,
-               b.{quote_identifier(code_col)} AS __admin_code,
-               b.{quote_identifier(name_col)} AS __admin_name,
-               ST_AsWKB(b.{quote_identifier(admin_geom_col)}) AS __admin_geom
-        FROM (
+    boundary_columns = list(dict.fromkeys((code_col, name_col)))
+    code_ref = admin_column_ref(0, code_col)
+    name_ref = admin_column_ref(boundary_columns.index(name_col), name_col)
+    return build_admin_join_query(
+        input_relation=f"""(
             SELECT {select_list}{input_pt_expr} AS __cen
             FROM {aggregate_source_relation(input_url)}
             {where_sql_fragment(where)}
-        ) s
-        LEFT JOIN {admin_ref} b
-          ON {bbox_filter}ST_Intersects(b.{quote_identifier(admin_geom_col)}, s.__cen)
-    """
+        )""",
+        admin_table_ref=admin_ref,
+        admin_select_clause=(
+            f"{code_ref} AS __admin_code, "
+            f"{name_ref} AS __admin_name, "
+            f"ST_AsWKB(b.{quote_identifier(admin_geom_col)}) AS __admin_geom"
+        ),
+        input_geom_col="__cen",
+        admin_geom_col=admin_geom_col,
+        input_bbox_col=None,
+        admin_bbox_col=admin_bbox_col,
+        boundary_columns=boundary_columns,
+        input_alias="s",
+        input_is_point=True,
+    )
 
 
 def _build_agg_sql(
@@ -246,7 +242,9 @@ def aggregate_by_admin(
     # Fail on a bad keying column before the (possibly network-bound) dataset setup.
     _validate_keying_columns_for_file(input_parquet, bucket_point, bbox_column, verbose)
 
-    admin_dataset, _boundary_columns = _setup_admin_dataset(dataset, verbose, [level])
+    admin_dataset, _boundary_columns, _ = resolve_admin_dataset(
+        dataset, [level], cache=False, verbose=verbose
+    )
     mapping = admin_dataset.get_level_column_mapping()
     code_col = mapping[level]
     # Overture per-level caches store only the code column (e.g. ISO-2 country code
@@ -263,11 +261,10 @@ def aggregate_by_admin(
     # Opened in the dataset's scope, so its public read is not signed with an
     # outer AWS profile and configure_s3's endpoint is not beaten by a secret.
     with s3_config_scope(admin_dataset.get_s3_config()):
-        con = open_bounded_connection(
-            load_spatial=True, load_httpfs=True, memory_limit=memory_limit, verbose=verbose
+        con = open_admin_join_connection(
+            spill_to_cache=False, materialize=True, memory_limit=memory_limit, verbose=verbose
         )
     try:
-        con.execute("SET geometry_always_xy = true")
         admin_dataset.configure_s3(con)
 
         read_rel = aggregate_source_relation(input_url)
@@ -286,7 +283,7 @@ def aggregate_by_admin(
             )
             validate_agg_columns(cols, metrics, breakdown, bd_metric)
 
-        admin_ref = _get_admin_ref(admin_dataset, con, level)
+        admin_ref = _get_admin_ref(admin_dataset, level)
 
         # Resolve metric column types from the input so sentinel literals match the
         # column's actual precision (REAL vs DOUBLE, #613) and non-numeric metric

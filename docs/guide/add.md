@@ -664,7 +664,7 @@ Input in a non-CRS84 CRS is reprojected to the boundaries' CRS (OGC:CRS84) befor
 
 For native-geometry inputs (GeoParquet 2.0 and GeoParquet 1.1 with geoarrow encoding), the spatial join relies on native Parquet column statistics to skip irrelevant data, but this is not quite working yet, so expect those to be a bit slower until [#462](https://github.com/geoparquet/geoparquet-io/issues/462) is implemented. For non-native inputs (GeoParquet 1.x that carry a `bbox` column), a cheap bbox-overlap test is applied before `ST_Intersects` to prune candidates, and using it will be 5-10x faster.
 
-The join is a streaming `LEFT JOIN` so it scales to very large inputs (hundreds of millions of features) with bounded memory. A feature is attributed to the admin polygon(s) it intersects; because the per-level caches are non-overlapping, this is normally exactly one polygon per level. A feature straddling overlapping polygons at a border is emitted once per match. De-duplicating such border overlaps is intentionally left to a future dedicated operation rather than folded into this join, as including it greatly degraded performance.
+The join is a `LEFT JOIN` whose every step can spill to disk, so it scales to very large inputs (hundreds of millions of features) with bounded memory. Each input feature comes out exactly once, in input order. A feature is attributed to the admin polygon it intersects; where it intersects more than one at a level (a polygon straddling a border, or a sliver where the independently simplified caches overlap), it is assigned to the one with the smallest admin code. `gpio partition admin` and `gpio process aggregate admin` use the same rule, so a feature is never written to two partitions or counted in two regions.
 
 ### Quick Start
 

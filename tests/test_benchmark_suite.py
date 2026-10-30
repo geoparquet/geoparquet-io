@@ -106,6 +106,35 @@ class TestOperationRegistry:
         with pytest.raises(KeyError):
             get_operation("nonexistent-operation")
 
+    def test_add_country_runs_admin_divisions_country_level(self, monkeypatch, tmp_path):
+        """``add-country`` benchmarks the one admin join: ``add admin-divisions``
+        at the country level on Overture (the separate country_codes module is
+        gone, #1367)."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.benchmarks.operations import get_operation
+        from geoparquet_io.core.add import admin_divisions
+
+        calls = []
+
+        def fake(**kwargs):
+            calls.append(kwargs)
+            pq.write_table(pa.table({"id": [1, 2]}), kwargs["output_parquet"])
+
+        monkeypatch.setattr(admin_divisions, "add_admin_divisions_multi", fake)
+        result = get_operation("add-country")["run"](tmp_path / "in.parquet", tmp_path)
+
+        assert calls == [
+            {
+                "input_parquet": str(tmp_path / "in.parquet"),
+                "output_parquet": str(tmp_path / "output.parquet"),
+                "dataset_name": "overture",
+                "levels": ["country"],
+            }
+        ]
+        assert result == {"rows_with_country": 2}
+
 
 class TestBenchmarkRunner:
     """Tests for benchmark runner."""

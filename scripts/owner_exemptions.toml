@@ -85,10 +85,6 @@ path = "geoparquet_io/core/overture.py"
 name = "urllib.request"
 count = 2
 reason = "latest-release lookup via urllib.request with its own 5 s timeout, outside http_retry; T4c"
-[[G1.sql_escape]]
-path = "geoparquet_io/core/process/aggregate/common.py"
-name = "sql_literal"
-reason = "hand-rolled string-literal escape (#1101 class); use _escape_sql_string (T1)"
 # Row-group count: core/parquet_writer.py owns the default and every resolver (#981, #1215).
 [[G1.row_group_policy]]
 path = "geoparquet_io/core/benchmark.py"
@@ -368,14 +364,6 @@ path = "geoparquet_io/core/add/bbox_metadata.py"
 name = "_covering_for"
 reason = "covering builder copy of build_bbox_covering; T3e"
 [[G2.exemptions]]
-path = "geoparquet_io/core/add/admin_divisions.py"
-name = "_build_spatial_join_query"
-reason = "spatial-join builder copy; T1d"
-[[G2.exemptions]]
-path = "geoparquet_io/core/add/country_codes.py"
-name = "_build_spatial_join_query"
-reason = "spatial-join builder copy; T1d"
-[[G2.exemptions]]
 path = "geoparquet_io/core/add/quadkey.py"
 name = "_is_geographic_crs"
 reason = "is-geographic copy (approved change 8); T4c"
@@ -516,9 +504,6 @@ reason = "index add workflow, one copy per index; T5b's index_ops driver replace
 pair = "geoparquet_io/core/add/a5.py:add_a5_table|geoparquet_io/core/add/h3.py:add_h3_table"
 reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
 [[G3.pairs]]
-pair = "geoparquet_io/core/add/admin_divisions.py:_print_dry_run_header|geoparquet_io/core/add/country_codes.py:_print_dry_run_header"
-reason = "one dry-run banner with the dataset label as a parameter; T5c (T2e moved its remote-path display into remote.display_path)"
-[[G3.pairs]]
 pair = "geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query|geoparquet_io/core/add/s2.py:_add_s2_streaming.make_query"
 reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
 [[G3.pairs]]
@@ -635,18 +620,6 @@ reason = "permanent: the same keyword-argument list forwarded to one callee (API
 [[G3.pylint]]
 block = "core.add.a5:add_a5_table|core.add.h3:add_h3_table"
 reason = "index add workflow per index; T5b's index_ops driver"
-[[G3.pylint]]
-block = "core.add.admin_divisions:_execute_per_level_joins|core.str_order:_str_order_file_based"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.add.admin_divisions:_setup_duckdb_connection|core.partition.admin_hierarchical:_setup_admin_join_connection"
-reason = "two admin-join connections (cache spill dir, threads=1, preserve_insertion_order, memory policy); T1d/T1e"
-[[G3.pylint]]
-block = "core.add.admin_divisions:add_admin_divisions_multi|core.add.country_codes:add_country_codes"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.add.admin_divisions:add_admin_divisions_multi|core.str_order:_str_order_file_based"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
 block = "core.add.bbox:_add_bbox_streaming|core.stream_io:execute_transform"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"

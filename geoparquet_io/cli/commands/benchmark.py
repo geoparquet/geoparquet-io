@@ -248,7 +248,7 @@ def benchmark_suite(
     "-q",
     type=str,
     default=None,
-    help="Custom SQL query. Use {file} as placeholder for file path.",
+    help="Custom SQL query. {file} is replaced by the file path as a quoted SQL string literal, as in read_parquet({file}).",
 )
 @click.option(
     "--format",
@@ -282,7 +282,7 @@ def benchmark_explain(
     Example:
         gpio benchmark explain input.parquet
         gpio benchmark explain input.parquet --format json
-        gpio benchmark explain input.parquet --query "SELECT * FROM read_parquet('{file}') WHERE id > 10"
+        gpio benchmark explain input.parquet --query "SELECT * FROM read_parquet({file}) WHERE id > 10"
         gpio benchmark explain input.parquet --output plan.json
     """
     configure_verbose(verbose)

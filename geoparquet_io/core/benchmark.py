@@ -24,7 +24,6 @@ import psutil
 
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     duckdb_capabilities,
     fetch_one,
     get_duckdb_connection,
@@ -896,9 +895,11 @@ def _get_explain_connection(file_path: str) -> duckdb.DuckDBPyConnection:
 def _build_explain_query(file_path: str, query: str | None) -> str:
     """Build the EXPLAIN ANALYZE query string."""
     if query:
-        # The user's own query supplies the quotes around ``{file}``, so the
-        # placeholder takes a bare escaped literal rather than a complete one.
-        sql = query.replace("{file}", _escape_sql_string(file_path))
+        # ``{file}`` is the whole sql_path literal, quotes included. The quoted
+        # spelling ``'{file}'`` the docs used to show is the same literal, so
+        # it is replaced first, as one unit.
+        literal = sql_path(file_path)
+        sql = query.replace("'{file}'", literal).replace("{file}", literal)
     else:
         sql = f"SELECT * FROM read_parquet({sql_path(file_path)})"
     return f"EXPLAIN ANALYZE {sql}"
@@ -916,8 +917,10 @@ def explain_analyze(
 
     Args:
         file_path: Path to the input Parquet file (local path or URL).
-        query: Optional SQL query. Use {file} as placeholder for the file path.
-               Defaults to SELECT * FROM read_parquet('{file}').
+        query: Optional SQL query. ``{file}`` is replaced by the file path as a
+               quoted, escaped SQL string literal, so write
+               ``read_parquet({file})``; ``'{file}'`` means the same. Defaults
+               to SELECT * FROM read_parquet({file}).
 
     Returns:
         Parsed query plan dictionary with operators, timing, and analysis.

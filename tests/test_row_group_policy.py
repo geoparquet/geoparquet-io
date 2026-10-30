@@ -134,7 +134,7 @@ def _use_local_admin(tmp_path: Path, monkeypatch) -> None:
         return OvertureAdminDataset(source_path=str(admin_file), verbose=verbose)
 
     monkeypatch.setattr(
-        "geoparquet_io.core.partition.admin_hierarchical.AdminDatasetFactory.create",
+        "geoparquet_io.core.admin_datasets.AdminDatasetFactory.create",
         staticmethod(create),
     )
 

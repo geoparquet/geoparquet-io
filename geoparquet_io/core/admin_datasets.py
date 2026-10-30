@@ -11,18 +11,26 @@ or remote URLs, with automatic caching and error handling.
 import os
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 import duckdb
 
+from geoparquet_io.core import duckdb_utils
 from geoparquet_io.core.compression import resolve_codec
+from geoparquet_io.core.crs_utils import reproject_to_source_sql, transform_geom_sql
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
+    build_spatial_join_condition,
+    build_spatial_join_query,
+    fetch_one,
     get_duckdb_connection,
     orphaned_spill_dirs,
+    pin_duckdb_settings,
+    quote_identifier,
     s3_config_scope,
     spill_directory,
+    sql_literal,
     sql_path,
     sweep_orphaned_spill_dirs,
 )
@@ -31,7 +39,7 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
 )
 from geoparquet_io.core.logging_config import debug, info, warn
-from geoparquet_io.core.memory_limits import scoped_write_memory_limit
+from geoparquet_io.core.memory_limits import open_bounded_connection, scoped_write_memory_limit
 from geoparquet_io.core.overture import OVERTURE_FALLBACK_RELEASE, get_latest_overture_release
 from geoparquet_io.core.remote import is_remote_url
 
@@ -76,7 +84,7 @@ def _overture_country_code_sql(col: str = "country") -> str:
     an already-remapped value is a no-op, so the cached path is unaffected.
     """
     whens = " ".join(
-        f"WHEN {col} = '{_escape_sql_string(raw)}' THEN '{_escape_sql_string(iso)}'"
+        f"WHEN {col} = {sql_literal(raw)} THEN {sql_literal(iso)}"
         for raw, iso in _OVERTURE_PLACEHOLDER_CODE_REMAP.items()
     )
     return f"CASE {whens} ELSE {col} END"
@@ -100,8 +108,9 @@ _OVERTURE_LEVEL_CACHE_CONFIG: dict[str, dict[str, list[str]]] = {
         # country level takes both; filtering to 'country' alone left every
         # dependency unattributed (NULL -> 'ZZ' under --vecorel). See #819.
         #
-        # This keeps the level effectively non-overlapping, which the
-        # memory-safe plain LEFT JOIN relies on: a dependency is not contained
+        # This keeps the level effectively non-overlapping, so few features
+        # meet two countries (the join keeps one either way, #543): a
+        # dependency is not contained
         # in its sovereign's polygon (Overture's FR is metropolitan France
         # only). Measured on the simplified geometry this cache actually stores
         # (release 2026-07-22.0), the only country/dependency intersections are
@@ -129,7 +138,7 @@ _OVERTURE_LEVEL_CACHE_CONFIG: dict[str, dict[str, list[str]]] = {
 
 def _overture_subtype_sql(subtypes: list[str]) -> str:
     """Render an ``IN`` predicate over the given subtypes."""
-    return "subtype IN ({})".format(", ".join(f"'{_escape_sql_string(s)}'" for s in subtypes))
+    return "subtype IN ({})".format(", ".join(sql_literal(s) for s in subtypes))
 
 
 def _overture_subtypes_for_levels(levels: list[str]) -> list[str]:
@@ -494,12 +503,7 @@ class AdminDataset(ABC):
             )
             try:
                 # Get read options
-                read_options = self.get_read_parquet_options()
-                if read_options:
-                    options_str = ", ".join([f"{k}={v}" for k, v in read_options.items()])
-                    query = f"SELECT * FROM read_parquet({sql_path(source)}, {options_str})"
-                else:
-                    query = f"SELECT * FROM read_parquet({sql_path(source)})"
+                query = f"SELECT * FROM {self.table_reference(source)}"
 
                 # Write to cache, bounded like every other gpio write (#1156):
                 # the source is a multi-GB remote dataset and this COPY used to
@@ -637,6 +641,21 @@ class AdminDataset(ABC):
         """Whether this dataset provides separate source files per admin level."""
         return False
 
+    def get_source_for_level(self, level: str, no_cache: bool = False) -> str:
+        """The source of one admin level, for a dataset that :meth:`supports_per_level_sources`."""
+        raise NotImplementedError(f"{self.get_dataset_name()} has no per-level sources")
+
+    def source_for_level(self, level: str, no_cache: bool = False) -> str | None:
+        """The source a join of ``level`` reads: the level's own, or ``None``.
+
+        The one rule for it: a dataset that :meth:`supports_per_level_sources`
+        reads each level from :meth:`get_source_for_level`; any other reads its
+        own source, which :meth:`table_reference` picks for ``None``.
+        """
+        if not self.supports_per_level_sources():
+            return None
+        return self.get_source_for_level(level, no_cache=no_cache)
+
     def get_read_parquet_options(self) -> dict:
         """
         Get additional options to pass to read_parquet() for this dataset.
@@ -765,33 +784,32 @@ class AdminDataset(ABC):
         """
         pass  # Default: no custom S3 configuration needed (standard AWS S3)
 
-    def prepare_data_source(self, con: duckdb.DuckDBPyConnection) -> str:
+    def table_reference(self, source: str | None = None) -> str:
+        """The admin relation an admin join reads: ``read_parquet(<source>, <options>)``.
+
+        The one builder of it (#1367): the dataset's read options (Overture's
+        ``hive_partitioning``) go on every read of it -- the cache download,
+        each per-level join, the aggregate join. ``source`` is a RAW path or URL
+        (a per-level cache, say), quoted and escaped here by :func:`sql_path`
+        (#802). ``None`` means the dataset's own source, which for a local file
+        is checked to exist first.
+
+        Raises:
+            FileNotFoundGeoParquetError: ``source`` is None and the dataset's
+                local source does not exist.
         """
-        Prepare the data source for querying.
-
-        For remote sources, uses direct remote access with spatial extent filtering.
-        For local sources, verifies the file exists and returns the path.
-
-        Args:
-            con: DuckDB connection to use for queries
-
-        Returns:
-            A SQL table reference: the source path as a quoted, escaped literal
-            (:func:`sql_path`), ready to interpolate (#802).
-        """
-        source = self.get_source()
-        if self.is_remote():
-            # For remote sources, use direct remote access
-            if self.verbose:
-                debug(f"Using remote dataset: {source}")
-            return sql_path(source)
-        else:
-            # For local sources, verify the file exists
-            if not os.path.exists(source):
+        if source is None:
+            source = self.get_source()
+            if not self.is_remote() and not os.path.exists(source):
                 raise FileNotFoundGeoParquetError(source, "admin dataset")
             if self.verbose:
-                debug(f"Using local data source: {source}")
+                where = "remote dataset" if self.is_remote() else "local data source"
+                debug(f"Using {where}: {source}")
+        options = self.get_read_parquet_options()
+        if not options:
             return sql_path(source)
+        options_sql = ", ".join(f"{k}={v}" for k, v in options.items())
+        return f"read_parquet({sql_path(source)}, {options_sql})"
 
 
 class CurrentAdminDataset(AdminDataset):
@@ -1055,9 +1073,10 @@ class OvertureAdminDataset(AdminDataset):
         polygon per division whose geometry spans the whole territory —
         including the entire landmass — so keeping both classes makes every
         land feature match two polygons per level, inflating spatial-join
-        output ~2x per level. Land-only keeps each level's polygons
-        non-overlapping, which is what the plain (memory-safe) LEFT JOIN relies
-        on instead of an OOM-prone dedup window.
+        output ~2x per level. Land-only keeps each level's polygons (nearly)
+        non-overlapping, so the join's one-match dedup (see
+        ``duckdb_utils.build_spatial_join_query``) only has to settle border
+        features and the slivers simplification leaves, not every land feature.
 
         The filter is ``is_land IS NOT FALSE`` (not ``= true``): it drops only
         explicitly-maritime polygons and keeps land polygons whose flag is
@@ -1109,9 +1128,11 @@ class OvertureAdminDataset(AdminDataset):
 
         The full Overture divisions dataset is ~4.5GB with 1M+ rows. We split
         into per-level, land-only files (see :meth:`_build_level_cache_query`)
-        so spatial joins run against non-overlapping polygons, preventing row
-        multiplication. Geometries are simplified to ~11m tolerance to keep
-        files small.
+        so spatial joins run against land polygons rather than land plus the
+        maritime polygons that cover the same territory. Geometries are
+        simplified to ~11m tolerance to keep files small; the slivers where
+        simplified neighbours overlap are settled by the join's one-match dedup
+        (#543).
         """
 
         cache_dir = get_cache_dir()
@@ -1243,3 +1264,511 @@ def default_admin_levels(dataset_name: str, source_path: str | None = None) -> l
     """
     dataset = AdminDatasetFactory.create(dataset_name, source_path, verbose=False)
     return dataset.get_available_levels()
+
+
+def _boundary_column_ref(i: int, col: str) -> tuple[str, str]:
+    """(subquery projection, name the join reads it by) for one boundary column.
+
+    A plain column name is quoted. A boundary "column" containing ``[`` or
+    ``(`` is a struct/list access expression (e.g. Overture's
+    ``names['primary']``) and is projected bare as ``_col_<i>``: it comes from
+    the dataset definitions in this module, never from an input file, so it
+    is outside the file-metadata threat model that quoting defends (#935, #942).
+    """
+    if "[" in col or "(" in col:
+        return f"{col} as _col_{i}", f"_col_{i}"
+    q = quote_identifier(col)
+    return q, q
+
+
+def admin_column_ref(i: int, col: str, alias: str = "b") -> str:
+    """How a select list reads boundary column ``i`` off :func:`build_admin_subquery`.
+
+    ``b."country"`` for a plain column, ``b._col_<i>`` for an expression
+    column; the naming rule is :func:`_boundary_column_ref`'s, so the select
+    lists, the tiebreak and the subquery cannot disagree.
+    """
+    return f"{alias}.{_boundary_column_ref(i, col)[1]}"
+
+
+def admin_side_reprojected(source_crs: str | None, admin_bbox_col: str | None) -> bool:
+    """Whether an admin join reprojects the admin side into the input CRS (#525).
+
+    The one reprojection rule of every admin join. The admin boundaries are
+    OGC:CRS84; for a non-CRS84 input either side can move. When the admin
+    dataset carries a bbox, the (small) admin side is reprojected and its bbox
+    rebuilt in the input CRS, so the join keeps a cheap bbox pre-filter
+    instead of transforming the (large) input per row (#460). Without an
+    admin bbox there is no pre-filter to keep, and the input geometry is
+    reprojected inline instead.
+    """
+    return bool(source_crs) and bool(admin_bbox_col)
+
+
+def admin_input_reprojected(source_crs: str | None, admin_bbox_col: str | None) -> bool:
+    """Whether an admin join reprojects the *input* geometry into OGC:CRS84 (#525).
+
+    The other side of :func:`admin_side_reprojected`: a non-CRS84 input moves
+    when the admin side cannot, because it has no bbox to rebuild. The join
+    (:func:`build_admin_join_query`) and every report of its strategy (``add
+    admin-divisions``' status line and dry run) read it here, so what is
+    reported is what runs.
+    """
+    return bool(source_crs) and not admin_side_reprojected(source_crs, admin_bbox_col)
+
+
+def _admin_input_extent(
+    con: duckdb.DuckDBPyConnection,
+    input_relation: str,
+    input_bbox_col: str | None,
+    input_geom_col: str,
+    source_crs: str | None = None,
+) -> tuple[float, float, float, float] | None:
+    """The input's (xmin, xmax, ymin, ymax) in the admin CRS (OGC:CRS84), or None.
+
+    Read off the input's bbox column when it has one in CRS84; for a non-CRS84
+    input the stored bbox is in the source CRS, so the extent is computed over
+    the reprojected geometry (#525). ``input_relation`` is a SQL relation (a
+    :func:`sql_path` literal or a table name). Identifiers are quoted; only the
+    column segment of a struct-field access is, leaving ``.xmin`` bare (#926).
+    """
+    if input_bbox_col and not source_crs:
+        q_bbox = quote_identifier(input_bbox_col)
+        parts = (f"{q_bbox}.xmin", f"{q_bbox}.xmax", f"{q_bbox}.ymin", f"{q_bbox}.ymax")
+    else:
+        geom = transform_geom_sql(quote_identifier(input_geom_col), source_crs)
+        parts = tuple(f"ST_{fn}({geom})" for fn in ("XMin", "XMax", "YMin", "YMax"))
+    query = f"""
+            SELECT
+                MIN({parts[0]}) as xmin,
+                MAX({parts[1]}) as xmax,
+                MIN({parts[2]}) as ymin,
+                MAX({parts[3]}) as ymax
+            FROM {input_relation}
+        """
+    extent = fetch_one(con.execute(query))
+    if extent and all(v is not None for v in extent):
+        return extent
+    return None
+
+
+def _admin_where_clause(
+    dataset: "AdminDataset",
+    levels: list[str],
+    admin_bbox_col: str | None,
+    extent: tuple[float, float, float, float] | None,
+    *,
+    admin_source: str | None = None,
+    verbose: bool = False,
+) -> str:
+    """The admin side's ``WHERE`` for an admin join, or ``""``.
+
+    The level's subtype filter (how much it carries depends on whether
+    ``admin_source`` is a pre-filtered cache or a raw release, #819) ANDed with
+    a bbox-overlap filter against the input ``extent`` from
+    :func:`_admin_input_extent`, so only admin polygons near the data are read.
+    It runs on the stored (CRS84) columns, before any reprojection.
+    :func:`run_admin_join` is its caller, with the extent read once.
+    """
+    clauses = []
+    subtype_filter = dataset.get_subtype_filter(levels, source=admin_source)
+    if subtype_filter:
+        clauses.append(subtype_filter)
+        if verbose:
+            debug(f"Filtering admin boundaries: {subtype_filter}")
+    if admin_bbox_col and extent:
+        xmin, xmax, ymin, ymax = extent
+        q_bbox = quote_identifier(admin_bbox_col)
+        clauses.append(f"""
+            ({q_bbox}.xmin <= {xmax} AND
+             {q_bbox}.xmax >= {xmin} AND
+             {q_bbox}.ymin <= {ymax} AND
+             {q_bbox}.ymax >= {ymin})
+        """)
+        if verbose:
+            debug(
+                "Filtering admin boundaries to input extent: "
+                f"({xmin:.2f}, {ymin:.2f}, {xmax:.2f}, {ymax:.2f})"
+            )
+    return "WHERE " + " AND ".join(clauses) if clauses else ""
+
+
+def build_admin_subquery(
+    admin_table_ref: str,
+    admin_geom_col: str,
+    admin_bbox_col: str | None,
+    boundary_columns: list[str],
+    where_sql: str = "",
+    *,
+    reproject_to: str | None = None,
+) -> str:
+    """The admin side of an admin spatial join, as a parenthesised subquery.
+
+    It projects the admin geometry, its bbox (when the dataset has one) and
+    the boundary columns (see :func:`_boundary_column_ref` for how each is
+    named). ``admin_table_ref`` is :meth:`AdminDataset.table_reference`;
+    ``where_sql`` is :func:`_admin_where_clause`, run on the stored (CRS84)
+    columns before any reprojection.
+
+    ``reproject_to`` (an ``"AUTH:CODE"`` string, needs ``admin_bbox_col``)
+    reprojects the admin polygons into a non-CRS84 input's CRS and rebuilds
+    their bbox there -- see :func:`admin_side_reprojected` (#525, preserving
+    #460).
+    """
+    cols = ", ".join(_boundary_column_ref(i, c)[0] for i, c in enumerate(boundary_columns))
+    q_geom = quote_identifier(admin_geom_col)
+    if reproject_to:
+        radmin = reproject_to_source_sql(q_geom, reproject_to)
+        bbox_struct = (
+            f"struct_pack(xmin := ST_XMin({radmin}), xmax := ST_XMax({radmin}), "
+            f"ymin := ST_YMin({radmin}), ymax := ST_YMax({radmin})) "
+            f"AS {quote_identifier(admin_bbox_col)}"
+        )
+        projection = f"{radmin} AS {q_geom}, {bbox_struct}"
+    elif admin_bbox_col:
+        projection = f"{q_geom}, {quote_identifier(admin_bbox_col)}"
+    else:
+        projection = q_geom
+    return f"""(
+        SELECT {projection}, {cols}
+        FROM {admin_table_ref}
+        {where_sql}
+    )"""
+
+
+def admin_match_order(boundary_columns: list[str], alias: str = "b") -> list[str]:
+    """The tiebreak keys for a one-match admin join: the boundary columns, in order.
+
+    Passed as ``match_order`` to
+    :func:`~geoparquet_io.core.duckdb_utils.build_spatial_join_query`, so a
+    feature meeting two admin polygons keeps the one with the smallest codes.
+    """
+    return [admin_column_ref(i, c, alias) for i, c in enumerate(boundary_columns)]
+
+
+def build_admin_join_query(
+    *,
+    input_relation: str,
+    admin_table_ref: str,
+    admin_select_clause: str,
+    input_geom_col: str,
+    admin_geom_col: str,
+    input_bbox_col: str | None,
+    admin_bbox_col: str | None,
+    boundary_columns: list[str],
+    admin_where_sql: str = "",
+    source_crs: str | None = None,
+    input_alias: str = "a",
+    input_is_point: bool = False,
+) -> str:
+    """The admin spatial join, for every admin command.
+
+    ``gpio add admin-divisions``, ``gpio partition admin`` and ``gpio process
+    aggregate admin`` all build their join here. A ``LEFT JOIN`` of every input
+    row (alias ``input_alias``) to the admin polygons it intersects (alias
+    ``b``), read through :func:`build_admin_subquery`:
+
+    - the ON clause is the owner's, every identifier quoted (#926, #942);
+    - one admin region per input row, the one whose ``boundary_columns`` sort
+      first (#543) -- see
+      :func:`~geoparquet_io.core.duckdb_utils.build_spatial_join_query` for the
+      spill-safe dedup and the tiebreak;
+    - for a non-CRS84 input (``source_crs``), the side that is reprojected is
+      decided once, by :func:`admin_side_reprojected` (#525).
+
+    ``input_is_point`` marks ``input_geom_col`` as a per-row POINT (aggregate's
+    join point, already in CRS84), for the point-in-bbox pre-filter.
+    ``admin_select_clause`` reads the admin columns off ``b`` (see
+    :func:`admin_column_ref`).
+    """
+    reproject_admin = admin_side_reprojected(source_crs, admin_bbox_col)
+    input_geom_sql = None
+    if admin_input_reprojected(source_crs, admin_bbox_col):
+        input_geom_sql = transform_geom_sql(
+            f"{input_alias}.{quote_identifier(input_geom_col)}", source_crs
+        )
+    admin_relation = build_admin_subquery(
+        admin_table_ref,
+        admin_geom_col,
+        admin_bbox_col,
+        boundary_columns,
+        admin_where_sql,
+        reproject_to=source_crs if reproject_admin else None,
+    )
+    return build_spatial_join_query(
+        input_relation=input_relation,
+        target_relation=admin_relation,
+        target_select=admin_select_clause,
+        condition=build_spatial_join_condition(
+            input_geom_col,
+            admin_geom_col,
+            input_bbox_col,
+            admin_bbox_col,
+            input_alias=input_alias,
+            input_geom_sql=input_geom_sql,
+            input_is_point=input_is_point,
+        ),
+        match_order=admin_match_order(boundary_columns),
+        input_alias=input_alias,
+    )
+
+
+def open_admin_join_connection(
+    *,
+    spill_to_cache: bool,
+    materialize: bool = False,
+    memory_limit: str | None = None,
+    verbose: bool = False,
+) -> duckdb.DuckDBPyConnection:
+    """Open the DuckDB connection an admin spatial join runs on.
+
+    The one place that decides how an admin join runs. The memory ceiling and
+    DuckDB's share of it are ``memory_limits``' (#1156, #1174, #1179); this
+    picks between the two shapes the admin commands need:
+
+    ``spill_to_cache=True`` -- the join against the per-level Overture caches
+    in ``add admin-divisions`` and ``partition admin``, which runs as a
+    ``CREATE TEMP TABLE``/``COPY`` wrapped in ``scoped_write_memory_limit``
+    (todo 013):
+
+    - ``temp_directory`` on the admin cache volume (which already holds the
+      multi-GB cached dataset, so it has the room), in a private leaf per
+      connection -- DuckDB's spill filenames carry no connection identity, so
+      two runs sharing the cache dir itself would overwrite each other's blocks.
+    - ``threads = 1``: parallel spatial-join / window operators each grab
+      memory and cannot coordinate spilling, so they OOM even with a temp
+      directory set (DuckDB #8270). Single-threaded execution spills
+      predictably, for every per-level join, not just the final write.
+    - ``preserve_insertion_order = false`` lets operators stream/flush to disk
+      instead of buffering the result to keep order. The one-match join orders
+      its output by input row itself (#543).
+
+    ``memory_limit`` is refused for both: their statements take the limit
+    from ``scoped_write_memory_limit``, so a connection-level one would be
+    dropped without a word.
+
+    ``spill_to_cache=False`` is the default connection, spilling under the OS
+    temp directory (a single-source dataset such as GAUL).
+
+    ``materialize=True`` is for a join whose result is read client-side
+    (``process aggregate admin`` reads it with ``.arrow().read_all()``), so no
+    statement exists for ``scoped_write_memory_limit`` to wrap: the connection
+    itself carries ``memory_limit`` (else the default), through
+    :func:`~geoparquet_io.core.memory_limits.open_bounded_connection`. It keeps
+    that function's thread cap -- each thread keeps a spillable share of the
+    limit -- instead of ``threads=1``: aggregate's join point is a POINT per
+    row with a GROUP BY right after it, and nothing has measured the
+    single-threaded shape on it, so it is not imposed here. It cannot combine
+    with ``spill_to_cache``.
+
+    Every shape loads spatial through ``get_duckdb_connection``, which sets
+    ``geometry_always_xy`` -- the lon/lat order the CRS-aware join (#525) needs.
+    """
+    if memory_limit is not None and not materialize:
+        raise ValueError(
+            "memory_limit is carried by the connection only with materialize=True; "
+            "a join run as a statement takes it from scoped_write_memory_limit"
+        )
+    if materialize:
+        if spill_to_cache:
+            raise ValueError("materialize=True keeps the bounded thread cap; not spill_to_cache")
+        return open_bounded_connection(
+            load_spatial=True, load_httpfs=True, memory_limit=memory_limit, verbose=verbose
+        )
+    # Looked up on the module, as the callers' call-time imports did, so a spy
+    # patched onto duckdb_utils.get_duckdb_connection sees these connections.
+    if not spill_to_cache:
+        return duckdb_utils.get_duckdb_connection(load_spatial=True, load_httpfs=True)
+    temp_dir = get_cache_dir()
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    con = duckdb_utils.get_duckdb_connection(
+        load_spatial=True,
+        load_httpfs=True,
+        temp_directory=spill_directory(temp_dir),
+        threads=1,
+    )
+    pin_duckdb_settings(con, {"preserve_insertion_order": False})
+    return con
+
+
+@dataclass(frozen=True)
+class AdminJoinStep:
+    """One join of an admin chain, as :func:`run_admin_join` hands it out.
+
+    ``levels`` are the admin levels it adds (one per step for a per-level
+    dataset, all of them in one step otherwise), ``source`` the admin source it
+    reads (``None``: the dataset's own), ``query`` the join's ``SELECT``, and
+    ``target`` the temp table it fills -- for the last step the caller's
+    ``final_table``, or ``None`` when its query goes to the caller's
+    ``final_step``.
+    """
+
+    index: int
+    count: int
+    levels: list[str]
+    source: str | None
+    query: str
+    target: str | None
+    per_level: bool
+
+
+def _admin_join_steps(
+    dataset: "AdminDataset", levels: list[str]
+) -> list[tuple[list[str], list[str]]]:
+    """``(levels, boundary columns)`` per join: one per level when each has its own source."""
+    columns = dataset.get_partition_columns(levels)
+    if not dataset.supports_per_level_sources():
+        return [(list(levels), columns)]
+    return [([level], [col]) for level, col in zip(levels, columns, strict=True)]
+
+
+def _run_admin_join_step(
+    con: duckdb.DuckDBPyConnection,
+    step: AdminJoinStep,
+    final_step: Callable[[AdminJoinStep], None] | None,
+    memory_limit: str | None,
+    verbose: bool,
+) -> None:
+    """Fill the step's temp table under the write memory policy, or hand it to ``final_step``."""
+    if step.target is None:
+        if final_step is not None:  # always, when there is no target table
+            final_step(step)
+        return
+    with scoped_write_memory_limit(con, memory_limit, verbose):
+        con.execute(f"CREATE OR REPLACE TEMP TABLE {step.target} AS {step.query}")
+
+
+def run_admin_join(
+    con: duckdb.DuckDBPyConnection,
+    dataset: "AdminDataset",
+    levels: list[str],
+    *,
+    input_path: str,
+    input_geom_col: str,
+    input_bbox_col: str | None,
+    admin_bbox_col: str | None,
+    select_for: Callable[[list[str], list[str]], str],
+    final_step: Callable[[AdminJoinStep], None] | None = None,
+    final_table: str | None = None,
+    admin_source: str | None = None,
+    source_crs: str | None = None,
+    no_cache: bool = False,
+    memory_limit: str | None = None,
+    verbose: bool = False,
+    dry_run: bool = False,
+    on_step: Callable[[AdminJoinStep], None] | None = None,
+) -> None:
+    """Run the admin join of ``add admin-divisions`` and ``partition admin``.
+
+    A dataset with per-level sources (Overture) is joined one level at a time,
+    each level against its own source (:meth:`get_source_for_level`), each
+    later level reading the temp table the one before it filled, so a feature
+    carries every admin column forward. Any other dataset is one join of all
+    ``levels`` against ``admin_source`` (``None``: the dataset's own source,
+    read through :meth:`AdminDataset.table_reference`). Each step:
+
+    - reads the input -- ``input_path``, RAW, through :func:`sql_path` -- or,
+      after the first step, the previous step's temp table, by its bare name;
+    - filters the admin side to its levels and to the input's extent, which is
+      read once for the whole chain and only when the admin side has a bbox to
+      filter on (#480);
+    - joins through :func:`build_admin_join_query` (one match per input, #543;
+      one reprojection rule, #525), with ``select_for(levels, columns)`` as
+      the admin columns;
+    - is handed to ``on_step``, then fills its temp table under
+      ``scoped_write_memory_limit`` (#1174). The last step's table is
+      ``final_table``, filled the same way; a caller that writes the result
+      somewhere else passes ``final_step`` instead, which takes the last step.
+      Exactly one of the two is given.
+
+    ``dry_run`` builds and hands out every step without running any.
+    ``admin_bbox_col`` is the dataset's, passed by the caller that has
+    already read it.
+    """
+    if (final_step is None) == (final_table is None):
+        raise ValueError("run_admin_join takes final_step or final_table, not both or neither")
+    admin_geom_col = dataset.get_geometry_column()
+    extent = None
+    if admin_bbox_col:
+        extent = _admin_input_extent(
+            con, sql_path(input_path), input_bbox_col, input_geom_col, source_crs
+        )
+    steps = _admin_join_steps(dataset, levels)
+    per_level = dataset.supports_per_level_sources()
+    relation = sql_path(input_path)
+    intermediates = []
+    for i, (step_levels, step_columns) in enumerate(steps):
+        source = dataset.source_for_level(step_levels[0], no_cache=no_cache) or admin_source
+        admin_table_ref = dataset.table_reference(source)
+        query = build_admin_join_query(
+            input_relation=relation,
+            admin_table_ref=admin_table_ref,
+            admin_select_clause=select_for(step_levels, step_columns),
+            input_geom_col=input_geom_col,
+            admin_geom_col=admin_geom_col,
+            input_bbox_col=input_bbox_col,
+            admin_bbox_col=admin_bbox_col,
+            boundary_columns=step_columns,
+            admin_where_sql=_admin_where_clause(
+                dataset,
+                step_levels,
+                admin_bbox_col,
+                extent,
+                admin_source=source if source is not None else dataset.get_source(),
+                verbose=verbose and not dry_run,
+            ),
+            source_crs=source_crs,
+        )
+        last = i == len(steps) - 1
+        target = final_table if last else f"_gpio_admin_step_{i}"
+        step = AdminJoinStep(i, len(steps), step_levels, source, query, target, per_level)
+        if on_step is not None:
+            on_step(step)
+        relation = target or relation
+        if not dry_run:
+            _run_admin_join_step(con, step, final_step, memory_limit, verbose)
+            if not last:
+                intermediates.append(relation)
+    for table in intermediates:
+        con.execute(f"DROP TABLE IF EXISTS {table}")
+
+
+def resolve_admin_dataset(
+    dataset_name: str,
+    levels: list[str],
+    *,
+    cache: bool,
+    source_path: str | None = None,
+    no_cache: bool = False,
+    memory_limit: str | None = None,
+    verbose: bool = False,
+) -> tuple["AdminDataset", list[str], str | None]:
+    """The admin dataset an admin command reads, its boundary columns, and its source.
+
+    The one place an admin command picks its dataset and its levels: ``add
+    admin-divisions`` (``cache=True``), ``partition admin``, ``process
+    aggregate admin`` and the overview rollup (``cache=False``). The levels are
+    validated here, and ``memory_limit`` (``--write-memory``) is set before any
+    cache download it bounds (#1156).
+
+    The source is ``None`` for a dataset with per-level sources -- each level
+    resolves its own, as it is joined -- and for ``cache=False``, which reads
+    the dataset's own source through :meth:`AdminDataset.table_reference`.
+    With ``cache=True`` it is :func:`get_or_cache_dataset`'s path (``no_cache``
+    reads the remote source directly).
+    """
+    dataset = AdminDatasetFactory.create(dataset_name, source_path, verbose)
+    dataset.memory_limit = memory_limit
+    if verbose:
+        debug(f"\nUsing admin dataset: {dataset.get_dataset_name()}")
+        debug(f"Admin levels: {' → '.join(levels)}")
+    dataset.validate_levels(levels)
+    boundary_columns = dataset.get_partition_columns(levels)
+    if verbose:
+        debug(f"Boundary dataset columns: {', '.join(boundary_columns)}")
+    source = None
+    if cache and not dataset.supports_per_level_sources():
+        source = get_or_cache_dataset(dataset, no_cache=no_cache, verbose=verbose)
+    if verbose:
+        debug(f"Data source: {source or dataset.get_source()}")
+    return dataset, boundary_columns, source

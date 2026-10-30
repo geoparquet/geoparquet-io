@@ -25,11 +25,11 @@ from geoparquet_io.core.crs_utils import (
     is_default_crs,
 )
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     fetch_one,
     free_column_name,
     get_duckdb_connection,
     quote_identifier,
+    sql_literal,
     sql_path,
     uses_aws_profile,
     validate_where_clause,
@@ -459,9 +459,7 @@ def write_gdal_format(
         # Extract CRS for SRS parameter
         srs_param = _get_srs_parameter(input_path, verbose)
         if srs_param:
-            # SQL-escape the SRS parameter
-            safe_srs = _escape_sql_string(srs_param)
-            srs_clause = f", SRS '{safe_srs}'"
+            srs_clause = f", SRS {sql_literal(srs_param)}"
             debug(f"Setting SRS: {srs_param}")
         else:
             srs_clause = ""
@@ -508,7 +506,7 @@ def write_gdal_format(
 
         # The list form: DuckDB hands a bare string to GDAL as ONE key=value
         # pair, so space-separating several options silently corrupts them all.
-        lco_options = ", ".join(f"'{_escape_sql_string(part)}'" for part in lco_parts)
+        lco_options = ", ".join(sql_literal(part) for part in lco_parts)
         lco_clause = f", LAYER_CREATION_OPTIONS ({lco_options})" if lco_parts else ""
         # The layer name is a COPY option of DuckDB's GDAL writer; as a layer
         # creation option GDAL ignores it and names the layer after the file
@@ -516,7 +514,7 @@ def write_gdal_format(
         # would have had (the output's stem) is passed explicitly.
         if config.get("layer_option"):
             layer = layer_name if layer_name is not None else Path(output_path).stem
-            lco_clause = f", {config['layer_option']} '{_escape_sql_string(layer)}'{lco_clause}"
+            lco_clause = f", {config['layer_option']} {sql_literal(layer)}{lco_clause}"
 
         geometry_read = (
             resolve_geometry_read(con, input_url, geometry_col) if geometry_col else None

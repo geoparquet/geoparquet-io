@@ -499,8 +499,13 @@ class _FakeAdminDataset:
     def supports_per_level_sources(self):
         return True
 
-    def get_source_for_level(self, level):
+    def source_for_level(self, level, no_cache=False):
         return self._path
+
+    def table_reference(self, source=None):
+        from geoparquet_io.core.duckdb_utils import sql_path
+
+        return sql_path(source or str(self._path))
 
     def get_level_column_mapping(self):
         return {"country": "country"}
@@ -534,8 +539,8 @@ def fake_admin_dataset(tmp_path, monkeypatch):
     )
     con.close()
     monkeypatch.setattr(
-        "geoparquet_io.core.process.aggregate.by_admin._setup_admin_dataset",
-        lambda dataset, verbose, levels: (_FakeAdminDataset(admin_path), None),
+        "geoparquet_io.core.process.aggregate.by_admin.resolve_admin_dataset",
+        lambda dataset, levels, **k: (_FakeAdminDataset(admin_path), None, None),
     )
 
 

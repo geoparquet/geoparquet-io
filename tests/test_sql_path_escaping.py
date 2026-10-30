@@ -571,8 +571,7 @@ class TestDisplayedPathsAreNotEscaped:
         """No ``--`` prose line may carry an escaped path.
 
         The SQL these runs echo is another matter: there ``o''brien`` is the
-        correct literal, and ``add/country_codes.py:_print_dry_run_bounds_info``
-        prints SQL on purpose.
+        correct literal.
         """
         prose = [line for line in text.splitlines() if line.strip().startswith("--")]
         assert prose, text
@@ -642,39 +641,6 @@ class TestDisplayedPathsAreNotEscaped:
         assert f"-- Input file: {apostrophe_file}" in result.output
         self._assert_shows_raw(result.output, apostrophe_file)
 
-    def test_add_country_codes_dry_run_header(self, apostrophe_file, tmp_path, caplog):
-        """Both the input and the ``--countries`` path are shown raw (#802)."""
-        from geoparquet_io.core.add.country_codes import add_country_codes
-
-        countries = _make_countries_file(apostrophe_file, tmp_path / "o'brien" / "c.parquet")
-        with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            add_country_codes(
-                input_parquet=apostrophe_file,
-                countries_parquet=countries,
-                output_parquet=str(tmp_path / "o'brien" / "cc_out.parquet"),
-                add_bbox_flag=False,
-                dry_run=True,
-                verbose=False,
-            )
-
-        assert f"-- Input file: {apostrophe_file}" in caplog.text
-        assert f"-- Countries file: {countries}" in caplog.text
-        self._assert_shows_raw(caplog.text, apostrophe_file)
-
-
-def _make_countries_file(source_parquet, dest):
-    """A countries file built from ``source_parquet``'s own geometries."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    con = get_duckdb_connection(load_spatial=True)
-    try:
-        con.execute(
-            f"COPY (SELECT geometry, 'US' AS country_code FROM {sql_path(source_parquet)}) "
-            f"TO {sql_path(dest)} (FORMAT PARQUET)"
-        )
-    finally:
-        con.close()
-    return str(dest)
-
 
 class TestEscapedValuesDoNotCrossFunctionBoundaries:
     """Issue #802 part 2: a function hands back a RAW path.
@@ -684,14 +650,6 @@ class TestEscapedValuesDoNotCrossFunctionBoundaries:
     that produced #718's crashes: the next consumer added has to know.
     """
 
-    def test_get_countries_config_returns_a_raw_path(self, apostrophe_file, tmp_path):
-        from geoparquet_io.core.add.country_codes import _get_countries_config
-
-        countries = _make_countries_file(apostrophe_file, tmp_path / "o'brien" / "c.parquet")
-        countries_path, _, _ = _get_countries_config(countries, using_default=False, verbose=False)
-
-        assert countries_path == countries
-
     def test_get_input_file_info_returns_a_raw_path(self, apostrophe_file):
         from geoparquet_io.core.partition.admin_hierarchical import _get_input_file_info
 
@@ -699,50 +657,33 @@ class TestEscapedValuesDoNotCrossFunctionBoundaries:
 
         assert input_path == apostrophe_file
 
-    def test_admin_divisions_input_ref_escapes_a_raw_path(self, apostrophe_file):
-        """``current_source`` alternately holds a table name, so the RAW path
-        has to be the thing that reaches the SQL boundary."""
-        from geoparquet_io.core.add.admin_divisions import _format_input_ref
+    def test_admin_join_chain_escapes_the_raw_path_and_keeps_its_tables_bare(self, apostrophe_file):
+        """The chain's relation alternates between the input path and a temp
+        table, so the RAW path is what reaches the SQL boundary, once (#802)."""
+        from geoparquet_io.core.admin_datasets import OvertureAdminDataset, run_admin_join
 
-        assert _format_input_ref(apostrophe_file) == sql_path(apostrophe_file)
-        assert _format_input_ref("_gpio_admin_step_0", is_table_ref=True) == "_gpio_admin_step_0"
+        steps = []
+        con = get_duckdb_connection(load_spatial=True)
+        try:
+            run_admin_join(
+                con,
+                OvertureAdminDataset(source_path="admin.parquet"),
+                ["country", "region"],
+                input_path=apostrophe_file,
+                input_geom_col="geometry",
+                input_bbox_col=None,
+                admin_bbox_col=None,
+                select_for=lambda levels, columns: "b.country AS admin_country",
+                final_step=steps.append,
+                dry_run=True,
+                on_step=steps.append,
+            )
+        finally:
+            con.close()
 
-    def test_admin_hierarchical_enrichment_query_escapes_a_raw_path(self, apostrophe_file):
-        from geoparquet_io.core.partition.admin_hierarchical import _build_enrichment_query
-
-        query = _build_enrichment_query(
-            apostrophe_file,
-            "admin_tbl",
-            "",
-            "b.country AS admin_country",
-            "geometry",
-            None,
-            ["country"],
-            "geometry",
-            None,
-            "_enriched",
-        )
-
-        assert f"FROM {sql_path(apostrophe_file)} a" in query
-
-    def test_admin_hierarchical_enrichment_query_keeps_a_table_ref_bare(self, apostrophe_file):
-        from geoparquet_io.core.partition.admin_hierarchical import _build_enrichment_query
-
-        query = _build_enrichment_query(
-            "_admin_step_0",
-            "admin_tbl",
-            "",
-            "b.country AS admin_country",
-            "geometry",
-            None,
-            ["country"],
-            "geometry",
-            None,
-            "_enriched",
-            input_is_table_ref=True,
-        )
-
-        assert "FROM _admin_step_0 a" in query
+        first, second = (step.query for step in steps)
+        assert f"FROM {sql_path(apostrophe_file)})" in first
+        assert "FROM _gpio_admin_step_0)" in second
 
 
 class TestBboxMetadataFallbackPath:
@@ -806,16 +747,16 @@ class TestAggregateByAdminSource:
         dataset = AdminDatasetFactory.create("overture", source_path=apostrophe_file)
         assert dataset.supports_per_level_sources()
 
-        ref = _get_admin_ref(dataset, None, "country")
+        ref = _get_admin_ref(dataset, "country")
 
-        assert ref == f"read_parquet({sql_path(apostrophe_file)})"
+        assert ref == f"read_parquet({sql_path(apostrophe_file)}, hive_partitioning=1)"
 
     def test_per_level_source_ref_is_runnable_sql(self, apostrophe_file):
         from geoparquet_io.core.admin_datasets import AdminDatasetFactory
         from geoparquet_io.core.process.aggregate.by_admin import _get_admin_ref
 
         dataset = AdminDatasetFactory.create("overture", source_path=apostrophe_file)
-        ref = _get_admin_ref(dataset, None, "country")
+        ref = _get_admin_ref(dataset, "country")
 
         con = get_duckdb_connection(load_spatial=False)
         try:

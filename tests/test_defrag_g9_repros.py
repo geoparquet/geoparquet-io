@@ -625,3 +625,106 @@ def test_1080_check_spec_reports_a_string_geometry_types_once(tmp_path):
     failed = [line for line in result.output.splitlines() if "✗" in line]
     assert len(failed) == 1, _explain(result)
     assert '"geometry_types" list' in failed[0]
+
+
+# ---------------------------------------------------------------------------
+# #543 / #942 -- the admin spatial join (fixed by the T1d+T1e PR, #1386)
+# ---------------------------------------------------------------------------
+
+
+def _local_overture(tmp_path, monkeypatch, bbox_name="bbox"):
+    """Overture-shaped admin boundaries on disk: AA [0,2]x[0,2] and BB [1,3]x[0,2]
+    overlap on x in [1, 2]. Only the network source is replaced."""
+    import duckdb
+
+    from geoparquet_io.core import admin_datasets
+    from geoparquet_io.core.duckdb_utils import quote_identifier, sql_path
+
+    path = tmp_path / "admin.parquet"
+    con = duckdb.connect()
+    try:
+        con.execute("INSTALL spatial; LOAD spatial")
+        con.execute(
+            "COPY (SELECT 'country' AS subtype, code AS country, NULL::VARCHAR AS region, "
+            "ST_GeomFromText(wkt) AS geometry, struct_pack(xmin := ST_XMin(ST_GeomFromText(wkt)), "
+            "xmax := ST_XMax(ST_GeomFromText(wkt)), ymin := ST_YMin(ST_GeomFromText(wkt)), "
+            f"ymax := ST_YMax(ST_GeomFromText(wkt))) AS {quote_identifier(bbox_name)} "
+            "FROM (VALUES ('AA', 'POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))'), "
+            "('BB', 'POLYGON((1 0, 3 0, 3 2, 1 2, 1 0))')) t(code, wkt)) "
+            f"TO {sql_path(path)} (FORMAT PARQUET)"
+        )
+    finally:
+        con.close()
+
+    class LocalOverture(admin_datasets.OvertureAdminDataset):
+        def get_bbox_column(self):
+            return bbox_name
+
+    monkeypatch.setattr(
+        admin_datasets.AdminDatasetFactory,
+        "create",
+        classmethod(
+            lambda cls, dataset_name, source_path=None, verbose=False: LocalOverture(
+                source_path=str(path), verbose=verbose
+            )
+        ),
+    )
+
+
+def _three_points(tmp_path):
+    """id 1 in AA only, id 2 in the AA/BB overlap, id 3 in BB only."""
+    table = pa.table(
+        {
+            "id": pa.array([1, 2, 3], pa.int64()),
+            "geometry": pa.array([point_wkb(x, 1.0) for x in (0.5, 1.5, 2.5)], pa.binary()),
+        }
+    )
+    return write_with_geo(tmp_path / "points.parquet", table, geo_block())
+
+
+def test_543_a_feature_in_two_admin_polygons_is_counted_once(tmp_path, monkeypatch):
+    """Fixed by the T1d+T1e PR (#1386): a plain regression test.
+
+    On the base the LEFT JOIN fanned out: ``add admin-divisions`` wrote 4 rows
+    for 3 inputs, and ``process aggregate admin`` counted AA 2 + BB 2.
+    """
+    _local_overture(tmp_path, monkeypatch)
+    src = _three_points(tmp_path)
+    added = tmp_path / "added.parquet"
+    result = _run(
+        "add", "admin-divisions", src, added, "--dataset", "overture", "--levels", "country"
+    )
+    assert result.exit_code == 0, _explain(result)
+    assert pq.read_table(added).column("overture_country").to_pylist() == ["AA", "AA", "BB"]
+
+    agg = tmp_path / "agg.parquet"
+    result = _run(
+        "process", "aggregate", "admin", src, agg, "--level", "country", "--out-geometry", "none"
+    )
+    assert result.exit_code == 0, _explain(result)
+    counts = {r["admin_code"]: r["count"] for r in pq.read_table(agg).to_pylist()}
+    assert counts == {"AA": 2, "BB": 1}
+
+
+def test_942_partition_admin_joins_through_the_owner(tmp_path, monkeypatch):
+    """Fixed by the T1d+T1e PR (#1386): a plain regression test.
+
+    ``partition admin`` hand-rolled its ON clause and its admin subquery, so
+    what the owner's tests cover (a bbox name that needs quoting, the
+    one-match rule) did not reach it. Through the owner it quotes ``b "box"``
+    and assigns exactly as ``add admin-divisions`` does. On the base the
+    overlap point went to both partitions: ``country=AA [1, 2]``,
+    ``country=BB [2, 3]``.
+    """
+    _local_overture(tmp_path, monkeypatch, bbox_name='b "box"')
+    src = _three_points(tmp_path)
+    out = tmp_path / "parts"
+    result = _run(
+        "partition", "admin", src, out, "--dataset", "overture", "--levels", "country", "--hive"
+    )
+    assert result.exit_code == 0, _explain(result)
+    parts = {
+        f.parent.name: sorted(pq.read_table(f, columns=["id"]).column("id").to_pylist())
+        for f in out.rglob("*.parquet")
+    }
+    assert parts == {"country=AA": [1, 2], "country=BB": [3]}

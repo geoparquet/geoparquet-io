@@ -28,10 +28,10 @@ from geoparquet_io.core.crs_utils import (
     is_unknown_type_crs,
 )
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     describe_query,
     duckdb_type_is_geometry,
     quote_identifier,
+    sql_literal,
 )
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
@@ -172,7 +172,7 @@ def wrap_query_with_secondary_crs(
         crs = wanted[name]
         literal = crs if isinstance(crs, str) else json.dumps(crs)
         ident = quote_identifier(name)
-        replacements.append(f"ST_SetCRS({ident}, '{_escape_sql_string(literal)}') AS {ident}")
+        replacements.append(f"ST_SetCRS({ident}, {sql_literal(literal)}) AS {ident}")
     if not replacements:
         return query
     return f"SELECT * REPLACE ({', '.join(replacements)}) FROM ({query})"

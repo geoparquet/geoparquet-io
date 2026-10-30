@@ -14,6 +14,7 @@ from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     fetch_rows,
     quote_identifier,
+    sql_literal,
     sql_path,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
@@ -601,27 +602,6 @@ def build_breakdown_column_names(
 def breakdown_other_name(colmap: list[tuple[object, str]], reserved: set[str], prefix: str) -> str:
     """The remainder bucket's column name, clear of the pivots and the metric names."""
     return _unique_name(f"{prefix}_other", set(reserved) | {name for _, name in colmap})
-
-
-def sql_literal(value: object) -> str:
-    """Render a Python value as a safe DuckDB SQL literal.
-
-    A float is written as an explicit DOUBLE: a bare ``0.699999988079071`` is
-    typed DECIMAL by DuckDB and never equals the REAL column it came from, so
-    the category's rows would land in no pivot at all. ``nan``/``inf`` need the
-    cast to be literals at all. A NUL byte cannot sit inside a quoted string,
-    so it is spliced in as ``chr(0)``.
-    """
-    if isinstance(value, bool):
-        return "TRUE" if value else "FALSE"
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float):
-        return f"CAST('{value!r}' AS DOUBLE)"
-    text = str(value).replace("'", "''")
-    if "\x00" in text:
-        return " || chr(0) || ".join(f"'{piece}'" for piece in text.split("\x00"))
-    return f"'{text}'"
 
 
 def resolve_breakdown_values(con, source_sql: str, column: str, limit: int) -> tuple[list, bool]:

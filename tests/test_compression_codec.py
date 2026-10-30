@@ -1133,25 +1133,6 @@ def test_admin_divisions_dry_run_prints_the_owner_clauses():
     assert "ZSTD:None" not in result.output
 
 
-def test_country_codes_dry_run_prints_the_owner_clauses(caplog):
-    import logging
-
-    from geoparquet_io.core.add.country_codes import add_country_codes
-
-    fields = str(DATA / "fields_gpq2_crs84_zstd.parquet")
-    with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-        add_country_codes(
-            input_parquet=fields,
-            countries_parquet=fields,
-            output_parquet="output.parquet",
-            add_bbox_flag=False,
-            dry_run=True,
-            verbose=False,
-        )
-    assert "COMPRESSION ZSTD, COMPRESSION_LEVEL 15" in caplog.text
-    assert "Using ZSTD:15 compression" in caplog.text
-
-
 def test_add_computed_column_dry_run_prints_the_owner_clauses(caplog):
     import logging
 

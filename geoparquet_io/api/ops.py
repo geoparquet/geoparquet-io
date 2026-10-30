@@ -2893,8 +2893,9 @@ def explain_analyze(
 
     Args:
         file_path: Path to the input Parquet file.
-        query: Optional SQL query. Use {file} as placeholder for the file path.
-               Defaults to SELECT * FROM read_parquet('{file}').
+        query: Optional SQL query. ``{file}`` is replaced by the file path as a
+               quoted, escaped SQL string literal (``'{file}'`` means the
+               same). Defaults to SELECT * FROM read_parquet({file}).
 
     Returns:
         Dictionary with operators, timing, and analysis results.
@@ -2907,7 +2908,7 @@ def explain_analyze(
         >>> # With a custom query:
         >>> result = ops.explain_analyze(
         ...     'input.parquet',
-        ...     query="SELECT * FROM read_parquet('{file}') WHERE id > 10"
+        ...     query="SELECT * FROM read_parquet({file}) WHERE id > 10"
         ... )
     """
     from geoparquet_io.core.benchmark import explain_analyze as _explain_analyze

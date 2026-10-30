@@ -1,7 +1,7 @@
 import duckdb
 import pytest
 
-from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.duckdb_utils import fetch_one, sql_literal
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.process.aggregate.common import (
     MetricSpec,
@@ -11,7 +11,6 @@ from geoparquet_io.core.process.aggregate.common import (
     parse_metrics,
     resolve_breakdown_values,
     sanitize_value_for_column,
-    sql_literal,
 )
 
 

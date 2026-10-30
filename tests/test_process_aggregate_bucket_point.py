@@ -11,7 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.duckdb_utils import fetch_one, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3
@@ -240,7 +240,8 @@ def test_admin_joined_sql_uses_point_expr_and_select_list():
         "geometry",
         select_list='"height", "bbox", ',
     )
-    inner = sql.split("FROM (")[1].split(") s")[0]
+    # The input scan's projection: everything between its SELECT and the join point.
+    inner = sql.split("AS __cen")[0].rsplit("SELECT ", 1)[1]
     assert "ST_Point((bbox.xmin" in inner
     assert '"height", "bbox", ' in inner
     # The narrowed list is the whole projection: no passthrough star, so the
@@ -743,8 +744,11 @@ class _FakeAdminDataset:
     def supports_per_level_sources(self):
         return True
 
-    def get_source_for_level(self, level):
+    def source_for_level(self, level, no_cache=False):
         return self._path
+
+    def table_reference(self, source=None):
+        return sql_path(source or self._path)
 
 
 def _write_admin_polygons(path):
@@ -767,8 +771,8 @@ def _run_admin_offline(monkeypatch, admin_path):
 
     monkeypatch.setattr(
         by_admin,
-        "_setup_admin_dataset",
-        lambda dataset, verbose, levels: (_FakeAdminDataset(admin_path), None),
+        "resolve_admin_dataset",
+        lambda dataset, levels, **k: (_FakeAdminDataset(admin_path), None, None),
     )
 
 

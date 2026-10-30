@@ -147,7 +147,7 @@ def add(ctx):
 @verbose_option
 @any_extension_option
 @show_sql_option
-def add_country_codes(
+def add_admin_divisions(
     input_parquet,
     output_parquet,
     dataset,

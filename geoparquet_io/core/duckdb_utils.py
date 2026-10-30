@@ -6,7 +6,7 @@ with appropriate extensions loaded for GeoParquet operations.
 
 ``import duckdb`` is deferred into the functions that touch it (#1307): the
 embeddable core modules (see docs/guide/embedding.md) import this module for
-``quote_identifier``/``_escape_sql_string``/``sql_path``-style helpers, and a
+``quote_identifier``/``sql_literal``/``sql_path``-style helpers, and a
 host application without DuckDB installed must be able to import them and fail
 only when a connection is actually asked for.
 """
@@ -164,15 +164,15 @@ def _s3_secret_sql(settings: Mapping[str, Any]) -> str:
     profile = settings.get("profile")
     if profile:
         params.append(f"CHAIN '{_NAMED_PROFILE_CHAIN}'")
-        params.append(f"PROFILE '{_escape_sql_string(profile)}'")
+        params.append(f"PROFILE {sql_literal(profile)}")
     endpoint = settings.get("endpoint")
     if endpoint:
-        params.append(f"ENDPOINT '{_escape_sql_string(endpoint)}'")
+        params.append(f"ENDPOINT {sql_literal(endpoint)}")
         params.append("URL_STYLE 'path'")
         params.append(f"USE_SSL {'false' if settings.get('use_ssl') is False else 'true'}")
     region = settings.get("region")
     if region:
-        params.append(f"REGION '{_escape_sql_string(region)}'")
+        params.append(f"REGION {sql_literal(region)}")
     body = ",\n    ".join(params)
     return f"CREATE OR REPLACE SECRET (\n    {body}\n);"
 
@@ -199,14 +199,14 @@ def _apply_s3_settings(con, settings: Mapping[str, Any]) -> None:
     """``SET`` the resolved endpoint and region for reads that use no secret."""
     endpoint = settings.get("endpoint")
     if endpoint:
-        con.execute(f"SET s3_endpoint='{_escape_sql_string(endpoint)}';")
+        con.execute(f"SET s3_endpoint={sql_literal(endpoint)};")
         con.execute("SET s3_url_style='path';")
         ssl_value = "false" if settings.get("use_ssl") is False else "true"
         con.execute(f"SET s3_use_ssl={ssl_value};")
 
     region = settings.get("region")
     if region:
-        con.execute(f"SET s3_region='{_escape_sql_string(region)}';")
+        con.execute(f"SET s3_region={sql_literal(region)};")
 
 
 def get_active_s3_config() -> dict:
@@ -268,6 +268,42 @@ def _escape_sql_string(value: str) -> str:
         String with single quotes escaped for safe SQL interpolation
     """
     return value.replace("'", "''")
+
+
+def _require_str(value: object) -> str:
+    """``value`` unchanged if it is a ``str``; a ``TypeError`` otherwise.
+
+    For the literal builders whose input must already be text: ``sql_literal``
+    renders anything through ``str()``, which would turn a ``bytes`` payload
+    into the characters ``b'...'`` instead of failing.
+    """
+    if not isinstance(value, str):
+        raise TypeError(f"expected str, got {type(value).__name__}")
+    return value
+
+
+def sql_literal(value: object) -> str:
+    """Render a Python value as a DuckDB SQL literal -- the one value-literal builder.
+
+    - ``bool`` -> ``TRUE``/``FALSE``; ``int`` -> its digits.
+    - ``float`` -> an explicit DOUBLE: a bare ``0.699999988079071`` is typed
+      DECIMAL by DuckDB and never equals the REAL column it came from, and
+      ``nan``/``inf`` need the cast to be literals at all.
+    - anything else -> ``str(value)`` as a single-quoted string, escaped by
+      :func:`_escape_sql_string`. A NUL byte is spliced in as ``chr(0)``:
+      DuckDB 1.5's lexer ends a quoted string at a NUL ("unterminated quoted
+      string"), while 2.0 accepts it; the splice reads the same on both.
+    """
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return f"CAST('{value!r}' AS DOUBLE)"
+    text = _escape_sql_string(str(value))
+    if "\x00" in text:
+        return " || chr(0) || ".join(f"'{piece}'" for piece in text.split("\x00"))
+    return f"'{text}'"
 
 
 _SETTING_KEY_RE = re.compile(r"[a-z_]+")
@@ -510,7 +546,7 @@ def _current_setting(con: duckdb.DuckDBPyConnection, key: str) -> object:
 
 def _set_setting(con: duckdb.DuckDBPyConnection, key: str, value: object) -> None:
     if isinstance(value, str):
-        con.execute(f"SET {key} = '{_escape_sql_string(value)}'")
+        con.execute(f"SET {key} = {sql_literal(value)}")
     else:
         con.execute(f"SET {key} = {value}")
 
@@ -539,14 +575,22 @@ def sql_path(path: str | os.PathLike[str]) -> str:
     it had already written the file (issue #718).
 
     The argument must be **RAW**: the path as the user typed it, or as
-    :func:`~geoparquet_io.core.file_utils.resolve_file_url` resolved it, never a
-    value already escaped for SQL; escaping is not idempotent, so a second pass
+    :func:`~geoparquet_io.core.file_utils.resolve_file_url` resolved it -- never
+    an already-escaped value; escaping is not idempotent, so a second pass
     doubles the doubling. No guard can catch that automatically -- a filename
     may legally contain two apostrophes in a row -- so the rule is structural: a
-    path is escaped exactly once, here.
+    path is escaped exactly once, here, and the result is used whole. Slicing
+    the quotes off it (``sql_path(p)[1:-1]``) to quote it again by hand is the
+    shape the ``sql_escape_hand_quote`` guard refuses: with a NUL byte the
+    literal is ``'a' || chr(0) || 'b'``, not one quoted span.
 
-    For a non-path SQL string literal use :func:`_escape_sql_string` and supply
-    your own quotes; for an identifier use :func:`quote_identifier`.
+    For a non-path SQL value use :func:`sql_literal`, which supplies the quotes
+    too; for an identifier use :func:`quote_identifier`. A path is a string
+    literal like any other, so this is ``sql_literal`` on its ``fspath``.
+
+    The bare escape under both, ``_escape_sql_string``, is private to this
+    module: a call site that adds its own quotes around it is one that can
+    forget them, and gets no NUL handling.
 
     A ``PathLike`` is accepted as well as a ``str``: callers hold ``Path``
     objects just as often, and ``str.replace`` on a ``Path`` is the completely
@@ -559,7 +603,7 @@ def sql_path(path: str | os.PathLike[str]) -> str:
     Returns:
         The path as a quoted, escaped SQL string literal.
     """
-    return f"'{_escape_sql_string(os.fspath(path))}'"
+    return sql_literal(_require_str(os.fspath(path)))
 
 
 def build_kv_metadata_clause(pairs: Mapping[str, str] | None) -> str | None:
@@ -580,7 +624,7 @@ def build_kv_metadata_clause(pairs: Mapping[str, str] | None) -> str | None:
     if not pairs:
         return None
     body = ", ".join(
-        f"'{_escape_sql_string(key)}': '{_escape_sql_string(value)}'"
+        f"{sql_literal(_require_str(key))}: {sql_literal(_require_str(value))}"
         for key, value in pairs.items()
     )
     return f"KV_METADATA {{{body}}}"
@@ -601,7 +645,7 @@ def quote_identifier(name: str) -> str:
     something already quoted.
 
     For a SQL *string literal* (e.g. ``WHERE path_in_schema = '...'``) use
-    :func:`_escape_sql_string` instead; the two escapes are not interchangeable.
+    :func:`sql_literal` instead; the two escapes are not interchangeable.
 
     Args:
         name: The identifier (column name, table name, etc.) to quote
@@ -809,6 +853,7 @@ def build_spatial_join_condition(
     input_alias: str = "a",
     target_alias: str = "b",
     input_geom_sql: str | None = None,
+    input_is_point: bool = False,
 ) -> str:
     """Build the ON-clause condition for a spatial join between two tables.
 
@@ -859,11 +904,37 @@ def build_spatial_join_condition(
         target_bbox_col: Optional bbox covering column on the target table.
         input_alias: SQL alias for the input table (default "a").
         target_alias: SQL alias for the target table (default "b").
+        input_geom_sql: A pre-built input-geometry expression (e.g. an
+            ``ST_Transform`` reprojecting a non-CRS84 input, #525). It replaces
+            ``input_alias.input_geom_col`` and drops the bbox pre-filter, since
+            the stored input bbox is in the source CRS.
+        input_is_point: The input geometry is one POINT per row (the join point
+            ``gpio process aggregate admin`` builds). With a target bbox, the
+            pre-filter is then point-in-bbox on that point -- comparable even
+            when the input has no bbox of its own.
 
     Returns:
         A SQL boolean expression for use directly after ``ON``.
     """
     qt_geom = quote_identifier(target_geom_col)
+
+    if input_is_point:
+        point = input_geom_sql or f"{input_alias}.{quote_identifier(input_geom_col)}"
+        intersects = f"ST_Intersects({target_alias}.{qt_geom}, {point})"
+        if not target_bbox_col:
+            return intersects
+        qt_bbox = quote_identifier(target_bbox_col)
+        return (
+            "(\n"
+            "        -- Fast point-in-bbox pre-filter (cheap; eliminates most candidate pairs)\n"
+            f"        {target_alias}.{qt_bbox}.xmin <= ST_X({point}) AND\n"
+            f"        {target_alias}.{qt_bbox}.xmax >= ST_X({point}) AND\n"
+            f"        {target_alias}.{qt_bbox}.ymin <= ST_Y({point}) AND\n"
+            f"        {target_alias}.{qt_bbox}.ymax >= ST_Y({point})\n"
+            "    )\n"
+            "    -- Precise check only runs on the bbox matches\n"
+            f"    AND {intersects}"
+        )
 
     # ``input_geom_sql`` is a pre-built input-geometry expression (e.g. wrapped in
     # ST_Transform to reproject a non-CRS84 input, #525). When supplied, the
@@ -893,6 +964,86 @@ def build_spatial_join_condition(
         "    )\n"
         "    -- Precise check only runs on the bbox matches\n"
         f"    AND {intersects}"
+    )
+
+
+# The input-row id build_spatial_join_query carries through a one-match join.
+SPATIAL_JOIN_INPUT_ROW = "__gpio_input_row"
+
+
+def build_spatial_join_query(
+    *,
+    input_relation: str,
+    target_relation: str,
+    target_select: str,
+    condition: str,
+    match_order: Sequence[str],
+    input_alias: str = "a",
+    target_alias: str = "b",
+) -> str:
+    """Build the ``SELECT`` that LEFT JOINs every input row to one target it meets.
+
+    The query keeps every input column (``<input_alias>.*``), adds
+    ``target_select`` (target-side expressions, aliased by the caller), and
+    joins ``ON condition`` -- normally :func:`build_spatial_join_condition`.
+    An input row that meets no target is kept, with NULL target columns.
+
+    Exactly one output row per input row, in input order (#543): a feature
+    that intersects two target polygons is never emitted twice. Of the
+    targets a row meets, the one kept is the first by ``match_order`` -- SQL
+    expressions over the target alias, compared in order, ascending, NULLs
+    last. That is the tiebreak, and it is deterministic: rows that tie on
+    every ``match_order`` key carry the same target values, so which of them
+    survives cannot show in the output. The admin commands pass the admin code
+    columns, so a feature in the overlap of two admin polygons goes to the
+    smaller code. It is a cheap key on purpose: an intersection-area tiebreak
+    would run ``ST_Intersection`` on every matched row, and the admin join
+    point is a POINT with no area. Caveat for polygon inputs (``add
+    admin-divisions``, ``partition admin`` join the full geometry): a polygon
+    straddling a border goes to the smaller code, not to the region holding
+    most of its area.
+
+    The dedup is spill-safe at the scale the admin commands target. Input rows
+    are numbered with ``row_number() OVER ()`` -- a streaming window, with no
+    ``PARTITION BY`` to buffer -- and the survivor is picked with ``DISTINCT
+    ON``, which DuckDB plans as a hash aggregate (it spills) followed by a sort
+    on the row number (it spills). The ``QUALIFY row_number() OVER (PARTITION
+    BY ...)`` form that #461 retired buffers every row in a window that does
+    not spill, and is not used.
+
+    Args:
+        input_relation: The input side: a table name, ``read_parquet(...)``
+            call, or parenthesised subquery.
+        target_relation: The target side, in the same forms.
+        target_select: The target-side SELECT items, e.g. ``b."country" AS c``.
+        condition: The ON condition.
+        match_order: The tiebreak keys (at least one).
+        input_alias: SQL alias for the input (default "a").
+        target_alias: SQL alias for the target (default "b").
+
+    Returns:
+        A SELECT statement (no trailing semicolon).
+
+    Raises:
+        ValueError: An empty ``match_order``.
+    """
+    if not match_order:
+        raise ValueError("build_spatial_join_query needs a match_order to pick the kept match")
+
+    row = SPATIAL_JOIN_INPUT_ROW
+    keys = [f"__gpio_match_{i}" for i in range(len(match_order))]
+    key_select = ", ".join(f"{expr} AS {key}" for expr, key in zip(match_order, keys, strict=True))
+    key_order = ", ".join(f"{key} ASC NULLS LAST" for key in keys)
+    return (
+        f"SELECT * EXCLUDE ({row}, {', '.join(keys)}) FROM (\n"
+        f"    SELECT DISTINCT ON ({row}) * FROM (\n"
+        f"        SELECT {input_alias}.*, {target_select}, {key_select}\n"
+        f"        FROM (SELECT *, row_number() OVER () AS {row} FROM {input_relation}) {input_alias}\n"
+        f"        LEFT JOIN {target_relation} {target_alias}\n"
+        f"        ON {condition}\n"
+        "    )\n"
+        f"    ORDER BY {row}, {key_order}\n"
+        ")"
     )
 
 
@@ -1309,7 +1460,7 @@ def _apply_memory_limit(
     to match a limit.
     """
     if limit is not None:
-        con.execute(f"SET memory_limit = '{_escape_sql_string(str(limit))}';")
+        con.execute(f"SET memory_limit = {sql_literal(str(limit))};")
         if verbose:
             debug(f"DuckDB memory limit: {limit}")
     if thread_cap is not None and thread_cap < int(str(_current_setting(con, "threads"))):
@@ -1468,7 +1619,7 @@ class ProfiledConnection:
             target = os.path.join(self._directory, name)
             if not os.path.exists(target):
                 break
-        self._con.execute(f"SET profiling_output = '{_escape_sql_string(target)}';")
+        self._con.execute(f"SET profiling_output = {sql_path(target)};")
 
     def execute(self, *args, **kwargs):
         self._rotate_profile_output()
@@ -1612,8 +1763,7 @@ def get_duckdb_connection(
     # so a per-write override cannot be applied to the connections gpio shares
     # across writes (a partition loop finalizes N files on one connection).
     effective_temp_dir = temp_directory if temp_directory is not None else spill_directory()
-    safe_temp_dir = _escape_sql_string(str(effective_temp_dir))
-    con.execute(f"SET temp_directory = '{safe_temp_dir}';")
+    con.execute(f"SET temp_directory = {sql_path(effective_temp_dir)};")
     _apply_connection_limits(con, memory_limit, threads)
 
     # Always load spatial extension by default (core use case). None is the
