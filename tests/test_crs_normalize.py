@@ -513,17 +513,14 @@ class TestAdminReprojectsAdminSideWithBbox:
         assert ".xmin" in sql and ".xmax" in sql
 
     def test_admin_subquery_reprojects_admin_and_synthesizes_bbox(self):
-        from geoparquet_io.core.add.admin_divisions import _build_admin_subquery
+        from geoparquet_io.core.admin_datasets import build_admin_subquery
 
-        sq = _build_admin_subquery(
-            dataset=None,
-            levels=None,
-            boundary_columns=["region"],
-            admin_table_ref="'admin.parquet'",
-            admin_geom_col="geom",
-            admin_bbox_col="bbox",
-            admin_where_clauses=[],
-            source_crs="EPSG:5070",
+        sq = build_admin_subquery(
+            "'admin.parquet'",
+            "geom",
+            "bbox",
+            ["region"],
+            reproject_to="EPSG:5070",
         )
         assert "ST_Transform" in sq  # admin polygons reprojected into input CRS
         assert "struct_pack" in sq  # source-CRS bbox synthesized for the pre-filter

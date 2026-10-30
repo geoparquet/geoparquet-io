@@ -339,3 +339,34 @@ def test_guard_sees_a_hand_rolled_join():
     hand_rolled = 'def f(g):\n    """ST_Intersects( in a docstring is fine."""\n'
     hand_rolled += '    return f"ON ST_Intersects(b.{g}, a.{g})"\n'
     assert st_intersects_literals(hand_rolled) == 1
+
+
+def _literals_containing(source: str, needle: str) -> int:
+    tree = ast.parse(source)
+    skip = _docstring_ids(tree)
+    return sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in skip
+        and needle in node.value
+    )
+
+
+def test_admin_subquery_is_built_only_in_admin_datasets():
+    """The admin side's boundary-column projection (``<expr> as _col_<i>``) and
+    its reprojected bbox are spelled once, in ``admin_datasets.build_admin_subquery``
+    (#942)."""
+    found = {}
+    for path in sorted(PACKAGE.rglob("*.py")):
+        rel = path.relative_to(PACKAGE).as_posix()
+        if rel == "core/admin_datasets.py":
+            continue
+        text = path.read_text()
+        count = _literals_containing(text, " as _col_") + _literals_containing(
+            text, "struct_pack(xmin := ST_XMin("
+        )
+        if count:
+            found[rel] = count
+    assert found == {}

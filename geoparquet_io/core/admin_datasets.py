@@ -17,10 +17,12 @@ from pathlib import Path
 import duckdb
 
 from geoparquet_io.core.compression import resolve_codec
+from geoparquet_io.core.crs_utils import reproject_to_source_sql
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     get_duckdb_connection,
     orphaned_spill_dirs,
+    quote_identifier,
     s3_config_scope,
     spill_directory,
     sql_path,
@@ -1055,9 +1057,10 @@ class OvertureAdminDataset(AdminDataset):
         polygon per division whose geometry spans the whole territory —
         including the entire landmass — so keeping both classes makes every
         land feature match two polygons per level, inflating spatial-join
-        output ~2x per level. Land-only keeps each level's polygons
-        non-overlapping, which is what the plain (memory-safe) LEFT JOIN relies
-        on instead of an OOM-prone dedup window.
+        output ~2x per level. Land-only keeps each level's polygons (nearly)
+        non-overlapping, so the join's one-match dedup (see
+        ``duckdb_utils.build_spatial_join_query``) only has to settle border
+        features and the slivers simplification leaves, not every land feature.
 
         The filter is ``is_land IS NOT FALSE`` (not ``= true``): it drops only
         explicitly-maritime polygons and keeps land polygons whose flag is
@@ -1109,9 +1112,11 @@ class OvertureAdminDataset(AdminDataset):
 
         The full Overture divisions dataset is ~4.5GB with 1M+ rows. We split
         into per-level, land-only files (see :meth:`_build_level_cache_query`)
-        so spatial joins run against non-overlapping polygons, preventing row
-        multiplication. Geometries are simplified to ~11m tolerance to keep
-        files small.
+        so spatial joins run against land polygons rather than land plus the
+        maritime polygons that cover the same territory. Geometries are
+        simplified to ~11m tolerance to keep files small; the slivers where
+        simplified neighbours overlap are settled by the join's one-match dedup
+        (#543).
         """
 
         cache_dir = get_cache_dir()
@@ -1243,3 +1248,74 @@ def default_admin_levels(dataset_name: str, source_path: str | None = None) -> l
     """
     dataset = AdminDatasetFactory.create(dataset_name, source_path, verbose=False)
     return dataset.get_available_levels()
+
+
+def _boundary_column_ref(i: int, col: str) -> tuple[str, str]:
+    """(subquery projection, name the join reads it by) for one boundary column.
+
+    A plain column name is quoted. A boundary "column" containing ``[`` or
+    ``(`` is a struct/list access expression (e.g. Overture's
+    ``names['primary']``) and is projected bare as ``_col_<i>``: it comes from
+    the dataset definitions in this module, never from an input file, so it
+    is outside the file-metadata threat model that quoting defends (#935, #942).
+    """
+    if "[" in col or "(" in col:
+        return f"{col} as _col_{i}", f"_col_{i}"
+    q = quote_identifier(col)
+    return q, q
+
+
+def build_admin_subquery(
+    admin_table_ref: str,
+    admin_geom_col: str,
+    admin_bbox_col: str | None,
+    boundary_columns: list[str],
+    where_sql: str = "",
+    *,
+    reproject_to: str | None = None,
+    include_bbox: bool = True,
+) -> str:
+    """The admin side of an admin spatial join, as a parenthesised subquery.
+
+    It projects the admin geometry, the bbox the join pre-filters on, and the
+    boundary columns (see :func:`_boundary_column_ref` for how each is named).
+    ``where_sql`` is a complete ``WHERE ...`` clause or empty; it runs on the
+    stored (CRS84) columns, before any reprojection.
+
+    ``reproject_to`` (an ``"AUTH:CODE"`` string, needs ``admin_bbox_col``)
+    reprojects the admin polygons into a non-CRS84 input's CRS and rebuilds
+    their bbox there, so the join keeps its cheap bbox pre-filter instead of
+    transforming the (large) input per row (#525, preserving #460).
+    ``include_bbox=False`` leaves the stored bbox out, for a join that has no
+    pre-filter to feed. Used by ``gpio add admin-divisions`` and ``gpio
+    partition admin`` (#942).
+    """
+    cols = ", ".join(_boundary_column_ref(i, c)[0] for i, c in enumerate(boundary_columns))
+    q_geom = quote_identifier(admin_geom_col)
+    if reproject_to:
+        radmin = reproject_to_source_sql(q_geom, reproject_to)
+        bbox_struct = (
+            f"struct_pack(xmin := ST_XMin({radmin}), xmax := ST_XMax({radmin}), "
+            f"ymin := ST_YMin({radmin}), ymax := ST_YMax({radmin})) "
+            f"AS {quote_identifier(admin_bbox_col)}"
+        )
+        projection = f"{radmin} AS {q_geom}, {bbox_struct}"
+    elif include_bbox and admin_bbox_col:
+        projection = f"{q_geom}, {quote_identifier(admin_bbox_col)}"
+    else:
+        projection = q_geom
+    return f"""(
+        SELECT {projection}, {cols}
+        FROM {admin_table_ref}
+        {where_sql}
+    )"""
+
+
+def admin_match_order(boundary_columns: list[str], alias: str = "b") -> list[str]:
+    """The tiebreak keys for a one-match admin join: the boundary columns, in order.
+
+    Passed as ``match_order`` to
+    :func:`~geoparquet_io.core.duckdb_utils.build_spatial_join_query`, so a
+    feature meeting two admin polygons keeps the one with the smallest codes.
+    """
+    return [f"{alias}.{_boundary_column_ref(i, c)[1]}" for i, c in enumerate(boundary_columns)]

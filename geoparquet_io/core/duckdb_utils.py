@@ -960,6 +960,9 @@ def build_spatial_join_query(
       two admin polygons goes to the smaller code. It is a cheap key on
       purpose: an intersection-area tiebreak would run ``ST_Intersection`` on
       every matched row, and the admin join point is a POINT with no area.
+      Caveat for polygon inputs (``add admin-divisions``, ``partition admin``
+      join the full geometry): a polygon straddling a border goes to the
+      smaller code, not to the region holding most of its area.
 
     The dedup is spill-safe at the scale the admin commands target. Input rows
     are numbered with ``row_number() OVER ()`` -- a streaming window, with no

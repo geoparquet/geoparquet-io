@@ -7,11 +7,15 @@ This module extends the add_country_codes functionality to support
 multiple admin datasets with hierarchical level support.
 """
 
-from geoparquet_io.core.admin_datasets import AdminDatasetFactory, get_or_cache_dataset
+from geoparquet_io.core.admin_datasets import (
+    AdminDatasetFactory,
+    admin_match_order,
+    build_admin_subquery,
+    get_or_cache_dataset,
+)
 from geoparquet_io.core.bbox_structure import check_bbox_structure, get_bbox_advice
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.crs_utils import (
-    reproject_to_source_sql,
     source_crs_string,
     transform_geom_sql,
 )
@@ -46,64 +50,6 @@ def _admin_reprojected(source_crs, admin_bbox_col) -> bool:
     input CRS) — see :func:`reproject_to_source_sql`.
     """
     return bool(source_crs) and bool(admin_bbox_col)
-
-
-def _build_admin_subquery(
-    dataset,
-    levels,
-    boundary_columns,
-    admin_table_ref,
-    admin_geom_col,
-    admin_bbox_col,
-    admin_where_clauses,
-    source_crs=None,
-):
-    """Build admin data subquery with filters.
-
-    When ``source_crs`` is set (non-CRS84 input) and the admin data has a bbox,
-    the admin polygons are reprojected into the input's CRS and a matching
-    source-CRS bbox struct is synthesized, so the downstream join keeps its cheap
-    bbox pre-filter without transforming the input per row (#525). The admin
-    ``WHERE`` extent filter still runs on the original (CRS84) bbox before the
-    reprojection.
-    """
-    admin_where_clause = ""
-    if admin_where_clauses:
-        admin_where_clause = "WHERE " + " AND ".join(admin_where_clauses)
-
-    # Build column list for subquery - handle struct access
-    subquery_cols = []
-    for i, col in enumerate(boundary_columns):
-        if "[" in col or "(" in col:
-            subquery_cols.append(f"{col} as _col_{i}")
-        else:
-            subquery_cols.append(quote_identifier(col))
-    subquery_cols_str = ", ".join(subquery_cols)
-
-    geom_select = quote_identifier(admin_geom_col)
-
-    if _admin_reprojected(source_crs, admin_bbox_col):
-        radmin = reproject_to_source_sql(geom_select, source_crs)
-        bbox_q = quote_identifier(admin_bbox_col)
-        # Reproject the polygon (M rows, cheap) and rebuild its bbox in the input
-        # CRS so the join can pre-filter against the input's stored bbox.
-        bbox_struct = (
-            f"struct_pack(xmin := ST_XMin({radmin}), xmax := ST_XMax({radmin}), "
-            f"ymin := ST_YMin({radmin}), ymax := ST_YMax({radmin})) AS {bbox_q}"
-        )
-        return f"""(
-        SELECT {radmin} AS {geom_select}, {bbox_struct}, {subquery_cols_str}
-        FROM {admin_table_ref}
-        {admin_where_clause}
-    )"""
-
-    bbox_select = quote_identifier(admin_bbox_col) if admin_bbox_col else geom_select
-
-    return f"""(
-        SELECT {geom_select}, {bbox_select}, {subquery_cols_str}
-        FROM {admin_table_ref}
-        {admin_where_clause}
-    )"""
 
 
 def _build_admin_select_clause(dataset, levels, partition_columns, prefix=None):
@@ -199,10 +145,7 @@ def _build_spatial_join_query(
             input_geom_sql=input_geom_sql,
         ),
         one_match_per_input=True,
-        match_order=[
-            f"b._col_{i}" if "[" in col or "(" in col else f"b.{quote_identifier(col)}"
-            for i, col in enumerate(boundary_columns)
-        ],
+        match_order=admin_match_order(boundary_columns),
     )
 
 
@@ -590,15 +533,13 @@ def _build_query_components(
     admin_select_clause = _build_admin_select_clause(
         dataset, levels, partition_columns, prefix=prefix
     )
-    admin_subquery = _build_admin_subquery(
-        dataset,
-        levels,
-        partition_columns,
+    admin_subquery = build_admin_subquery(
         admin_table_ref,
         admin_geom_col,
         admin_bbox_col,
-        admin_where_clauses,
-        source_crs=source_crs,
+        partition_columns,
+        "WHERE " + " AND ".join(admin_where_clauses) if admin_where_clauses else "",
+        reproject_to=source_crs if _admin_reprojected(source_crs, admin_bbox_col) else None,
     )
 
     if not dry_run:
