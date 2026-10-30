@@ -475,8 +475,9 @@ def _rewrite_with_geo(
 
     The fallback for a file whose footer cannot be patched. It decodes and
     re-encodes every page, which is why it cannot preserve the compression
-    level -- Parquet does not record it, so the output comes back at DuckDB's
-    default -- and why it re-chunks a file with uneven row groups. Everything
+    level -- Parquet does not record it, so the file's codec comes back at the
+    owner's default level for it (ZSTD 15; ``codec_from_footer``) -- and why it
+    re-chunks a file with uneven row groups. Everything
     it does defend (the geometry column's physical type, #712; the quoting of
     preserved keys, #700 and #756) is a consequence of re-encoding that the
     footer patch does not have to think about.

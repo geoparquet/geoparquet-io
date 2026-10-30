@@ -290,6 +290,92 @@ def test_pyarrow_kwargs_give_uncompressed_as_pyarrows_none():
 
 
 # ---------------------------------------------------------------------------
+# GZIP and BROTLI on a DuckDB COPY: the level DuckDB writes, stated once
+# ---------------------------------------------------------------------------
+#
+# DuckDB 1.5.6 and 2.0.0 refuse COMPRESSION_LEVEL for every codec but ZSTD
+# (a binder error), and write GZIP at miniz's MZ_DEFAULT_LEVEL (6) and BROTLI
+# at BROTLI_DEFAULT_QUALITY (11) -- extension/parquet/column_writer.cpp and
+# third_party/miniz/miniz_wrapper.hpp at both tags. Parquet records no level and
+# miniz and zlib emit different deflate bytes at the same level, so no file
+# comparison can read the level back; the owner states it instead.
+
+
+@pytest.mark.parametrize("codec", ["GZIP", "BROTLI"])
+def test_duckdb_copy_refuses_a_level_for_gzip_and_brotli(tmp_path, codec):
+    import duckdb
+
+    out = tmp_path / "x.parquet"
+    with pytest.raises(duckdb.BinderException, match="only supported for the ZSTD"):
+        duckdb.sql(
+            f"COPY (SELECT 1 AS a) TO '{out}' (FORMAT PARQUET, COMPRESSION {codec}, "
+            "COMPRESSION_LEVEL 6)"
+        )
+
+
+@pytest.mark.parametrize(
+    ("codec", "level", "copy_level"),
+    [
+        ("ZSTD", None, 15),
+        ("ZSTD", 3, 3),
+        ("GZIP", None, 6),
+        ("GZIP", 9, 6),
+        ("BROTLI", None, 11),
+        ("BROTLI", 4, 11),
+        ("LZ4", None, None),
+        ("SNAPPY", None, None),
+        ("UNCOMPRESSED", None, None),
+    ],
+)
+def test_copy_level_is_the_level_a_duckdb_copy_writes(codec, level, copy_level):
+    assert resolve_codec(codec, level, context="write").copy_level == copy_level
+
+
+@pytest.mark.parametrize("context", ["write", "process"])
+def test_an_unset_gzip_level_is_the_same_on_copy_and_pyarrow(context):
+    """The GZIP COPY write and the GZIP pyarrow write use one level: 6."""
+    codec = resolve_codec("GZIP", None, context=context)
+    assert codec.pyarrow_kwargs()["compression_level"] == codec.copy_level == 6
+
+
+@pytest.mark.parametrize(("codec", "level", "written"), [("GZIP", 9, 6), ("BROTLI", None, 11)])
+def test_a_copy_that_cannot_write_the_level_says_which_it_writes(caplog, codec, level, written):
+    import logging
+
+    resolved = resolve_codec(codec, level, context="write")
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        assert resolved.duckdb_copy_options() == [f"COMPRESSION {codec}"]
+    assert f"DuckDB writes {codec} at level {written}" in caplog.text
+    assert f"not {resolved.level}" in caplog.text
+
+
+@pytest.mark.parametrize(("codec", "level"), [("GZIP", None), ("GZIP", 6), ("ZSTD", None)])
+def test_a_copy_at_the_level_asked_for_is_quiet(caplog, codec, level):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        resolve_codec(codec, level, context="write").duckdb_copy_options()
+    assert caplog.text == ""
+
+
+def test_level_help_is_the_owner_level_per_codec(monkeypatch):
+    """``--compression-level`` help asks the owner, not COMPRESSION_RANGES."""
+    from geoparquet_io.cli import decorators as dec
+
+    asked = []
+    real = dec.resolve_codec
+
+    def spy(codec, level, *, context, verbose=False):
+        asked.append((codec, level, context))
+        return real(codec, level, context=context, verbose=verbose)
+
+    monkeypatch.setattr(dec, "resolve_codec", spy)
+    text = dec._compression_level_help("process")
+    assert ("GZIP", None, "process") in asked and ("ZSTD", None, "process") in asked
+    assert "ZSTD: 1-22 (default: 9)" in text and "GZIP: 1-9 (default: 6)" in text
+
+
+# ---------------------------------------------------------------------------
 # Every write path that takes a codec name goes through the owner
 # ---------------------------------------------------------------------------
 
@@ -579,7 +665,18 @@ def _defaults(func: ast.FunctionDef | ast.AsyncFunctionDef):
     )
 
 
+def _mentions_codec_or_level(node: ast.AST) -> bool:
+    return any(
+        any(word in _ident(sub).lower() for word in ("compression", "codec", "level"))
+        for sub in ast.walk(node)
+    )
+
+
 def _second_default(node: ast.AST) -> bool:
+    if isinstance(node, ast.IfExp):
+        return _mentions_codec_or_level(node.test) and (
+            _codec_or_level_literal(node.body) or _codec_or_level_literal(node.orelse)
+        )
     if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
         return any(_names_compression(v) for v in node.values[:-1]) and _codec_or_level_literal(
             node.values[-1]
@@ -603,12 +700,19 @@ def _case_fold(node: ast.AST) -> bool:
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr in ("upper", "lower")
-        and _names_compression(node.func.value)
+        and any(word in _ident(node.func.value).lower() for word in ("compression", "codec"))
     )
 
 
 def _copy_clause(node: ast.AST) -> bool:
-    """An f-string or concatenation that spells a COMPRESSION clause."""
+    """A string, f-string or concatenation that spells a COMPRESSION clause."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        if id(node) in _DOCSTRINGS:
+            return False
+        text = node.value
+        return "COMPRESSION_LEVEL" in text or any(
+            f"COMPRESSION {codec.upper()}" in text for codec in CODEC_NAMES
+        )
     if isinstance(node, ast.JoinedStr):
         parts = [v.value for v in node.values if isinstance(v, ast.Constant)]
     elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
@@ -627,16 +731,94 @@ def _pyarrow_codec_kwarg(node: ast.AST) -> bool:
     )
 
 
+def _codec_dict(node: ast.AST) -> bool:
+    """``{"compression": "zstd"}`` -- a pyarrow kwargs dict built by hand."""
+    return isinstance(node, ast.Dict) and any(
+        isinstance(k, ast.Constant)
+        and k.value in ("compression", "compression_level")
+        and _codec_or_level_literal(v)
+        for k, v in zip(node.keys, node.values, strict=True)
+    )
+
+
+def _codec_literal_arg(node: ast.AST) -> bool:
+    """A codec name written as a literal argument to any call."""
+    if not isinstance(node, ast.Call):
+        return False
+    values = [*node.args, *(kw.value for kw in node.keywords)]
+    return any(
+        isinstance(v, ast.Constant)
+        and isinstance(v.value, str)
+        and v.value.lower() in UNAMBIGUOUS
+        # "ZSTD" or "zstd", not a "Uncompressed" table heading.
+        and (v.value.isupper() or v.value.islower())
+        for v in values
+    )
+
+
+def _level_literal_kwarg(node: ast.AST) -> bool:
+    """``compression_level=<int>`` -- a level chosen at the call site."""
+    return isinstance(node, ast.Call) and any(
+        kw.arg == "compression_level"
+        and isinstance(kw.value, ast.Constant)
+        and type(kw.value.value) is int
+        for kw in node.keywords
+    )
+
+
 SHAPES = {
     "second-default": _second_default,
     "case-fold": _case_fold,
     "copy-clause": _copy_clause,
     "pyarrow-codec-kwarg": _pyarrow_codec_kwarg,
+    "codec-dict": _codec_dict,
+    "codec-literal-arg": _codec_literal_arg,
+    "level-literal-kwarg": _level_literal_kwarg,
+}
+
+#: Docstring nodes of the tree being scanned: prose may name a clause.
+_DOCSTRINGS: set[int] = set()
+
+#: The per-call codec choices that are justified, with the reason. Each one is
+#: a codec picked for one internal file nobody reads back at gpio's level, so
+#: it is deliberately not the owner's default; it still goes through the owner.
+JUSTIFIED_CALL_SITES = {
+    ("geoparquet_io/core/pmtiles_chunks.py", "level-literal-kwarg"): (
+        1,
+        "PMTiles chunk staging: a throwaway intermediate, ZSTD 3 for speed",
+    ),
+    ("geoparquet_io/core/admin_datasets.py", "codec-literal-arg"): (
+        1,
+        "admin-boundary cache: ZSTD 3, byte-identical to the cache DuckDB wrote before",
+    ),
+    ("geoparquet_io/core/partition/staging.py", "codec-literal-arg"): (
+        1,
+        "partition staging file: SNAPPY, read once and deleted",
+    ),
+    ("geoparquet_io/core/benchmark.py", "codec-literal-arg"): (
+        3,
+        "benchmark baselines: DuckDB's ZSTD 3 and the geopandas writers' own"
+        " compression='zstd', fixed so runs compare across versions and tools",
+    ),
+    ("geoparquet_io/core/source_text.py", "case-fold"): (
+        1,
+        "a *text* encoding codec (latin-1, cp1252) folded for a UDF name, not compression",
+    ),
 }
 
 
 def codec_policy_copies(tree: ast.AST) -> dict[str, list[int]]:
     """Line numbers per shape of a codec or level decided outside the owner."""
+    _DOCSTRINGS.clear()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if (
+            isinstance(body, list)
+            and body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+        ):
+            _DOCSTRINGS.add(id(body[0].value))
     hits: dict[str, list[int]] = {}
     for node in ast.walk(tree):
         for shape, matches in SHAPES.items():
@@ -650,10 +832,21 @@ def test_no_codec_policy_outside_the_owner():
     for path in sorted(PACKAGE.rglob("*.py")):
         if path == OWNER:
             continue
+        rel = str(path.relative_to(REPO))
         hits = codec_policy_copies(ast.parse(path.read_text(encoding="utf-8")))
-        if hits:
-            found[str(path.relative_to(REPO))] = hits
+        for shape, lines in hits.items():
+            allowed, _reason = JUSTIFIED_CALL_SITES.get((rel, shape), (0, ""))
+            if len(lines) != allowed:
+                found[(rel, shape)] = lines
     assert found == {}, f"codec or level decided outside core/compression.py: {found}"
+
+
+def test_every_justified_call_site_still_exists():
+    """An allowlist entry whose call is gone must be deleted, not kept as slack."""
+    for (rel, shape), (count, reason) in JUSTIFIED_CALL_SITES.items():
+        assert reason
+        hits = codec_policy_copies(ast.parse((REPO / rel).read_text(encoding="utf-8")))
+        assert len(hits.get(shape, [])) == count, (rel, shape)
 
 
 @pytest.mark.parametrize(
@@ -672,6 +865,19 @@ def test_no_codec_policy_outside_the_owner():
         ("copy-clause", 'q = "COMPRESSION " + codec'),
         ("pyarrow-codec-kwarg", 'pq.write_table(t, p, compression="zstd")'),
         ("pyarrow-codec-kwarg", "pq.ParquetWriter(p, s, compression_level=lvl)"),
+        # The second audit's shapes.
+        ("second-default", "lvl = level if level is not None else 15"),
+        ("second-default", 'c = "ZSTD" if compression is None else compression'),
+        ("codec-dict", 'kw = {"compression": "zstd"}'),
+        ("codec-dict", 'kw = {"compression_level": 15}'),
+        ("codec-literal-arg", 'write(t, p, "zstd")'),
+        ("codec-literal-arg", 'resolve_codec("GZIP", None, context="write")'),
+        ("codec-literal-arg", 'opts(codec="brotli")'),
+        ("copy-clause", 'q = "(FORMAT PARQUET, COMPRESSION ZSTD)"'),
+        ("copy-clause", 'q = "COMPRESSION_LEVEL 15"'),
+        ("case-fold", "c = codec.upper()"),
+        ("case-fold", "c = self.codec_name.lower()"),
+        ("level-literal-kwarg", "add_column(src, out, compression_level=9)"),
     ],
 )
 def test_the_policy_guard_catches_each_shape(shape, source):
@@ -687,6 +893,12 @@ def test_the_policy_guard_catches_each_shape(shape, source):
         "c = compression or None",
         "name = path.lower()",
         "def f(level=15): pass",
+        'def f():\n    """Writes COMPRESSION ZSTD, COMPRESSION_LEVEL 15."""',
+        'if out_geometry == "none": pass',
+        'run(out_geometry="none")',
+        "h3 = level if level is not None else 9",
+        'kw = {"compression": codec.name}',
+        "f(compression_level=compression_level)",
     ],
 )
 def test_the_policy_guard_ignores_the_owner_routes(source):

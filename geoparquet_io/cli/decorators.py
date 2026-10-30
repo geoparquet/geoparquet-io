@@ -15,10 +15,8 @@ from geoparquet_io.core.compression import (
     ACCEPTED_CODEC_NAMES,
     ALLOWED_CODECS,
     COMPRESSION_RANGES,
-    DEFAULT_CODEC,
-    DEFAULT_WRITE_LEVEL,
     MAX_COMPRESSION_LEVEL,
-    PROCESS_ZSTD_LEVEL,
+    WriteContext,
     resolve_codec,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
@@ -213,18 +211,17 @@ def resolve_kdtree_options(
     return None, sample_size, ("rows", target_rows)
 
 
-def _compression_level_help(zstd_default: int) -> str:
-    """The ``--compression-level`` help, which has to name the right ZSTD default.
+def _compression_level_help(context: WriteContext) -> str:
+    """The ``--compression-level`` help, naming each codec's default for *context*.
 
-    Two strings, because there are two defaults: ``gpio process`` resolves an
-    unset ZSTD level to ``PROCESS_ZSTD_LEVEL`` and everything else to the
-    global 15 (#1299). Both numbers are imported, not typed, so help text
-    cannot drift from what the writers actually do -- the mistake #967 made
-    with the row-group number.
+    ``gpio process`` resolves an unset ZSTD level to ``PROCESS_ZSTD_LEVEL`` and
+    everything else to the global 15 (#1299). Each default is asked of the
+    owner, not typed or recomputed, so help text cannot drift from what the
+    writers actually do -- the mistake #967 made with the row-group number.
     """
     ranges = ", ".join(
-        f"{codec}: {low}-{high} (default: {zstd_default if codec == DEFAULT_CODEC else default})"
-        for codec, (low, high, default) in COMPRESSION_RANGES.items()
+        f"{codec}: {low}-{high} (default: {resolve_codec(codec, None, context=context).level})"
+        for codec, (low, high, _) in COMPRESSION_RANGES.items()
     )
     levelless = "/".join(
         codec
@@ -282,7 +279,7 @@ def compression_options(func):
     For a ``gpio process`` command use :func:`process_compression_options`
     instead, so the help names that group's lower ZSTD default.
     """
-    return _add_compression_options(func, _compression_level_help(DEFAULT_WRITE_LEVEL))
+    return _add_compression_options(func, _compression_level_help("write"))
 
 
 def process_compression_options(func):
@@ -294,7 +291,7 @@ def process_compression_options(func):
     (``core/compression.resolve_process_compression_level``), so the Python API
     gets it too -- this decorator only keeps ``--help`` honest.
     """
-    return _add_compression_options(func, _compression_level_help(PROCESS_ZSTD_LEVEL))
+    return _add_compression_options(func, _compression_level_help("process"))
 
 
 # Help text for --row-group-size. One string, because there is now one rule.

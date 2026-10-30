@@ -6,3 +6,7 @@ Supported formats:
 - `LZ4` - Fastest
 - `SNAPPY` - Fast, good compression
 - `UNCOMPRESSED` - No compression
+
+On a path that writes through a DuckDB `COPY`, DuckDB takes a level for ZSTD only:
+GZIP is written at level 6 and BROTLI at level 11 whatever level is given, and gpio
+warns when that differs from the level you asked for.

@@ -31,7 +31,6 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.compression import (
-    DEFAULT_WRITE_LEVEL,
     PROCESS_ZSTD_LEVEL,
     resolve_codec,
     resolve_process_compression_level,
@@ -127,7 +126,7 @@ class TestGlobalDefaultIsUnchanged:
 
     def test_the_owner_still_resolves_an_unset_zstd_level_to_fifteen(self):
         codec = resolve_codec("ZSTD", None, context="write")
-        assert codec.level == DEFAULT_WRITE_LEVEL == 15
+        assert codec.level == resolve_codec(None, None, context="write").level == 15
         assert codec.description == "ZSTD:15"
 
     def test_the_write_facade_leaves_the_default_to_the_owner(self):
@@ -141,7 +140,7 @@ class TestGlobalDefaultIsUnchanged:
         assert levels == [15]
 
     def test_the_process_level_is_below_the_global_one(self):
-        assert PROCESS_ZSTD_LEVEL < DEFAULT_WRITE_LEVEL
+        assert PROCESS_ZSTD_LEVEL < resolve_codec(None, None, context="write").level
 
     def test_a_levelless_codec_warns_only_about_a_level_the_caller_chose(self, caplog):
         """No caller hands a default level through any more, so any level is the caller's."""

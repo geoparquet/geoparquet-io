@@ -55,9 +55,6 @@ COMPRESSION_RANGES = {
     "BROTLI": (1, 11, 6),
 }
 
-#: The level an unset ZSTD level resolves to on every ordinary write.
-DEFAULT_WRITE_LEVEL = COMPRESSION_RANGES[DEFAULT_CODEC][2]
-
 #: The widest level any codec takes; the CLI's first bound before the codec
 #: is known.
 MAX_COMPRESSION_LEVEL = max(hi for _, hi, _ in COMPRESSION_RANGES.values())
@@ -77,6 +74,12 @@ MAX_COMPRESSION_LEVEL = max(hi for _, hi, _ in COMPRESSION_RANGES.values())
 #: large share of their wall clock -- 67-90% on the raster two. Every other
 #: write path keeps 15, the DuckDB ``COPY`` paths included (#1335).
 PROCESS_ZSTD_LEVEL = 9
+
+#: The level DuckDB's Parquet ``COPY`` writes for a codec it takes no level for:
+#: miniz's ``MZ_DEFAULT_LEVEL`` for GZIP and ``BROTLI_DEFAULT_QUALITY`` for BROTLI
+#: (``extension/parquet/column_writer.cpp`` in DuckDB 1.5.6 and 2.0.0). gpio's
+#: GZIP default is the same 6, so an unset GZIP level agrees on both encoders.
+DUCKDB_COPY_FIXED_LEVELS = {"GZIP": 6, "BROTLI": 11}
 
 #: ``gpio process`` defaults, where they differ from :data:`COMPRESSION_RANGES`.
 _PROCESS_DEFAULTS = {"ZSTD": PROCESS_ZSTD_LEVEL}
@@ -136,17 +139,32 @@ class ResolvedCodec:
         """``ZSTD:15`` for a levelled codec, the bare name otherwise."""
         return self.name if self.level is None else f"{self.name}:{self.level}"
 
+    @property
+    def copy_level(self) -> int | None:
+        """The level a DuckDB ``COPY`` with these clauses actually writes.
+
+        ZSTD writes :attr:`level`; GZIP and BROTLI write DuckDB's fixed level
+        for them (:data:`DUCKDB_COPY_FIXED_LEVELS`), whatever was asked.
+        """
+        return DUCKDB_COPY_FIXED_LEVELS.get(self.name, self.level)
+
     def duckdb_copy_options(self) -> list[str]:
         """The ``COMPRESSION`` (and ``COMPRESSION_LEVEL``) clauses of a ``COPY``.
 
         DuckDB takes ``COMPRESSION_LEVEL`` for ZSTD only -- naming any other
         codec with a level is a binder error -- so GZIP and BROTLI write at
-        DuckDB's own level for them. A ZSTD level is always emitted: leaving it
-        out is not "the default", it is DuckDB's 3 (#1335).
+        DuckDB's fixed level for them, and a level that differs from it is
+        warned about rather than silently dropped. A ZSTD level is always
+        emitted: leaving it out is not "the default", it is DuckDB's 3 (#1335).
         """
         options = [f"COMPRESSION {self.name}"]
         if self.name == "ZSTD":
             options.append(f"COMPRESSION_LEVEL {self.level}")
+        elif self.copy_level != self.level:
+            warn(
+                f"DuckDB writes {self.name} at level {self.copy_level} on this path, "
+                f"not {self.level}: its COPY takes a level for ZSTD only."
+            )
         return options
 
     def pyarrow_kwargs(self) -> dict:
