@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import tracemalloc
+from functools import partial
 from pathlib import Path
 from statistics import mean, stdev
 from typing import Any
@@ -278,9 +279,9 @@ def benchmark_duckdb(input_path: Path, output_path: Path) -> tuple[float, float]
     return elapsed, peak_memory_mb
 
 
-def benchmark_geopandas_fiona(input_path: Path, output_path: Path) -> tuple[float, float]:
+def benchmark_geopandas(input_path: Path, output_path: Path, *, engine: str) -> tuple[float, float]:
     """
-    Benchmark Geopandas with Fiona engine.
+    Benchmark Geopandas reading with ``engine`` ("fiona" or "pyogrio").
 
     Returns:
         Tuple of (elapsed_time_seconds, peak_memory_mb)
@@ -291,37 +292,13 @@ def benchmark_geopandas_fiona(input_path: Path, output_path: Path) -> tuple[floa
 
     start = time.perf_counter()
 
-    gdf = gpd.read_file(input_path, engine="fiona")
-    gdf.to_parquet(output_path, compression="zstd")
-
-    elapsed = time.perf_counter() - start
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-
-    peak_memory_mb = peak / (1024 * 1024)
-
-    return elapsed, peak_memory_mb
-
-
-def benchmark_geopandas_pyogrio(input_path: Path, output_path: Path) -> tuple[float, float]:
-    """
-    Benchmark Geopandas with Pyogrio engine.
-
-    Returns:
-        Tuple of (elapsed_time_seconds, peak_memory_mb)
-    """
-    import geopandas as gpd
-
-    tracemalloc.start()
-
-    start = time.perf_counter()
-
-    gdf = gpd.read_file(input_path, engine="pyogrio")
-    gdf.to_parquet(output_path, compression="zstd")
-
-    elapsed = time.perf_counter() - start
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+    try:
+        gdf = gpd.read_file(input_path, engine=engine)
+        gdf.to_parquet(output_path, compression="zstd")
+    finally:
+        elapsed = time.perf_counter() - start
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
 
     peak_memory_mb = peak / (1024 * 1024)
 
@@ -381,8 +358,8 @@ def benchmark_gdal(input_path: Path, output_path: Path) -> tuple[float, float]:
 # Map converter names to benchmark functions
 BENCHMARK_FUNCTIONS = {
     "duckdb": benchmark_duckdb,
-    "geopandas_fiona": benchmark_geopandas_fiona,
-    "geopandas_pyogrio": benchmark_geopandas_pyogrio,
+    "geopandas_fiona": partial(benchmark_geopandas, engine="fiona"),
+    "geopandas_pyogrio": partial(benchmark_geopandas, engine="pyogrio"),
     "gdal_ogr2ogr": benchmark_gdal,
 }
 

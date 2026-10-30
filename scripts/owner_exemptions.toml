@@ -429,9 +429,6 @@ reason = "CRS equality copy (approved change 9); T4c"
 [G3]
 baseline = "scripts/duplicate_pairs_baseline.txt"
 
-[[G3.pairs]]
-pair = "geoparquet_io/core/benchmark.py:benchmark_geopandas_fiona|geoparquet_io/core/benchmark.py:benchmark_geopandas_pyogrio"
-reason = "geopandas benchmark harness differing only in the engine= literal; T5c (one function, engine parameter, two registry entries)"
 
 # pylint R0801 (scripts/check_pylint_duplicates.py, the pylint-duplicates hook).
 # One entry per reported block, keyed by the module and the function (or class,

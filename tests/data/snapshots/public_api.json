@@ -74,6 +74,7 @@
   ],
   "geoparquet_io.cli.commands.check": [
     "MultiFileCheckRunner",
+    "PROGRESS_LINE_WIDTH",
     "T",
     "begin_check_run",
     "exit_for_verdict",
