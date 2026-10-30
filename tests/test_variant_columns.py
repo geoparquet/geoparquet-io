@@ -12,11 +12,12 @@ both DuckDB 1.5 and 2.0.
 import json
 
 import duckdb
+import pyarrow as pa
 import pytest
 
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
 from geoparquet_io.core.extract import extract
-from geoparquet_io.core.geo_metadata import output_query_schema
+from geoparquet_io.core.geo_metadata import gate_illegal_bbox_covering, output_query_schema
 from geoparquet_io.core.inspect_utils import get_preview_data
 
 # One row per VARIANT shape: int, string, nested object, mixed list, NULL.
@@ -68,12 +69,13 @@ class TestOutputQuerySchema:
             con.close()
         assert "id" in schema.names
         assert "geometry" in schema.names
-        if _arrow_can_export_variant():
-            assert "properties" in schema.names
-        else:
-            # The probe only answers bbox-covering questions, which a VARIANT
-            # column can never be, so dropping it from the schema is lossless.
-            assert "properties" not in schema.names
+        # The column must stay in the schema on BOTH versions: the covering
+        # gates treat a column absent from the schema as somebody else's
+        # question and keep its covering, so dropping it on 1.5 shipped a
+        # spec-invalid covering 2.0 strips. 1.5 gets a sentinel binary field.
+        assert "properties" in schema.names
+        if not _arrow_can_export_variant():
+            assert pa.types.is_binary(schema.field("properties").type)
 
     def test_all_variant_query_yields_schema_without_crash(self):
         con = get_duckdb_connection(load_spatial=False)
@@ -81,8 +83,75 @@ class TestOutputQuerySchema:
             schema = output_query_schema(con, "SELECT '1'::JSON::VARIANT AS v")
         finally:
             con.close()
-        expected = ["v"] if _arrow_can_export_variant() else []
-        assert list(schema.names) == expected
+        assert list(schema.names) == ["v"]
+        if not _arrow_can_export_variant():
+            assert pa.types.is_binary(schema.field("v").type)
+
+    def test_struct_field_named_variant_id_survives_fallback(self):
+        """A struct FIELD named variant_id is not a VARIANT (#1352 review).
+
+        The fallback used to substring-match the DESCRIBE type, so
+        ``STRUCT(variant_id INTEGER)`` beside a real VARIANT vanished from the
+        probe schema on 1.5. It must keep its real struct type.
+        """
+        con = get_duckdb_connection(load_spatial=False)
+        try:
+            schema = output_query_schema(
+                con,
+                "SELECT 1 AS id, {'variant_id': 7} AS attrs, '1'::JSON::VARIANT AS props",
+            )
+        finally:
+            con.close()
+        assert list(schema.names) == ["id", "attrs", "props"]
+        assert pa.types.is_struct(schema.field("attrs").type)
+        if not _arrow_can_export_variant():
+            assert pa.types.is_binary(schema.field("props").type)
+
+
+class TestTypeContainsVariant:
+    """The shared predicate matches the VARIANT type keyword, not field names."""
+
+    def test_word_boundary_matching(self):
+        from geoparquet_io.core.geo_metadata import _type_contains_variant
+
+        assert _type_contains_variant("VARIANT")
+        assert _type_contains_variant("VARIANT[]")
+        assert _type_contains_variant("STRUCT(a VARIANT)")
+        assert _type_contains_variant("MAP(VARCHAR, VARIANT)")
+        assert not _type_contains_variant("STRUCT(variant_id INTEGER)")
+        assert not _type_contains_variant("STRUCT(variant VARCHAR)")
+        assert not _type_contains_variant("INTEGER")
+
+
+class TestCoveringGateParity:
+    """A covering declared over a VARIANT column is stripped on 1.5 and 2.0 alike."""
+
+    def test_covering_over_variant_column_is_stripped(self, variant_file):
+        geo = {
+            "version": "1.1.0",
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {
+                    "encoding": "WKB",
+                    "geometry_types": [],
+                    "covering": {
+                        "bbox": {
+                            "xmin": ["properties", "xmin"],
+                            "ymin": ["properties", "ymin"],
+                            "xmax": ["properties", "xmax"],
+                            "ymax": ["properties", "ymax"],
+                        }
+                    },
+                }
+            },
+        }
+        con = get_duckdb_connection()
+        try:
+            query = f"SELECT * FROM read_parquet({sql_path(variant_file)})"
+            gated = gate_illegal_bbox_covering(geo, con, query)
+        finally:
+            con.close()
+        assert "covering" not in gated["columns"]["geometry"]
 
     def test_non_variant_arrow_errors_are_reraised(self):
         class _BoomRelation:
@@ -126,6 +195,21 @@ class TestExtractRoundTrip:
 
 class TestPreview:
     """inspect head/tail render VARIANT values as JSON text on every DuckDB."""
+
+    def test_struct_field_named_variant_id_renders_as_struct(self, tmp_path):
+        """A struct with a field named variant_id keeps native rendering (#1352 review)."""
+        path = tmp_path / "struct_variant_id.parquet"
+        con = get_duckdb_connection()
+        try:
+            con.execute(
+                "COPY (SELECT 1 AS id, ST_GeomFromText('POINT(1 1)') AS geometry, "
+                f"{{'variant_id': 7}} AS attrs) TO {sql_path(str(path))} (FORMAT parquet)"
+            )
+        finally:
+            con.close()
+        table, mode = get_preview_data(str(path), head=1)
+        assert mode == "head"
+        assert table.column("attrs").to_pylist() == [{"variant_id": 7}]
 
     def test_head_renders_variant_as_json(self, variant_file):
         table, mode = get_preview_data(variant_file, head=5)
