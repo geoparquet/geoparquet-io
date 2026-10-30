@@ -113,6 +113,7 @@ The command automatically checks for existing bbox columns:
 - **If bbox exists without metadata**: Same copy, plus a suggestion to use `gpio add bbox-metadata`
 - **If `--bbox-name` asks for a different name**: That column is computed and added alongside the existing one, with a warning that the file will have two bbox columns
 - **If a write option is asked for explicitly** (`--geoparquet-version`, `--compression`, `--compression-level`, `--row-group-size`): the column is recomputed instead of copied, because a verbatim copy reproduces the input's settings and cannot honour the requested ones
+- **If the input is GeoParquet 1.0**: the column is recomputed and the output written at 1.1, the version every gpio command writes for a 1.x input when `--geoparquet-version` is not given; a copy would keep 1.0. This holds for a piped (stdin) input too
 - **Use `--force`**: Replace existing bbox column with a freshly computed one
 - **If the name is taken by something that is not a bbox struct** (a string tile id called `bbox`, or the same name spelled `BBOX`): that column is the input's own data, so it is kept as it is and the computed bbox is written under the next free name (`bbox_1`, `bbox_2`, …) with the covering declared over that column; a warning names both. `gpio convert` and the Python API's `Table.add_bbox()` take the same decision, so one collision means one thing whichever path writes the column ([#1176](https://github.com/geoparquet/geoparquet-io/issues/1176))
 
