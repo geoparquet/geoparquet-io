@@ -188,7 +188,7 @@ def _check_bbox_metadata_covering(geo_meta, has_bbox_column, verbose, bbox_colum
     """Check if geo metadata contains proper bbox covering.
 
     Args:
-        geo_meta: Parsed geo metadata dict (``raw_geo_of_file(...).value``)
+        geo_meta: Parsed geo metadata dict (``raw_geo_of_file(...).block``)
         has_bbox_column: Whether a bbox column was found in schema
         verbose: Whether to print verbose output
         bbox_column_name: The bbox column actually present in the file. A
@@ -211,7 +211,7 @@ def _check_bbox_metadata_covering(geo_meta, has_bbox_column, verbose, bbox_colum
     # `covering` that is not one, simply declares no covering -- the truthful
     # answer, where iterating it raised an `AttributeError` from someone else's
     # file (#947).
-    columns = geo_meta.get("columns") if isinstance(geo_meta, dict) else None
+    columns = geo_meta.get("columns")
     if isinstance(columns, dict):
         for _col_name, col_info in columns.items():
             covering = col_info.get("covering") if isinstance(col_info, dict) else None
@@ -305,7 +305,7 @@ def check_bbox_structure(parquet_file, verbose=False) -> BboxInfo:
     # Find the primary's bbox column: the authoritative covering metadata on its
     # own entry first (spec-valid files may use non-conventional names), then the
     # one self-evident conventional name as the no-provenance fallback (#1171).
-    geo_meta = raw_geo_of_file(parquet_file).value
+    geo_meta = raw_geo_of_file(parquet_file).block
     bbox_column_name = None
     covering_column = _bbox_column_from_covering(geo_meta)
     if covering_column:
