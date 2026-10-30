@@ -214,8 +214,7 @@ def _emit_malformed_geo_warning(detail: str, source: str | None = None) -> None:
     malformed inputs in one process (a Python API loop, a shell ``for``) share
     one cache entry and the second file is ignored in silence.
     """
-    where = f" of {source}" if source else ""
-    warn(f"Ignoring malformed 'geo' metadata on the input{where}: {detail}")
+    warn(f"Ignoring malformed 'geo' metadata on {source or 'the input'}: {detail}")
 
 
 def reset_malformed_geo_warnings() -> None:
@@ -321,7 +320,7 @@ def _decode_carried_geo(raw, source: str | None = None):
     """
     value, problem, _detail = _decode_geo_json(raw)
     if problem is not None:
-        _emit_malformed_geo_warning(f"{problem}; fresh metadata will be written", source)
+        _emit_malformed_geo_warning(problem, source)
     return value
 
 

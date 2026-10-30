@@ -148,6 +148,23 @@ def test_sanitized_warning_names_its_source(caplog):
     assert "b.parquet" in messages[1]
 
 
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "a.parquet",
+            "Ignoring malformed 'geo' metadata on a.parquet: the value is not valid JSON",
+        ),
+        (None, "Ignoring malformed 'geo' metadata on the input: the value is not valid JSON"),
+    ],
+)
+def test_undecodable_warning_text_is_display_neutral(caplog, source, expected):
+    """One condition, one message, for read and write callers alike."""
+    with caplog.at_level(logging.WARNING):
+        sanitized_carried_geo({b"geo": b"{"}, source=source)
+    assert _malformed(caplog.records) == [expected]
+
+
 def test_undecodable_warning_names_its_source(caplog):
     with caplog.at_level(logging.WARNING):
         sanitized_carried_geo({b"geo": b"{"}, source="a.parquet")
