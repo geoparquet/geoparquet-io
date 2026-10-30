@@ -1025,7 +1025,7 @@ def carto_to_table(
         include_cols: Comma-separated column names to include
         exclude_cols: Comma-separated column names to exclude (applied after fetch)
         api_key: API key for authenticated requests (or set CARTO_API_KEY env var)
-        timeout: Request timeout in seconds (default: 120)
+        timeout: Request timeout in seconds (default: ``CARTO_REQUEST_TIMEOUT``)
         max_retries: Number of retry attempts for transient failures (default: 3)
         geoparquet_version: GeoParquet version for metadata (default: "1.1.0")
         verbose: Enable verbose output
@@ -1316,7 +1316,7 @@ def convert_carto_to_geoparquet(
         include_cols: Comma-separated columns to include
         exclude_cols: Comma-separated columns to exclude
         api_key: API key for authenticated requests (or set CARTO_API_KEY env var)
-        timeout: Request timeout in seconds (default: 120)
+        timeout: Request timeout in seconds (default: ``CARTO_REQUEST_TIMEOUT``)
         max_retries: Number of retry attempts (default: 3)
         skip_hilbert: Skip Hilbert curve sorting (geometry tables only)
         skip_bbox: Skip adding bbox column (geometry tables only)

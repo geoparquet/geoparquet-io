@@ -2714,7 +2714,7 @@ def from_carto(
         include_cols: Comma-separated columns to include
         exclude_cols: Comma-separated columns to exclude
         api_key: API key for authenticated requests (or set CARTO_API_KEY env var)
-        timeout: Request timeout in seconds (default: 120; carto.CARTO_REQUEST_TIMEOUT)
+        timeout: Request timeout in seconds (default: ``carto.CARTO_REQUEST_TIMEOUT``)
         repair_geometry: Repair invalid geometry with ST_MakeValid (geometry
             tables only; default: True)
         geometry: Extraction mode. ``None`` (default) auto-detects from the
