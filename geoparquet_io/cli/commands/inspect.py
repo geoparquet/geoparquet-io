@@ -116,7 +116,7 @@ def _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_
 
     _validate_parquet_input(parquet_file)
 
-    with error_boundary(path=parquet_file):
+    with error_boundary(path=parquet_file, always=True):
         try:
             result = _inspect_summary_core(parquet_file, check_all_files)
 
@@ -145,7 +145,7 @@ def _inspect_preview_impl(
 
     _validate_parquet_input(parquet_file)
 
-    with error_boundary(path=parquet_file):
+    with error_boundary(path=parquet_file, always=True):
         result = _inspect_preview_core(parquet_file, count, mode)
 
         # Show partition notice if applicable
@@ -167,7 +167,7 @@ def _inspect_stats_impl(parquet_file, json_output, markdown_output):
 
     _validate_parquet_input(parquet_file)
 
-    with error_boundary(path=parquet_file):
+    with error_boundary(path=parquet_file, always=True):
         result = _inspect_stats_core(parquet_file)
 
         # Show partition notice if applicable
@@ -367,7 +367,7 @@ def inspect_meta(
     _validate_parquet_input(parquet_file)
 
     with _activate_s3(ctx):
-        with error_boundary(path=parquet_file):
+        with error_boundary(path=parquet_file, always=True):
             _handle_meta_display(
                 parquet_file,
                 meta_parquet,

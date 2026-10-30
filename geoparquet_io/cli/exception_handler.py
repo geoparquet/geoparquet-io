@@ -170,7 +170,9 @@ def click_error_for(
 
 
 @contextmanager
-def error_boundary(*, path: str | None = None, hint: str | None = None) -> Iterator[None]:
+def error_boundary(
+    *, path: str | None = None, hint: str | None = None, always: bool = False
+) -> Iterator[None]:
     """The one boundary: translate a failure no gpio frame owned, or let it through.
 
     An exception ``cli_error_for`` does not claim (a genuine gpio bug) is
@@ -178,11 +180,14 @@ def error_boundary(*, path: str | None = None, hint: str | None = None) -> Itera
     class wrap their ``invoke`` in this, so a command run on its own answers
     exactly as it does under the root; a command that knows its input file wraps
     its work in ``error_boundary(path=...)`` so a non-Parquet answer can name it.
+    ``always=True`` is for a command that has always shown any failure on its input
+    as a plain error line (``inspect``): an unclaimed exception becomes its cleaned
+    text instead of a traceback.
     """
     try:
         yield
     except Exception as exc:
-        error = _answer(exc, path=path, hint=hint, always=False)
+        error = _answer(exc, path=path, hint=hint, always=always)
         if error is None:
             raise
         raise error from exc
