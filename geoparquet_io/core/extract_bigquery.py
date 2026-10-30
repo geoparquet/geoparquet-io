@@ -19,6 +19,7 @@ from geoparquet_io.core.column_selection import (
     split_column_list,
 )
 from geoparquet_io.core.compression import resolve_codec
+from geoparquet_io.core.duckdb_metadata import duckdb_type_is_geometry
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     describe_query,
@@ -703,7 +704,7 @@ def _detect_geometry_column_from_schema(
     all_cols = []
     for col_name, col_type in schema_rows:
         all_cols.append(col_name)
-        if "GEOMETRY" in col_type.upper():
+        if duckdb_type_is_geometry(col_type):
             geometry_cols.append(col_name)
 
     # If explicit column provided and it's a native GEOMETRY column, use it
@@ -823,7 +824,7 @@ def _build_geometry_select_expr(
     Returns:
         SQL expression string for the SELECT clause
     """
-    if "GEOMETRY" in column_type:
+    if duckdb_type_is_geometry(column_type):
         return f"ST_AsWKB({quote_identifier(column_name)}) AS {quote_identifier(column_name)}"
     elif geometry_format == "geojson":
         return f"ST_AsWKB(ST_GeomFromGeoJSON({quote_identifier(column_name)})) AS {quote_identifier(column_name)}"

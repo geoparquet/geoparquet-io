@@ -28,6 +28,7 @@ from geoparquet_io.core.arrow_geo_metadata import (
 )
 from geoparquet_io.core.compression import ResolvedCodec, resolve_codec
 from geoparquet_io.core.crs_utils import apply_output_crs
+from geoparquet_io.core.duckdb_metadata import duckdb_type_is_geometry
 from geoparquet_io.core.duckdb_utils import (
     _wrap_query_with_wkb_conversion,
     fetch_one,
@@ -275,7 +276,7 @@ def _check_geometry_type(
         con.execute(f"SELECT TYPEOF({quote_identifier(geometry_column)}) FROM ({query}) LIMIT 1")
     )
     duckdb_type = type_result[0] if type_result else None
-    needs_wkb = duckdb_type == "GEOMETRY"
+    needs_wkb = duckdb_type_is_geometry(duckdb_type)
 
     if verbose:
         msg = "wrapping with WKB conversion" if needs_wkb else "no conversion needed"

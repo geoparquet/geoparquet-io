@@ -34,6 +34,7 @@ from geoparquet_io.core.duckdb_metadata import (
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     _get_query_columns,
+    describe_query,
     fetch_one,
     get_duckdb_connection,
     get_duckdb_connection_for_s3,
@@ -696,8 +697,8 @@ def _setup_geometry_view(
 
     Returns (source_ref, needs_wkb_conversion).
     """
-    columns_info = con.execute("DESCRIBE __input_table").fetchall()
-    geom_is_blob = any(col[0] == geom_col and "BLOB" in col[1].upper() for col in columns_info)
+    columns_info = describe_query(con, "SELECT * FROM __input_table")
+    geom_is_blob = any(name == geom_col and "BLOB" in type_.upper() for name, type_ in columns_info)
 
     if not (geom_is_blob and geom_col in table.column_names):
         return "__input_table", False
@@ -976,8 +977,8 @@ def _extract_streaming(
         input_path, verbose=verbose, stream_output=should_stream_output(output_path)
     ) as (source, metadata, is_stream, con):
         # Get column names from query result (works with both table names and read_parquet)
-        sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
-        all_columns = [col[0] for col in sample]
+        # One relation: its reader has already de-duplicated the names.
+        all_columns = [name for name, _ in describe_query(con, f"SELECT * FROM {source}")]
 
         # Find geometry column
         geom_col = find_geometry_column_from_metadata(metadata)

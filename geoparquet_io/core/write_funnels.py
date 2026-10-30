@@ -54,6 +54,7 @@ from geoparquet_io.core.duckdb_metadata import (
     get_kv_metadata,
     get_schema_info,
     native_geo_type,
+    parse_duckdb_geo_type,
     parse_geometry_logical_type,
 )
 from geoparquet_io.core.duckdb_utils import (
@@ -343,7 +344,7 @@ def _geography_candidates(output_file: str, edges_by_col: dict[str, str]) -> dic
     planar = {
         col["name"]
         for col in root_schema_columns(get_schema_info(output_file))
-        if "GeometryType" in (col.get("logical_type") or "")
+        if native_geo_type(col.get("logical_type")) == "GEOMETRY"
     }
     for name, edges in candidates.items():
         if name not in planar:
@@ -1148,9 +1149,9 @@ def _query_geometry_is_already_native(con, query: str, geometry_column: str | No
     if not geometry_column:
         return False
     col_type = _get_query_column_type(con, query, geometry_column)
-    return bool(col_type) and not col_type.upper().startswith(
-        ("GEOMETRY", "GEOGRAPHY", "BLOB", "VARCHAR")
-    )
+    if not col_type or parse_duckdb_geo_type(col_type) is not None:
+        return False
+    return not col_type.upper().startswith(("BLOB", "VARCHAR"))
 
 
 def _secondary_geo_columns(carried_geo_block: dict | None, geometry_info: dict | None):

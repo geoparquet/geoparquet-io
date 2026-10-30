@@ -8,6 +8,7 @@ import pyarrow as pa
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_metadata import get_usable_columns
 from geoparquet_io.core.duckdb_utils import (
+    describe_query,
     get_duckdb_connection,
     quote_identifier,
     register_arrow,
@@ -102,7 +103,7 @@ def _sortable_columns(input_parquet: str, read_expr: str, allow_schema_diff: boo
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
     try:
-        return [row[0] for row in con.execute(f"DESCRIBE SELECT * FROM {read_expr}").fetchall()]
+        return [name for name, _ in describe_query(con, f"SELECT * FROM {read_expr}")]
     finally:
         con.close()
 
@@ -298,8 +299,7 @@ def _sort_by_column_streaming(
     def make_query(source: str, con) -> str:
         """Build the sort query for streaming source."""
         # Get column names from query result
-        sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
-        col_names = [col[0] for col in sample]
+        col_names = [name for name, _ in describe_query(con, f"SELECT * FROM {source}")]
 
         # Validate columns exist
         for col in column_list:

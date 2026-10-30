@@ -13,6 +13,7 @@ from typing import Any
 
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
+    describe_query,
     fetch_one,
     quote_identifier,
     sql_path,
@@ -1274,10 +1275,6 @@ def _detect_crs_from_filegdb(gdb_path, con, verbose=False):
     return None
 
 
-#: The CRS DuckDB spatial attaches to ``ST_Read``'s geometry column type.
-_GEOMETRY_TYPE_CRS = re.compile(r"GEOMETRY\('(.+)'\)", re.DOTALL)
-
-
 def _crs_from_read_type(input_file, con):
     """The CRS in the type of ``ST_Read``'s geometry column, or None.
 
@@ -1286,18 +1283,22 @@ def _crs_from_read_type(input_file, con):
     ``ST_Read`` read as ISO-8859-1 binds any bytes, and its geometry column
     type carries the CRS as an authority code or as PROJJSON.
     """
+    # Aliased: the G1 geo_parse arm reads a ``geo`` token in the owner's name as
+    # the footer ``geo`` key, and this json.loads parses a CRS, not that key.
+    from geoparquet_io.core.duckdb_metadata import parse_duckdb_geo_type as parse_type
+
     try:
-        description = con.execute(
-            f"SELECT * FROM ST_Read({sql_path(input_file)}, "
-            "open_options=['ENCODING=ISO-8859-1']) LIMIT 0"
-        ).description
+        described = describe_query(
+            con,
+            f"SELECT * FROM ST_Read({sql_path(input_file)}, open_options=['ENCODING=ISO-8859-1'])",
+        )
     except Exception:
         return None
-    for column in description:
-        match = _GEOMETRY_TYPE_CRS.fullmatch(str(column[1]))
-        if match is None:
+    for _, column_type in described:
+        parsed = parse_type(column_type)
+        if parsed is None or parsed[0] != "GEOMETRY" or not parsed[1]:
             continue
-        value = match.group(1).replace("''", "'")
+        value = parsed[1]
         if not value.startswith("{"):
             return parse_crs_string_to_projjson(value)
         try:

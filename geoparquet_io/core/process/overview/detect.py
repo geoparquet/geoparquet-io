@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from geoparquet_io.core.duckdb_utils import (
+    describe_query,
     fetch_one,
     fetch_row,
     load_community_extension,
@@ -96,8 +97,7 @@ def ensure_grid_extension(con, scheme: str) -> None:
 
 def _describe_columns(con, relation: str) -> list[tuple[str, str]]:
     return [
-        (row[0], row[1].upper())
-        for row in con.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()
+        (name, type_.upper()) for name, type_ in describe_query(con, f"SELECT * FROM {relation}")
     ]
 
 

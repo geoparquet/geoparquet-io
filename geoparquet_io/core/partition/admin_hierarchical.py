@@ -23,7 +23,13 @@ from geoparquet_io.core.crs_utils import (
     source_crs_string,
     transform_geom_sql,
 )
-from geoparquet_io.core.duckdb_utils import fetch_one, fetch_rows, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    fetch_one,
+    fetch_rows,
+    query_schema,
+    quote_identifier,
+    sql_path,
+)
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
@@ -517,9 +523,7 @@ def _verify_enrichment_results(con, enriched_table, output_column_names):
 
 def _get_original_columns(con, input_path):
     """Get original column names from the (RAW) input file path."""
-    original_columns_query = f"SELECT * FROM {sql_path(input_path)} LIMIT 0"
-    original_schema = con.execute(original_columns_query)
-    return [desc[0] for desc in original_schema.description]
+    return query_schema(con, f"SELECT * FROM {sql_path(input_path)}").names
 
 
 def _build_admin_staging_select(

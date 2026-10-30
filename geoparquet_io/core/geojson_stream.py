@@ -41,8 +41,13 @@ from geoparquet_io.core.crs_utils import (
     transform_source_label,
     warn_null_crs_once,
 )
+from geoparquet_io.core.duckdb_metadata import (
+    duckdb_type_contains_geometry,
+    duckdb_type_is_geometry,
+)
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
+    describe_query,
     duckdb_capabilities,
     fetch_one,
     quote_identifier,
@@ -252,9 +257,7 @@ def _get_property_columns(
     Returns:
         List of column names to include as properties
     """
-    schema_query = f"SELECT * FROM {source_ref} LIMIT 0"
-    result = con.execute(schema_query)
-    columns = [col[0] for col in result.description]
+    columns = [name for name, _ in describe_query(con, f"SELECT * FROM {source_ref}")]
 
     # Exclude geometry column and bbox
     excluded = {geometry_column.lower(), "bbox"}
@@ -417,9 +420,10 @@ def _geometry_typed_property_columns(
     writer nests it as GeoJSON. Any such column keeps the conversion on the
     hand-built writer so the output does not change.
     """
-    rows = con.execute(f"DESCRIBE SELECT * FROM {source_ref}").fetchall()
-    types = {row[0]: str(row[1]).upper() for row in rows}
-    return [col for col in property_columns if "GEOMETRY" in types.get(col, "")]
+    # Any depth, not only a top-level GEOMETRY: a STRUCT or LIST holding a
+    # geometry is rendered differently by the two writers too.
+    types = dict(describe_query(con, f"SELECT * FROM {source_ref}"))
+    return [col for col in property_columns if duckdb_type_contains_geometry(types.get(col))]
 
 
 def _native_feature_collection_to_file(
@@ -699,11 +703,8 @@ def _find_geometry_column(
     Raises:
         ValueError: If no geometry column found
     """
-    schema_query = f"SELECT * FROM {source_ref} LIMIT 0"
-    result = con.execute(schema_query)
-
     # Look for common geometry column names
-    columns = [col[0] for col in result.description]
+    columns = [name for name, _ in describe_query(con, f"SELECT * FROM {source_ref}")]
 
     for name in STANDARD_GEOMETRY_NAMES:
         for col in columns:
@@ -715,7 +716,7 @@ def _find_geometry_column(
         try:
             type_query = f"SELECT typeof({quote_identifier(col)}) FROM {source_ref} LIMIT 1"
             type_result = fetch_one(con.execute(type_query))
-            if type_result and "GEOMETRY" in str(type_result[0]).upper():
+            if type_result and duckdb_type_is_geometry(type_result[0]):
                 return col
         except Exception:
             continue

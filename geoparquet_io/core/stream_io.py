@@ -30,6 +30,7 @@ from geoparquet_io.core.crs_utils import (
     source_crs_string,
 )
 from geoparquet_io.core.duckdb_utils import (
+    describe_query,
     get_duckdb_connection,
     query_schema,
     quote_identifier,
@@ -96,10 +97,9 @@ def _create_view_with_geometry(
     quoted_table = quote_identifier(table_name)
 
     # Get column info to check types
-    columns = con.execute(f"DESCRIBE {quoted_table}").fetchall()
     column_defs = []
 
-    for col_name, col_type, *_ in columns:
+    for col_name, col_type in describe_query(con, f"SELECT * FROM {quoted_table}"):
         quoted_col = quote_identifier(col_name)
         if col_name == geometry_column and "BLOB" in col_type.upper():
             # Convert BLOB to GEOMETRY using ST_GeomFromWKB

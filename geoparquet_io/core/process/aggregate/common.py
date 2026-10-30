@@ -8,7 +8,13 @@ import re
 import string
 from dataclasses import dataclass
 
-from geoparquet_io.core.duckdb_utils import fetch_one, fetch_rows, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    describe_query,
+    fetch_one,
+    fetch_rows,
+    quote_identifier,
+    sql_path,
+)
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import warn
 
@@ -346,7 +352,7 @@ def resolve_metric_column_types(con, select_sql: str, metrics: list[MetricSpec])
     columns = sorted({m.column for m in metrics})
     col_list = ", ".join(quote_identifier(c) for c in columns)
     try:
-        rows = con.execute(f"DESCRIBE SELECT {col_list} FROM ({select_sql})").fetchall()
+        rows = describe_query(con, f"SELECT {col_list} FROM ({select_sql})")
     except Exception:  # noqa: BLE001 - typing is best-effort; real query reports errors
         return {}
     # One DESCRIBE row per selected column, in SELECT order.
@@ -650,9 +656,7 @@ def resolve_breakdown_values(con, source_sql: str, column: str, limit: int) -> t
     if limit < 1:
         raise InvalidParameterError("breakdown-limit", f"must be at least 1, got {limit}")
     qcol = quote_identifier(column)
-    (_, col_type, *_rest), *_ = con.execute(
-        f"DESCRIBE SELECT {qcol} FROM ({source_sql})"
-    ).fetchall()
+    (_, col_type), *_ = describe_query(con, f"SELECT {qcol} FROM ({source_sql})")
     if not _is_scalar_sql_type(str(col_type)):
         raise InvalidParameterError(
             "breakdown",

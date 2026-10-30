@@ -11,6 +11,7 @@ from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     get_duckdb_connection,
     print_spatial_join_dry_run,
+    query_schema,
     quote_identifier,
     spatial_join_strategy,
     sql_path,
@@ -42,12 +43,8 @@ def find_country_code_column(con, countries_source, is_subquery=False):
         InvalidParameterError: If no suitable country code column is found
     """
     # Build appropriate query based on source type
-    if is_subquery:
-        columns_query = f"SELECT * FROM {countries_source} LIMIT 0;"
-    else:
-        columns_query = f"SELECT * FROM {sql_path(countries_source)} LIMIT 0;"
-
-    countries_columns = [col[0] for col in con.execute(columns_query).description]
+    source = countries_source if is_subquery else sql_path(countries_source)
+    countries_columns = query_schema(con, f"SELECT * FROM {source}").names
 
     # Define possible country code column names in priority order
     country_code_options = [
@@ -86,12 +83,8 @@ def find_subdivision_code_column(con, countries_source, is_subquery=False):
         str or None: The name of the subdivision code column, or None if not found
     """
     # Build appropriate query based on source type
-    if is_subquery:
-        columns_query = f"SELECT * FROM {countries_source} LIMIT 0;"
-    else:
-        columns_query = f"SELECT * FROM {sql_path(countries_source)} LIMIT 0;"
-
-    countries_columns = [col[0] for col in con.execute(columns_query).description]
+    source = countries_source if is_subquery else sql_path(countries_source)
+    countries_columns = query_schema(con, f"SELECT * FROM {source}").names
 
     # Define possible subdivision code column names in priority order
     subdivision_code_options = [
@@ -401,8 +394,10 @@ def _output_has_subdivision(con, output_parquet):
     countries file has none. Asking the output is the only answer that is true
     in both directions (#672).
     """
-    described = con.execute(f"SELECT * FROM {sql_path(output_parquet)} LIMIT 0").description
-    return "admin:subdivision_code" in {column[0] for column in described}
+    return (
+        "admin:subdivision_code"
+        in query_schema(con, f"SELECT * FROM {sql_path(output_parquet)}").names
+    )
 
 
 def _print_output_stats(con, output_parquet):

@@ -30,6 +30,7 @@ from geoparquet_io.core.duckdb_utils import (
     _get_query_columns,
     _install_and_load_extension,
     complete_without_fetch,
+    describe_query,
     fetch_one,
     free_column_name,
     get_duckdb_connection,
@@ -1179,7 +1180,9 @@ def _detect_tabular_geometry(
     ``allow_xy`` is passed down to the bare ``y``/``x`` fallback; see
     :func:`_exact_latlon_pair` for why Parquet turns it off.
     """
-    columns = con.execute(f"SELECT * FROM {read_expr} LIMIT 0").description
+    # ``(name, DuckDB type)`` pairs; one relation, so its reader has already
+    # de-duplicated the names (``a``, ``a_1``) exactly as ``.description`` did.
+    columns = describe_query(con, f"SELECT * FROM {read_expr}")
     if verbose:
         debug(f"Detected columns: {', '.join([col[0] for col in columns])}")
 

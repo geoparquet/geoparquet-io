@@ -28,6 +28,7 @@ from geoparquet_io.core.duckdb_utils import (
     duckdb_capabilities,
     fetch_one,
     get_duckdb_connection,
+    query_schema,
     quote_identifier,
     sql_path,
 )
@@ -132,16 +133,13 @@ def get_file_info(filepath: Path) -> dict[str, Any]:
             feature_count = result[0] if result else 0
 
             # Get schema to find geometry column
-            schema = conn.execute(f"""
-                SELECT * FROM ST_Read({sql_path(filepath)}) LIMIT 0
-            """).description
+            names = query_schema(conn, f"SELECT * FROM ST_Read({sql_path(filepath)})").names
 
             # Find geometry column (common names)
             geom_col = None
-            for col_info in schema:
-                col_name = col_info[0].lower()
-                if col_name in [n.lower() for n in STANDARD_GEOMETRY_NAMES]:
-                    geom_col = col_info[0]
+            for name in names:
+                if name.lower() in [n.lower() for n in STANDARD_GEOMETRY_NAMES]:
+                    geom_col = name
                     break
 
             # Try to get geometry type from first row

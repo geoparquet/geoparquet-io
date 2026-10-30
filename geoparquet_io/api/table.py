@@ -331,8 +331,10 @@ def read_partition(
         >>> table = gpio.read_partition('partitioned_output/')
         >>> table = gpio.read_partition('data/quadkey=*/*.parquet')
     """
+    from geoparquet_io.core.duckdb_metadata import parse_duckdb_geo_type
     from geoparquet_io.core.duckdb_utils import (
         _wrap_query_with_wkb_conversion,
+        describe_query,
         get_duckdb_connection,
         s3_config_scope,
     )
@@ -357,9 +359,12 @@ def read_partition(
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path_str))
         try:
             query = f"SELECT * FROM {expr}"
-            for row in con.execute(f"DESCRIBE ({query})").fetchall():
-                if row[1] and row[1].upper() == "GEOMETRY":
-                    query = _wrap_query_with_wkb_conversion(query, row[0], con=con)
+            for name, type_ in describe_query(con, query):
+                # Only a CRS-less GEOMETRY is wrapped. A CRS-typed one,
+                # GEOMETRY('EPSG:4326'), crosses Arrow as geoarrow.wkb carrying
+                # that CRS; ST_AsWKB would drop it.
+                if parse_duckdb_geo_type(type_) == ("GEOMETRY", None):
+                    query = _wrap_query_with_wkb_conversion(query, name, con=con)
 
             arrow_table = con.sql(query).arrow().read_all()
         finally:

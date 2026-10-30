@@ -47,6 +47,7 @@ from typing import Any
 from geoparquet_io.core.common import get_dataset_bounds, get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
+    query_schema,
     quote_identifier,
     spill_directory,
     sql_path,
@@ -257,10 +258,8 @@ def _split_input(
     )
     staging = tempfile.mkdtemp(prefix=".staging_", dir=parts_dir)
     try:
-        describe = con.execute(
-            f"SELECT {projection} FROM {sql_path(input_url)} LIMIT 0"
-        ).description
-        alias = make_partition_aliases(1, [d[0] for d in describe])[0]
+        input_cols = query_schema(con, f"SELECT {projection} FROM {sql_path(input_url)}").names
+        alias = make_partition_aliases(1, input_cols)[0]
         select_sql = f"SELECT {projection}, {key_sql} AS {alias} FROM {sql_path(input_url)} WHERE {predicate}"
         run_partitioned_copy(con, select_sql, [alias], staging, verbose)
 

@@ -75,6 +75,7 @@ EXPECTED_COUNTS = {
     "G1.retry_after": 0,
     "G1.retry_wrappers": 0,
     "G1.json_dumps": 40,
+    "G1.parquet_metadata": 0,
     "G2.exemptions": 31,
     "G3.pairs": 27,
     "G3.baseline": 27,
@@ -410,6 +411,22 @@ def _find_cgroup(m: _Module) -> Iterator[Hit]:
     """
     for node in m.strings():
         if "/sys/fs/cgroup" in node.value:
+            yield m.hit(node)
+
+
+_PARQUET_METADATA_CALL = re.compile(r"(?i)\bparquet_metadata\s*\(")
+
+
+def _find_parquet_metadata(m: _Module) -> Iterator[Hit]:
+    """A ``parquet_metadata(...)`` table-function call outside ``core/duckdb_metadata.py``.
+
+    Would have caught the per-row-group readers of #1367 concept 17 (T1c audit):
+    ``metadata_utils._get_num_rows_per_row_group`` and validate's ``geo_types``
+    query each opened their own connection over ``parquet_metadata()`` beside
+    the owner's ``_parquet_metadata_rows`` runner and its typed views.
+    """
+    for node in m.strings():
+        if _PARQUET_METADATA_CALL.search(node.value):
             yield m.hit(node)
 
 
@@ -903,6 +920,7 @@ ARMS = {
     "sql_escape": Arm(_find_sql_escape, ("geoparquet_io/core/duckdb_utils.py",)),
     "cgroup": Arm(_find_cgroup, ("geoparquet_io/core/memory_limits.py",)),
     "duckdb_version": Arm(_find_duckdb_version, ("geoparquet_io/core/duckdb_utils.py",)),
+    "parquet_metadata": Arm(_find_parquet_metadata, ("geoparquet_io/core/duckdb_metadata.py",)),
     "retry_loop": Arm(_find_retry_loop, _HTTP_OWNER),
     "retry_constants": Arm(_find_retry_constants, _HTTP_OWNER, needs_repo=True),
     "retry_param_defaults": Arm(_find_retry_param_defaults, _HTTP_OWNER),
@@ -1409,6 +1427,10 @@ G1_PLANTS = {
     "retry_after": 'def wait(resp):\n    return resp.headers.get("Retry-After")\n',
     "retry_wrappers": "def fetch(url):\n    return make_request_with_retry('GET', url)\n",
     "json_dumps": "import json\n\ndef show(d):\n    print(json.dumps(d))\n",
+    "parquet_metadata": (
+        "def rows(con, path):\n"
+        "    return con.execute(f\"SELECT * FROM parquet_metadata('{path}')\").fetchall()\n"
+    ),
 }
 
 #: Near-misses each arm must not flag, so a planted hit is the pattern itself.
@@ -1431,6 +1453,10 @@ G1_CLEAN = {
         "    log(rows)\n    return [r for r in rows if r]\n"
     ),
     "json_dumps": "from geoparquet_io.core.json_output import dumps_json\n",
+    "parquet_metadata": (
+        '"""Reads parquet_metadata() through the owner."""\n'
+        "from geoparquet_io.core.duckdb_metadata import get_row_group_sizes\n"
+    ),
 }
 
 

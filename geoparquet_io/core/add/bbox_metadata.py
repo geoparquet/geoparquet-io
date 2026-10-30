@@ -25,10 +25,9 @@ from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.check_parquet_structure import get_compression_info, get_row_group_stats
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.compression import codec_from_footer
+from geoparquet_io.core.duckdb_metadata import get_schema_info, is_native_geo_column
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     _wrap_query_with_blob_conversion,
-    fetch_one,
     get_duckdb_connection,
     sql_path,
 )
@@ -72,20 +71,9 @@ def _detect_native_geometry(
     Returns:
         True if the file has native GEOMETRY type, False otherwise
     """
-    # The column name comes from the file's own `geo` metadata, so it is
-    # untrusted input, not a constant: escape it like any other SQL literal.
-    result = fetch_one(
-        conn.execute(f"""
-        SELECT logical_type
-        FROM parquet_schema({sql_path(parquet_file)})
-        WHERE name = '{_escape_sql_string(geometry_column)}'
-    """)
+    return (
+        is_native_geo_column(get_schema_info(parquet_file, con=conn), geometry_column) is not None
     )
-
-    if result and result[0]:
-        logical_type = str(result[0])
-        return "Geometry" in logical_type or "Geography" in logical_type
-    return False
 
 
 def _get_existing_kv_metadata(conn: duckdb.DuckDBPyConnection, parquet_file: str) -> dict:

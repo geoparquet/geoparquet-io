@@ -37,12 +37,12 @@ from geoparquet_io.core.duckdb_metadata import (
     count_kv_key,
     is_geometry_column,
     is_native_geo_column,
+    native_geo_type,
     parse_geometry_logical_type,
     resolve_authority_code_crs,
     resolve_crs_reference,
 )
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     _geoarrow_coord_exprs,
     describe_query,
     disable_geoparquet_conversion,
@@ -869,7 +869,7 @@ def _check_version_features(parquet_file: str, geo_meta: dict) -> ValidationChec
         native_cols = [
             schema.column(i).name
             for i in range(len(schema))
-            if str(schema.column(i).logical_type).startswith(("Geometry", "Geography"))
+            if native_geo_type(schema.column(i).logical_type) is not None
         ]
     except Exception as e:
         return _result(CheckStatus.SKIPPED, f"could not inspect Parquet schema: {e}")
@@ -2195,7 +2195,7 @@ def _check_native_geo_type_present(schema_info: list, geom_col: str) -> Validati
         if col.get("name") == geom_col:
             logical_type = col.get("logical_type") or ""
             if is_geometry_column(logical_type):
-                geo_type = "GEOMETRY" if "GeometryType" in logical_type else "GEOGRAPHY"
+                geo_type = native_geo_type(logical_type)
                 return ValidationCheck(
                     name=f"native_geo_type_present_{geom_col}",
                     status=CheckStatus.PASSED,
@@ -2284,7 +2284,7 @@ def _check_geography_edges_valid(schema_info: list, geom_col: str) -> Validation
         if col.get("name") == geom_col:
             logical_type = col.get("logical_type") or ""
 
-            if "GeographyType" not in logical_type:
+            if native_geo_type(logical_type) != "GEOGRAPHY":
                 return ValidationCheck(
                     name=f"geography_edges_valid_{geom_col}",
                     status=CheckStatus.SKIPPED,
@@ -3100,16 +3100,11 @@ def _check_native_geo_types_match(
     try:
         raw_url = resolve_file_url(parquet_file, verbose=False)
 
-        # Get declared geo_types from parquet metadata
-        escaped_geom_col = _escape_sql_string(geom_col)
-        meta_result = con.execute(f"""
-            SELECT DISTINCT unnest(geo_types) as geo_type
-            FROM parquet_metadata({sql_path(raw_url)})
-            WHERE path_in_schema = '{escaped_geom_col}'
-              AND geo_types IS NOT NULL
-        """).fetchall()
+        from geoparquet_io.core.duckdb_metadata import get_native_geo_stats_by_row_group
 
-        declared_types = {row[0].lower() for row in meta_result if row[0]}
+        # Get declared geo_types from parquet metadata
+        chunks = get_native_geo_stats_by_row_group(parquet_file, geom_col, con) or []
+        declared_types = {t.lower() for c in chunks for t in c["geometry_types"] if t}
 
         # Empty list means "not known" - this is valid per spec
         if not declared_types:
@@ -3476,11 +3471,12 @@ def _edges_schema_facts(schema_info: list, geom_col: str) -> tuple[bool, bool, s
         if col.get("name") != geom_col:
             continue
         logical_type = col.get("logical_type") or ""
-        if "GeographyType" in logical_type:
+        kind = native_geo_type(logical_type)
+        if kind == "GEOGRAPHY":
             parsed = parse_geometry_logical_type(logical_type)
             algorithm = parsed.get("algorithm", "spherical") if parsed else None
             return True, False, algorithm
-        return False, "GeometryType" in logical_type, None
+        return False, kind == "GEOMETRY", None
     return False, False, None
 
 

@@ -17,7 +17,13 @@ import duckdb
 import pyarrow as pa
 import pytest
 
-from geoparquet_io.core.duckdb_metadata import is_native_geo_column, native_geo_type
+from geoparquet_io.core.duckdb_metadata import (
+    duckdb_type_contains_geometry,
+    duckdb_type_is_geometry,
+    is_native_geo_column,
+    native_geo_type,
+    parse_duckdb_geo_type,
+)
 from geoparquet_io.core.duckdb_utils import (
     _get_query_column_type,
     _get_query_columns,
@@ -141,82 +147,176 @@ def test_is_native_geo_column():
     assert is_native_geo_column(None, "geom") is None
 
 
+# --- DuckDB's own GEOMETRY type name ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("type_name", "parsed"),
+    [
+        ("GEOMETRY", ("GEOMETRY", None)),
+        ("geometry", ("GEOMETRY", None)),
+        ("GEOMETRY('EPSG:4326')", ("GEOMETRY", "EPSG:4326")),
+        ("GEOMETRY('{\"name\": \"it''s\"}')", ("GEOMETRY", '{"name": "it\'s"}')),
+        ("GEOGRAPHY('OGC:CRS84')", ("GEOGRAPHY", "OGC:CRS84")),
+        ("GEOMETRY[]", None),
+        ("STRUCT(g GEOMETRY)", None),
+        ("BLOB", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_parse_duckdb_geo_type(type_name, parsed):
+    assert parse_duckdb_geo_type(type_name) == parsed
+    assert duckdb_type_is_geometry(type_name) is (parsed is not None and parsed[0] == "GEOMETRY")
+
+
+def test_duckdb_type_contains_geometry_reaches_nested_types():
+    assert duckdb_type_contains_geometry("STRUCT(g GEOMETRY)")
+    assert duckdb_type_contains_geometry("GEOMETRY[]")
+    assert duckdb_type_contains_geometry("GEOMETRY('EPSG:4326')")
+    assert not duckdb_type_contains_geometry("BLOB")
+    assert not duckdb_type_contains_geometry(None)
+
+
+def test_describe_renders_what_the_parser_reads(con):
+    """The spellings above are the ones DuckDB's DESCRIBE actually produces."""
+    con.execute("LOAD spatial")
+    rows = describe_query(
+        con,
+        "SELECT ST_Point(0, 0) AS g, ST_SetCRS(ST_Point(0, 0), 'EPSG:4326') AS c, "
+        "[ST_Point(0, 0)] AS l",
+    )
+    types = dict(rows)
+    assert duckdb_type_is_geometry(types["g"])
+    assert parse_duckdb_geo_type(types["c"]) == ("GEOMETRY", "EPSG:4326")
+    assert not duckdb_type_is_geometry(types["l"])
+    assert duckdb_type_contains_geometry(types["l"])
+
+
 # --- guards ---------------------------------------------------------------------------
 
 _PROBE_SQL = re.compile(r"\bLIMIT\s+0\b|\bDESCRIBE\b")
 
-#: ``LIMIT 0`` / ``DESCRIBE`` literals left outside ``duckdb_utils.py``, per file.
-#: The count may only go down: a site routed to ``query_schema``/``describe_query``
-#: lowers its file's number here in the same commit. Reasons:
-#: [T3] functions T3 deletes or owns (aggregate/common.py:92, auto_resolution.py:371,
-#: convert.py:225/397/537, grid_common.py:258) -- T3c removes them;
-#: [other] outside T1c's files or line ranges (hand-off in the track ledger), or a
-#: SQL statement that is not a schema probe (DESCRIBE inside a larger query).
+#: The probe owner's own functions: the only code allowed to spell a schema probe.
+#: ``_query_schema_without_variant`` is ``query_schema``'s VARIANT fallback.
+PROBE_OWNER = "geoparquet_io/core/duckdb_utils.py"
+PROBE_OWNER_FUNCTIONS = frozenset(
+    {"describe_query", "query_schema", "_query_schema_without_variant"}
+)
+
+#: ``LIMIT 0`` / ``DESCRIBE`` literals left outside the owner functions, per file.
+#: Only sites inside functions a later track deletes; each names the track and may
+#: only go down (a routed site lowers its file's number in the same commit).
 PROBE_BASELINE = {
-    "geoparquet_io/api/table.py": 1,  # other
-    "geoparquet_io/core/add/a5.py": 2,  # other
-    "geoparquet_io/core/add/country_codes.py": 5,  # other
-    "geoparquet_io/core/add/geometry_metrics.py": 1,  # other
-    "geoparquet_io/core/add/h3.py": 2,  # other
-    "geoparquet_io/core/add/kdtree.py": 1,  # other
-    "geoparquet_io/core/add/quadkey.py": 2,  # other
-    "geoparquet_io/core/add/s2.py": 2,  # other
-    "geoparquet_io/core/benchmark.py": 1,  # other
-    "geoparquet_io/core/carto.py": 1,  # other
-    "geoparquet_io/core/convert.py": 4,  # T3 (225/397/537) + other (1182)
-    "geoparquet_io/core/crs_utils.py": 1,  # other
-    "geoparquet_io/core/extract.py": 2,  # other (699, 979)
-    "geoparquet_io/core/geojson_stream.py": 3,  # other
-    "geoparquet_io/core/geometry_detection.py": 5,  # other
-    "geoparquet_io/core/geometry_repair.py": 1,  # other
-    "geoparquet_io/core/hilbert_order.py": 1,  # other
-    "geoparquet_io/core/inspect_utils.py": 1,  # other (685, a DESCRIBE subquery)
-    "geoparquet_io/core/partition/admin_hierarchical.py": 1,  # other
-    "geoparquet_io/core/partition/auto_resolution.py": 1,  # T3
-    "geoparquet_io/core/partition/common.py": 1,  # other
-    "geoparquet_io/core/pmtiles_chunks.py": 1,  # other
-    "geoparquet_io/core/process/aggregate/by_admin.py": 1,  # other
-    "geoparquet_io/core/process/aggregate/common.py": 3,  # T3 (92) + other
-    "geoparquet_io/core/process/aggregate/grid_common.py": 1,  # T3 (258)
-    "geoparquet_io/core/process/overview/detect.py": 1,  # other
-    "geoparquet_io/core/sort_by_column.py": 2,  # other
-    "geoparquet_io/core/str_order.py": 2,  # other
-    "geoparquet_io/core/stream_io.py": 1,  # other (99)
-    "geoparquet_io/core/wfs.py": 1,  # other
-    "geoparquet_io/core/write_strategies/base.py": 1,  # other
-    "geoparquet_io/core/write_strategies/duckdb_kv.py": 1,  # other
+    # Not a DuckDB probe: a ``LIMIT 0`` sent to the CARTO remote SQL API.
+    "geoparquet_io/core/carto.py": 1,  # 421
+    "geoparquet_io/core/convert.py": 3,  # T3: 226, 398, 539 (functions T3 deletes)
+    "geoparquet_io/core/partition/auto_resolution.py": 1,  # T3: 371
+    "geoparquet_io/core/process/aggregate/common.py": 1,  # T3: 98
+    "geoparquet_io/core/process/aggregate/grid_common.py": 1,  # T3: 258
 }
 
-_NATIVE_PROBE = re.compile(r"(?<!ST_)Geo(graphy|metry)Type")
+#: A Parquet logical type read as a string, as either reader renders it: DuckDB's
+#: ``GeometryType(...)``/``GeographyType(...)`` anywhere in a literal, or PyArrow's
+#: ``Geometry(``/``Geography(`` at its start; plus a bare family name used as a
+#: prefix or substring test (``lt.startswith("Geometry")``, ``"Geography" in lt``).
+#: Comparing an owner-decided *label* (``== "Geography"``) is not a probe.
+_NATIVE_PROBE = re.compile(r"(?<!ST_)Geo(?:graphy|metry)Type|^Geo(?:graphy|metry)\\?\(")
+_FAMILIES = frozenset({"Geometry", "Geography"})
 
-#: Native-type string probes left outside ``duckdb_metadata.py`` (outside T1c's
-#: line ranges; hand-off in the track ledger). May only go down.
-NATIVE_BASELINE = {
-    "geoparquet_io/core/validate.py": 4,  # 2198, 2287, 3479, 3483
-    "geoparquet_io/core/write_funnels.py": 1,  # 347
+#: Native-type string probes left outside ``duckdb_metadata.py``. May only go down.
+NATIVE_BASELINE: dict[str, int] = {}
+
+#: Tests of a DuckDB type name (DESCRIBE / TYPEOF output) for GEOMETRY outside
+#: ``duckdb_metadata.py``: ``"GEOMETRY" in t``, ``t.startswith("GEOMETRY")``,
+#: ``t.upper() == "GEOMETRY"``. Comparing an owner's answer
+#: (``parse_duckdb_geo_type(t)[0] == "GEOMETRY"``, ``native_geo_type(lt) == ...``)
+#: is not one. May only go down.
+DUCKDB_GEO_TYPE_BASELINE = {
+    "geoparquet_io/core/convert.py": 1,  # T3: 228 (inside the 226 probe's function)
+    "geoparquet_io/core/partition/auto_resolution.py": 1,  # T3: 373
+    "geoparquet_io/core/process/aggregate/common.py": 1,  # T3: 100
 }
 
+_GEO_TYPE_OWNERS = frozenset({"native_geo_type", "parse_duckdb_geo_type", "is_native_geo_column"})
 
-def _string_literals(tree: ast.AST):
-    docstrings = {
+
+def _docstring_ids(tree: ast.AST) -> set[int]:
+    return {
         id(node.value)
         for node in ast.walk(tree)
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
     }
+
+
+def _string_literals(tree: ast.AST, skip: set[int] = frozenset()):
+    docstrings = _docstring_ids(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if id(node) not in docstrings:
+            if id(node) not in docstrings and id(node) not in skip:
                 yield node
 
 
-def _counts(root: Path, owner: str, matches) -> Counter:
-    counts: Counter = Counter()
+def _owner_function_nodes(tree: ast.AST, names: frozenset[str]) -> set[int]:
+    return {
+        id(sub)
+        for func in ast.walk(tree)
+        if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) and func.name in names
+        for sub in ast.walk(func)
+    }
+
+
+def _modules(root: Path):
     for path in sorted(root.rglob("*.py")):
-        if path.name == owner:
+        yield path.relative_to(root.parent).as_posix(), ast.parse(path.read_text(encoding="utf-8"))
+
+
+def _probe_counts(root: Path = PACKAGE) -> Counter:
+    counts: Counter = Counter()
+    owner = PROBE_OWNER.split("/", 1)[1]
+    for rel, tree in _modules(root):
+        skip = (
+            _owner_function_nodes(tree, PROBE_OWNER_FUNCTIONS)
+            if rel.split("/", 1)[1] == owner
+            else set()
+        )
+        counts[rel] += sum(1 for n in _string_literals(tree, skip) if _PROBE_SQL.search(n.value))
+    return +counts
+
+
+def _consts(node: ast.AST) -> list[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, ast.Tuple):
+        return [v for e in node.elts for v in _consts(e)]
+    return []
+
+
+_MEMBERSHIP = (ast.In, ast.NotIn)  # codespell:ignore
+
+
+def _prefix_or_substring_tests(tree: ast.AST, wanted) -> int:
+    """``x.startswith(c)`` / ``x.endswith(c)`` / ``c in x`` with a constant ``c`` in ``wanted``."""
+    found = 0
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("startswith", "endswith")
+        ):
+            found += any(wanted(c) for a in node.args for c in _consts(a))
+        elif isinstance(node, ast.Compare) and any(isinstance(op, _MEMBERSHIP) for op in node.ops):
+            found += any(wanted(c) for c in _consts(node.left))
+    return found
+
+
+def _native_counts(root: Path = PACKAGE) -> Counter:
+    counts: Counter = Counter()
+    for rel, tree in _modules(root):
+        if rel.endswith("/duckdb_metadata.py"):
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        rel = path.relative_to(root.parent).as_posix()
-        counts[rel] += sum(1 for node in _string_literals(tree) if matches(node.value))
+        counts[rel] += sum(1 for n in _string_literals(tree) if _NATIVE_PROBE.search(n.value))
+        counts[rel] += _prefix_or_substring_tests(tree, _FAMILIES.__contains__)
         if any(
             isinstance(n, ast.FunctionDef) and n.name == "_is_geography_column"
             for n in ast.walk(tree)
@@ -225,18 +325,65 @@ def _counts(root: Path, owner: str, matches) -> Counter:
     return +counts
 
 
-def _probe_counts(root: Path = PACKAGE) -> Counter:
-    return Counter(
+def _owner_names(tree: ast.AST) -> set[str]:
+    """The geo-type owners' names in this module, ``import ... as`` aliases included."""
+    return _GEO_TYPE_OWNERS | {
+        alias.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.name in _GEO_TYPE_OWNERS and alias.asname
+    }
+
+
+def _owner_answers(tree: ast.AST, owners: set[str]) -> set[str]:
+    """Names bound straight from a geo-type owner call (``parsed = parse_duckdb_geo_type(t)``)."""
+    return {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and _is_owner_call(node.value, owners, set())
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+
+
+def _is_owner_call(node: ast.AST, owners: set[str], answers: set[str]) -> bool:
+    if isinstance(node, ast.Subscript):
+        node = node.value
+    if isinstance(node, ast.Name):
+        return node.id in answers
+    if isinstance(node, ast.Call):
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        return name in owners
+    return False
+
+
+def _duckdb_geo_type_checks(tree: ast.AST) -> int:
+    owners = _owner_names(tree)
+    answers = _owner_answers(tree, owners)
+    found = _prefix_or_substring_tests(tree, "GEOMETRY".__eq__)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare) or not any(
+            isinstance(op, (ast.Eq, ast.NotEq)) for op in node.ops
+        ):
+            continue
+        operands = [node.left, *node.comparators]
+        if any(c == "GEOMETRY" for x in operands for c in _consts(x)) and not any(
+            _is_owner_call(x, owners, answers) for x in operands
+        ):
+            found += 1
+    return found
+
+
+def _duckdb_geo_type_counts(root: Path = PACKAGE) -> Counter:
+    return +Counter(
         {
-            k: v
-            for k, v in _counts(root, "duckdb_utils.py", _PROBE_SQL.search).items()
-            if "::" not in k
+            rel: _duckdb_geo_type_checks(tree)
+            for rel, tree in _modules(root)
+            if not rel.endswith("/duckdb_metadata.py")
         }
     )
-
-
-def _native_counts(root: Path = PACKAGE) -> Counter:
-    return _counts(root, "duckdb_metadata.py", _NATIVE_PROBE.search)
 
 
 def test_schema_probes_only_go_down():
@@ -247,18 +394,48 @@ def test_native_type_probes_only_go_down():
     assert dict(_native_counts()) == NATIVE_BASELINE
 
 
+def test_duckdb_geometry_type_checks_only_go_down():
+    assert dict(_duckdb_geo_type_counts()) == DUCKDB_GEO_TYPE_BASELINE
+
+
 def test_guards_catch_new_copies(tmp_path):
     pkg = tmp_path / "pkg"
-    pkg.mkdir()
+    (pkg / "core").mkdir(parents=True)
     (pkg / "rogue.py").write_text(
         '"""DESCRIBE in a docstring is fine."""\n'
         "def _is_geography_column(rows, col):\n"
         '    return "GeographyType" in rows[col]\n\n'
+        "def pa_native(t):\n"
+        '    return str(t).startswith(("Geometry", "Geography"))\n\n'
+        "def pa_regex(t):\n"
+        '    return re.match("Geography\\\\(.*algorithm=(\\\\w+)", t)\n\n'
         "def cols(con, src):\n"
-        '    return con.execute(f"SELECT * FROM {src} LIMIT 0").description\n'
+        '    return con.execute(f"SELECT * FROM {src} LIMIT 0").description\n\n'
+        "def is_geom(t):\n"
+        '    return t.upper() == "GEOMETRY" or t.startswith("GEOMETRY") or "GEOMETRY" in t\n'
     )
-    assert dict(_probe_counts(pkg)) == {"pkg/rogue.py": 1}
+    # Near-misses: comparing an owner's answer or a decided label is not a probe.
+    (pkg / "clean.py").write_text(
+        "from x.duckdb_metadata import parse_duckdb_geo_type as parse_type\n\n"
+        "def f(t, lt, info):\n"
+        "    parsed = parse_type(t)\n"
+        '    a = parsed[0] == "GEOMETRY"\n'
+        '    b = native_geo_type(lt) != "GEOMETRY"\n'
+        '    c = info["logical_type"] == "Geography"\n'
+        '    return a, b, c, "geometry" in info\n'
+    )
+    # The owner's probe functions may spell the probe; any other function there may not.
+    (pkg / "core" / "duckdb_utils.py").write_text(
+        "def describe_query(con, sql):\n"
+        '    return con.execute(f"DESCRIBE ({sql})").fetchall()\n\n'
+        "def query_schema(con, sql):\n"
+        '    return con.sql(f"SELECT * FROM ({sql}) LIMIT 0")\n\n'
+        "def _wrap(con, q):\n"
+        '    return con.execute(f"DESCRIBE ({q})").fetchall()\n'
+    )
+    assert dict(_probe_counts(pkg)) == {"pkg/rogue.py": 1, "pkg/core/duckdb_utils.py": 1}
     assert dict(_native_counts(pkg)) == {
-        "pkg/rogue.py": 1,
+        "pkg/rogue.py": 3,
         "pkg/rogue.py::_is_geography_column": 1,
     }
+    assert dict(_duckdb_geo_type_counts(pkg)) == {"pkg/rogue.py": 3}

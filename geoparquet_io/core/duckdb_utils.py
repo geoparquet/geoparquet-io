@@ -2237,12 +2237,14 @@ def _wrap_query_with_blob_conversion(
         str: Wrapped query with BLOB conversion, or original query if there is
         nothing to convert
     """
+    # Deferred: duckdb_metadata imports this module.
+    from geoparquet_io.core.duckdb_metadata import duckdb_type_is_geometry
+
     # If connection provided, check which columns exist in the query output
     col_info: dict[str, str] = {}
     if con is not None:
         try:
-            rows = con.execute(f"DESCRIBE ({query})").fetchall()
-            col_info = {row[0]: row[1] for row in rows}
+            col_info = dict(describe_query(con, query))
         except Exception:
             col_info = {}
 
@@ -2253,7 +2255,7 @@ def _wrap_query_with_blob_conversion(
         # already the correct 1.x carrier and ST_AsWKB(BLOB) does not bind, so
         # the whole write aborted; worse, ST_AsWKB(VARCHAR) *does* bind and
         # silently reinterprets the text as WKT.
-        if col_info.get(geometry_column, "").upper().startswith("GEOMETRY"):
+        if duckdb_type_is_geometry(col_info.get(geometry_column)):
             targets.append(geometry_column)
     else:
         # DESCRIBE failed, so we know nothing about the types. Convert the
@@ -2264,8 +2266,8 @@ def _wrap_query_with_blob_conversion(
     for name in secondary_columns or ():
         if name in targets or name == geometry_column:
             continue
-        # A STRUCT is a bbox-style column, not geometry: startswith() excludes it.
-        if col_info.get(name, "").upper().startswith("GEOMETRY"):
+        # A STRUCT is a bbox-style column, not geometry: the owner excludes it.
+        if duckdb_type_is_geometry(col_info.get(name)):
             targets.append(name)
 
     if not targets:

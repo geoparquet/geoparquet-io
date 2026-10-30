@@ -16,7 +16,6 @@ single copies in ``geo_metadata``.
 
 import json
 import os
-import re
 from typing import Any
 
 import pyarrow as pa
@@ -62,10 +61,10 @@ def _geography_edges_from_logical(logical: str) -> str | None:
     to "spherical" (the Parquet spec default) when none is spelled out.
     Returns None for non-Geography logical types.
     """
-    if not logical.startswith("Geography"):
+    if native_geo_type(logical) != "GEOGRAPHY":
         return None
-    match = re.search(r"algorithm=([A-Za-z_]+)", logical)
-    return match.group(1).lower() if match else "spherical"
+    parsed = parse_geometry_logical_type(logical) or {}
+    return parsed.get("algorithm", "spherical")
 
 
 def _crs_from_geo_logical(logical: str, parquet_file: str) -> tuple[bool, Any]:

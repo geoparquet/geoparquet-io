@@ -48,7 +48,9 @@ __all__ = [
 
 from geoparquet_io.core.arrow_types import _cast_table_to_schema, _compute_unified_schema
 from geoparquet_io.core.crs_utils import _projjson_from_authority
+from geoparquet_io.core.duckdb_metadata import parse_duckdb_geo_type
 from geoparquet_io.core.duckdb_utils import (
+    describe_query,
     fetch_one,
     get_duckdb_connection,
     quote_identifier,
@@ -1987,9 +1989,9 @@ _GML_CONTENT_TYPE_MARKERS: Final[tuple[str, ...]] = ("gml", "xml")
 _ERROR_PAGE_CONTENT_TYPE_MARKERS: Final[tuple[str, ...]] = ("html", "text/plain")
 
 # GDAL reports a GML layer's CRS in the DuckDB column type, e.g.
-# GEOMETRY('EPSG:4326'). That is the server's own statement of the CRS it
-# returned, so it plays the same role the GeoJSON `crs` member does.
-_GEOMETRY_TYPE_CRS_RE: Final = re.compile(r"GEOMETRY\('([^']+)'\)", re.IGNORECASE)
+# GEOMETRY('EPSG:4326') (read by duckdb_metadata.parse_duckdb_geo_type). That is
+# the server's own statement of the CRS it returned, so it plays the same role
+# the GeoJSON `crs` member does.
 
 
 def _classify_wfs_content_type(content_type: str) -> str:
@@ -2148,7 +2150,7 @@ def _gml_geometry_column(
     is invoked at all, because Linux builds segfault here instead of raising.
     """
     try:
-        described = con.execute(f"DESCRIBE SELECT * FROM ST_Read({sql_path(tmp_path)})").fetchall()
+        described = describe_query(con, f"SELECT * FROM ST_Read({sql_path(tmp_path)})")
     except duckdb.IOException as e:
         if "contains no layers" in str(e):
             return None
@@ -2157,12 +2159,11 @@ def _gml_geometry_column(
     geometry_column: str | None = None
     server_crs: str | None = None
     other_columns: list[str] = []
-    for row in described:
-        name, column_type = str(row[0]), str(row[1])
-        if geometry_column is None and column_type.upper().startswith("GEOMETRY"):
+    for name, column_type in described:
+        parsed = parse_duckdb_geo_type(column_type)
+        if geometry_column is None and parsed is not None and parsed[0] == "GEOMETRY":
             geometry_column = name
-            match = _GEOMETRY_TYPE_CRS_RE.search(column_type)
-            server_crs = _normalize_crs(match.group(1)) if match else None
+            server_crs = _normalize_crs(parsed[1]) if parsed[1] else None
         else:
             other_columns.append(name)
 

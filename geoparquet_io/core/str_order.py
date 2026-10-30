@@ -12,6 +12,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
+    describe_query,
     fetch_one,
     get_duckdb_connection,
     quote_identifier,
@@ -171,9 +172,12 @@ def _geometry_source(
     geometry_column: str,
 ) -> str:
     """Return a queryable source whose geometry column has DuckDB GEOMETRY type."""
-    columns = con.execute(f"DESCRIBE SELECT * FROM {source}").fetchall()
     geometry_type = next(
-        (column[1] for column in columns if column[0] == geometry_column),
+        (
+            type_
+            for name, type_ in describe_query(con, f"SELECT * FROM {source}")
+            if name == geometry_column
+        ),
         None,
     )
     if geometry_type is None or "BLOB" not in geometry_type.upper():
@@ -341,9 +345,7 @@ def _str_order_streaming(
         verbose = False
 
     with open_input(input_path, verbose=verbose) as (source, metadata, _is_stream, con):
-        column_names = [
-            column[0] for column in con.execute(f"SELECT * FROM {source} LIMIT 0").description
-        ]
+        column_names = [name for name, _ in describe_query(con, f"SELECT * FROM {source}")]
         geom_col = geometry_column
         if geom_col == "geometry" or geom_col not in column_names:
             # The stream carries its own `geo` metadata, so prefer the file's

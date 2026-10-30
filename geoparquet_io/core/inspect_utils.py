@@ -683,9 +683,7 @@ def get_preview_data(
             geo_columns.update(columns_meta.keys())
 
         # Get all column names and DuckDB types from the parquet file
-        schema_result = con.execute(
-            f"SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_parquet({sql_path(raw_url)}))"
-        ).fetchall()
+        schema_result = describe_query(con, f"SELECT * FROM read_parquet({sql_path(raw_url)})")
         all_columns = [row[0] for row in schema_result]
         col_types = {row[0]: row[1] for row in schema_result}
 

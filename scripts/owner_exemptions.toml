@@ -393,6 +393,13 @@ reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 "is_native_geo_column" = ["geoparquet_io/core/duckdb_metadata.py"]
 "*query_schema" = ["geoparquet_io/core/duckdb_utils.py"]
 "describe_query" = ["geoparquet_io/core/duckdb_utils.py"]
+# T1c audit: the per-row-group spatial-stats ladder, the parquet_metadata() runner,
+# and the DuckDB-type (DESCRIBE/TYPEOF) geometry test.
+"get_row_group_bbox_stats" = ["geoparquet_io/core/duckdb_metadata.py"]
+"_parquet_metadata_rows" = ["geoparquet_io/core/duckdb_metadata.py"]
+"duckdb_type_is_geometry" = ["geoparquet_io/core/duckdb_metadata.py"]
+"duckdb_type_contains_geometry" = ["geoparquet_io/core/duckdb_metadata.py"]
+"parse_duckdb_geo_type" = ["geoparquet_io/core/duckdb_metadata.py"]
 "_compute_geometry_types" = ["geoparquet_io/core/geo_metadata.py"]
 "_compute_bbox_from_data" = ["geoparquet_io/core/geo_metadata.py"]
 "handle_output_overwrite" = ["geoparquet_io/core/file_utils.py"]

@@ -26,7 +26,7 @@ from geoparquet_io.core.crs_utils import (
     extract_crs_from_parquet,
     transform_geom_sql,
 )
-from geoparquet_io.core.duckdb_utils import quote_identifier
+from geoparquet_io.core.duckdb_utils import query_schema, quote_identifier
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
@@ -155,8 +155,7 @@ def _add_metrics_streaming(
         verbose = False
 
     def make_query(source: str, con, source_crs: str | None = None) -> str:
-        sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
-        col_names = [col[0] for col in sample]
+        col_names = query_schema(con, f"SELECT * FROM {source}").names
 
         geom_col = None
         for name in STANDARD_GEOMETRY_NAMES:
