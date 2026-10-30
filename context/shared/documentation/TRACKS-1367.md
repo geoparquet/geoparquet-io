@@ -8,7 +8,7 @@ merged in between and are absorbed by T1a and T1c). Agents never merge to `main`
 
 | Track | Concepts | Model | Worktree / branch |
 |---|---|---|---|
-| T0 gates and CI | G1–G13, drop mutmut | Opus 5.5 | `/home/ubuntu/gpio-wt/t0` · `defrag/1367-t0-gates` |
+| T0 gates and CI | G1–G13, remove mutation testing | Opus 5.5 | `/home/ubuntu/gpio-wt/t0` · `defrag/1367-t0-gates` |
 | T1 DuckDB layer | 9, 10, 16, 17, 20 | Opus 5.5 | `/home/ubuntu/gpio-wt/t1` · `defrag/1367-t1-duckdb` |
 | T2 output-file lifecycle | 1, 2, 11 | Opus 5.5 | `/home/ubuntu/gpio-wt/t2` · `defrag/1367-t2-output` |
 | T3 geo block + geometry identity | 3, 4, 5, 6, 7 | Opus 5.5 | `/home/ubuntu/gpio-wt/t3` · `defrag/1367-t3-geo` |
