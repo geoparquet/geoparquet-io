@@ -83,3 +83,4 @@ scope per the ticket (perf; the spatial-order heuristic #618/#755/#774).
 | Date | Event |
 |---|---|
 | 2026-10-30 | Integration branch cut from origin/main @ 3185269f; eight worktrees created; hooks installed. |
+| 2026-10-30 | Draft PR #1372 opened. Launched T0a (Opus, t0), T0d (Opus, t0h: G7/G8/G9 + byte-identity harness), T1a (Opus, t1), T4a (Sonnet, t4), Codex Sol duplicate scan (read-only). |
