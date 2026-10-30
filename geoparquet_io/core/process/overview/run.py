@@ -29,6 +29,7 @@ from geoparquet_io.core.process.aggregate.common import (
     geometry_to_geom_expr,
 )
 from geoparquet_io.core.process.overview.detect import (
+    ADMIN_SCHEME,
     AggregateInfo,
     aggregate_connection,
     detect_aggregate_info,
@@ -42,7 +43,6 @@ from geoparquet_io.core.process.overview.levels import (
     select_bands,
 )
 from geoparquet_io.core.process.overview.rollup import (
-    GRID_PARENT_TEMPLATES,
     GRID_SCHEMES,
     admin_parent_expr,
     build_level_sql,
@@ -62,7 +62,7 @@ def overview_output_path(
     path = Path(input_parquet)
     directory = Path(output_dir) if output_dir else path.parent
     suffix = path.suffix or ".parquet"
-    if scheme == "admin":
+    if scheme == ADMIN_SCHEME:
         return str(directory / f"{path.stem}_{level}{suffix}")
     return str(directory / f"{path.stem}_r{level}{suffix}")
 
@@ -78,7 +78,7 @@ def parse_levels(levels: str | Sequence[int | str], info: AggregateInfo) -> list
     parsed = [validate_level(info, level) for level in raw]
     if len(set(parsed)) != len(parsed):
         raise InvalidParameterError("levels", f"duplicate levels in {parsed}")
-    if info.scheme == "admin":
+    if info.scheme == ADMIN_SCHEME:
         return parsed
     return sorted(parsed)
 
@@ -89,14 +89,10 @@ def _grid_cells_probe_sql(info: AggregateInfo, source_sql: str, level: int) -> s
     if level == info.base_level:
         parent = qcol
     else:
-        parent = GRID_PARENT_TEMPLATES[info.scheme].format(cell=qcol, level=level)
-    # a5_cell_to_lonlat returns [lon, lat]; h3_cell_to_latlng returns [lat, lng].
-    if info.scheme == "a5":
-        lonlat = "a5_cell_to_lonlat(__parent)"
-        lon, lat = "__ll[1]", "__ll[2]"
-    else:
-        lonlat = "h3_cell_to_latlng(__parent)"
-        lon, lat = "__ll[2]", "__ll[1]"
+        parent = GRID_SCHEMES[info.scheme].spec.parent_template.format(cell=qcol, level=level)
+    scheme = GRID_SCHEMES[info.scheme]
+    lonlat = scheme.latlng_template.format(cell="__parent")
+    lon, lat = ("__ll[1]", "__ll[2]") if scheme.spec.longitude_first else ("__ll[2]", "__ll[1]")
     return (
         f"SELECT {lon} AS lon, {lat} AS lat FROM ("
         f"SELECT {lonlat} AS __ll FROM ("
@@ -148,20 +144,20 @@ def plan_bands(
     ``max_probe_zoom`` caps the probed zoom range (e.g. to an archive's max
     zoom) so band transitions never land beyond it.
     """
-    if info.scheme == "admin":
+    if info.scheme == ADMIN_SCHEME:
         candidates: list[int | str] = ["country", "region"]
     elif levels is not None:
         candidates = [*levels, info.base_level]
     else:
         scheme = GRID_SCHEMES[info.scheme]
-        candidates = [*range(scheme.min_resolution, int(info.base_level)), info.base_level]
+        candidates = [*range(scheme.spec.min_resolution, int(info.base_level)), info.base_level]
 
     bpc = bytes_per_cell or estimate_bytes_per_cell(info.num_attributes, info.out_geometry)
     probe_zoom = MAX_PROBE_ZOOM if max_probe_zoom is None else max(0, max_probe_zoom)
     load_index(con, get_index_spec("quadkey"))
     worst: dict[int | str, dict[int, int]] = {}
     for level in candidates:
-        if info.scheme == "admin":
+        if info.scheme == ADMIN_SCHEME:
             cells_sql = _admin_cells_probe_sql(con, info, source_sql, str(level))
         else:
             cells_sql = _grid_cells_probe_sql(info, source_sql, int(level))
@@ -186,7 +182,7 @@ def _auto_levels(
     ``[]`` when the base level already fits the budget. A geometry-less admin
     aggregate cannot be probed; it falls back to the only coarser level.
     """
-    if info.scheme == "admin" and info.out_geometry == "none":
+    if info.scheme == ADMIN_SCHEME and info.out_geometry == "none":
         return ["country"]
     bands = plan_bands(
         con,

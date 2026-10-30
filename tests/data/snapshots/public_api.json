@@ -531,7 +531,6 @@
     "ensure_index_column",
     "get_index_spec",
     "index_expression",
-    "lat_lon_to_quadkey",
     "load_index",
     "make_index_query",
     "partition_index",

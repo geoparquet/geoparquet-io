@@ -26,6 +26,7 @@ from geoparquet_io.core.pmtiles import (
     resolve_scratch_directory,
 )
 from geoparquet_io.core.process.overview.detect import (
+    ADMIN_SCHEME,
     AggregateInfo,
     aggregate_connection,
     detect_aggregate_info,
@@ -53,7 +54,7 @@ def _layer_name(layer_mode: str, scheme: str, level: int | str, stem: str) -> st
         return stem
     if layer_mode == "grouped":
         return "aggregate"
-    return str(level) if scheme == "admin" else f"r{level}"
+    return str(level) if scheme == ADMIN_SCHEME else f"r{level}"
 
 
 def _feature_layer_name(layer_mode: str, stem: str) -> str:

@@ -48,7 +48,7 @@ def partition_by_a5(
         input_parquet: Input GeoParquet file (local, remote URL, or "-" for stdin)
         output_folder: Output directory (always writes to directory, no stdout support)
         a5_column_name: Name of the A5 column (default: 'a5_cell')
-        resolution: A5 resolution level (0-30). Required unless --auto is used
+        resolution: A5 resolution level (see index bounds). Required unless --auto is used
         hive: Use Hive-style partitioning (column=value directories)
         overwrite: Overwrite existing output directory
         preview: Preview partition distribution without writing

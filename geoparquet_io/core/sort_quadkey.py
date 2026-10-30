@@ -7,9 +7,8 @@ import os
 import duckdb
 import pyarrow as pa
 
-from geoparquet_io.core.add.quadkey import add_quadkey_table
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.constants import DEFAULT_QUADKEY_COLUMN_NAME, DEFAULT_QUADKEY_RESOLUTION
+from geoparquet_io.core.constants import DEFAULT_QUADKEY_COLUMN_NAME
 from geoparquet_io.core.duckdb_metadata import get_usable_columns
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
@@ -45,7 +44,7 @@ from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 def sort_by_quadkey_table(
     table: pa.Table,
     quadkey_column_name: str = DEFAULT_QUADKEY_COLUMN_NAME,
-    resolution: int = DEFAULT_QUADKEY_RESOLUTION,
+    resolution: int = get_index_spec("quadkey").default_resolution,
     use_centroid: bool = False,
     remove_quadkey_column: bool = False,
 ) -> pa.Table:
@@ -64,15 +63,13 @@ def sort_by_quadkey_table(
     Returns:
         New table sorted by quadkey
     """
-    # Check if quadkey column exists, add if needed
-    working_table = table
-    if quadkey_column_name not in table.column_names:
-        working_table = add_quadkey_table(
-            table,
-            quadkey_column_name=quadkey_column_name,
-            resolution=resolution,
-            use_centroid=use_centroid,
-        )
+    working_table, quadkey_column_name, _ = ensure_index_column(
+        get_index_spec("quadkey"),
+        table,
+        quadkey_column_name,
+        resolution,
+        use_centroid=use_centroid,
+    )
 
     # Sort by quadkey
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
@@ -105,7 +102,7 @@ def sort_by_quadkey(
     input_parquet: str,
     output_parquet: str | None = None,
     quadkey_column_name: str = DEFAULT_QUADKEY_COLUMN_NAME,
-    resolution: int = DEFAULT_QUADKEY_RESOLUTION,
+    resolution: int = get_index_spec("quadkey").default_resolution,
     use_centroid: bool = False,
     remove_quadkey_column: bool = False,
     verbose: bool = False,

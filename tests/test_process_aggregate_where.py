@@ -4,6 +4,8 @@ The clause must apply to the source scan feeding keying, metrics, breakdowns,
 and --auto resolution sizing, mirroring `gpio extract --where` semantics.
 """
 
+from dataclasses import replace
+
 import duckdb
 import pyarrow.parquet as pq
 import pytest
@@ -12,6 +14,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import ValidationError
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3
 
@@ -380,9 +383,7 @@ def test_grid_aggregation_output_has_no_hive_partition_column(tmp_path):
     # A scheme keyed by plain SQL so the test needs no community extension.
     scheme = GridScheme(
         name="test",
-        extension="",
-        min_resolution=0,
-        max_resolution=10,
+        spec=replace(get_index_spec("h3"), extension=None, min_resolution=0, max_resolution=10),
         default_column="test_cell",
         key_template="CAST(floor(ST_X({pt}) * {res}) AS VARCHAR)",
         boundary_template="ST_MakeEnvelope(0.0, 0.0, 1.0, 1.0)",

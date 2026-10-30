@@ -17,12 +17,12 @@ from geoparquet_io.core.duckdb_utils import (
     describe_query,
     fetch_one,
     fetch_row,
-    load_community_extension,
     quote_identifier,
     sql_path,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.index_ops import get_index_spec, load_index
 from geoparquet_io.core.logging_config import warn
 from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME
@@ -34,7 +34,8 @@ from geoparquet_io.core.process.aggregate.common import (
     geometry_to_geom_expr,
 )
 
-VALID_SCHEMES = ("a5", "h3", "admin")
+ADMIN_SCHEME = "admin"
+VALID_SCHEMES = ("a5", "h3", ADMIN_SCHEME)
 # Default cell column per scheme, single-sourced from the aggregate engine's
 # GridScheme descriptors so the two stay in lockstep.
 DEFAULT_CELL_COLUMNS = {
@@ -55,9 +56,6 @@ _INTEGER_TYPES = {
 }
 # H3 string cell ids are 15 hex chars (e.g. "85283473fffffff").
 _H3_STRING_RE = re.compile(r"^[0-9a-fA-F]{15}$")
-
-_GRID_EXTENSIONS = {"a5": "a5", "h3": "h3"}
-_RESOLUTION_FUNCS = {"a5": "a5_get_resolution", "h3": "h3_get_resolution"}
 
 
 @dataclass(frozen=True)
@@ -92,7 +90,7 @@ class AggregateInfo:
 
 def ensure_grid_extension(con, scheme: str) -> None:
     """Install/load the community extension backing a grid scheme."""
-    load_community_extension(con, _GRID_EXTENSIONS[scheme], feature=f"{scheme} overviews")
+    load_index(con, get_index_spec(scheme), feature=f"{scheme} overviews")
 
 
 def _describe_columns(con, relation: str) -> list[tuple[str, str]]:
@@ -162,7 +160,7 @@ def _scheme_for_column(con, relation: str, name: str, dtype: str) -> str:
 def _classify_columns(columns: list[tuple[str, str]], cell_column: str, scheme: str):
     """Split attribute columns into rollup roles; return (rollups, dropped)."""
     special = {cell_column, "count", "geometry", "centroid"}
-    if scheme == "admin":
+    if scheme == ADMIN_SCHEME:
         special.add("admin_name")
     # Single-sourced from the aggregate engine's metric functions so adding a
     # metric func there cannot silently drop its columns here; breakdown
@@ -208,7 +206,7 @@ def _pct_cell_source(name: str, names: set[str], scheme: str) -> str | None:
     hand-built or pre-#1181 file), and for admin rollups, where a country is
     not a cell and has no cell area at all.
     """
-    if scheme == "admin":
+    if scheme == ADMIN_SCHEME:
         return None
     source = f"sum_{name[len(PCT_CELL_PREFIX) :]}"
     return source if source in names else None
@@ -233,7 +231,7 @@ def _infer_out_geometry(con, relation: str, columns: dict[str, str]) -> str:
 def _detect_grid_base_level(con, relation: str, scheme: str, cell_column: str) -> int:
     ensure_grid_extension(con, scheme)
     qcol = quote_identifier(cell_column)
-    res_func = _RESOLUTION_FUNCS[scheme]
+    res_func = get_index_spec(scheme).resolution_function
     rows = con.execute(
         f"SELECT DISTINCT {res_func}({qcol}) FROM {relation} WHERE {qcol} IS NOT NULL"
     ).fetchall()
@@ -297,7 +295,7 @@ def detect_aggregate_info(
     if dropped:
         warn(f"Ignoring columns that cannot be rolled up: {', '.join(dropped)}")
 
-    if scheme == "admin":
+    if scheme == ADMIN_SCHEME:
         base_level: int | str = _detect_admin_base_level(con, relation, cell_col)
     else:
         base_level = _detect_grid_base_level(con, relation, scheme, cell_col)

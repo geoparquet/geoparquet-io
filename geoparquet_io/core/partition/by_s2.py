@@ -57,7 +57,7 @@ def partition_by_s2(
         input_parquet: Input GeoParquet file (local, remote URL, or "-" for stdin)
         output_folder: Output directory (always writes to directory, no stdout support)
         s2_column_name: Name of the S2 column (default: 's2_cell')
-        level: S2 level (0-30). Required unless --auto is used
+        level: S2 level (see index bounds). Required unless --auto is used
         hive: Use Hive-style partitioning (column=value directories)
         overwrite: Overwrite existing output directory
         preview: Preview partition distribution without writing

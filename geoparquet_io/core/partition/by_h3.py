@@ -48,7 +48,7 @@ def partition_by_h3(
         input_parquet: Input GeoParquet file (local, remote URL, or "-" for stdin)
         output_folder: Output directory (always writes to directory, no stdout support)
         h3_column_name: Name of the H3 column (default: 'h3_cell')
-        resolution: H3 resolution level (0-15). Required unless --auto is used
+        resolution: H3 resolution level (see index bounds). Required unless --auto is used
         hive: Use Hive-style partitioning (column=value directories)
         overwrite: Overwrite existing output directory
         preview: Preview partition distribution without writing

@@ -539,23 +539,11 @@ def _build_transform_query(transform_query_fn, source, con, input_path, metadata
     if not _wants_source_crs(transform_query_fn):
         return transform_query_fn(source, con)
     source_crs = _detect_transform_source_crs(input_path, metadata, is_stream)
-    if len(_query_fn_params(transform_query_fn)) < 4:
-        return transform_query_fn(source, con, source_crs)
-    return transform_query_fn(
-        source, con, source_crs, input_nonplanar_edges(input_path, metadata, is_stream)
-    )
+    import inspect
 
-
-def input_nonplanar_edges(input_path: str, metadata: dict | None, is_stream: bool) -> dict:
-    """``{column: edges}`` for an ``open_input`` input's non-planar columns.
-
-    The one place a streamed cell-key builder learns its edges (#1293): the
-    file when there is one, otherwise the stream's own block
-    (``write_funnels.declared_nonplanar_edges``). ``_build_transform_query``
-    hands it to a four-parameter builder (h3, s2, a5); ``add quadkey``, which
-    opens its own input, asks it directly.
-    """
-    return declared_nonplanar_edges(None if is_stream else input_path, metadata)
+    if "metadata" in inspect.signature(transform_query_fn).parameters:
+        return transform_query_fn(source, con, source_crs, metadata=metadata)
+    return transform_query_fn(source, con, source_crs)
 
 
 def execute_transform(
@@ -583,7 +571,8 @@ def execute_transform(
     Args:
         input_path: Input path (file or "-" for stdin)
         output_path: Output path (file, "-" for stdout, or None for auto-detect)
-        transform_query_fn: Callable(source_ref, con) -> SQL query string
+        transform_query_fn: Callable(source_ref, con) -> SQL query string; may
+            additionally accept source_crs and metadata for CRS-aware computations
         verbose: Whether to print verbose output
         dry_run: If True, print query without executing
         compression: Compression for file output

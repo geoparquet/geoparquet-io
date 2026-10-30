@@ -601,7 +601,7 @@ def add_stac_metadata_cmd(
 )
 @click.option(
     "--resolution",
-    default=9,
+    default=get_index_spec("h3").default_resolution,
     type=click.IntRange(get_index_spec("h3").min_resolution, get_index_spec("h3").max_resolution),
     help="H3 resolution level (0-15). Res 7: ~5km², Res 9: ~105m², Res 11: ~2m², Res 13: ~0.04m². Default: 9",
 )
@@ -676,7 +676,7 @@ def add_h3(
 )
 @click.option(
     "--resolution",
-    default=15,
+    default=get_index_spec("a5").default_resolution,
     type=click.IntRange(get_index_spec("a5").min_resolution, get_index_spec("a5").max_resolution),
     help="A5 resolution level (0-30). Res 10: ~41km², Res 15: ~39m², Res 20: ~39mm², Res 25: ~38μm². Default: 15",
 )
@@ -751,7 +751,7 @@ def add_a5(
 )
 @click.option(
     "--level",
-    default=13,
+    default=get_index_spec("s2").default_resolution,
     type=click.IntRange(get_index_spec("s2").min_resolution, get_index_spec("s2").max_resolution),
     help="S2 level (0-30). Level 8: ~1,250km², Level 13: ~1.2km², Level 18: ~1,200m². Default: 13",
 )
@@ -941,7 +941,7 @@ def add_kdtree(
 )
 @click.option(
     "--resolution",
-    default=13,
+    default=get_index_spec("quadkey").default_resolution,
     type=click.IntRange(
         get_index_spec("quadkey").min_resolution, get_index_spec("quadkey").max_resolution
     ),

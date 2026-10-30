@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 import pyarrow as pa
 
+from geoparquet_io.core import index_ops
 from geoparquet_io.core.add.a5 import add_a5_table
 from geoparquet_io.core.add.bbox import add_bbox_table
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata_table
@@ -186,7 +187,7 @@ def add_stac_metadata_table(
 def add_quadkey(
     table: pa.Table,
     column_name: str = "quadkey",
-    resolution: int = 13,
+    resolution: int = index_ops.get_index_spec("quadkey").default_resolution,
     use_centroid: bool = False,
     geometry_column: str | None = None,
 ) -> pa.Table:
@@ -390,7 +391,7 @@ def extract(
 def add_h3(
     table: pa.Table,
     column_name: str = "h3_cell",
-    resolution: int = 9,
+    resolution: int = index_ops.get_index_spec("h3").default_resolution,
     geometry_column: str | None = None,
 ) -> pa.Table:
     """
@@ -416,7 +417,7 @@ def add_h3(
 def add_a5(
     table: pa.Table,
     column_name: str = "a5_cell",
-    resolution: int = 15,
+    resolution: int = index_ops.get_index_spec("a5").default_resolution,
     geometry_column: str | None = None,
 ) -> pa.Table:
     """
@@ -854,7 +855,7 @@ def add_kdtree(
 def add_s2(
     table: pa.Table,
     column_name: str = "s2_cell",
-    level: int = 13,
+    level: int = index_ops.get_index_spec("s2").default_resolution,
     geometry_column: str | None = None,
 ) -> pa.Table:
     """
@@ -912,7 +913,7 @@ def sort_column(
 def sort_quadkey(
     table: pa.Table,
     column_name: str = "quadkey",
-    resolution: int = 13,
+    resolution: int = index_ops.get_index_spec("quadkey").default_resolution,
     use_centroid: bool = False,
     remove_column: bool = False,
 ) -> pa.Table:

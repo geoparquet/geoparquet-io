@@ -221,7 +221,7 @@ class TestQuadkeyStdin:
     """stdin ``add quadkey`` with an empty ``crs`` in the streamed geo metadata."""
 
     @pytest.mark.parametrize("value", ["", {}, [], 0], ids=repr)
-    def test_streaming_source_crs_warns(self, value, caplog):
+    def test_streamed_quadkey_empty_crs_warns(self, value, caplog):
         from geoparquet_io.core.stream_io import _detect_transform_source_crs
 
         metadata = {b"geo": json.dumps(_geo_block(value)).encode()}

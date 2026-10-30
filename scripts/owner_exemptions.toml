@@ -525,9 +525,6 @@ block = "cli.commands.process:process_aggregate_h3|core.process.aggregate.by_a5:
 count = 2
 reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
 [[G3.pylint]]
-block = "core.add.geometry_metrics:_add_metrics_streaming|core.sort_by_column:_sort_by_column_streaming"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
 block = "core.add.kdtree:_add_kdtree_streaming|core.str_order:_str_order_streaming"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]

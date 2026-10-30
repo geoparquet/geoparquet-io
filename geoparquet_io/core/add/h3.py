@@ -49,6 +49,10 @@ SPEC = IndexSpec(
     7,
     "h3",
     _get_resolution_size,
+    resolution_function="h3_get_resolution",
+    parent_template="h3_cell_to_parent({cell}, {level})",
+    longitude_first=False,
+    default_resolution=9,
     label="H3",
     column_option="--h3-name",
 )
@@ -58,7 +62,7 @@ from geoparquet_io.core.write_funnels import collect_nonplanar_edges
 def add_h3_table(
     table: pa.Table,
     h3_column_name: str = DEFAULT_H3_COLUMN_NAME,
-    resolution: int = 9,
+    resolution: int = SPEC.default_resolution,
     geometry_column: str | None = None,
 ) -> pa.Table:
     """
@@ -82,7 +86,7 @@ def add_h3_column(
     input_parquet: str,
     output_parquet: str | None = None,
     h3_column_name: str = DEFAULT_H3_COLUMN_NAME,
-    h3_resolution: int = 9,
+    h3_resolution: int = SPEC.default_resolution,
     dry_run: bool = False,
     verbose: bool = False,
     compression: str | None = None,

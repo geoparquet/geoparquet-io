@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import importlib
 import os
 from pathlib import Path
 
 from geoparquet_io.core.duckdb_metadata import get_row_count
 from geoparquet_io.core.index_ops import (
     get_index_spec,
+    partition_index,
     preflight_index,
     validate_partition_arguments,
 )
@@ -219,8 +219,6 @@ def sub_partition_directory(
     """
     configure_verbose(verbose)
     spec = get_index_spec(partition_type)
-    module = importlib.import_module(f"geoparquet_io.core.partition.by_{spec.name}")
-    partition = getattr(module, f"partition_by_{spec.name}")
     res_value = resolution if resolution is not None else level
     validate_partition_arguments(spec, res_value, partition_resolution, auto)
     preflight_index(spec, "partition", directory=True)
@@ -265,10 +263,10 @@ def sub_partition_directory(
                 "max_partitions": max_partitions,
             }
 
-            kwargs[spec.unit] = res_value
+            kwargs.update(resolution=res_value, column_name=spec.column_name)
             if spec.prefix_partition:
                 kwargs.update(partition_resolution=partition_resolution, use_centroid=use_centroid)
-            partition(**kwargs)
+            partition_index(spec, **kwargs)
 
             if in_place:
                 # Validate output before deleting original

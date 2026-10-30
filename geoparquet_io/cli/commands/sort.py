@@ -257,7 +257,7 @@ def sort_column(
 )
 @click.option(
     "--resolution",
-    default=13,
+    default=get_index_spec("quadkey").default_resolution,
     type=click.IntRange(
         get_index_spec("quadkey").min_resolution, get_index_spec("quadkey").max_resolution
     ),

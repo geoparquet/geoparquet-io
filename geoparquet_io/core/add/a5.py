@@ -64,6 +64,10 @@ SPEC = IndexSpec(
     4,
     "a5",
     _get_resolution_size,
+    resolution_function="a5_get_resolution",
+    parent_template="a5_cell_to_parent({cell}, {level})",
+    longitude_first=True,
+    default_resolution=15,
     label="A5",
     column_option="--a5-name",
 )
@@ -73,7 +77,7 @@ from geoparquet_io.core.write_funnels import collect_nonplanar_edges
 def add_a5_table(
     table: pa.Table,
     a5_column_name: str = DEFAULT_A5_COLUMN_NAME,
-    resolution: int = 15,
+    resolution: int = SPEC.default_resolution,
     geometry_column: str | None = None,
 ) -> pa.Table:
     """
@@ -97,7 +101,7 @@ def add_a5_column(
     input_parquet: str,
     output_parquet: str | None = None,
     a5_column_name: str = DEFAULT_A5_COLUMN_NAME,
-    a5_resolution: int = 15,
+    a5_resolution: int = SPEC.default_resolution,
     dry_run: bool = False,
     verbose: bool = False,
     compression: str | None = None,

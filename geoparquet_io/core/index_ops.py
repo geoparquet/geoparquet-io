@@ -14,10 +14,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import mercantile
-
 from geoparquet_io.core.bbox_structure import get_bbox_advice
-from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.compression import print_copy_dry_run
 from geoparquet_io.core.crs_utils import (
     crs_string_from_table,
@@ -27,7 +24,6 @@ from geoparquet_io.core.crs_utils import (
 from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
-    fetch_one,
     get_duckdb_connection,
     load_community_extension,
     query_schema,
@@ -55,17 +51,13 @@ from geoparquet_io.core.logging_config import (
 from geoparquet_io.core.partition.common import preview_partition
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
-    display_path,
-    needs_httpfs,
     validate_profile_for_urls,
 )
-from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
     find_geometry_column_from_table,
     is_stdin,
     should_stream_output,
 )
-from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 
 @dataclass(frozen=True)
@@ -80,6 +72,11 @@ class IndexSpec:
     extension: str | None
     size: Callable[[int], str]
 
+    default_resolution: int = 0
+    register: Callable | None = None
+    resolution_function: str = ""
+    parent_template: str = ""
+    longitude_first: bool = False
     label: str = ""
     unit: str = "resolution"
     extension_preflight: bool = False
@@ -123,14 +120,8 @@ def load_index(con, spec, verbose=False, *, feature=None):
         feature = feature or (f"gpio add {spec.name}" if spec.extension_preflight else None)
         kwargs = {"feature": feature} if feature else {}
         load_community_extension(con, spec.extension, **kwargs)
-    else:
-        con.create_function(
-            "lat_lon_to_quadkey", lat_lon_to_quadkey, ["DOUBLE", "DOUBLE", "INTEGER"], "VARCHAR"
-        )
-
-
-def lat_lon_to_quadkey(lat: float, lon: float, level: int) -> str:
-    return str(mercantile.quadkey(mercantile.tile(lon, lat, level)))
+    if spec.register is not None:
+        spec.register(con)
 
 
 def index_expression(spec, geom_col, resolution, source_crs=None, bbox_col=None):
@@ -268,78 +259,56 @@ def add_index_column(
             warn(advice["message"] + f" - using geometry centroid for {spec.label} calculation")
             for suggestion in advice["suggestions"]:
                 info(f"Tip: {suggestion}")
-    if dry_run:
-        warn("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n")
-        display_input = display_path(input_path)
-        display_output = display_path(output_parquet)
-        info(f"-- Input file: {display_input}")
-        info(f"-- Output file: {display_output}")
-        info(f"-- Geometry column: {geom_col}")
-        info(f"-- New column: {column_name}")
+    from geoparquet_io.core.common import add_computed_column
+
+    def preview_details():
         if spec.preview_sql:
             info(
                 f"-- Description: {spec.label} cell ID at {spec.unit} {resolution} (~{spec.size(resolution)})"
             )
-            query = make_index_query(
-                spec,
-                _index_from_clause(input_path, allow_schema_diff, hive_input),
-                geom_col,
-                column_name,
-                resolution,
-                source_crs,
-                bbox_col,
-            )
+            from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_query
+
+            query = build_query(source)
+            with get_duckdb_connection(load_spatial=True, load_httpfs=False) as con:
+                rows = resolve_row_group_rows_for_query(
+                    con, query, row_group_rows, row_group_size_mb
+                )
             info("-- Main query:")
-            print_copy_dry_run(query, output_parquet, compression, compression_level)
+            print_copy_dry_run(query, output_parquet, compression, compression_level, rows)
         else:
             info(f"-- Resolution ({spec.display_unit or spec.unit}): {resolution}")
             info(f"-- Calculation method: {'bbox midpoint' if bbox_col else 'geometry centroid'}")
+
+    def build_query(source):
+        return make_index_query(
+            spec, source, geom_col, column_name, resolution, source_crs, bbox_col
+        )
+
+    source = _index_from_clause(input_path, allow_schema_diff, hive_input)
+    add_computed_column(
+        input_parquet,
+        output_parquet,
+        column_name,
+        index_expression(spec, geom_col, resolution, source_crs, bbox_col),
+        dry_run=dry_run,
+        verbose=verbose,
+        compression=compression,
+        compression_level=compression_level,
+        row_group_size_mb=row_group_size_mb,
+        row_group_rows=row_group_rows,
+        profile=profile,
+        geoparquet_version=geoparquet_version,
+        memory_limit=memory_limit,
+        custom_metadata={"covering": {spec.name: {"column": column_name, spec.unit: resolution}}},
+        from_clause=source,
+        query_builder=build_query,
+        connection_setup=lambda con: load_index(con, spec, verbose=verbose),
+        dry_run_details=preview_details,
+        report_count=spec.report_count,
+        progress_message=f"Adding {spec.label} column '{column_name}' ({spec.display_unit or spec.unit} {resolution})...",
+    )
+    if dry_run:
         return
-    ensure_index_column(spec, input_parquet, column_name, resolution, reject_existing=True)
-    metadata, _ = get_parquet_metadata(input_parquet, verbose)
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
-    try:
-        con.execute("SET geometry_always_xy = true;")
-        load_index(con, spec, verbose=verbose)
-        query = make_index_query(
-            spec,
-            _index_from_clause(input_path, allow_schema_diff, hive_input),
-            geom_col,
-            column_name,
-            resolution,
-            source_crs,
-            bbox_col,
-        )
-        if spec.report_count:
-            count = fetch_one(
-                con.execute(
-                    f"SELECT COUNT(*) FROM {_index_from_clause(input_path, allow_schema_diff, hive_input)}"
-                )
-            )[0]
-            progress(f"Processing {count:,} features...")
-        progress(
-            f"Adding {spec.label} column '{column_name}' ({spec.display_unit or spec.unit} {resolution})..."
-        )
-        write_parquet_with_metadata(
-            con,
-            query,
-            output_parquet,
-            original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            custom_metadata={
-                "covering": {spec.name: {"column": column_name, spec.unit: resolution}}
-            },
-            input_file=input_parquet,
-            memory_limit=memory_limit,
-        )
-    finally:
-        con.close()
     success(
         f"Successfully added {spec.label} column '{column_name}' ({spec.display_unit or spec.unit} {resolution}) to: {output_parquet}"
     )
@@ -361,50 +330,45 @@ def add_index_streaming(
     memory_limit,
     use_centroid=False,
 ):
-    """Stream an index column, retaining quadkey's input and metadata policies."""
-    from geoparquet_io.core.stream_io import _detect_transform_source_crs
+    """Build the index query through the shared streaming driver."""
+    from geoparquet_io.core.stream_io import execute_transform
 
-    if should_stream_output(output_path):
-        verbose = False
     validate_index_resolution(spec, resolution)
-    stream_output = should_stream_output(output_path)
-    with open_input(input_path, verbose=verbose, stream_output=stream_output) as (
-        source,
-        metadata,
-        is_stream,
-        con,
-    ):
+
+    def make_query(source, con, source_crs, metadata):
         con.execute("SET geometry_always_xy = true;")
-        load_index(con, spec, verbose=verbose)
+        load_index(con, spec, verbose=verbose and not should_stream_output(output_path))
         schema = query_schema(con, f"SELECT * FROM {source}").empty_table()
         geom_col = detect_geometry_column_from_names(schema.column_names)
         if geom_col is None:
             raise GeoParquetError("No geometry column found")
-        source_crs = _detect_transform_source_crs(input_path, metadata, is_stream)
         validate_index_crs(
-            spec, sanitized_carried_geo(metadata), geom_col, source_crs, "stream", verbose
+            spec,
+            sanitized_carried_geo(metadata),
+            geom_col,
+            source_crs,
+            "stream",
+            verbose and not should_stream_output(output_path),
         )
         schema = schema.replace_schema_metadata(metadata)
         bbox_col = table_bbox_column(spec, schema, source_crs, use_centroid)
-        query = make_index_query(
+        return make_index_query(
             spec, source, geom_col, column_name, resolution, source_crs, bbox_col
         )
-        if verbose:
-            debug(f"Streaming {spec.label} query: {query}")
-        write_output(
-            con,
-            query,
-            output_path,
-            original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            memory_limit=memory_limit,
-        )
+
+    execute_transform(
+        input_path,
+        output_path,
+        make_query,
+        verbose=verbose,
+        compression=compression,
+        compression_level=compression_level,
+        row_group_size_mb=row_group_size_mb,
+        row_group_rows=row_group_rows,
+        profile=profile,
+        geoparquet_version=geoparquet_version,
+        memory_limit=memory_limit,
+    )
     if not should_stream_output(output_path):
         unit = spec.display_unit or spec.unit
         success(
@@ -447,7 +411,8 @@ def ensure_index_column(
     hive_input=None,
 ):
     """Return (working path, resolved column, temporary path), reusing existing cells."""
-    columns = get_column_names(input_parquet)
+    is_table = hasattr(input_parquet, "column_names")
+    columns = input_parquet.column_names if is_table else get_column_names(input_parquet)
     resolved = next((c for c in columns if c.lower() == column_name.lower()), None)
     if reject_existing:
         if resolved:
@@ -464,6 +429,14 @@ def ensure_index_column(
         raise missing_error
     if verbose:
         debug(f"{spec.label} column '{column_name}' not found. Adding it now...")
+    if is_table:
+        return (
+            add_index_table(
+                spec, input_parquet, column_name, resolution, use_centroid=use_centroid
+            ),
+            column_name,
+            None,
+        )
     temp = os.path.join(
         tempfile.gettempdir(),
         f"{spec.name}_enriched_{uuid.uuid4().hex}.parquet",

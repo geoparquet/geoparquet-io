@@ -223,3 +223,34 @@ def test_sort_reuses_case_insensitive_quadkey_column(tmp_path, streaming):
     sorted_table = pq.read_table(output)
     assert sorted_table["QUADKEY"].to_pylist() == sorted(table["QUADKEY"].to_pylist())
     assert sorted_table.column_names == table.column_names
+
+
+@pytest.mark.parametrize("remove_column", [False, True])
+def test_sort_table_reuses_case_insensitive_quadkey_column(remove_column):
+    table = golden_fixture().append_column(
+        "QUADKEY", pa.array(["3", "1", "2"] + ["0"] * (golden_fixture().num_rows - 3))
+    )
+    result = ops.sort_quadkey(table, remove_column=remove_column)
+    expected = sorted(table["QUADKEY"].to_pylist())
+    if remove_column:
+        assert "QUADKEY" not in result.column_names
+        assert "quadkey" not in result.column_names
+    else:
+        assert result["QUADKEY"].to_pylist() == expected
+        assert result.column_names == table.column_names
+
+
+def test_index_drivers_use_shared_funnels():
+    tree = ast.parse((Path(__file__).parents[1] / "geoparquet_io/core/index_ops.py").read_text())
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    for driver, funnel in [
+        ("add_index_column", "add_computed_column"),
+        ("add_index_streaming", "execute_transform"),
+    ]:
+        calls = {
+            node.func.id
+            for node in ast.walk(functions[driver])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert funnel in calls
+        assert not calls.intersection({"open_input", "write_output", "write_parquet_with_metadata"})

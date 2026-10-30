@@ -19,13 +19,9 @@ from geoparquet_io.core.process.aggregate.grid_common import (
 
 SPEC = get_index_spec("h3")
 
-assert SPEC.extension is not None
-
 H3_SCHEME = GridScheme(
     name=SPEC.name,
-    extension=SPEC.extension,
-    min_resolution=SPEC.min_resolution,
-    max_resolution=SPEC.max_resolution,
+    spec=SPEC,
     default_column=SPEC.column_name,
     # h3_latlng_to_cell_string takes (lat, lng) -> note Y before X.
     key_template=SPEC.expression("ST_X({pt})", "ST_Y({pt})", "{res}"),

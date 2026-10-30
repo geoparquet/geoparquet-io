@@ -588,8 +588,8 @@ class TestGeoarrowVersionIgnoresWriteMemory:
 # ---------------------------------------------------------------------------
 
 
-class TestPrivateHelpersForwardMemoryLimit:
-    def test_add_h3_streaming_forwards_memory_limit(self, places_test_file, tmp_path):
+class TestIndexStreamingForwardMemoryLimit:
+    def test_h3_cli_stream_preserves_memory_limit(self, places_test_file, tmp_path):
         import subprocess
         import sys
 
@@ -615,7 +615,7 @@ class TestPrivateHelpersForwardMemoryLimit:
         assert "h3_cell" in table.column_names
 
     @pytest.mark.network
-    def test_add_a5_streaming_forwards_memory_limit(self, places_test_file, tmp_path):
+    def test_a5_cli_stream_preserves_memory_limit(self, places_test_file, tmp_path):
         import subprocess
         import sys
 
@@ -640,7 +640,7 @@ class TestPrivateHelpersForwardMemoryLimit:
         assert table.num_rows == 766
         assert "a5_cell" in table.column_names
 
-    def test_add_s2_streaming_forwards_memory_limit(self, places_test_file, tmp_path):
+    def test_s2_cli_stream_preserves_memory_limit(self, places_test_file, tmp_path):
         from tests.conftest import skip_if_geography_unavailable
 
         skip_if_geography_unavailable()
@@ -711,7 +711,7 @@ class TestPrivateHelpersForwardMemoryLimit:
         mocked.assert_called_once()
         assert mocked.call_args.kwargs.get("memory_limit") == "605MB"
 
-    def test_add_quadkey_streaming_forwards_memory_limit(self, places_test_file, tmp_path):
+    def test_quadkey_cli_stream_preserves_memory_limit(self, places_test_file, tmp_path):
         import subprocess
         import sys
 
@@ -781,7 +781,7 @@ class TestPrivateHelpersForwardMemoryLimit:
         assert mocked.call_args.kwargs.get("memory_limit") == "609MB"
 
     def test_execute_transform_forwards_memory_limit(self, places_test_file, temp_output_file):
-        """execute_transform itself (used by h3/a5/s2/sort column streaming) must
+        """execute_transform itself (used by all index and sort column streaming) must
         forward memory_limit into write_output -> write_parquet_with_metadata."""
         from geoparquet_io.core.stream_io import execute_transform
 

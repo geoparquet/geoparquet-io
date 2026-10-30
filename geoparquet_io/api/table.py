@@ -1798,7 +1798,7 @@ class Table:
     def add_quadkey(
         self,
         column_name: str = "quadkey",
-        resolution: int = 13,
+        resolution: int = get_index_spec("quadkey").default_resolution,
         use_centroid: bool = False,
     ) -> Table:
         """
@@ -1917,7 +1917,7 @@ class Table:
     def add_h3(
         self,
         column_name: str = "h3_cell",
-        resolution: int = 9,
+        resolution: int = get_index_spec("h3").default_resolution,
     ) -> Table:
         """
         Add an H3 cell column based on geometry location.
@@ -1941,7 +1941,7 @@ class Table:
     def add_a5(
         self,
         column_name: str = "a5_cell",
-        resolution: int = 15,
+        resolution: int = get_index_spec("a5").default_resolution,
     ) -> Table:
         """
         Add an A5 cell column based on geometry location.
@@ -2177,7 +2177,7 @@ class Table:
     def add_s2(
         self,
         column_name: str = "s2_cell",
-        level: int = 13,
+        level: int = get_index_spec("s2").default_resolution,
     ) -> Table:
         """
         Add an S2 cell column based on geometry location.
@@ -2309,7 +2309,7 @@ class Table:
     def sort_quadkey(
         self,
         column_name: str = "quadkey",
-        resolution: int = 13,
+        resolution: int = get_index_spec("quadkey").default_resolution,
         use_centroid: bool = False,
         remove_column: bool = False,
     ) -> Table:

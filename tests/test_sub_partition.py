@@ -183,10 +183,8 @@ class TestSubPartitionExecution:
         def mock_partition_fail(*args, **kwargs):
             raise ValueError("Simulated partition failure")
 
-        # Patch the h3 partition function to fail - patch where it's imported
-        monkeypatch.setattr(
-            "geoparquet_io.core.partition.by_h3.partition_by_h3", mock_partition_fail
-        )
+        # Patch the shared partition driver where directory mode calls it.
+        monkeypatch.setattr("geoparquet_io.core.sub_partition.partition_index", mock_partition_fail)
 
         result = sub_partition_directory(
             directory=temp_partition_dir,
@@ -430,10 +428,10 @@ class TestQuadkeyDirectoryResolutions:
         _test_file, threshold = self._seed(temp_partition_dir)
         calls = []
 
-        def _record(**kwargs):
+        def _record(spec, **kwargs):
             calls.append(kwargs)
 
-        monkeypatch.setattr("geoparquet_io.core.partition.by_quadkey.partition_by_quadkey", _record)
+        monkeypatch.setattr("geoparquet_io.core.sub_partition.partition_index", _record)
 
         core_sub_partition.sub_partition_directory(
             directory=temp_partition_dir,
@@ -469,11 +467,11 @@ class TestSubPartitionFailuresAreReported:
         said success -- so a run that partitioned nothing looked like a clean one."""
         size = self._seed(temp_partition_dir)
 
-        def _boom(**kwargs):
+        def _boom(spec, **kwargs):
             raise RuntimeError("simulated partition failure")
 
-        # sub_partition_directory imports it inside the function, so patch the source.
-        monkeypatch.setattr("geoparquet_io.core.partition.by_quadkey.partition_by_quadkey", _boom)
+        # Patch the shared partition driver at the directory call site.
+        monkeypatch.setattr("geoparquet_io.core.sub_partition.partition_index", _boom)
 
         result = cli_runner.invoke(
             partition,

@@ -19,13 +19,9 @@ from geoparquet_io.core.process.aggregate.grid_common import (
 
 SPEC = get_index_spec("a5")
 
-assert SPEC.extension is not None
-
 A5_SCHEME = GridScheme(
     name=SPEC.name,
-    extension=SPEC.extension,
-    min_resolution=SPEC.min_resolution,
-    max_resolution=SPEC.max_resolution,
+    spec=SPEC,
     default_column=SPEC.column_name,
     key_template=SPEC.expression("ST_X({pt})", "ST_Y({pt})", "{res}"),
     # a5_cell_to_boundary returns an open DOUBLE[2][] ring that stays contiguous

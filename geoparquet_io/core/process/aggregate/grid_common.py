@@ -44,7 +44,7 @@ from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.index_ops import (
-    get_index_spec,
+    IndexSpec,
     load_index,
     validate_index_resolution,
     validate_partition_arguments,
@@ -97,9 +97,7 @@ class GridScheme:
     """
 
     name: str
-    extension: str
-    min_resolution: int
-    max_resolution: int
+    spec: IndexSpec
     default_column: str
     key_template: str
     boundary_template: str
@@ -700,12 +698,12 @@ def _resolve_resolution(
     """
     from geoparquet_io.core.partition import auto_resolution as _auto_resolution
 
-    spec = get_index_spec(scheme.name)
+    spec = scheme.spec
     validate_partition_arguments(spec, resolution, auto=auto)
     if auto:
         resolution = _auto_resolution.calculate_auto_resolution(
             input_parquet,
-            scheme.name,
+            spec.name,
             target_rows_per_partition=target_per_cell,
             max_partitions=max_cells,
             verbose=verbose,
@@ -713,7 +711,7 @@ def _resolve_resolution(
         )
         if verbose:
             debug(f"Auto-selected {scheme.name} resolution {resolution}")
-    validate_index_resolution(get_index_spec(scheme.name), resolution)
+    validate_index_resolution(scheme.spec, resolution)
     return resolution
 
 
@@ -933,7 +931,7 @@ def aggregate_grid_file(
         load_spatial=True, load_httpfs=True, memory_limit=memory_limit, verbose=verbose
     )
     try:
-        load_index(con, get_index_spec(scheme.name), feature=f"{scheme.name} aggregation")
+        load_index(con, scheme.spec, feature=f"{scheme.name} aggregation")
         con.execute("SET geometry_always_xy = true")
 
         # The columns a user may name in --metric/--breakdown: everything the
@@ -1036,12 +1034,12 @@ def aggregate_grid_table(
     _validate_bucket_point_args(bucket_point, bbox_column)
     if bucket_point == BUCKET_POINT_BBOX:
         bbox_column = _resolve_bbox_column_for_table(table, bbox_column)
-    validate_index_resolution(get_index_spec(scheme.name), resolution)
+    validate_index_resolution(scheme.spec, resolution)
 
     geom_col = geometry_column or "geometry"
     con = open_bounded_connection(load_spatial=True, load_httpfs=False, memory_limit=memory_limit)
     try:
-        load_index(con, get_index_spec(scheme.name), feature=f"{scheme.name} aggregation")
+        load_index(con, scheme.spec, feature=f"{scheme.name} aggregation")
         con.execute("SET geometry_always_xy = true")
         if bucket_point == BUCKET_POINT_BBOX:
             warn_planar_math("aggregate", table, geom_col)

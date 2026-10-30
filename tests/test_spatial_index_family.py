@@ -82,6 +82,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.add.a5 import add_a5_column, add_a5_table
 from geoparquet_io.core.add.h3 import add_h3_column, add_h3_table
+from geoparquet_io.core.add.quadkey import _lat_lon_to_quadkey as lat_lon_to_quadkey
 from geoparquet_io.core.add.quadkey import (
     add_quadkey_column,
     add_quadkey_table,
@@ -92,7 +93,6 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.index_ops import (
     calculate_index_resolution,
     get_index_spec,
-    lat_lon_to_quadkey,
     validate_partition_resolutions,
 )
 from geoparquet_io.core.partition.auto_resolution import (

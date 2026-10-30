@@ -142,47 +142,33 @@ def add_computed_column(
     replace_column=None,
     geoparquet_version=None,
     memory_limit: str | None = None,
+    *,
+    from_clause: str | None = None,
+    query_builder=None,
+    connection_setup=None,
+    dry_run_details=None,
+    report_count: bool = True,
+    progress_message: str | None = None,
 ):
-    """
-    Add a computed column to a GeoParquet file using SQL expression.
+    """Add a SQL-derived column through the shared file write funnel.
 
-    Handles all boilerplate for adding columns derived from existing data:
-    - Input validation
-    - Schema checking
-    - DuckDB connection and extension loading
-    - Query execution
-    - Metadata preservation
-    - Dry-run support
-    - Remote input/output support
+    Resolves input paths and geometry, checks for existing columns, loads
+    dependencies, reports progress and preserves metadata. Dry runs print the
+    SQL without writing; write settings go to write_parquet_with_metadata.
 
     Args:
-        input_parquet: Path to input file (local or remote URL)
-        output_parquet: Path to output file (local or remote URL)
-        column_name: Name for the new column
-        sql_expression: SQL expression to compute column value
-        extensions: DuckDB extensions to load beyond 'spatial' (e.g., ['h3'])
-        dry_run: Whether to print SQL without executing
-        verbose: Whether to print verbose output
-        compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
-        compression_level: Compression level (varies by format)
-        row_group_size_mb: Target row group size in MB
-        row_group_rows: Exact number of rows per row group
-        dry_run_description: Optional description for dry-run output
-        custom_metadata: Optional dict with custom metadata (e.g., H3 info)
-        profile: AWS profile name (S3 only, optional)
-        replace_column: Name of existing column to replace (uses EXCLUDE in query)
-        memory_limit: DuckDB memory limit for the write (e.g., '2GB', '512MB');
-            None auto-detects based on available system/container memory
-
-    Example:
-        add_computed_column(
-            'input.parquet', 'output.parquet',
-            column_name='h3_cell',
-            sql_expression="h3_latlng_to_cell(ST_Y(ST_Centroid(geometry)), "
-                          "ST_X(ST_Centroid(geometry)), 9)",
-            extensions=['h3'],
-            custom_metadata={'covering': {'h3': {'column': 'h3_cell', 'resolution': 9}}}
-        )
+        sql_expression: SQL expression yielding the new column value
+        extensions: Additional DuckDB extensions beyond spatial
+        dry_run_description: Description shown before the SQL preview
+        custom_metadata: Additional metadata (for example index covering)
+        replace_column: Existing column to exclude from the SELECT
+        from_clause: Optional SQL source, including reader options
+        query_builder: Optional callable(source) returning the complete SELECT
+        connection_setup: Optional callable(con) loading computation dependencies
+        dry_run_details: Optional callable printing a specialized preview
+        report_count: Report the input feature count before writing
+        progress_message: Optional computation-specific progress message
+        memory_limit: DuckDB write limit; None auto-detects available memory
     """
     # RAW path: the dry-run header below shows it to the user, and every SQL
     # interpolation escapes it through sql_path (#802).
@@ -190,6 +176,8 @@ def add_computed_column(
 
     # Get geometry column (for reference)
     geom_col = find_primary_geometry_column(input_parquet, verbose)
+
+    source = from_clause or sql_path(input_path)
 
     # Dry-run mode header
     if dry_run:
@@ -202,6 +190,9 @@ def add_computed_column(
         info(f"-- New column: {column_name}")
         if dry_run_description:
             info(f"-- Description: {dry_run_description}")
+        if dry_run_details is not None:
+            dry_run_details()
+            return
         progress("")
 
     # Check if column already exists (skip in dry-run or when replacing)
@@ -225,6 +216,9 @@ def add_computed_column(
     # Ensure ST_Transform (used by CRS-aware grid keying) emits lon/lat order.
     con.execute("SET geometry_always_xy = true;")
 
+    if connection_setup is not None:
+        connection_setup(con)
+
     # Load additional extensions if specified
     if extensions:
         for ext in extensions:
@@ -233,8 +227,8 @@ def add_computed_column(
             load_community_extension(con, ext)
 
     # Get total count (skip in dry-run)
-    if not dry_run:
-        total_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM {sql_path(input_path)}"))[0]
+    if not dry_run and report_count:
+        total_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM {source}"))[0]
         progress(f"Processing {total_count:,} features...")
 
     # Quote column name to handle special characters (e.g., colons in "metrics:area")
@@ -246,16 +240,20 @@ def add_computed_column(
         SELECT
             * EXCLUDE ({quote_identifier(replace_column)}),
             {sql_expression} AS {quoted_col}
-        FROM {sql_path(input_path)}
+        FROM {source}
     """
     else:
         query = f"""
         SELECT
             *,
             {sql_expression} AS {quoted_col}
-        FROM {sql_path(input_path)}
+        FROM {source}
     """
 
+    if query_builder is not None:
+        query = query_builder(source)
+
+    # Handle dry-run display
     if dry_run:
         from geoparquet_io.core.compression import print_copy_dry_run
         from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_query
@@ -267,6 +265,9 @@ def add_computed_column(
         info("-- The covering metadata is updated only if the output has a bbox column")
         con.close()
         return
+
+    if progress_message:
+        progress(progress_message)
 
     # Execute the query using existing write helper
     if verbose:

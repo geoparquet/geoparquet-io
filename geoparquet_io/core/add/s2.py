@@ -81,6 +81,7 @@ SPEC = IndexSpec(
     4,
     "geography",
     _get_level_size,
+    default_resolution=DEFAULT_S2_LEVEL,
     label="S2",
     column_option="--s2-name",
     unit="level",
@@ -92,7 +93,7 @@ SPEC = IndexSpec(
 def add_s2_table(
     table: pa.Table,
     s2_column_name: str = DEFAULT_S2_COLUMN_NAME,
-    level: int = DEFAULT_S2_LEVEL,
+    level: int = SPEC.default_resolution,
     geometry_column: str | None = None,
 ) -> pa.Table:
     """
@@ -116,7 +117,7 @@ def add_s2_column(
     input_parquet: str,
     output_parquet: str | None = None,
     s2_column_name: str = DEFAULT_S2_COLUMN_NAME,
-    s2_level: int = DEFAULT_S2_LEVEL,
+    s2_level: int = SPEC.default_resolution,
     dry_run: bool = False,
     verbose: bool = False,
     compression: str | None = None,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import mercantile
 import pyarrow as pa
 
 from geoparquet_io.core.constants import DEFAULT_QUADKEY_COLUMN_NAME, DEFAULT_QUADKEY_RESOLUTION
@@ -122,6 +123,16 @@ def _cell_expression(lon, lat, resolution):
     return f"lat_lon_to_quadkey({lat}, {lon}, {resolution})"
 
 
+def _lat_lon_to_quadkey(lat: float, lon: float, level: int) -> str:
+    return str(mercantile.quadkey(mercantile.tile(lon, lat, level)))
+
+
+def _register(con):
+    con.create_function(
+        "lat_lon_to_quadkey", _lat_lon_to_quadkey, ["DOUBLE", "DOUBLE", "INTEGER"], "VARCHAR"
+    )
+
+
 SPEC = IndexSpec(
     "quadkey",
     DEFAULT_QUADKEY_COLUMN_NAME,
@@ -132,8 +143,10 @@ SPEC = IndexSpec(
     4,
     None,
     _get_resolution_size,
+    default_resolution=DEFAULT_QUADKEY_RESOLUTION,
     label="quadkey",
     column_option="--quadkey-column",
+    register=_register,
     bbox_midpoint=True,
     crs_validator=_validate_crs_from_geo_metadata,
     prefix_partition=True,
@@ -163,7 +176,7 @@ def register_quadkey_udf(con) -> None:
 def add_quadkey_table(
     table: pa.Table,
     quadkey_column_name: str = DEFAULT_QUADKEY_COLUMN_NAME,
-    resolution: int = DEFAULT_QUADKEY_RESOLUTION,
+    resolution: int = SPEC.default_resolution,
     use_centroid: bool = False,
     geometry_column: str | None = None,
 ) -> pa.Table:
@@ -195,7 +208,7 @@ def add_quadkey_column(
     input_parquet: str,
     output_parquet: str | None = None,
     quadkey_column_name: str = DEFAULT_QUADKEY_COLUMN_NAME,
-    resolution: int = DEFAULT_QUADKEY_RESOLUTION,
+    resolution: int = SPEC.default_resolution,
     use_centroid: bool = False,
     dry_run: bool = False,
     verbose: bool = False,
