@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
@@ -353,37 +355,60 @@ class WriteStrategy(str, Enum):
 
 
 @contextmanager
-def atomic_write(output_path: str, suffix: str = ".parquet"):
+def atomic_write(
+    output_path: str,
+    suffix: str = ".parquet",
+    *,
+    sidecar_suffixes: Iterable[str] | None = None,
+):
     """
     Context manager for atomic file writes with cleanup.
 
-    Writes to a temp file in the same directory, then renames atomically on success.
-    Ensures partial files are cleaned up on failure.
+    Stages in a temp directory beside the output, yields a path inside it, and
+    on success moves the result over ``output_path``. On any failure, including
+    a ``KeyboardInterrupt``, the whole directory is removed, so a partial file
+    (and anything the writer left next to it) never reaches the destination,
+    and a file that already existed there is never deleted.
+
+    The staged file is named after the output's stem plus ``suffix``, so a
+    writer that derives a name from the file (a GDAL layer) sees the output's.
+
+    ``sidecar_suffixes`` stages a set of files that share the output's stem
+    (a Shapefile's ``.shp``/``.shx``/``.dbf``/``.prj``/...). Every file the
+    writer leaves in the staging directory is published beside the output, and
+    an old file named ``<stem><suffix>`` for a listed suffix that the new set
+    lacks is removed, so a stale ``.cpg`` or ``.sbn`` cannot outlive an
+    overwrite. A multi-file publish is atomic per file, not as a set: a crash
+    between two moves leaves a mix of old and new files.
 
     Args:
         output_path: Final destination path for the file
-        suffix: File suffix for temp file (default: .parquet)
+        suffix: File suffix for the staged file (default: .parquet)
+        sidecar_suffixes: Suffixes of sidecar files that belong to the output
 
     Yields:
-        str: Path to temp file to write to
+        str: Path to the staged file to write to
 
     Raises:
         Any exception from the write operation (after cleanup)
     """
-    dir_path = os.path.dirname(output_path) or "."
-    fd, temp_path = tempfile.mkstemp(suffix=suffix, dir=dir_path)
-    os.close(fd)
-
+    final = Path(output_path)
+    stage_dir = Path(tempfile.mkdtemp(prefix=".gpio-stage-", dir=final.parent))
+    staged = stage_dir / f"{final.stem}{suffix}"
     try:
-        yield temp_path
-        os.replace(temp_path, output_path)
-    except Exception:
-        if os.path.exists(temp_path):
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
-        raise
+        yield str(staged)
+        if sidecar_suffixes is not None:
+            published = {part.name for part in stage_dir.iterdir()}
+            for sidecar in sorted(stage_dir.iterdir()):
+                if sidecar != staged:
+                    os.replace(sidecar, final.parent / sidecar.name)
+            for stale in sidecar_suffixes:
+                old = final.parent / f"{final.stem}{stale}"
+                if old.name not in published and old != final:
+                    old.unlink(missing_ok=True)
+        os.replace(staged, final)
+    finally:
+        shutil.rmtree(stage_dir, ignore_errors=True)
 
 
 class BaseWriteStrategy(ABC):

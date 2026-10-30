@@ -330,7 +330,7 @@ class TestDonorRegressions:
         out = tmp_path / "tags.gpkg"
         write_geopackage(str(source), str(out), bbox=BBOX)
         columns = _gpkg_columns(out)
-        assert "tags" not in columns  # GDAL cannot hold it; dropped as before
+        assert "tags" in columns  # GDAL cannot hold it natively; JSON text since #1333
         assert "name" in columns  # the columns after it still arrive
         assert len(_gpkg_values(out)) == BBOX_ROWS
 

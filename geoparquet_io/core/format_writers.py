@@ -14,6 +14,7 @@ import json
 import math
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -40,7 +41,11 @@ from geoparquet_io.core.exceptions import (
     ValidationError,
 )
 from geoparquet_io.core.file_utils import resolve_file_url, validate_output_path
-from geoparquet_io.core.geometry_detection import detect_parquet_geometry_column
+from geoparquet_io.core.geometry_detection import (
+    GeometryRead,
+    detect_parquet_geometry_column,
+    resolve_geometry_read,
+)
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.remote import (
@@ -50,14 +55,16 @@ from geoparquet_io.core.remote import (
 )
 from geoparquet_io.core.sizing import format_size
 from geoparquet_io.core.streaming import is_stdin
+from geoparquet_io.core.write_strategies.base import atomic_write
 
 # Error message templates for consistency
 ERROR_REMOTE_OUTPUT = "{format} output path must be local. Use upload() for cloud destinations."
 ERROR_FILE_EXISTS = "{format} file already exists: {path}\nUse --overwrite to replace it."
 ERROR_CONVERSION_FAILED = "Failed to create {format}: {error}"
 ERROR_NO_GEOMETRY = "No geometry column found. Expected 'geometry', 'geom', or 'wkb_geometry'."
-ERROR_NO_COMPATIBLE_COLUMNS = (
-    "No compatible columns for {format} format. All columns are complex types (STRUCT, LIST, MAP)."
+ERROR_NATIVE_GEOMETRY = (
+    "Geometry column '{column}' uses a GeoArrow-native (nested) encoding, which the "
+    "GDAL writers cannot read. Re-encode it as WKB first."
 )
 # `-` reaches these writers as an ordinary path and dies inside GDAL/DuckDB as
 # "File not found: -", which describes neither what happened nor what to do.
@@ -83,31 +90,49 @@ def _reject_stdin_input(input_path: str, description: str, command: str, output:
         )
 
 
+#: Every file a Shapefile can own beside its ``.shp``.
+SHAPEFILE_SIDECARS = (".shx", ".dbf", ".prj", ".cpg", ".sbn", ".sbx", ".qix", ".fix", ".shp.xml")
+
+
+def shapefile_members(shapefile_path: str | Path) -> list[Path]:
+    """The files on disk that belong to the Shapefile at ``shapefile_path``.
+
+    The ``.shp`` and every sidecar in :data:`SHAPEFILE_SIDECARS` that shares its
+    stem. Matched on the end of the name, because ``.shp.xml`` has suffix ``.xml``.
+    """
+    shp = Path(shapefile_path)
+    names = {f"{shp.stem}{ext}".lower() for ext in (".shp", *SHAPEFILE_SIDECARS)}
+    return sorted(f for f in shp.parent.iterdir() if f.name.lower() in names)
+
+
 # Format configuration for GDAL-based writers
 GDAL_FORMATS = {
     "geopackage": {
         "cli_command": "geopackage",
-        "sample_output": "out.gpkg",
         "driver": "GPKG",
         "description": "GeoPackage",
         "check_overwrite": True,
         "layer_option": "LAYER_NAME",
+        "sidecar_suffixes": None,
+        "extension": ".gpkg",
     },
     "flatgeobuf": {
         "cli_command": "flatgeobuf",
-        "sample_output": "out.fgb",
         "driver": "FlatGeobuf",
         "description": "FlatGeobuf",
         "check_overwrite": True,
-        "layer_option": None,
+        "layer_option": "LAYER_NAME",
+        "sidecar_suffixes": None,
+        "extension": ".fgb",
     },
     "shapefile": {
         "cli_command": "shapefile",
-        "sample_output": "out.shp",
         "driver": "ESRI Shapefile",
         "description": "Shapefile",
         "check_overwrite": True,
         "layer_option": None,
+        "sidecar_suffixes": SHAPEFILE_SIDECARS,
+        "extension": ".shp",
         "encoding_option": "ENCODING",
     },
 }
@@ -252,23 +277,50 @@ def _should_promote_to_multi(input_path: str, geometry_col: str) -> bool:
     return len(names) > 1 and len({_MULTI_TYPES.get(name, name) for name in names}) == 1
 
 
-def _gdal_select_exprs(schema: pa.Schema, geometry_col: str | None, input_path: str) -> list[str]:
-    """Column expressions GDAL can hold: complex types dropped, mixed
-    single/multi geometry promoted to its multi type."""
+def _attribute_expr(field: pa.Field) -> str:
+    """A column's select expression: nested STRUCT, LIST and MAP values as JSON text.
+
+    GDAL layers and CSV cells cannot hold nested types, so both writers
+    JSON-encode them instead of dropping them (#1333).
+    """
+    ident = quote_identifier(field.name)
+    if (
+        pa.types.is_struct(field.type)
+        or pa.types.is_list(field.type)
+        or pa.types.is_map(field.type)
+    ):
+        return f"to_json({ident}) AS {ident}"
+    return ident
+
+
+def _gdal_select_exprs(
+    schema: pa.Schema,
+    geometry_col: str | None,
+    input_path: str,
+    read: GeometryRead | None = None,
+) -> list[str]:
+    """Column expressions for a GDAL layer.
+
+    Nested attributes are JSON-encoded (:func:`_attribute_expr`). The geometry
+    column is read through its :class:`GeometryRead`, which decodes WKB that
+    DuckDB left as BLOB (a file with no ``geo`` key): left as BLOB, GDAL sees a
+    layer with no geometry and FlatGeobuf dies on a "NULL geometry" (#1161). A
+    GeoArrow-native or unreadable geometry is refused with a clear error. Mixed
+    single/multi geometry is promoted to its multi type.
+    """
     promote = geometry_col is not None and _should_promote_to_multi(input_path, geometry_col)
     exprs = []
     for field in schema:
-        if (
-            pa.types.is_struct(field.type)
-            or pa.types.is_list(field.type)
-            or pa.types.is_map(field.type)
-        ):
+        if field.name != geometry_col or read is None:
+            exprs.append(_attribute_expr(field))
             continue
+        if read.kind == "geoarrow":
+            raise GeoParquetError(ERROR_NATIVE_GEOMETRY.format(column=field.name))
+        if not read.readable:
+            raise GeoParquetError(read.problem or ERROR_NATIVE_GEOMETRY.format(column=field.name))
         ident = quote_identifier(field.name)
-        if promote and field.name == geometry_col:
-            exprs.append(f"ST_Multi({ident}) AS {ident}")
-        else:
-            exprs.append(ident)
+        value = f"ST_Multi({read.expr})" if promote else read.expr
+        exprs.append(f"{value} AS {ident}")
     return exprs
 
 
@@ -326,7 +378,7 @@ def write_gdal_format(
     output_path: str,
     format_name: str,
     overwrite: bool = False,
-    layer_name: str = "features",
+    layer_name: str | None = None,
     encoding: str = "UTF-8",
     verbose: bool = False,
     profile: str | None = None,
@@ -345,7 +397,7 @@ def write_gdal_format(
         output_path: Path to output file (must be local)
         format_name: Format key: 'geopackage', 'flatgeobuf', or 'shapefile'
         overwrite: Overwrite existing file if True
-        layer_name: Layer name (for formats that support it)
+        layer_name: GeoPackage layer name; None keeps GDAL's default, the output file stem
         encoding: Character encoding (for Shapefile)
         verbose: Print verbose output
         profile: AWS profile for S3 input files
@@ -379,7 +431,7 @@ def write_gdal_format(
         input_path,
         str(config["description"]),
         str(config["cli_command"]),
-        str(config["sample_output"]),
+        f"out{config['extension']}",
     )
 
     # Validate inputs
@@ -451,8 +503,6 @@ def write_gdal_format(
         # Build layer creation options, as RAW strings: the one escape happens
         # at the join below, so a future part cannot be appended unescaped.
         lco_parts = []
-        if config.get("layer_option"):
-            lco_parts.append(f"{config['layer_option']}={layer_name}")
         if config.get("encoding_option"):
             lco_parts.append(f"{config['encoding_option']}={encoding}")
         if format_name == "geopackage":
@@ -468,10 +518,18 @@ def write_gdal_format(
         # pair, so space-separating several options silently corrupts them all.
         lco_options = ", ".join(f"'{_escape_sql_string(part)}'" for part in lco_parts)
         lco_clause = f", LAYER_CREATION_OPTIONS ({lco_options})" if lco_parts else ""
+        # The layer name is a COPY option of DuckDB's GDAL writer; as a layer
+        # creation option GDAL ignores it and names the layer after the file
+        # (#1320). The write is staged under a temp name, so the name the layer
+        # would have had (the output's stem) is passed explicitly.
+        if config.get("layer_option"):
+            layer = layer_name if layer_name is not None else output_file.stem
+            lco_clause = f", {config['layer_option']} '{_escape_sql_string(layer)}'{lco_clause}"
 
-        compatible_cols = _gdal_select_exprs(schema, geometry_col, input_path)
-        if not compatible_cols:
-            raise GeoParquetError(ERROR_NO_COMPATIBLE_COLUMNS.format(format=config["description"]))
+        geometry_read = (
+            resolve_geometry_read(con, input_url, geometry_col) if geometry_col else None
+        )
+        compatible_cols = _gdal_select_exprs(schema, geometry_col, input_path, geometry_read)
 
         where_filter = _build_convert_filter(
             input_path, geometry_col, bbox, geometry, where, use_first_geometry
@@ -486,9 +544,11 @@ def write_gdal_format(
             source_query += f" WHERE {where_filter}"
 
         staging = f"CREATE OR REPLACE TEMP TABLE {_STAGED_TABLE} AS {source_query}"
-        query = f"""
+
+        def copy_query(target: str) -> str:
+            return f"""
             COPY (SELECT * FROM {_STAGED_TABLE})
-            TO {sql_path(output_path)}
+            TO {sql_path(target)}
             WITH (FORMAT GDAL, DRIVER '{config["driver"]}'{lco_clause}{srs_clause})
         """
 
@@ -498,11 +558,16 @@ def write_gdal_format(
         with scoped_write_memory_limit(con, None, verbose):
             debug(f"Executing: {staging}")
             con.execute(staging)
-            debug(f"Executing: {query}")
-            con.execute(query)
-
-        if format_name == "geopackage" and not has_geometry:
-            _drop_gpkg_geometry_column(output_path)
+            with atomic_write(
+                output_path,
+                suffix=str(config["extension"]),
+                sidecar_suffixes=cast("tuple[str, ...] | None", config["sidecar_suffixes"]),
+            ) as target:
+                query = copy_query(target)
+                debug(f"Executing: {query}")
+                con.execute(query)
+                if format_name == "geopackage" and not has_geometry:
+                    _drop_gpkg_geometry_column(target)
 
         success(f"Created {config['description']}: {output_path}")
         return output_path
@@ -613,18 +678,7 @@ def write_csv(
                 if include_bbox:
                     select_cols.append(f"to_json({quote_identifier(col)}) as bbox")
             else:
-                # Check if column is complex type, JSON-encode if needed
-                field = schema.field(col)
-                if (
-                    pa.types.is_struct(field.type)
-                    or pa.types.is_list(field.type)
-                    or pa.types.is_map(field.type)
-                ):
-                    select_cols.append(
-                        f"to_json({quote_identifier(col)}) as {quote_identifier(col)}"
-                    )
-                else:
-                    select_cols.append(quote_identifier(col))
+                select_cols.append(_attribute_expr(schema.field(col)))
 
         if not select_cols:
             raise GeoParquetError("No columns to export after filtering geometry.")
@@ -882,12 +936,7 @@ def create_shapefile_zip(shapefile_path: str | Path, verbose: bool = False) -> P
     stem = shapefile_path.stem
     parent = shapefile_path.parent
 
-    # Find all files with the same stem
-    sidecar_files = list(parent.glob(f"{stem}.*"))
-
-    # Filter to only shapefile-related extensions
-    shapefile_extensions = {".shp", ".shx", ".dbf", ".prj", ".cpg", ".sbn", ".sbx"}
-    sidecar_files = [f for f in sidecar_files if f.suffix.lower() in shapefile_extensions]
+    sidecar_files = shapefile_members(shapefile_path)
 
     if not sidecar_files:
         raise FileNotFoundGeoParquetError(str(shapefile_path), "no shapefile components found")

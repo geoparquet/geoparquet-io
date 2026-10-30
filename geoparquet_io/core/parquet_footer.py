@@ -870,10 +870,11 @@ def _copy_below_footer(source: BinaryIO, sink: BinaryIO, footer_start: int) -> N
 def _inherit_mode(staged: str, parquet_file: str, destination: str) -> None:
     """Give the staged file the mode it is about to replace.
 
-    `atomic_write` stages through `mkstemp`, which creates 0600. Replacing a
-    published file with one nobody else can read is not a metadata edit, so the
-    destination's own mode wins, falling back to the input's when the
-    destination is new.
+    The staged file here is created by `open(..., "wb")` under the process
+    umask, so it carries neither the destination's mode nor the input's.
+    Replacing a published file with a differently-permissioned one is not a
+    metadata edit, so the destination's own mode wins, falling back to the
+    input's when the destination is new.
     """
     source = destination if os.path.exists(destination) else parquet_file
     os.chmod(staged, stat.S_IMODE(os.stat(source).st_mode))
