@@ -115,7 +115,6 @@ dev = [
     "radon>=6.0.1",
     "xenon>=0.9.3",
     "commitizen>=4.0",
-    "mutmut>=3.0",
     "pyyaml>=6.0",
     "codespell>=2.2",
     "import-linter>=2.0",
@@ -358,42 +357,6 @@ module = ["numpy"]
 follow_imports = "skip"
 follow_imports_for_stubs = true
 
-[tool.mutmut]
-source_paths = ["geoparquet_io/"]
-# Fast tests only: slow/network tests are nondeterministic (live third-party
-# servers) and far too slow to run once per mutant. --no-cov drops the coverage
-# overhead and stops [tool.coverage.report].fail_under from failing every mutant.
-# NOTE: mutmut 3 runs pytest in-process and IGNORES a `runner` setting;
-# extra args must go in pytest_add_cli_args.
-# `not meta` is what keeps the tooling meta-tests out: they spawn `uv run ...`
-# subprocesses against the project, and from mutmut's mutants/ cwd that would
-# resolve/install the MUTATED package — meaningless for mutation score and
-# fatal to the run. It replaces the per-file --ignore list those tests used to
-# need. test_import_linter.py is not in the meta lane (it is a fast unit test
-# of the contract config) but shells out the same way, so it keeps its ignore.
-pytest_add_cli_args = [
-    "--no-cov",
-    # --tb=short (not --tb=no): a failure in mutmut's single-process stats
-    # phase must show WHERE it failed. --tb=no once hid a cwd-related crash
-    # (tests that chdir break mutmut's trampoline) and made nightly red with
-    # no diagnosable reason. See the tests/ chdir guard in .pre-commit-config.
-    "--tb=short",
-    "-m", "not slow and not network and not meta",
-    "--ignore=tests/test_import_linter.py",
-]
-pytest_add_cli_args_test_selection = ["tests/"]
-# Everything the test suite reads relative to the repo root must also exist
-# inside mutmut's mutants/ tree (tests import scripts.*, and the meta-tests
-# validate ADRs, CLAUDE.md, workflows, and config files).
-also_copy = [
-    "scripts/",
-    "context/",
-    ".github/",
-    ".pre-commit-config.yaml",
-    ".pip-audit-ignores",
-    "CLAUDE.md",
-]
-
 [tool.bandit]
 exclude_dirs = ["tests", ".venv", "docs"]
 skips = [
@@ -431,9 +394,8 @@ sort_by_size = true
 verbose = false
 
 [tool.codespell]
-# site/ (zensical build) and mutants/ (mutmut working tree) are gitignored
-# build artifacts; scanning them made test_codespell_passes fail on any
-# machine that had built docs or run mutation testing locally.
+# site/ (zensical build) is a gitignored build artifact; scanning it made
+# test_codespell_passes fail on any machine that had built docs locally.
 # *.csv and *.geojson are sample data, not prose: real-world place names and
 # addresses carry their own misspellings, which are data to be preserved
 # verbatim, not mistakes to be fixed.
@@ -447,7 +409,7 @@ verbose = false
 # extension also keeps prose that lives beside the data - notably
 # tests/data/canonical/README.md - checked, which a working directory skip
 # would have swallowed.
-skip = ".git,*.lock,*.parquet,*.json,*.csv,*.geojson,geoparquet-testing,.venv,uv.lock,site,mutants"
+skip = ".git,*.lock,*.parquet,*.json,*.csv,*.geojson,geoparquet-testing,.venv,uv.lock,site"
 ignore-words-list = "nd,ot,crs,inout,hel,bu"
 check-filenames = true
 
@@ -620,9 +582,9 @@ dev = [
 [tool.deptry]
 # DEP002: unused dependencies - skip because optional/benchmark extras aren't always used
 ignore = ["DEP002"]
-# Exclude virtual env, tests, benchmarks, plugin packages (own dependency
-# definitions), and mutmut's mutants/ working tree from analysis
-exclude = [".venv", "tests", "geoparquet_io/benchmarks", "plugins", "mutants"]
+# Exclude virtual env, tests, benchmarks and plugin packages (own dependency
+# definitions) from analysis
+exclude = [".venv", "tests", "geoparquet_io/benchmarks", "plugins"]
 # Known transitive dependencies that appear unused but are required
 per_rule_ignores = {DEP003 = ["tomli"]}
 

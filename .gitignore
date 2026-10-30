@@ -211,6 +211,3 @@ cython_debug/
 
 # Internal agentic dev planning artifacts
 docs/superpowers/
-
-# mutmut mutation-testing working tree
-mutants/

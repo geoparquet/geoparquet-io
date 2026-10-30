@@ -97,12 +97,11 @@ CI runs four test tiers:
 - **Slow tests** (`(slow or meta) and not network`) — run after merge to main
   and nightly; opt in on a PR by adding the `run-slow-tests` label. This tier
   also carries the `meta` lane: repo-tooling checks (codespell, commitizen,
-  doc-sync, mutmut, mypy, validate-claude-md, security tool availability) that
-  shell out to subprocesses. Most re-check something the lint job already runs
-  via pre-commit, so `uv run pytest -m meta` is mainly for when you skip
+  doc-sync, mypy, validate-claude-md, security tool availability) that shell
+  out to subprocesses. Most re-check something the lint job already runs via
+  pre-commit, so `uv run pytest -m meta` is mainly for when you skip
   pre-commit — except commitizen (a `commit-msg`-stage hook, which
-  `pre-commit run --all-files` never runs) and mutmut (no hook at all), where
-  it is the only local check.
+  `pre-commit run --all-files` never runs), where it is the only local check.
 - **Network tests** (`network`) — hit live third-party services (ArcGIS, WFS,
   Carto, ...). They are **non-blocking**: failures open/update a tracking issue
   instead of failing CI, because a remote server's behavior is not something a
@@ -167,31 +166,38 @@ uv run pre-commit run --all-files --hook-stage pre-push  # deptry, vulture,
                                                          # import-linter, menard
 ```
 
-Two ratchet/ignore files gate quality over time:
+One ignore file gates quality over time:
 
 - `.pip-audit-ignores` — self-expiring CVE ignore list shared by the CI
   security job and the daily security audit. Each entry needs an expiry date
   and a reason; expired entries automatically re-fail CI.
-- `.mutation-baseline` — minimum mutation kill rate enforced by the nightly
-  mutation-testing run. Ratchet it up as test quality improves.
 
 ## How the CI is set up (and why)
 
-Merging to `main` requires these status checks to pass: `lint`, `security`,
-`notebooks`, and the `test` matrix (Ubuntu on Python 3.10–3.13, macOS and
-Windows on 3.11–3.13). That list lives in code —
-`scripts/apply_branch_protection.sh` declares the required checks and review
-rules as GitHub rulesets, and an admin re-runs it whenever the list changes.
-If your PR is blocked on a check, that's the system working as intended:
-fix the check.
+Merging to `main` requires two status checks to pass:
 
-Two heavier gates exist but don't run on every PR, so they won't slow down
+- `all-checks` — the last job in `.github/workflows/tests.yml`. It waits for
+  every other job in that workflow (`lint`, `security`, `embeddable-import`,
+  the `test` matrix, `test-duckdb-2`, `notebooks`, `docs-examples`,
+  `slow-tests`, `network-tests`) and fails if any of them failed, was
+  cancelled, or was skipped. Only `slow-tests` and `network-tests` may be
+  skipped, because they do not run on every pull request. A job added to
+  `tests.yml` must be added to its `needs:` list, and
+  `tests/test_ci_wiring.py` fails until it is.
+- `pr-title` — `.github/workflows/pr-title.yml` checks that the pull-request
+  title follows the commit convention. It is its own workflow so that editing
+  the title reruns it without rerunning the suite.
+
+That list lives in code — `scripts/apply_branch_protection.sh` declares the
+required checks and review rules as GitHub rulesets, and an admin re-runs it
+whenever the list changes. If your PR is blocked on a check, that's the system
+working as intended: fix the check.
+
+One heavier gate exists but doesn't run on every PR, so it won't slow down
 day-to-day contributions:
 
 - **Benchmark regression** — label-triggered; fails if performance drops
   10% or more against the baseline.
-- **Mutation testing** — nightly; enforces the kill-rate floor in
-  `.mutation-baseline`.
 
 The repository also maintains itself where it can:
 
