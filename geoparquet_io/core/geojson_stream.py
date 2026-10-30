@@ -259,6 +259,49 @@ def _get_property_columns(
     return [col for col in columns if col.lower() not in excluded]
 
 
+def _reprojected_source_ref(source_ref: str, quoted_geom: str, source_crs: str) -> str:
+    """Wrap ``source_ref`` so every reader below sees WGS84 geometry.
+
+    Reproject first, in a subquery, so everything downstream sees the geometry
+    in the CRS it will be written in. Reprojection is not topology-preserving: a
+    polygon ST_MakeValid has just made valid in the source CRS can come out of
+    ST_Transform invalid in WGS84, and ST_ReducePrecision - a GEOS topology
+    operation - then raises TopologyException on it. Repairing after the
+    transform is also what the explicit --src-crs route already does, since
+    core/pmtiles.py reprojects in a separate process before piping into this
+    query; only the auto-detected CRS path had the two in the wrong order.
+
+    The transform lives in a subquery rather than inline because
+    repair_geometry_sql repeats its argument, and ST_Transform is far too
+    expensive to evaluate once per repetition per row.
+    """
+    # source_crs comes straight out of a file's own geo metadata, so it can
+    # be any free-form string -- escape it like every other SQL literal.
+    source_crs_literal = _escape_sql_string(source_crs)
+    return (
+        f"(SELECT * REPLACE ("
+        f"ST_Transform({quoted_geom}, '{source_crs_literal}', '{WGS84_CRS}') AS {quoted_geom}"
+        f") FROM {source_ref} WHERE {quoted_geom} IS NOT NULL)"
+    )
+
+
+def _output_geometry_exprs(
+    quoted_geom: str, precision: int, repair_geometry: bool
+) -> tuple[str, str]:
+    """The repaired geometry and its precision-reduced form, as SQL expressions.
+
+    Both GeoJSON writers must serialize exactly the same geometry, so the chain
+    lives here: repair (issue #506) happens before precision reduction so
+    downstream consumers (e.g. tippecanoe in the PMTiles pipeline) never see a
+    self-intersection, and ST_ReducePrecision applies the RFC 7946 coordinate
+    grid of 10^-precision (e.g. precision=7 -> grid=0.0000001). Very low
+    precision values may collapse small geometries to empty.
+    """
+    geom_for_output = repair_geometry_sql(quoted_geom) if repair_geometry else quoted_geom
+    geom_with_precision = f"ST_ReducePrecision({geom_for_output}, pow(10, -{precision}))"
+    return geom_for_output, geom_with_precision
+
+
 def _build_feature_query(
     source_ref: str,
     geometry_column: str,
@@ -290,38 +333,16 @@ def _build_feature_query(
     precision = int(precision)
     quoted_geom = quote_identifier(geometry_column)
 
-    # Reproject first, in a subquery, so everything below sees the geometry in
-    # the CRS it will be written in. Reprojection is not topology-preserving: a
-    # polygon ST_MakeValid has just made valid in the source CRS can come out of
-    # ST_Transform invalid in WGS84, and ST_ReducePrecision - a GEOS topology
-    # operation - then raises TopologyException on it. Repairing after the
-    # transform is also what the explicit --src-crs route already does, since
-    # core/pmtiles.py reprojects in a separate process before piping into this
-    # query; only the auto-detected CRS path had the two in the wrong order.
-    #
-    # The transform lives in a subquery rather than inline because
-    # repair_geometry_sql repeats its argument, and ST_Transform is far too
-    # expensive to evaluate once per repetition per row.
     if source_crs:
-        # source_crs comes straight out of a file's own geo metadata, so it can
-        # be any free-form string -- escape it like every other SQL literal.
-        source_crs_literal = _escape_sql_string(source_crs)
-        source_ref = (
-            f"(SELECT * REPLACE ("
-            f"ST_Transform({quoted_geom}, '{source_crs_literal}', '{WGS84_CRS}') AS {quoted_geom}"
-            f") FROM {source_ref} WHERE {quoted_geom} IS NOT NULL)"
-        )
+        source_ref = _reprojected_source_ref(source_ref, quoted_geom, source_crs)
 
-    # Repair invalid geometry (issue #506) before precision/GeoJSON so downstream
-    # consumers (e.g. tippecanoe in the PMTiles pipeline) never see a
-    # self-intersection. The NULL filter in the WHERE clause stays on the raw
-    # column. ST_AsGeoJSON requires native GEOMETRY, which this already is.
-    geom_for_output = repair_geometry_sql(quoted_geom) if repair_geometry else quoted_geom
-
-    # Apply coordinate precision using ST_ReducePrecision before GeoJSON conversion.
-    # The grid size is 10^-precision (e.g., precision=7 -> grid=0.0000001).
-    # Note: Very low precision values may collapse small geometries to empty.
-    geom_with_precision = f"ST_ReducePrecision({geom_for_output}, pow(10, -{precision}))"
+    # The repair/precision chain is shared with the native fast path so both
+    # writers serialize exactly the same geometry. The NULL filter in the WHERE
+    # clause stays on the raw column. ST_AsGeoJSON requires native GEOMETRY,
+    # which this already is.
+    geom_for_output, geom_with_precision = _output_geometry_exprs(
+        quoted_geom, precision, repair_geometry
+    )
     geom_expr = f"ST_AsGeoJSON({geom_with_precision})"
 
     # Build properties expression
@@ -381,6 +402,133 @@ def _build_feature_query(
     """
 
     return query
+
+
+def _native_geojson_writer_available() -> bool:
+    """Whether DuckDB ships the native ``COPY ... (FORMAT GEOJSON)`` writer.
+
+    The format arrived with DuckDB 2.0's spatial extension; on 1.x the same
+    statement is a binder error. Gate on the library's major version so one
+    wheel serves both (#1349).
+    """
+    import duckdb
+
+    major = duckdb.__version__.split(".", 1)[0]
+    return major.isdigit() and int(major) >= 2
+
+
+def _geometry_typed_property_columns(
+    con: duckdb.DuckDBPyConnection,
+    source_ref: str,
+    property_columns: list[str],
+) -> list[str]:
+    """Property columns whose type is GEOMETRY, which the two writers disagree on.
+
+    ``to_json`` renders a GEOMETRY property as a WKT string, while the native
+    writer nests it as GeoJSON. Any such column keeps the conversion on the
+    hand-built writer so the output does not change.
+    """
+    rows = con.execute(f"DESCRIBE SELECT * FROM {source_ref}").fetchall()
+    types = {row[0]: str(row[1]).upper() for row in rows}
+    return [col for col in property_columns if "GEOMETRY" in types.get(col, "")]
+
+
+def _native_feature_collection_to_file(
+    con: duckdb.DuckDBPyConnection,
+    source_ref: str,
+    geometry_column: str,
+    property_columns: list[str],
+    output_path: str,
+    precision: int,
+    source_crs: str | None,
+    repair_geometry: bool,
+) -> int:
+    """Write a FeatureCollection file with DuckDB 2.0's native GeoJSON writer.
+
+    Semantic equivalence with the hand-built writer is the contract
+    (tests/test_geojson_native_writer.py compares both parsed outputs):
+
+    - The geometry chain (reprojection subquery, repair, ST_ReducePrecision)
+      is the same SQL both writers run, and the native serializer formats the
+      resulting doubles exactly as ST_AsGeoJSON does.
+    - ``ID_COLUMN ''`` disables the writer's default promotion of a column
+      named ``id``, keeping it in ``properties`` like the hand-built writer.
+    - The same ``WHERE geometry IS NOT NULL`` filter drops NULL-geometry rows.
+
+    The caller guarantees eligibility; options the writer cannot reproduce
+    (pretty, description, id_field, write_bbox, geometry-typed properties)
+    never reach this function. ``ST_ReducePrecision`` is a GEOS topology
+    operation, so precision was already coerced to int by the caller.
+
+    Returns:
+        Number of features written (the COPY row count after the NULL filter).
+    """
+    quoted_geom = quote_identifier(geometry_column)
+    if source_crs:
+        source_ref = _reprojected_source_ref(source_ref, quoted_geom, source_crs)
+    _, geom_with_precision = _output_geometry_exprs(quoted_geom, precision, repair_geometry)
+    select_list = ", ".join(
+        [f"{geom_with_precision} AS {quoted_geom}"]
+        + [quote_identifier(col) for col in property_columns]
+    )
+    copy_query = (
+        f"COPY (SELECT {select_list} FROM {source_ref} WHERE {quoted_geom} IS NOT NULL) "
+        f"TO {sql_path(output_path)} (FORMAT GEOJSON, ID_COLUMN '', "
+        f"GEOMETRY_COLUMN '{_escape_sql_string(geometry_column)}')"
+    )
+    debug(f"Native GeoJSON COPY: {copy_query}")
+    row = fetch_one(con.execute(copy_query))
+    return int(row[0]) if row else 0
+
+
+def _maybe_native_feature_collection(
+    con: duckdb.DuckDBPyConnection,
+    source_ref: str,
+    geometry_column: str,
+    property_columns: list[str],
+    *,
+    output_path: str | None,
+    precision: int,
+    write_bbox: bool,
+    id_field: str | None,
+    description: str | None,
+    pretty: bool,
+    source_crs: str | None,
+    repair_geometry: bool,
+) -> int | None:
+    """Take the native fast path when its output would be semantically identical.
+
+    Returns the feature count on success, or ``None`` when the conversion must
+    stay on the hand-built writer:
+
+    - no ``output_path``: the stdout paths stream (RS-delimited GeoJSONSeq for
+      tippecanoe, or a FeatureCollection) and COPY only writes files;
+    - ``pretty``/``description``: the native writer has no such options;
+    - ``id_field``: the writer's ID_COLUMN removes the column from properties
+      and emits ``"id": null`` for NULL values, where gpio keeps the property
+      and omits the member per RFC 7946;
+    - ``write_bbox``: the writer's BBOX option computes the box from the
+      precision-reduced geometry and omits it for EMPTY, where gpio rounds the
+      pre-reduction extent;
+    - a GEOMETRY-typed property column (WKT string vs nested GeoJSON);
+    - DuckDB 1.x, which has no native GeoJSON writer.
+    """
+    if not output_path or pretty or description or id_field or write_bbox:
+        return None
+    if not _native_geojson_writer_available():
+        return None
+    if _geometry_typed_property_columns(con, source_ref, property_columns):
+        return None
+    return _native_feature_collection_to_file(
+        con,
+        source_ref,
+        geometry_column,
+        property_columns,
+        output_path,
+        int(precision),
+        source_crs,
+        repair_geometry,
+    )
 
 
 def _stream_to_stdout(
@@ -655,6 +803,24 @@ def convert_to_geojson_stream(
         property_columns = _get_property_columns(con, source_ref, geometry_column)
         debug(f"Property columns: {', '.join(property_columns)}")
 
+        count = _maybe_native_feature_collection(
+            con,
+            source_ref,
+            geometry_column,
+            property_columns,
+            output_path=output_path,
+            precision=precision,
+            write_bbox=write_bbox,
+            id_field=id_field,
+            description=description,
+            pretty=pretty,
+            source_crs=source_crs if needs_reproject else None,
+            repair_geometry=repair_geometry,
+        )
+        if count is not None:
+            success(f"Wrote {count:,} features to {output_path}")
+            return count
+
         # Build and execute query (pass source_crs if reprojection needed)
         query = _build_feature_query(
             source_ref,
@@ -782,6 +948,24 @@ def _convert_from_stream(
 
         # Create view with proper geometry type
         source_ref = _create_view_with_geometry(con, "input_stream", geometry_column)
+
+        count = _maybe_native_feature_collection(
+            con,
+            source_ref,
+            geometry_column,
+            property_columns,
+            output_path=output_path,
+            precision=precision,
+            write_bbox=write_bbox,
+            id_field=id_field,
+            description=description,
+            pretty=pretty,
+            source_crs=source_crs if needs_reproject else None,
+            repair_geometry=repair_geometry,
+        )
+        if count is not None:
+            success(f"Wrote {count:,} features to {output_path}")
+            return count
 
         # Build and execute query
         query = _build_feature_query(
