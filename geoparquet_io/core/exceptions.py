@@ -185,7 +185,8 @@ class ValidationError(GeoParquetError):
 # DuckDB 2.0 adds a second shape: the community a5 build downloads and loads,
 # then its init refuses because a5 for 2.0+ is "distributed from the Query.Farm
 # extension repository, not the DuckDB community repository". Equally not a
-# network problem, and equally not published where gpio installs from.
+# network problem. gpio installs a5 from Query.Farm itself on 2.0+ (#1347), so
+# this shape only appears when the community stub was installed outside gpio.
 _NOT_PUBLISHED_SIGNATURES = ("http 404", "not the duckdb community repository")
 
 
@@ -217,9 +218,13 @@ def is_unpublished_extension_error(exc: BaseException | str | None) -> bool:
 # cannot say.
 _UNPUBLISHED_EXTENSION_HINTS = {
     "a5": (
-        "For DuckDB 2.0 and later, a5 moved to the Query.Farm extension "
-        "repository, and gpio installs only from the DuckDB community repository. "
-        "Use DuckDB 1.5 for the a5 commands."
+        "For DuckDB 2.0 and later, gpio installs a5 automatically from the "
+        "Query.Farm extension repository (https://duckdb-extensions.query.farm), "
+        "where its maintainers publish it; the community registry carries only "
+        "a stub. This failure means the Query.Farm install itself did not "
+        "produce a loadable a5: either no build is published there for this "
+        "DuckDB version and platform, or a community stub installed outside "
+        "gpio was loaded."
     ),
     "geography": (
         "'geography' is published for gpio's whole DuckDB range on mainstream "

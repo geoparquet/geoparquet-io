@@ -165,6 +165,7 @@ Each pivot holds a count by default. `--breakdown-metric` makes it hold a magnit
 ## A5 Grid Aggregation
 
 Aggregate into A5 equal-area hexagonal grid cells. A5 cells at lower resolutions cover large areas (useful for global overviews) while higher resolutions approach parcel level.
+The `a5` DuckDB extension is installed on first use — from the community repository on DuckDB 1.5, from the [Query.Farm repository](https://duckdb-extensions.query.farm) on DuckDB 2.0+ — with its load-time telemetry opted out (see [gpio add a5](add.md#a5-cells)).
 
 ### Resolution
 

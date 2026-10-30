@@ -870,12 +870,39 @@ def pytest_runtest_setup(item):
 # output -- so they must ask before asserting success (#737).
 
 
+#: DuckDB's text when an extension could not be *downloaded* at all (offline,
+#: proxy): the registry never answered, so whether the extension is published
+#: is unknown here. For the availability probe that is still "this environment
+#: cannot run the extension", so the honest outcome is a skip -- unlike the
+#: user-facing classification, which must NOT call an offline error
+#: "unpublished" (#778). The unpublished 404 carries this phrase too, but is
+#: classified first by `is_unpublished_extension_error`. a5 on DuckDB 2.0
+#: downloads from the Query.Farm repository (#1347), the others from the
+#: community registry; both failures read "Failed to download extension".
+_DOWNLOAD_FAILURE = "failed to download extension"
+
+
+def _extension_download_failed(exc) -> bool:
+    """True when ``exc``'s chain carries DuckDB's extension-download failure."""
+    seen: set[int] = set()
+    cur = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if _DOWNLOAD_FAILURE in str(cur).lower():
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 @functools.cache
 def _community_extension_available(name: str) -> bool:
     """Probe once per session whether `name` can be installed and loaded.
 
-    Only the unpublished/404 case counts as unavailable; any other failure is
-    re-raised so a genuinely broken environment still fails loudly.
+    Unavailable means the registry answered 404 (unpublished for this DuckDB)
+    or the download never completed (offline); either way the extension cannot
+    run here and its tests skip. Any other failure -- a corrupt extension, a
+    permission error -- is re-raised so a genuinely broken environment still
+    fails loudly.
     """
     from geoparquet_io.core.duckdb_utils import require_community_extension
     from geoparquet_io.core.exceptions import ExtensionUnavailableError
@@ -883,7 +910,7 @@ def _community_extension_available(name: str) -> bool:
     try:
         require_community_extension(name)
     except ExtensionUnavailableError as exc:
-        if _is_unpublished_extension_error(exc):
+        if _is_unpublished_extension_error(exc) or _extension_download_failed(exc):
             return False
         raise
     return True
@@ -893,8 +920,9 @@ def skip_if_geography_unavailable() -> None:
     """Skip an S2 test when 'geography' is not published for the running DuckDB."""
     if not _community_extension_available("geography"):
         pytest.skip(
-            f"DuckDB community extension 'geography' (S2) is not published for "
-            f"DuckDB {duckdb.__version__}"
+            f"DuckDB community extension 'geography' (S2) is not available for "
+            f"DuckDB {duckdb.__version__} (not published for it, or not "
+            f"downloadable from here)"
         )
 
 
@@ -903,17 +931,19 @@ _GRID_EXTENSIONS = {"a5": "a5", "h3": "h3", "s2": "geography"}
 
 
 def skip_if_grid_unavailable(grid: str) -> None:
-    """Skip a CLI test of grid command ``grid`` when its extension is not published.
+    """Skip a CLI test of grid command ``grid`` when its extension is unavailable.
 
     A no-op for grids that need no community extension (quadkey, kdtree). On
-    DuckDB 2.0, for example, 'geography' is not yet built and 'a5' moved to
-    another repository, while h3 is published for both.
+    DuckDB 2.0, for example, 'geography' is not yet built, while h3 is
+    published for both and a5 auto-installs from the Query.Farm repository
+    (#1347) whenever that registry is reachable.
     """
     extension = _GRID_EXTENSIONS.get(grid)
     if extension is not None and not _community_extension_available(extension):
         pytest.skip(
-            f"DuckDB community extension '{extension}' ({grid}) is not published "
-            f"for DuckDB {duckdb.__version__}"
+            f"DuckDB extension '{extension}' ({grid}) is not available for "
+            f"DuckDB {duckdb.__version__} (not published for it, or not "
+            f"downloadable from here)"
         )
 
 
