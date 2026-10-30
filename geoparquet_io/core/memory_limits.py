@@ -18,7 +18,6 @@ connection is *opened* (#1179). Both draw the number from the same place.
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
@@ -27,17 +26,19 @@ if TYPE_CHECKING:
     import duckdb
 
 from geoparquet_io.core.duckdb_utils import (
+    _apply_memory_limit,
     _current_setting,
-    _displayed_size_max,
     get_duckdb_connection,
+    pin_duckdb_settings,
     restore_duckdb_settings,
 )
 from geoparquet_io.core.logging_config import debug
-
-# DuckDB's memory_limit is a SET value, which cannot be parameterised, so the
-# value has to be interpolated into SQL. Only accept a plain size literal: a
-# decimal number with an optional decimal (KB/MB/GB/TB) or binary (KiB/…) unit.
-_MEMORY_LIMIT_RE = re.compile(r"^\d+(\.\d+)?\s*(K|M|G|T)?i?B$", re.IGNORECASE)
+from geoparquet_io.core.sizing import (
+    displayed_size_max,
+    format_memory_limit,
+    normalize_size_string,
+    parse_size_string,
+)
 
 
 def validate_memory_limit(value: str) -> str:
@@ -46,52 +47,31 @@ def validate_memory_limit(value: str) -> str:
     ``memory_limit`` originates from ``--write-memory`` (or from a library
     caller's config) and ends up inside ``SET memory_limit = '…'``. DuckDB's
     ``execute`` runs multi-statement strings, so an unvalidated value can close
-    the string literal and append arbitrary SQL. Reject anything that is not a
-    plain size.
+    the string literal and append arbitrary SQL. Only a size
+    :func:`~geoparquet_io.core.sizing.parse_size_string` reads is accepted, so
+    the grammar is the one every other size option uses: KB/MB/GB/TB powers of
+    1000, KiB/MiB/GiB/TiB powers of 1024, a bare number MB.
 
     Args:
-        value: Candidate memory limit, e.g. "512MB", "2GB", "4.5 GB", "1GiB"
+        value: Candidate memory limit, e.g. "512MB", "2GB", "4.5 GB", "1GiB", "512"
 
     Returns:
-        The normalized value (whitespace removed, unit upper-cased).
+        The canonical spelling (``sizing.normalize_size_string``): whitespace
+        removed, unit in canonical case, a bare number given its MB unit.
 
     Raises:
-        ValueError: If the value is not a plain size literal.
+        ValueError: If the value is not a plain size.
     """
-    text = str(value).strip()
-    if not _MEMORY_LIMIT_RE.match(text):
+    try:
+        normalized = normalize_size_string(str(value))
+    except ValueError:
+        normalized = None
+    if normalized is None or not parse_size_string(normalized):
         raise ValueError(
             f"Invalid memory_limit {value!r}; expected a size like "
             f"'512MB', '2GB', '4.5GB', or '1GiB'."
         )
-    return text.upper().replace(" ", "")
-
-
-_SIZE_UNITS = {
-    "B": 1,
-    "BYTES": 1,
-    "KB": 1000,
-    "MB": 1000**2,
-    "GB": 1000**3,
-    "TB": 1000**4,
-    "KIB": 1024,
-    "MIB": 1024**2,
-    "GIB": 1024**3,
-    "TIB": 1024**4,
-}
-_SIZE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([A-Za-z]+)\s*$")
-
-
-def parse_size(text: str) -> int | None:
-    """Bytes in a size as DuckDB reads or reports it ("2GB", "14.3 GiB", "0 bytes").
-
-    DuckDB, like ``--write-memory``, reads KB/MB/GB as powers of 1000 and
-    KiB/MiB/GiB as powers of 1024. ``None`` for anything else.
-    """
-    match = _SIZE_RE.match(str(text))
-    if not match or match.group(2).upper() not in _SIZE_UNITS:
-        return None
-    return int(float(match.group(1)) * _SIZE_UNITS[match.group(2).upper()])
+    return normalized
 
 
 #: Where the process's own cgroup is named, and where the hierarchy is mounted.
@@ -183,16 +163,6 @@ def memory_ceiling() -> int | None:
     return min((v for v in candidates if v), default=None)
 
 
-def _format_memory_limit(limit_bytes: int) -> str:
-    # Divides by 1024**3 but writes "GB", which DuckDB reads as 10**9: the
-    # ~7% undershoot is extra headroom, kept rather than churn every limit.
-    limit_gb = limit_bytes / (1024**3)
-    if limit_gb >= 1:
-        return f"{limit_gb:.1f}GB"
-    limit_mb = limit_bytes / (1024**2)
-    return f"{max(128, int(limit_mb))}MB"  # Minimum 128MB
-
-
 #: Share of the memory ceiling a write gives DuckDB by default.
 #:
 #: DuckDB's own default is 80%, but its limit covers only its buffer manager:
@@ -208,18 +178,18 @@ def default_memory_limit() -> str | None:
     ceiling = memory_ceiling()
     if ceiling is None:
         return None
-    return _format_memory_limit(int(ceiling * DEFAULT_MEMORY_FRACTION))
-
-
-def get_default_memory_limit() -> str:
-    """``default_memory_limit``, or a conservative 2GB when the ceiling is unknown."""
-    return default_memory_limit() or "2GB"
+    return format_memory_limit(int(ceiling * DEFAULT_MEMORY_FRACTION))
 
 
 #: Memory each DuckDB thread needs for a large sort to spill rather than fail.
 #: Measured on a 4M-polygon Hilbert COPY: ~250MB per thread spilled reliably,
 #: under ~170MB raised OutOfMemoryException with a temp_directory set.
 _BYTES_PER_THREAD = 512 * 1024**2
+
+
+def _thread_cap(limit_bytes: int) -> int:
+    """The most threads a memory limit supports, each keeping ``_BYTES_PER_THREAD``."""
+    return max(1, limit_bytes // _BYTES_PER_THREAD)
 
 
 def _connection_limit(memory_limit: str | None) -> tuple[str | None, int | None]:
@@ -238,10 +208,10 @@ def _connection_limit(memory_limit: str | None) -> tuple[str | None, int | None]
     limit = validate_memory_limit(memory_limit) if memory_limit else default_memory_limit()
     if limit is None:
         return None, None
-    limit_bytes = parse_size(limit)
+    limit_bytes = parse_size_string(limit)
     if not limit_bytes:  # pragma: no cover - validate_memory_limit accepts only sizes
         return limit, None
-    threads = max(1, limit_bytes // _BYTES_PER_THREAD)
+    threads = _thread_cap(limit_bytes)
     default_threads = os.cpu_count() or threads
     return limit, (threads if threads < default_threads else None)
 
@@ -285,13 +255,29 @@ def open_bounded_connection(
     return con
 
 
+def bound_open_connection(
+    con: duckdb.DuckDBPyConnection, memory_limit: str, verbose: bool = False
+) -> None:
+    """Hold an already-open connection to an explicit limit for the rest of its life.
+
+    For a caller that cannot reopen through :func:`open_bounded_connection`
+    and has no single statement for :func:`scoped_write_memory_limit` to wrap:
+    ``gpio extract bigquery`` opens its connection with the BigQuery extension
+    and credentials layered on, then materializes the scan client-side. The
+    limit and the thread cap it affords follow the same rule as a connection
+    opened bounded (``_connection_limit``); threads only ever come down.
+    """
+    limit, threads = _connection_limit(memory_limit)
+    _apply_memory_limit(con, limit, threads, verbose)
+
+
 def _resolve_limit(con: duckdb.DuckDBPyConnection, memory_limit: str | None) -> str | None:
     """The limit to SET for one write, or None to leave the session's in place.
 
     An explicit ``memory_limit`` always wins. Otherwise the default applies,
     unless the caller already set a stricter limit on their own connection.
 
-    The session is read through ``_displayed_size_max`` because
+    The session is read through ``displayed_size_max`` because
     ``current_setting`` truncates a size to one decimal: the default this very
     module SET when the connection was opened ("5.0GB") reads back as "4.6 GiB",
     4.94e9 bytes against the 5e9 asked for, and comparing that directly made
@@ -306,8 +292,8 @@ def _resolve_limit(con: duckdb.DuckDBPyConnection, memory_limit: str | None) -> 
     if default is None:
         return None
     display = str(_current_setting(con, "memory_limit"))
-    session = parse_size(_displayed_size_max(display) or display)
-    default_bytes = parse_size(default)
+    session = parse_size_string(displayed_size_max(display) or display)
+    default_bytes = parse_size_string(default)
     if session is not None and default_bytes is not None and session < default_bytes:
         return None
     return validate_memory_limit(default)
@@ -337,21 +323,14 @@ def scoped_write_memory_limit(
     keys = dict.fromkeys(("memory_limit", "threads", *pinned))
     saved = {key: _current_setting(con, key) for key in keys}
     try:
-        effective = _resolve_limit(con, memory_limit)
-        if effective is not None:
-            con.execute(f"SET memory_limit = '{effective}'")
-            if verbose:
-                debug(f"DuckDB memory limit: {effective}")
-        limit_bytes = parse_size(str(_current_setting(con, "memory_limit")))
-        if limit_bytes and "threads" not in pinned:
-            threads = max(1, limit_bytes // _BYTES_PER_THREAD)
-            if threads < int(str(saved["threads"])):
-                con.execute(f"SET threads = {threads}")
-                if verbose:
-                    debug(f"DuckDB threads: {threads} (for the memory limit)")
-        for key, value in pinned.items():
-            rendered = str(value).lower() if isinstance(value, bool) else int(value)
-            con.execute(f"SET {key} = {rendered}")
+        _apply_memory_limit(con, _resolve_limit(con, memory_limit), None, verbose)
+        if "threads" not in pinned:
+            # The cap follows the limit now in force -- the one just SET, or a
+            # stricter one the caller had -- as DuckDB reports it.
+            limit_bytes = parse_size_string(str(_current_setting(con, "memory_limit")))
+            if limit_bytes:
+                _apply_memory_limit(con, None, _thread_cap(limit_bytes), verbose)
+        pin_duckdb_settings(con, pinned)
         yield
     finally:
         restore_duckdb_settings(con, saved, verbose)

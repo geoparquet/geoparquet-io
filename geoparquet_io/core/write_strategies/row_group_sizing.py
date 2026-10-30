@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from geoparquet_io.core.duckdb_utils import _strip_trailing_order_by
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.parquet_writer import estimate_row_size
+from geoparquet_io.core.sizing import mb_to_bytes
 
 if TYPE_CHECKING:
     import duckdb
@@ -102,7 +103,7 @@ def _rows_for_mb_target(sample: pa.Table, row_group_size_mb: float, verbose: boo
     """Convert an MB target into a row count using a sample's bytes-per-row."""
 
     bytes_per_row = estimate_row_size(sample)
-    target_bytes = row_group_size_mb * 1024 * 1024
+    target_bytes = mb_to_bytes(row_group_size_mb)
     rows = max(1, int(target_bytes // bytes_per_row))
     if verbose:
         debug(

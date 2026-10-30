@@ -27,6 +27,7 @@ import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
@@ -36,6 +37,7 @@ from geoparquet_io.core.exceptions import ExtensionUnavailableError, ValidationE
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.remote import is_s3_url, needs_httpfs
+from geoparquet_io.core.sizing import nudged_size
 
 # Per-bucket cache for S3 buckets that require authentication
 # Buckets not in this set are accessed without credentials (works for public buckets)
@@ -268,41 +270,6 @@ def _escape_sql_string(value: str) -> str:
 
 
 _SETTING_KEY_RE = re.compile(r"[a-z_]+")
-# A size as current_setting() displays it: "2.7 GiB", "953.6 MiB".
-_DISPLAYED_SIZE_RE = re.compile(r"^(\d+)\.(\d+) ([KMGT]iB)$")
-
-
-def _nudged_size(displayed: str) -> str | None:
-    """A size that DuckDB displays back as ``displayed``; None if it is not a size.
-
-    ``current_setting`` truncates a size to one decimal, so writing the display
-    string back lands a step low ("2.7 GiB" reads back "2.6 GiB") and a loop of
-    save/restore drifts down. Half a displayed step up reads back unchanged.
-    """
-    match = _DISPLAYED_SIZE_RE.match(displayed)
-    if not match:
-        return None
-    whole, frac, unit = match.groups()
-    return f"{whole}.{frac}5{unit}"
-
-
-def _displayed_size_max(displayed: str) -> str | None:
-    """The largest size DuckDB would display as ``displayed``; None if it is not a size.
-
-    The same truncation seen from the other side: "7.4 GiB" is any size from
-    7.4 GiB up to 7.5 GiB, so a *comparison* against a number gpio itself set has
-    to use the top of that range. Against the bottom, the 8.0GB limit gpio puts
-    on a connection reads back as 7.4 GiB = 7.95e9 bytes and looks like a
-    stricter limit somebody else chose. :func:`_nudged_size` takes the middle of
-    the range instead, because a restore has to read back unchanged rather than
-    err high.
-    """
-    match = _DISPLAYED_SIZE_RE.match(displayed)
-    if not match:
-        return None
-    whole, frac, unit = match.groups()
-    step = 10 ** -len(frac)
-    return f"{float(f'{whole}.{frac}') + step:.{len(frac)}f}{unit}"
 
 
 def restore_duckdb_settings(
@@ -329,7 +296,7 @@ def restore_duckdb_settings(
             if _current_setting(con, key) == value:
                 continue
             con.execute(f"RESET {key}")
-            nudged = _nudged_size(value) if isinstance(value, str) else None
+            nudged = nudged_size(value) if isinstance(value, str) else None
             if _current_setting(con, key) != value and nudged:
                 _set_setting(con, key, nudged)
         except duckdb.Error as e:  # pragma: no cover - defensive
@@ -395,6 +362,126 @@ def disable_geoparquet_conversion(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("SET enable_geoparquet_conversion = false")
 
 
+_VERSION_PARTS = re.compile(r"v?(\d+)(?:\.(\d+))?")
+
+
+def _parse_duckdb_version(version: str) -> tuple[int | None, int | None]:
+    """``(major, minor)`` from a DuckDB version string, ``None`` where unreadable.
+
+    Accepts ``"2.0.0"``, ``"2"``, ``"2.0.0-dev123"`` and ``"v2.0.0"``; anything
+    that does not start with a number (``"unknown"``, ``""``) is ``(None, None)``.
+    """
+    match = _VERSION_PARTS.match(version.strip()) if isinstance(version, str) else None
+    if match is None:
+        return None, None
+    major, minor = match.groups()
+    return int(major), (int(minor) if minor is not None else None)
+
+
+@dataclass(frozen=True)
+class DuckDBCapabilities:
+    """What the installed DuckDB can do, where 1.5 and 2.0 differ.
+
+    Built once by :func:`duckdb_capabilities`; every version-dependent branch
+    in gpio reads a field here instead of ``duckdb.__version__`` (#1367). An
+    unreadable version leaves ``major``/``minor`` ``None`` and every 2.0
+    feature ``False``: the 1.5 code paths are the conservative ones.
+
+    Attributes:
+        version: ``duckdb.__version__`` as installed (reported in
+            :class:`ExtensionUnavailableError` and the benchmark environment
+            block, ``core/benchmark.py:get_environment_info``).
+        major, minor: Parsed from ``version``; ``None`` when not numeric.
+        is_v2: ``major >= 2``.
+        core_geometry: DuckDB's core ships GEOMETRY and the serialize /
+            deserialize functions, so read-only inspect paths skip the spatial
+            extension (``get_duckdb_connection(load_spatial=None)``,
+            ``inspect_utils`` previews, #1353).
+        native_geojson_writer: ``COPY ... (FORMAT GEOJSON)`` exists
+            (the native fast path in ``geojson_stream``, #1349).
+        a5_from_query_farm: the community ``a5`` is a stub that points at the
+            Query.Farm repository, which publishes the real build for 2.0+
+            (the routing open PR #1360 adds to ``load_community_extension``).
+            No reader yet by design: it is the hook #1360 is retargeted onto
+            once this lands, so that PR reads the owner instead of the version.
+    """
+
+    version: str
+    major: int | None
+    minor: int | None
+    is_v2: bool
+    core_geometry: bool
+    native_geojson_writer: bool
+    a5_from_query_farm: bool
+
+
+def _capabilities_for(version: str) -> DuckDBCapabilities:
+    """The capabilities a given version string implies (pure; no DuckDB call)."""
+    major, minor = _parse_duckdb_version(version)
+    is_v2 = major is not None and major >= 2
+    return DuckDBCapabilities(
+        version=version,
+        major=major,
+        minor=minor,
+        is_v2=is_v2,
+        core_geometry=is_v2,
+        native_geojson_writer=is_v2,
+        a5_from_query_farm=is_v2,
+    )
+
+
+@functools.cache
+def duckdb_capabilities() -> DuckDBCapabilities:
+    """The installed DuckDB's :class:`DuckDBCapabilities`, computed once per process.
+
+    The one reader of ``duckdb.__version__`` in gpio (``tests/
+    test_duckdb_capabilities.py`` fails on any other). Test hook: a test uses
+    ``pretend_duckdb_capabilities`` / ``pretend_duckdb_version`` from
+    ``tests/test_duckdb_capabilities.py``, which patch ``_capabilities_for`` and
+    call ``duckdb_capabilities.cache_clear()`` around the patch; it never
+    patches ``duckdb.__version__``.
+    """
+    import duckdb
+
+    return _capabilities_for(str(duckdb.__version__))
+
+
+def complete_without_fetch(result) -> None:
+    """Close an open ``execute()`` result without fetching a row from it.
+
+    On DuckDB 2.0 a result stays open until a fetch returns no rows, blocking
+    ``sql()``/``register()`` on the connection; ``complete()`` runs the rest
+    of the statement to completion (keeping a write's effect, unlike
+    ``abort()``) and discards the rows unconverted, so a probe whose rows
+    cannot be fetched (a GEOMETRY that fails to serialize on 1.5+) still
+    leaves nothing open. DuckDB 1.5 has no such method and needs none: the
+    next statement replaces the result there.
+
+    Decided per object, and this is the only place that asks: :func:`fetch_one`
+    (the result API guard's required spelling for a one-row read) is also
+    handed ``sqlite3`` cursors -- GeoPackage metadata in ``format_writers`` --
+    which have no ``complete()`` on any DuckDB, so a client-wide answer would
+    make every such read raise on 2.0. (A ``result_complete`` capability field
+    was tried and removed for exactly that reason.)
+    """
+    complete = getattr(result, "complete", None)
+    if complete is not None:
+        complete()
+
+
+def resolve_load_spatial(load_spatial: bool | None) -> bool:
+    """Whether a connection opened with ``load_spatial`` gets the spatial extension.
+
+    ``None`` is the auto mode: spatial only where DuckDB's own core lacks
+    GEOMETRY (``core_geometry``, #1353). :func:`get_duckdb_connection` decides
+    through this, and a caller that has to know what its auto-mode connection
+    carries resolves it here once and opens with the answer.
+    """
+    if load_spatial is None:
+        return not duckdb_capabilities().core_geometry
+    return load_spatial
+
+
 def fetch_one(result):
     """``result.fetchone()`` for an ``execute()`` result, leaving nothing open.
 
@@ -412,9 +499,7 @@ def fetch_one(result):
     """
     row = result.fetchone()
     if row is not None:
-        complete = getattr(result, "complete", None)
-        if complete is not None:
-            complete()
+        complete_without_fetch(result)
     return row
 
 
@@ -427,6 +512,18 @@ def _set_setting(con: duckdb.DuckDBPyConnection, key: str, value: object) -> Non
         con.execute(f"SET {key} = '{_escape_sql_string(value)}'")
     else:
         con.execute(f"SET {key} = {value}")
+
+
+def pin_duckdb_settings(con: duckdb.DuckDBPyConnection, settings: Mapping[str, int | bool]) -> None:
+    """SET settings a write needs for its duration; the caller restores them.
+
+    The pair of :func:`restore_duckdb_settings`: ``settings`` keys are names from
+    gpio's own code, never user input.
+    """
+    for key, value in settings.items():
+        if not _SETTING_KEY_RE.fullmatch(key):
+            raise ValueError(f"Not a DuckDB setting name: {key!r}")
+        _set_setting(con, key, str(value).lower() if isinstance(value, bool) else int(value))
 
 
 def sql_path(path: str | os.PathLike[str]) -> str:
@@ -1199,12 +1296,33 @@ def _apply_connection_limits(
     :func:`memory_limits.open_bounded_connection`, which passes both.
     """
     limit, cap = (memory_limit, None) if memory_limit is not None else _ceiling_based_limits()
+    _apply_memory_limit(con, limit, None if threads is not None else cap)
+
+
+def _apply_memory_limit(
+    con: duckdb.DuckDBPyConnection,
+    limit: str | None,
+    thread_cap: int | None,
+    verbose: bool = False,
+) -> None:
+    """SET ``memory_limit``, then lower ``threads`` to ``thread_cap`` -- the one place gpio does.
+
+    Every bounded connection goes through here: one freshly opened
+    (:func:`_apply_connection_limits`), one write scoped on a caller's
+    connection (``memory_limits.scoped_write_memory_limit``) and an already-open
+    connection held to a limit (``memory_limits.bound_open_connection``). Either
+    half is skipped when its value is ``None``. The cap only ever brings
+    ``threads`` *down* from what the session has: a thread count is never raised
+    to match a limit.
+    """
     if limit is not None:
         con.execute(f"SET memory_limit = '{_escape_sql_string(str(limit))}';")
-    if cap is None or threads is not None:
-        return
-    if cap < int(str(_current_setting(con, "threads"))):
-        con.execute(f"SET threads = {cap}")
+        if verbose:
+            debug(f"DuckDB memory limit: {limit}")
+    if thread_cap is not None and thread_cap < int(str(_current_setting(con, "threads"))):
+        con.execute(f"SET threads = {thread_cap}")
+        if verbose:
+            debug(f"DuckDB threads: {thread_cap} (for the memory limit)")
 
 
 _PROFILE_ENV_VAR = "GPIO_DUCKDB_PROFILE"
@@ -1388,36 +1506,14 @@ class ProfiledConnection:
         return self._con.__exit__(*exc_info)
 
 
-def has_core_geometry() -> bool:
-    """Whether DuckDB's own core covers gpio's read-only geometry needs.
-
-    DuckDB 2.0 ships the ``GEOMETRY`` type, GeoParquet/native-geo conversion in
-    the Parquet scan, and the serialize/deserialize functions (``ST_AsText``,
-    ``ST_GeomFromWKB``, ``ST_AsWKB``, ``ST_CRS``, ...) without the spatial
-    extension. Read-only paths that touch nothing beyond that set (the
-    ``gpio inspect`` preview and metadata paths) pass ``load_spatial=None``,
-    which :func:`get_duckdb_connection` resolves through this gate, so they
-    start faster and keep working where extensions cannot be downloaded
-    (#1353). There are no core
-    bounds or measure functions (``ST_Extent``, ``ST_Area``, ...), so
-    everything else still loads spatial.
-
-    Gated on the installed major version: on DuckDB 1.x this is False and
-    those paths load spatial exactly as before.
-    """
-    import duckdb
-
-    return int(duckdb.__version__.split(".", 1)[0]) >= 2
-
-
 def load_spatial_extension(con) -> None:
     """INSTALL and LOAD spatial on ``con``, with gpio's session settings.
 
     The one place that knows loading spatial also means setting
     ``geometry_always_xy`` (the setting is registered by the extension, so it
     cannot be set before the LOAD). Used by :func:`get_duckdb_connection` and
-    by paths that opened without spatial (``load_spatial=False`` under
-    :func:`has_core_geometry`) but then hit a function outside DuckDB's core
+    by paths that opened without spatial (``load_spatial=None`` where
+    ``duckdb_capabilities().core_geometry``) but then hit a function outside DuckDB's core
     set and load it on demand.
     """
     _install_and_load_extension(con, "spatial")
@@ -1449,7 +1545,7 @@ def get_duckdb_connection(
     Args:
         load_spatial: Whether to load spatial extension (default: True).
                     If None, loads it only when DuckDB's core lacks the
-                    GEOMETRY type (``not has_core_geometry()``, #1353): the
+                    GEOMETRY type (``not duckdb_capabilities().core_geometry``, #1353): the
                     auto mode for read-only paths that need nothing beyond
                     DuckDB core's serialize/deserialize set, mirroring
                     load_httpfs's None-means-auto convention.
@@ -1529,9 +1625,7 @@ def get_duckdb_connection(
 
     # Always load spatial extension by default (core use case). None is the
     # auto mode: spatial only where DuckDB's own core lacks GEOMETRY (#1353).
-    if load_spatial is None:
-        load_spatial = not has_core_geometry()
-    if load_spatial:
+    if resolve_load_spatial(load_spatial):
         load_spatial_extension(con)
 
     # S3 config, resolved once (explicit kwargs over the ambient scope). The
@@ -1612,7 +1706,9 @@ def load_community_extension(con, name: str, feature: str | None = None) -> None
         con.execute(f"INSTALL {name} FROM community;")
         con.execute(f"LOAD {name};")
     except duckdb.Error as e:
-        raise ExtensionUnavailableError(name, duckdb.__version__, str(e), feature=feature) from e
+        raise ExtensionUnavailableError(
+            name, duckdb_capabilities().version, str(e), feature=feature
+        ) from e
 
 
 def require_community_extension(name: str, feature: str | None = None) -> None:

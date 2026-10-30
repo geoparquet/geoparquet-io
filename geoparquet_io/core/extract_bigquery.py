@@ -37,7 +37,7 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
-from geoparquet_io.core.memory_limits import validate_memory_limit
+from geoparquet_io.core.memory_limits import bound_open_connection
 from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
@@ -1431,12 +1431,10 @@ def _execute_bigquery_extraction(
         credentials_file=credentials_file,
     ) as con:
         # The BigQuery scan is what actually consumes memory here (the result is
-        # materialised as an Arrow table before the PyArrow write), so apply the
-        # user's limit to this connection. validate_memory_limit guards the
-        # interpolation — a SET value cannot be parameterised.
+        # materialised as an Arrow table before the PyArrow write), so the
+        # user's limit -- and the thread cap it affords -- bound this connection.
         if memory_limit is not None:
-            con.execute(f"SET memory_limit = '{validate_memory_limit(memory_limit)}'")
-            debug(f"DuckDB memory limit: {memory_limit}")
+            bound_open_connection(con, memory_limit, verbose=True)
 
         # --sql is its own relation. Building it once here means every step
         # below -- the DESCRIBE, the geometry detection, the read -- is

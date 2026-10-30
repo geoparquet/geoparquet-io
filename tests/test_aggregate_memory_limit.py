@@ -224,7 +224,7 @@ class TestTheDefaultLimit:
     ):
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
         aggregate_by_a5(str(points_parquet), str(tmp_path / "out.parquet"), resolution=5)
-        assert connection_spy[0]["memory_limit"] == _duckdb_renders("5.0GB")
+        assert connection_spy[0]["memory_limit"] == _duckdb_renders("5.0GiB")
 
     def test_a_slurm_job_cgroup_cap_drives_the_default(
         self, points_parquet, tmp_path, monkeypatch, connection_spy
@@ -244,7 +244,7 @@ class TestTheDefaultLimit:
         monkeypatch.setattr(memory_limits, "_PROC_SELF_CGROUP", proc)
         monkeypatch.setattr(memory_limits, "_CGROUP_ROOT", root)
         aggregate_by_a5(str(points_parquet), str(tmp_path / "out.parquet"), resolution=5)
-        assert connection_spy[0]["memory_limit"] == _duckdb_renders("1.0GB")
+        assert connection_spy[0]["memory_limit"] == _duckdb_renders("1.0GiB")
 
     def test_unknown_ceiling_leaves_duckdbs_own_default(
         self, points_parquet, tmp_path, monkeypatch, connection_spy

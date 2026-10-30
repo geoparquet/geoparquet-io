@@ -223,6 +223,7 @@ PACKAGE_CACHES = (
     crs_utils._emit_srid0_crs_warning,
     crs_utils._free_form_source,
     crs_utils._projjson_from_authority,
+    duckdb_utils.duckdb_capabilities,
     file_type.detect_geoparquet_file_type,
     geo_metadata._emit_malformed_geo_warning,
     geo_metadata._note_undeclarable_bbox_column,

@@ -4089,9 +4089,8 @@ def _is_read_failure(exc: BaseException | None) -> bool:
     """
     import duckdb
 
+    # duckdb.HTTPException is an IOException on every supported client.
     io_types: tuple[type, ...] = (OSError, duckdb.IOException)
-    if hasattr(duckdb, "HTTPException"):
-        io_types = (*io_types, duckdb.HTTPException)
     seen: set[int] = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))

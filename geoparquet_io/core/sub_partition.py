@@ -15,6 +15,7 @@ from geoparquet_io.core.logging_config import (
     warn,
 )
 from geoparquet_io.core.partition.by_a5 import partition_by_a5
+from geoparquet_io.core.sizing import bytes_to_mb
 
 # Community extensions a partition type cannot run without, checked once before
 # the file loop so an unavailable one is reported once instead of per file.
@@ -308,7 +309,7 @@ def sub_partition_directory(
     large_files = find_large_files(directory, min_size_bytes)
 
     if not large_files:
-        info(f"No files found exceeding {min_size_bytes / (1024 * 1024):.1f}MB in {directory}")
+        info(f"No files found exceeding {bytes_to_mb(min_size_bytes):.1f}MB in {directory}")
         return {"processed": 0, "skipped": 0, "errors": []}
 
     progress(f"Found {len(large_files)} file(s) exceeding threshold")
@@ -318,7 +319,7 @@ def sub_partition_directory(
     errors = []
 
     for file_path in large_files:
-        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        file_size_mb = bytes_to_mb(os.path.getsize(file_path))
         file_name = os.path.basename(file_path)
         file_stem = Path(file_path).stem
         file_dir = os.path.dirname(file_path)

@@ -216,6 +216,14 @@ the buffers they build from it.
 admin joins; `gpio pmtiles create`, `gpio add bbox-metadata` and the format exports do not
 have it, so they always use the default.
 
+Sizes read the same way in every gpio option that takes one (`--write-memory`,
+`--row-group-size-mb`, `--min-size`): `KB`, `MB`, `GB` and `TB` are powers of 1000 and
+`KiB`, `MiB`, `GiB` and `TiB` powers of 1024, as DuckDB reads them; case and spaces do not
+matter, and a bare number means MB. So `--write-memory 1GB` is 1,000,000,000 bytes and
+`--write-memory 1GiB` is 1,073,741,824. `--row-group-size-mb 128MB` targets 128,000,000
+bytes per row group, and the sizes gpio prints (`inspect`, `check`, `--min-size` reports)
+use the same 1000-based units.
+
 The precedence, highest first:
 
 1. **An explicit `--write-memory`** (or `memory_limit=`, where the Python API takes one).
