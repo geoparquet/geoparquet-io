@@ -15,6 +15,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -270,52 +271,6 @@ def _get_reduced_batch_size(current_batch: int) -> int | None:
     return 1
 
 
-def _make_request(
-    method: str,
-    url: str,
-    params: dict | None = None,
-    data: dict | None = None,
-    max_retries: int = 3,
-    retry_delay: float = 1.0,
-    timeout: float = DEFAULT_TIMEOUT,
-    batch_size: int | None = None,
-) -> dict:
-    """
-    Make HTTP request with retry logic.
-
-    Delegates to shared http_retry module for connection pooling and error handling.
-
-    Args:
-        method: HTTP method ("GET" or "POST")
-        url: Request URL
-        params: Query parameters
-        data: POST data
-        max_retries: Number of retry attempts
-        retry_delay: Base delay between retries
-        timeout: Request timeout in seconds
-        batch_size: Current batch size (for BatchTooLargeError context)
-
-    Returns:
-        Parsed JSON response
-
-    Raises:
-        RemoteAccessError: For HTTP errors
-        BatchTooLargeError: On a paged request, when the server returns non-JSON
-            or a 5xx that survived every retry (batch too large)
-    """
-    return make_request_with_retry(
-        method=method,
-        url=url,
-        params=params,
-        data=data,
-        max_retries=max_retries,
-        retry_delay=retry_delay,
-        timeout=timeout,
-        parse_json=True,
-        batch_size=batch_size,
-    )
-
-
 def _handle_arcgis_response(data: dict, context: str, hint: str = "") -> dict:
     """Handle ArcGIS REST API response and check for errors.
 
@@ -372,7 +327,7 @@ def generate_token(
         "expiration": 60,  # 60 minutes
     }
 
-    result = _make_request("POST", token_url, data=data, timeout=timeout)
+    result = cast("dict", make_request_with_retry("POST", token_url, data=data, timeout=timeout))
     result = _handle_arcgis_response(result, "Token generation")
 
     if "token" not in result:
@@ -530,7 +485,7 @@ def get_layer_info(
         debug(f"Fetching layer info from {service_url}")
 
     params = _add_token_to_params({"f": "json"}, token)
-    data = _make_request("GET", service_url, params=params, timeout=timeout)
+    data = cast("dict", make_request_with_retry("GET", service_url, params=params, timeout=timeout))
     data = _handle_arcgis_response(data, "Layer info")
 
     # Get feature count (using the WHERE and bbox filters)
@@ -598,7 +553,7 @@ def get_feature_count(
 
     params = _add_token_to_params(params, token)
 
-    data = _make_request("GET", query_url, params=params, timeout=timeout)
+    data = cast("dict", make_request_with_retry("GET", query_url, params=params, timeout=timeout))
     data = _handle_arcgis_response(data, "Feature count")
 
     count = _checked_feature_count(data, query_url)
@@ -678,7 +633,10 @@ def fetch_features_page(
 
     params = _add_token_to_params(params, token)
 
-    data = _make_request("GET", query_url, params=params, timeout=timeout, batch_size=limit)
+    data = cast(
+        "dict",
+        make_request_with_retry("GET", query_url, params=params, timeout=timeout, batch_size=limit),
+    )
 
     # A successful page has no "error" key in either GeoJSON or EsriJSON. ArcGIS
     # reports a page it could not serialize as HTTP 200 + a JSON error envelope

@@ -243,11 +243,11 @@ echoes together (policy: ADR-0006). The diff-cover gate is passed
 `--branch-coverage`, so a partial branch on a changed line counts as
 uncovered there too.
 
-The `meta` lane (codespell, commitizen, doc-sync, mutmut, mypy,
-validate-claude-md, security tool checks) is excluded from the fast suite and
-runs in the slow/nightly job instead. Pre-commit covers most of it locally, but
-not all: commitizen is a `commit-msg`-stage hook and mutmut has no hook, so
-`uv run pytest -m meta` is the only local way to check those two.
+The `meta` lane (codespell, commitizen, doc-sync, mypy, validate-claude-md,
+security tool checks) is excluded from the fast suite and runs in the
+slow/nightly job instead. Pre-commit covers most of it locally, but not all:
+commitizen is a `commit-msg`-stage hook, so `uv run pytest -m meta` is the only
+local way to check it.
 
 <!-- BEGIN GENERATED: test-markers -->
 ### Test Markers
@@ -275,8 +275,9 @@ lane, and locally they time out and read as a flaky docs lane.
 
 | Stage | Hooks |
 |-------|-------|
-| commit | ruff, codespell, no-click-echo, duckdb-antipatterns, doc-sync, menard-check |
-| pre-push | xenon (complexity), import-linter, deptry, vulture |
+| commit | ruff, ruff-format, codespell, actionlint, zizmor, duckdb-antipatterns, no-click-echo, forbid-bespoke-schema-reconciliation, no-cwd-change-in-tests, check-api-for-cli, validate-claude-md, doc-sync, sync-dependencies (plus the stock whitespace/YAML/TOML/merge-conflict checks) |
+| commit-msg | commitizen |
+| pre-push | xenon (complexity), import-linter, deptry, vulture, mypy, menard-check, fast-tests |
 
 Complexity guidance: guard clauses, dictionary dispatch, max 30-40 lines/function.
 

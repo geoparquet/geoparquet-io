@@ -1335,7 +1335,7 @@ Find parquet files exceeding a size threshold.
 from geoparquet_io.core.sub_partition import find_large_files
 
 # Find files over 100MB
-large_files = find_large_files('/data/partitions/', min_size_bytes=100 * 1024 * 1024)
+large_files = find_large_files('/data/partitions/', min_size_bytes=100_000_000)
 print(f"Found {len(large_files)} large files")
 for file_path in large_files:
     print(f"  {file_path}")
@@ -1359,7 +1359,7 @@ from geoparquet_io.core.sub_partition import sub_partition_directory
 result = sub_partition_directory(
     directory='/data/h3_partitions/',
     partition_type='h3',
-    min_size_bytes=100 * 1024 * 1024,
+    min_size_bytes=100_000_000,
     resolution=4,
     in_place=True,  # Replace originals
     verbose=True
@@ -1372,7 +1372,7 @@ print(f"Errors: {len(result['errors'])}")
 result = sub_partition_directory(
     directory='/data/s2_partitions/',
     partition_type='s2',
-    min_size_bytes=50 * 1024 * 1024,
+    min_size_bytes=50_000_000,
     auto=True,
     target_rows=50000,
     skip_analysis=True  # Skip per-file analysis for speed
@@ -1383,7 +1383,7 @@ result = sub_partition_directory(
 result = sub_partition_directory(
     directory='/data/quadkey_partitions/',
     partition_type='quadkey',
-    min_size_bytes=200 * 1024 * 1024,
+    min_size_bytes=200_000_000,
     resolution=13,
     partition_resolution=8,
     hive=True
@@ -1907,7 +1907,7 @@ for candidate in plan['candidates']:
 The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 (the files the threshold selected, with sizes and destinations) and `preview`.
 
-- `min_size` takes the CLI's `'100MB'` spelling or a plain byte count.
+- `min_size` takes the CLI's `'100MB'` spelling (MB/GB are powers of 1000, MiB/GiB of 1024) or a plain byte count.
 - A file whose sub-partitions do not hold all of its rows keeps its original —
   rows with a NULL or empty geometry get a NULL index cell and are dropped by
   partitioning — and is reported in `errors`.

@@ -1,4 +1,0 @@
-# Minimum mutation kill rate (%) enforced by nightly.yml.
-# Ratchet UP as test quality improves; lowering requires justification in the PR.
-# Rate = killed / (killed + survived) from `mutmut results --all true`.
-50

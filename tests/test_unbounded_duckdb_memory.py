@@ -30,6 +30,7 @@ import pytest
 
 from geoparquet_io.core import memory_limits
 from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
+from geoparquet_io.core.sizing import parse_size_string
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 GIB = 1024**3
@@ -109,10 +110,10 @@ class TestConnectionDefault:
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
         connection = get_duckdb_connection(load_spatial=False)
         try:
-            limit = memory_limits.parse_size(str(_setting(connection, "memory_limit")))
+            limit = parse_size_string(str(_setting(connection, "memory_limit")))
         finally:
             connection.close()
-        assert limit is not None and limit <= 5 * 10**9  # half the ceiling
+        assert limit is not None and limit <= 5 * GIB  # half the ceiling
 
     def test_an_explicit_limit_is_not_overridden(self, monkeypatch):
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
@@ -397,8 +398,8 @@ class TestRemainingCopySitesAreBounded:
         assert seen, "the disk-rewrite COPY ran outside scoped_write_memory_limit"
         for arg, during, _threads in seen:
             assert arg is None
-            limit = memory_limits.parse_size(during)
-            assert limit is not None and limit <= 5 * 10**9
+            limit = parse_size_string(during)
+            assert limit is not None and limit <= 5 * GIB
 
     @pytest.mark.parametrize("fmt", ["csv", "flatgeobuf"])
     def test_format_export_copy_is_bounded(self, tmp_path, monkeypatch, places_test_file, fmt):
@@ -412,5 +413,5 @@ class TestRemainingCopySitesAreBounded:
         assert seen, f"the {fmt} export COPY ran outside scoped_write_memory_limit"
         for arg, during, _threads in seen:
             assert arg is None
-            limit = memory_limits.parse_size(during)
-            assert limit is not None and limit <= 5 * 10**9
+            limit = parse_size_string(during)
+            assert limit is not None and limit <= 5 * GIB

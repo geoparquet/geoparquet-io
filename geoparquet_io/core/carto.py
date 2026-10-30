@@ -33,7 +33,15 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, sanitize_error_message
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
-from geoparquet_io.core.http_retry import parse_retry_after
+from geoparquet_io.core.http_retry import (
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_RETRY_DELAY,
+    RetryExhaustedError,
+    RetryVerdict,
+    is_retryable_status,
+    response_retry_after,
+    run_with_retry,
+)
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
@@ -45,9 +53,7 @@ from geoparquet_io.core.logging_config import (
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 # Default timeout and retry settings
-DEFAULT_TIMEOUT = 120  # seconds
-DEFAULT_MAX_RETRIES = 3
-DEFAULT_RETRY_DELAY = 2.0  # seconds
+CARTO_REQUEST_TIMEOUT = 120  # seconds; Carto queries run long, so this is above the shared 60s
 
 # A failed fetch is diagnosed with one extra request (see _probe_request_status).
 # Cap how long that may take so a long --timeout is not paid a second time just
@@ -58,10 +64,6 @@ STATUS_PROBE_TIMEOUT = 30.0  # seconds
 # answers a bad query with a short JSON error; the cap keeps a body that is
 # not short from becoming a download.
 PROBE_DETAIL_BYTES = 2048
-
-# Statuses that mean "try again": the server is asking for it (429), asked the
-# client to resend (408), or is itself failing (5xx).
-_RETRYABLE_STATUSES = {408, 429}
 
 # Failures that happened on this machine, not at the server: the query never
 # produced a response to classify, so there is nothing to probe for and no
@@ -300,7 +302,7 @@ def _get_row_count(
     where: str | None = None,
     bbox: tuple[float, float, float, float] | None = None,
     api_key: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: float = CARTO_REQUEST_TIMEOUT,
 ) -> int:
     """Get row count from Carto table with optional filters.
 
@@ -372,7 +374,7 @@ def _carto_sql_json(
     url: str,
     sql: str,
     api_key: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: float = CARTO_REQUEST_TIMEOUT,
 ) -> dict:
     """Run a SQL query against the Carto API and return the parsed JSON response.
 
@@ -405,7 +407,7 @@ def _probe_table_schema(
     url: str,
     table_name: str,
     api_key: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: float = CARTO_REQUEST_TIMEOUT,
 ) -> object:
     """Fetch a Carto table's ``fields`` schema block with one bounded request.
 
@@ -424,7 +426,7 @@ def _detect_geometry_column(
     url: str,
     table_name: str,
     api_key: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: float = CARTO_REQUEST_TIMEOUT,
 ) -> str | None:
     """Probe the Carto SQL API for a geometry-typed column.
 
@@ -449,7 +451,7 @@ def _geometry_column_has_values(
     table_name: str,
     geom_col: str,
     api_key: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: float = CARTO_REQUEST_TIMEOUT,
 ) -> bool:
     """Probe whether a geometry column holds any non-NULL value.
 
@@ -474,7 +476,7 @@ def _detect_table_shape(
     url: str,
     table_name: str,
     api_key: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: float = CARTO_REQUEST_TIMEOUT,
 ) -> tuple[bool, list[str] | None]:
     """Decide whether a Carto table should be extracted as geometry.
 
@@ -520,7 +522,7 @@ def _probe_schema_columns(
     url: str,
     table_name: str,
     api_key: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: float = CARTO_REQUEST_TIMEOUT,
 ) -> list[str] | None:
     """Read a table's column names for the ``--include-cols`` check, tolerating a failure.
 
@@ -629,7 +631,7 @@ def _probe_geometry_srids(
     url: str,
     table_name: str,
     api_key: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: float = CARTO_REQUEST_TIMEOUT,
     source_sql: str | None = None,
 ) -> list[int]:
     """The SRIDs ``the_geom`` holds, read with one bounded query.
@@ -688,7 +690,7 @@ def _resolve_table_crs(
     url: str,
     table_name: str,
     api_key: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: float = CARTO_REQUEST_TIMEOUT,
     source_sql: str | None = None,
 ) -> dict:
     """The CRS to tag the output with, from the SRID the table really stores.
@@ -817,7 +819,9 @@ def _probe_request_status(full_url: str, timeout: float) -> _CartoStatus:
             # Carto puts the reason there ("column ... does not exist"), and a
             # bare "HTTP 400" throws away the only thing the user can act on.
             detail = _read_probe_detail(response) if 400 <= code < 500 and code != 429 else None
-            return _CartoStatus(code, False, detail=detail, retry_after=_retry_after(response))
+            return _CartoStatus(
+                code, False, detail=detail, retry_after=response_retry_after(response)
+            )
     except Exception as probe_error:  # noqa: BLE001 - any failure means "no status"
         # A probe that times out is a probe that could not answer -- no status,
         # the retryable class. It is *not* evidence that the data request timed
@@ -851,11 +855,6 @@ def _read_probe_detail(response) -> str | None:
     return sanitize_error_message(text) or None
 
 
-def _retry_after(response) -> float | None:
-    """The server's ``Retry-After``, capped; None when absent or unreadable."""
-    return parse_retry_after(response.headers.get("Retry-After"))
-
-
 def _classify_fetch_failure(
     exc: BaseException, full_url: str, timeout: float, elapsed: float = 0.0
 ) -> _CartoStatus:
@@ -883,7 +882,7 @@ def _is_retryable(status: _CartoStatus) -> bool:
     if status.local:
         return False
     code = status.code
-    return code is None or code in _RETRYABLE_STATUSES or code >= 500
+    return code is None or is_retryable_status(code)
 
 
 def _fatal_status_error(
@@ -926,14 +925,13 @@ def _fatal_status_error(
     return CartoError(message)
 
 
-def _retry_warning(status: _CartoStatus, attempt: int, max_retries: int, delay: float) -> str:
+def _retry_description(status: _CartoStatus) -> str:
     """Word the retry warning from the classified status, not from the message."""
-    suffix = f"(attempt {attempt + 1}/{max_retries}), retrying in {delay:.1f}s..."
     if status.timed_out:
-        return f"Request timed out {suffix}"
+        return "Request timed out"
     if status.code is None:
-        return f"Could not reach Carto {suffix}"
-    return f"Carto returned HTTP {status.code} {suffix}"
+        return "Could not reach Carto"
+    return f"Carto returned HTTP {status.code}"
 
 
 def _fetch_with_retry(
@@ -942,7 +940,7 @@ def _fetch_with_retry(
     sql: str,
     fmt: str = "GeoJSON",
     api_key: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: float = CARTO_REQUEST_TIMEOUT,
     max_retries: int = DEFAULT_MAX_RETRIES,
     retry_delay: float = DEFAULT_RETRY_DELAY,
 ) -> pa.Table:
@@ -958,7 +956,7 @@ def _fetch_with_retry(
         api_key: Optional API key
         timeout: Request timeout in seconds
         max_retries: Number of retry attempts
-        retry_delay: Base delay between retries (exponential backoff)
+        retry_delay: Base delay between retries (doubles per attempt)
 
     Returns:
         PyArrow Table from DuckDB
@@ -980,58 +978,54 @@ def _fetch_with_retry(
 
     debug(f"Request URL: {full_url[:100]}...")
 
-    last_exception: Exception | None = None
+    started = time.monotonic()
 
-    for attempt in range(max_retries):
+    def attempt() -> pa.Table:
+        nonlocal started
+        conn = get_duckdb_connection()
+        conn.execute("SET allow_asterisks_in_http_paths = true")
+        conn.execute(f"SET http_timeout = {int(timeout * 1000)}")  # milliseconds
+
+        # The clock that decides "timed out" starts at the request, not at
+        # the connection: loading the spatial extension on a cold macOS
+        # runner took longer than a 2 s --timeout and read as one.
         started = time.monotonic()
-        try:
-            conn = get_duckdb_connection()
-            conn.execute("SET allow_asterisks_in_http_paths = true")
-            conn.execute(f"SET http_timeout = {int(timeout * 1000)}")  # milliseconds
+        return conn.sql(f"SELECT * FROM {read_expr}").arrow().read_all()
 
-            # The clock that decides "timed out" starts at the request, not at
-            # the connection: loading the spatial extension on a cold macOS
-            # runner took longer than a 2 s --timeout and read as one.
-            started = time.monotonic()
-            table = conn.sql(f"SELECT * FROM {read_expr}").arrow().read_all()
-            return table
+    def classify(exc: BaseException) -> RetryVerdict:
+        # Classify on the HTTP status the transport reported -- never on the
+        # exception message, which embeds full_url and therefore the user's
+        # own table name, WHERE clause and LIMIT (#1020).
+        status = _classify_fetch_failure(exc, full_url, timeout, elapsed=time.monotonic() - started)
+        fatal = _fatal_status_error(status, table_name, fmt_param, exc)
+        if fatal is not None:
+            raise fatal from exc
+        # Retryable: a 408/429/5xx, or no status at all (refused, DNS, timeout).
+        return RetryVerdict(
+            True,
+            retry_after=status.retry_after,
+            description=_retry_description(status),
+            detail=status,
+        )
 
-        except Exception as e:
-            last_exception = e
-
-            # Classify on the HTTP status the transport reported -- never on the
-            # exception message, which embeds full_url and therefore the user's
-            # own table name, WHERE clause and LIMIT (#1020).
-            status = _classify_fetch_failure(
-                e, full_url, timeout, elapsed=time.monotonic() - started
-            )
-
-            fatal = _fatal_status_error(status, table_name, fmt_param, e)
-            if fatal is not None:
-                raise fatal from e
-
-            # Retryable: a 408/429/5xx, or no status at all (refused, DNS, timeout).
-            if attempt < max_retries - 1:
-                delay = retry_delay * (2**attempt)  # Exponential backoff
-                if status.retry_after is not None:
-                    # The server said how long it wants; a 429 answered with more
-                    # requests on our own schedule is the wrong direction.
-                    delay = max(delay, status.retry_after)
-                warn(_retry_warning(status, attempt, max_retries, delay))
-                time.sleep(delay)
-            elif status.timed_out:
-                raise CartoError(
-                    f"Request timed out after {max_retries} attempts. "
-                    "The table may be too large. Try using --limit or --where to reduce the result set, "
-                    "or increase --timeout."
-                ) from e
-
-    # All retries exhausted. The DuckDB message names the URL it failed on, key
-    # and all; sanitized rather than echoed.
-    raise CartoError(
-        f"Failed to fetch data from Carto after {max_retries} attempts: "
-        f"{sanitize_error_message(str(last_exception))}"
-    ) from last_exception
+    try:
+        return run_with_retry(
+            attempt, max_retries=max_retries, retry_delay=retry_delay, classify=classify
+        )
+    except RetryExhaustedError as e:
+        last = e.last_exception
+        if e.verdict is not None and e.verdict.detail.timed_out:
+            raise CartoError(
+                f"Request timed out after {max_retries} attempts. "
+                "The table may be too large. Try using --limit or --where to reduce the result set, "
+                "or increase --timeout."
+            ) from last
+        # The DuckDB message names the URL it failed on, key and all; sanitized
+        # rather than echoed.
+        raise CartoError(
+            f"Failed to fetch data from Carto after {max_retries} attempts: "
+            f"{sanitize_error_message(str(last))}"
+        ) from last
 
 
 def carto_to_table(
@@ -1044,7 +1038,7 @@ def carto_to_table(
     include_cols: str | None = None,
     exclude_cols: str | None = None,
     api_key: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: float = CARTO_REQUEST_TIMEOUT,
     max_retries: int = DEFAULT_MAX_RETRIES,
     geoparquet_version: str | None = None,
     verbose: bool = False,
@@ -1328,7 +1322,7 @@ def convert_carto_to_geoparquet(
     include_cols: str | None = None,
     exclude_cols: str | None = None,
     api_key: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: float = CARTO_REQUEST_TIMEOUT,
     max_retries: int = DEFAULT_MAX_RETRIES,
     skip_hilbert: bool = False,
     skip_bbox: bool = False,

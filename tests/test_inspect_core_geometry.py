@@ -16,13 +16,11 @@ from click.testing import CliRunner
 
 import geoparquet_io.core.duckdb_utils as duckdb_utils
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.duckdb_utils import (
-    get_duckdb_connection,
-    has_core_geometry,
-)
+from geoparquet_io.core.duckdb_utils import duckdb_capabilities, get_duckdb_connection
 from geoparquet_io.core.inspect_utils import _preview_table_from_query, wkb_to_wkt_preview
+from tests.test_duckdb_capabilities import pretend_duckdb_version
 
-DUCKDB_MAJOR = int(duckdb.__version__.split(".")[0])
+CORE_GEOMETRY = duckdb_capabilities().core_geometry
 
 # Standard ISO WKB point (x=1, y=2).
 WKB_POINT = b"\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf0?\x00\x00\x00\x00\x00\x00\x00@"
@@ -38,10 +36,10 @@ SPATIAL_1X_INTERNAL_POLYGON = (
 )
 
 requires_core_geometry = pytest.mark.skipif(
-    DUCKDB_MAJOR < 2, reason="DuckDB without core GEOMETRY (needs >= 2.0)"
+    not CORE_GEOMETRY, reason="DuckDB without core GEOMETRY (needs >= 2.0)"
 )
 requires_no_core_geometry = pytest.mark.skipif(
-    DUCKDB_MAJOR >= 2, reason="DuckDB with core GEOMETRY (needs < 2.0)"
+    CORE_GEOMETRY, reason="DuckDB with core GEOMETRY (needs < 2.0)"
 )
 
 
@@ -88,23 +86,16 @@ def spatial_unavailable(monkeypatch):
 # --- the version gate itself -------------------------------------------------
 
 
-def test_has_core_geometry_true_on_duckdb_2(monkeypatch):
-    monkeypatch.setattr(duckdb, "__version__", "2.0.0")
-    assert has_core_geometry() is True
+@pytest.mark.parametrize(
+    ("version", "expected"), [("2.0.0", True), ("2.1.3", True), ("1.5.6", False)]
+)
+def test_core_geometry_follows_the_major_version(version, expected):
+    with pretend_duckdb_version(version) as caps:
+        assert caps.core_geometry is expected
 
 
-def test_has_core_geometry_true_past_2(monkeypatch):
-    monkeypatch.setattr(duckdb, "__version__", "2.1.3")
-    assert has_core_geometry() is True
-
-
-def test_has_core_geometry_false_on_duckdb_1(monkeypatch):
-    monkeypatch.setattr(duckdb, "__version__", "1.5.6")
-    assert has_core_geometry() is False
-
-
-def test_has_core_geometry_matches_installed_duckdb():
-    assert has_core_geometry() is (DUCKDB_MAJOR >= 2)
+def test_core_geometry_matches_installed_duckdb():
+    assert CORE_GEOMETRY is (int(duckdb.__version__.split(".")[0]) >= 2)
 
 
 # --- inspect paths never load spatial on DuckDB >= 2.0 ------------------------
@@ -246,7 +237,7 @@ def test_preview_fallback_ignores_non_catalog_errors(extension_loads):
 def test_factory_resolves_auto_spatial_from_core_geometry(extension_loads):
     """load_spatial=None loads spatial exactly where DuckDB's core lacks GEOMETRY."""
     get_duckdb_connection(load_spatial=None, load_httpfs=False).close()
-    assert ("spatial" in extension_loads) is (not has_core_geometry())
+    assert ("spatial" in extension_loads) is (not CORE_GEOMETRY)
 
 
 # --- wkb_to_wkt_preview on a no-spatial connection (DuckDB >= 2.0) ---------------

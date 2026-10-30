@@ -29,6 +29,7 @@ from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
     _get_query_columns,
     _install_and_load_extension,
+    complete_without_fetch,
     fetch_one,
     free_column_name,
     get_duckdb_connection,
@@ -939,7 +940,7 @@ def _try_detect_wkt_column(con, csv_read, col_names_lower):
                     # DuckDB 1.5+'s GEOMETRY serialization error. complete() (2.0)
                     # discards the rows unconverted so the result isn't left open.
                     probe = con.execute("SELECT ST_GeomFromText(?)", [sample[0]])
-                    getattr(probe, "complete", lambda: None)()
+                    complete_without_fetch(probe)
                     return actual_col
             except Exception:
                 continue

@@ -794,3 +794,23 @@ class TestWfsParity:
         assert _param_default(getattr(wfs_module, name), "auto_tile") is True, (
             f"core.wfs.{name} defaults auto_tile=False and will silently truncate"
         )
+
+
+class TestRequestTimeoutsAreTheOwnerConstants:
+    """ArcGIS/WFS use ``http_retry.DEFAULT_TIMEOUT``; Carto uses ``CARTO_REQUEST_TIMEOUT``."""
+
+    def test_arcgis_cli_and_api_defaults_are_the_shared_timeout(self):
+        from geoparquet_io.api import table as table_module
+        from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
+
+        cmd = cli.commands["extract"].commands["arcgis"]
+        assert _cli_option_default(cmd, "--timeout") == DEFAULT_TIMEOUT
+        assert _param_default(ops.from_arcgis, "timeout") == DEFAULT_TIMEOUT
+        assert _param_default(table_module.extract_arcgis, "timeout") == DEFAULT_TIMEOUT
+
+    def test_carto_cli_and_api_defaults_are_the_carto_timeout(self):
+        from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT
+
+        cmd = cli.commands["extract"].commands["carto"]
+        assert _cli_option_default(cmd, "--timeout") == CARTO_REQUEST_TIMEOUT
+        assert _param_default(ops.from_carto, "timeout") == CARTO_REQUEST_TIMEOUT

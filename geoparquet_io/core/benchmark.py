@@ -24,6 +24,7 @@ import psutil
 
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
+    duckdb_capabilities,
     fetch_one,
     get_duckdb_connection,
     quote_identifier,
@@ -229,7 +230,7 @@ def get_environment_info() -> dict[str, Any]:
     env = {
         "os": platform.system(),
         "python_version": platform.python_version(),
-        "duckdb_version": duckdb.__version__,
+        "duckdb_version": duckdb_capabilities().version,
         "cpu": _get_cpu_info(),
     }
 

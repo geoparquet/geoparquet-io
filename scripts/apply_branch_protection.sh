@@ -129,8 +129,22 @@ delete_ruleset() {
 # 3a. Ruleset A: "main: PR + green checks"
 #
 #     enforcement: active, NO bypass actors -> applies to EVERYONE, admins
-#     included. Requires a PR (0 approvals) and all 14 status checks green,
-#     and blocks force-pushes / deletion of main.
+#     included. Requires a PR (0 approvals) and both required status checks
+#     green, and blocks force-pushes / deletion of main.
+#
+#     The required contexts are exactly two (#1367):
+#       - all-checks: the aggregator job in .github/workflows/tests.yml. It
+#         `needs:` every other job in that workflow and fails unless each one
+#         passed (slow-tests and network-tests may be skipped, by design), so
+#         a job added to tests.yml becomes a gate without editing this script.
+#         tests/test_ci_wiring.py keeps its `needs:` list equal to the job
+#         list. It replaces the 13 contexts (lint, security, notebooks and ten
+#         `test (os, py)` cells) this ruleset used to name one by one, which
+#         left every job added after them advisory.
+#       - pr-title: .github/workflows/pr-title.yml. It stays its own workflow
+#         and its own context because it must rerun on a title edit
+#         (`pull_request: edited`); folding it into tests.yml would re-run the
+#         whole suite on every edit.
 #
 #     integration_id is intentionally omitted from each required check so a
 #     check with that name counts no matter which app/source reports it.
@@ -167,20 +181,8 @@ RULESET_A_PAYLOAD="$(
         parameters: {
           strict_required_status_checks_policy: false,
           required_status_checks: [
-            {context: "pr-title"},
-            {context: "lint"},
-            {context: "security"},
-            {context: "notebooks"},
-            {context: "test (ubuntu-latest, 3.10)"},
-            {context: "test (ubuntu-latest, 3.11)"},
-            {context: "test (ubuntu-latest, 3.12)"},
-            {context: "test (ubuntu-latest, 3.13)"},
-            {context: "test (macos-latest, 3.11)"},
-            {context: "test (macos-latest, 3.12)"},
-            {context: "test (macos-latest, 3.13)"},
-            {context: "test (windows-latest, 3.11)"},
-            {context: "test (windows-latest, 3.12)"},
-            {context: "test (windows-latest, 3.13)"}
+            {context: "all-checks"},
+            {context: "pr-title"}
           ]
         }
       },
@@ -212,8 +214,9 @@ STALE_RULESET_NAME="main: review required"
 # -----------------------------------------------------------------------------
 # NET EFFECT
 #   Ruleset A carries no bypass actors, so everyone - contributors and admins
-#   alike - must open a PR and get all 14 checks green before anything lands
-#   on main. Nobody pushes straight to main, force-pushes it, or deletes it.
+#   alike - must open a PR and get both required checks (all-checks and
+#   pr-title) green before anything lands on main. Nobody pushes straight to
+#   main, force-pushes it, or deletes it.
 #
 #   No approving review is required. Contributors without write access still
 #   cannot merge their own PRs, because merging needs write access.
