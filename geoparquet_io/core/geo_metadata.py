@@ -580,6 +580,19 @@ def sanitized_carried_geo_of_file(parquet_file, con=None) -> dict:
     return sanitized_carried_geo(get_kv_metadata(str(parquet_file), con), source=str(parquet_file))
 
 
+def raw_geo_of_file(parquet_file, con=None) -> RawGeo:
+    """:func:`read_raw_geo` of a Parquet file's footer, for the check paths.
+
+    The file-level form of the raw diagnostic decoder: what the file's ``geo``
+    key literally holds, never sanitized and never warned about. A check that
+    wants the object uses ``.block`` (a dict, or None for an absent, undecodable
+    or non-object value). ``parquet_file`` is a RAW path/URL (#718).
+    """
+    from geoparquet_io.core.duckdb_metadata import get_kv_metadata
+
+    return read_raw_geo(get_kv_metadata(str(parquet_file), con))
+
+
 @dataclass(frozen=True)
 class RawGeo:
     """What a ``geo`` key literally holds, as :func:`read_raw_geo` reports it.
@@ -605,8 +618,9 @@ def read_raw_geo(metadata) -> RawGeo:
     """The raw diagnostic ``geo`` decoder: what a metadata mapping's ``geo`` key holds.
 
     One of the two ``geo`` decoders (the other is :func:`sanitized_carried_geo`),
-    for the readers that must report what is literally there -- ``gpio check
-    spec`` and ``gpio inspect meta`` -- and so neither sanitize nor warn. Bytes
+    for the readers that must report what is literally there -- the ``gpio
+    check`` paths and the raw ``Table.metadata`` view -- and so neither sanitize
+    nor warn (:func:`raw_geo_of_file` is its file-level form). Bytes
     or str keys. Never raises: an undecodable value (bad UTF-8, bad JSON) comes
     back with ``error`` set instead of a decoder traceback.
 

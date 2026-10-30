@@ -425,6 +425,7 @@
     "is_covering_path",
     "is_levelled_overview",
     "prune_geo_metadata_to_columns",
+    "raw_geo_of_file",
     "read_raw_geo",
     "reset_malformed_geo_warnings",
     "sanitize_geo_metadata",

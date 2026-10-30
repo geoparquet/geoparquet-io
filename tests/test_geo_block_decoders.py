@@ -271,6 +271,82 @@ def test_inspect_meta_of_a_bad_json_block_warns_with_the_path_and_reads_absent(
         assert json.loads(result.stdout)["geoparquet_metadata"] is None
 
 
+LIST_BLOCK = json.dumps([1, 2]).encode()
+
+
+def _parquet_with_list_block(tmp_path):
+    """A real point file (geometry + bbox struct) whose ``geo`` value is a JSON list."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import shapely
+
+    bbox_type = pa.struct([(n, pa.float64()) for n in ("xmin", "ymin", "xmax", "ymax")])
+    table = pa.table(
+        {
+            "geometry": pa.array([shapely.to_wkb(shapely.Point(1, 2))], pa.binary()),
+            "bbox": pa.array([{"xmin": 1.0, "ymin": 2.0, "xmax": 1.0, "ymax": 2.0}], bbox_type),
+        }
+    )
+    path = tmp_path / "list.parquet"
+    pq.write_table(table.replace_schema_metadata({b"geo": LIST_BLOCK}), path)
+    return str(path)
+
+
+def test_list_shaped_block_reads_absent_on_the_carried_file_readers(tmp_path):
+    """The four write/transform readers that assumed a dict (T3a fourth pass)."""
+    from geoparquet_io.core.add.bbox import _bbox_metadata_advice
+    from geoparquet_io.core.extract import _get_crs_from_file
+    from geoparquet_io.core.format_writers import _should_promote_to_multi
+    from geoparquet_io.core.write_funnels import collect_nonplanar_edges
+
+    path = _parquet_with_list_block(tmp_path)
+    assert collect_nonplanar_edges(path) == {}
+    assert _get_crs_from_file(path, "geometry") is None
+    assert _bbox_metadata_advice(path).startswith("Run 'gpio add bbox-metadata'")
+    assert _should_promote_to_multi(path, "geometry") is False
+
+
+def test_list_shaped_block_is_reported_by_the_check_paths(tmp_path):
+    """``check bbox`` reads the block raw and reports the missing version, not a
+    crash; ``check all`` gets as far as DuckDB, whose Parquet reader refuses the
+    block, and that refusal is a clean ``Error:`` line (as in #982)."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    path = _parquet_with_list_block(tmp_path)
+    for args in (["check", "bbox", path], ["check", "all", path]):
+        result = CliRunner().invoke(cli, args)
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            args,
+            result.output,
+        )
+        assert "has no attribute" not in result.output, (args, result.output)
+        assert "Check could not run" not in result.output, (args, result.output)
+        if args[1] == "bbox":
+            assert "0.0.0" in result.output, result.output
+        else:
+            assert result.output.startswith("Error:") or "0.0.0" in result.output, result.output
+
+
+def test_raw_geo_of_file_reports_the_list_and_has_no_block(tmp_path):
+    from geoparquet_io.core.geo_metadata import raw_geo_of_file
+
+    raw = raw_geo_of_file(_parquet_with_list_block(tmp_path))
+    assert raw.present and raw.value == [1, 2] and raw.block is None
+
+
+def test_inspect_primary_column_highlight_reads_the_sanitized_block(tmp_path):
+    """``inspect meta`` reads the block one way: the highlight repairs a
+    malformed ``primary_column`` from the lone declared column, as the geo
+    section does."""
+    from geoparquet_io.core.inspect import get_primary_geometry_column
+
+    block = {"version": "1.1.0", "primary_column": 5, "columns": {"geometry": {}}}
+    path = _parquet_with_geo(tmp_path / "p.parquet", json.dumps(block).encode())
+    assert get_primary_geometry_column(path) == "geometry"
+
+
 # ---------------------------------------------------------------------------
 # The G1.geo_parse arm (tests/test_owner_guards.py) sees every spelling
 # ---------------------------------------------------------------------------

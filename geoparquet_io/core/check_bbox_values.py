@@ -60,7 +60,7 @@ from geoparquet_io.core.check_verdict import (
     worst,
 )
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet, is_geographic_crs
-from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
+from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.duckdb_utils import (
     disable_geoparquet_conversion,
     fetch_one,
@@ -70,6 +70,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.geo_metadata import raw_geo_of_file
 from geoparquet_io.core.geometry_detection import (
     GeometryRead,
     find_primary_geometry_column,
@@ -650,7 +651,7 @@ def _check(
         return _empty_report("file has no bbox column to compare")
 
     if geo_meta is None:
-        geo_meta = get_geo_metadata(parquet_file) or {}
+        geo_meta = raw_geo_of_file(parquet_file).block or {}
     schema_info = get_schema_info(parquet_file)
     field_types = _bbox_field_types(schema_info, bbox_column)
     if not field_types <= _FLOAT_FIELD_TYPES:

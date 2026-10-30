@@ -49,7 +49,6 @@ from geoparquet_io.core.derive_geo_from_file import (
     derive_v2_geo_metadata,
 )
 from geoparquet_io.core.duckdb_metadata import (
-    get_geo_metadata,
     get_kv_metadata,
     get_schema_info,
     native_geo_type,
@@ -74,6 +73,7 @@ from geoparquet_io.core.geo_metadata import (
     prune_geo_metadata_to_columns,
     read_raw_geo,
     sanitized_carried_geo,
+    sanitized_carried_geo_of_file,
     strip_bboxless_covering,
     strip_derived_stats,
     strip_nonplanar_edges,
@@ -142,7 +142,7 @@ def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
             if native_geo_type(logical) == "GEOGRAPHY":
                 parsed = parse_geometry_logical_type(logical) or {}
                 edges_by_col[col["name"]] = parsed.get("algorithm") or "spherical"
-        geo_meta = get_geo_metadata(input_file) or {}
+        geo_meta = sanitized_carried_geo_of_file(input_file)
         for name, col_meta in (geo_meta.get("columns") or {}).items():
             edges = col_meta.get("edges") if isinstance(col_meta, dict) else None
             if edges == "planar":

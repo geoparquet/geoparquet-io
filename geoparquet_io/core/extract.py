@@ -25,7 +25,6 @@ from geoparquet_io.core.column_selection import (
 from geoparquet_io.core.common import get_parquet_metadata, should_skip_bbox
 from geoparquet_io.core.crs_utils import get_crs_display_name
 from geoparquet_io.core.duckdb_metadata import (
-    get_geo_metadata,
     get_row_count,
     get_schema_info,
     native_geo_type,
@@ -60,6 +59,7 @@ from geoparquet_io.core.geo_metadata import (
     carried_geometry_column,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
+    sanitized_carried_geo_of_file,
     strip_derived_stats,
     strip_orientation,
 )
@@ -152,7 +152,7 @@ def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | No
 
     # First try GeoParquet file-level metadata
     try:
-        geo_meta = get_geo_metadata(input_parquet)
+        geo_meta = sanitized_carried_geo_of_file(input_parquet)
         if geo_meta:
             columns_meta = geo_meta.get("columns", {})
             if geometry_col in columns_meta:

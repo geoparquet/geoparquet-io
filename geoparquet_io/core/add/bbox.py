@@ -22,6 +22,7 @@ from geoparquet_io.core.geo_metadata import (
     build_bbox_covering,
     covering_supported,
     sanitized_carried_geo,
+    sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
@@ -51,7 +52,7 @@ def _bbox_metadata_advice(parquet_file: str, declare_by_name: str | None = None)
     sending the user to a command that would report no bbox column at all.
     """
 
-    geo_meta = get_geo_metadata(parquet_file) or {}
+    geo_meta = sanitized_carried_geo_of_file(parquet_file)
     version = geo_meta.get("version", "")
     if covering_supported(version):
         if check_bbox_structure(parquet_file).get("covering_problem"):
