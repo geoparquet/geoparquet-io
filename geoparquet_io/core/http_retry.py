@@ -1,14 +1,30 @@
 """
 Shared HTTP request utilities with retry logic.
 
-This module provides reusable HTTP request functions with:
-- Exponential backoff retry on transient errors
-- Connection pooling via shared httpx client
-- Gzip compression support
-- Proper error classification (retryable vs. fatal)
+This module is the one owner of gpio's remote-request retry policy (#1367).
+Every extractor (ArcGIS, WFS, Carto) retries through it and keeps no loop,
+status set or backoff of its own.
 
-Used by: arcgis.py (wfs.py and carto.py share the pooled client and the
-``Retry-After`` parser)
+The policy (deterministic, no jitter, so tests can assert the exact sleeps):
+
+* Retried: a transport failure (timeout, dropped connection, network error)
+  and an HTTP 408, 429 or any 5xx. Not retried: every other status (401, 403,
+  404 and the rest of the 4xx), which are the server's considered answer.
+* Backoff: ``retry_delay * 2 ** attempt`` (1s, 2s, 4s with the default delay)
+  between attempts; there is no sleep after the last attempt.
+* ``Retry-After`` (seconds or HTTP-date): the server's minimum. The wait is
+  ``max(backoff, Retry-After)``, because answering a 429 with more requests on
+  our own schedule is the wrong direction.
+* Maximum: no wait is longer than ``MAX_RETRY_AFTER`` (60s), whether it comes
+  from the server's header or from the backoff.
+* A dropped connection or network error resets the pooled client first.
+
+Also provides connection pooling via a shared httpx client, gzip support and
+error classification for ``make_request_with_retry``.
+
+Callers whose attempt is not a plain request (a streamed WFS page, a DuckDB
+read of a Carto URL) call ``run_with_retry`` with their own attempt function and,
+where the status is not on an httpx exception, their own ``classify``.
 """
 
 from __future__ import annotations
@@ -17,6 +33,8 @@ import json
 import math
 import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -35,6 +53,15 @@ _http_client_lock = threading.Lock()
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_DELAY = 1.0
+
+# Statuses worth another attempt: request timeout, rate limit, and every 5xx.
+RETRYABLE_STATUSES = frozenset({408, 429})
+
+
+def is_retryable_status(status: int) -> bool:
+    """Whether an HTTP status is transient: 408, 429 or any 5xx."""
+    return status in RETRYABLE_STATUSES or 500 <= status < 600
+
 
 # The HTTP statuses a server uses to refuse a page it could not produce: its
 # own 500 (ArcGIS Server's "Error performing query operation" HTML page) and a
@@ -159,6 +186,137 @@ def reset_http_client() -> None:
             client_to_close.close()
 
 
+def retry_wait(attempt: int, retry_delay: float, retry_after: float | None = None) -> float:
+    """Seconds to wait after failed attempt number ``attempt`` (0-based).
+
+    ``retry_delay * 2 ** attempt``, raised to the server's ``Retry-After`` when it
+    sent one, and never more than ``MAX_RETRY_AFTER``.
+    """
+    delay = retry_delay * (2**attempt)
+    if retry_after is not None:
+        delay = max(delay, retry_after)
+    return min(delay, MAX_RETRY_AFTER)
+
+
+@dataclass(frozen=True)
+class RetryVerdict:
+    """What a caller's ``classify`` decided about one failed attempt.
+
+    Attributes:
+        retryable: Whether another attempt is worth making.
+        retry_after: The server's capped ``Retry-After`` in seconds, if it sent one.
+        reset_client: Drop the pooled httpx client before the next attempt.
+        description: Words for the retry warning, e.g. ``"HTTP 503"``.
+        detail: Anything the caller wants back on exhaustion (its own status object).
+    """
+
+    retryable: bool
+    retry_after: float | None = None
+    reset_client: bool = False
+    description: str = ""
+    detail: Any = None
+
+
+class RetryExhaustedError(Exception):
+    """Every attempt failed with a retryable error.
+
+    Attributes:
+        attempts: How many attempts were made.
+        last_exception: The failure of the last one (None when no attempt ran).
+        verdict: The classification of that failure.
+    """
+
+    def __init__(
+        self,
+        attempts: int,
+        last_exception: BaseException | None,
+        verdict: RetryVerdict | None = None,
+    ) -> None:
+        super().__init__(f"Request failed after {attempts} attempts: {last_exception}")
+        self.attempts = attempts
+        self.last_exception = last_exception
+        self.verdict = verdict
+
+
+def classify_httpx_error(exc: BaseException) -> RetryVerdict:
+    """The default ``classify``: transport failures and 408/429/5xx are retryable."""
+    import httpx
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return RetryVerdict(
+            is_retryable_status(status),
+            retry_after=parse_retry_after(exc.response.headers.get("Retry-After")),
+            description=f"HTTP {status}",
+        )
+    if isinstance(exc, httpx.TimeoutException):
+        return RetryVerdict(True, description="HTTP timeout")
+    if isinstance(exc, httpx.RequestError):
+        kind = "protocol" if isinstance(exc, httpx.RemoteProtocolError) else "network"
+        return RetryVerdict(True, reset_client=True, description=f"HTTP {kind} error: {exc}")
+    return RetryVerdict(False)
+
+
+def run_with_retry(
+    attempt_fn: Callable[[], Any],
+    *,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    retry_delay: float = DEFAULT_RETRY_DELAY,
+    classify: Callable[[BaseException], RetryVerdict] = classify_httpx_error,
+) -> Any:
+    """Call ``attempt_fn`` until it returns, under the module's retry policy.
+
+    An exception from ``attempt_fn`` goes to ``classify``. A non-retryable
+    verdict re-raises the original exception untouched (``classify`` may itself
+    raise to translate it). A retryable one sleeps ``retry_wait(...)`` and tries
+    again; when the last attempt fails too, ``RetryExhaustedError`` is raised
+    with the last exception attached. Exceptions are the only signal, so an
+    attempt that wants no retry returns or raises something ``classify`` rejects.
+    """
+    last_exception: Exception | None = None
+    last_verdict: RetryVerdict | None = None
+
+    for attempt in range(max_retries):
+        try:
+            return attempt_fn()
+        except Exception as exc:  # noqa: BLE001 - classify decides what is transient
+            verdict = classify(exc)
+            if not verdict.retryable:
+                raise
+            last_exception, last_verdict = exc, verdict
+            if verdict.reset_client:
+                reset_http_client()
+            if attempt >= max_retries - 1:
+                warn(f"{verdict.description} (attempt {attempt + 1}/{max_retries})")
+                break
+            delay = retry_wait(attempt, retry_delay, verdict.retry_after)
+            warn(
+                f"{verdict.description} (attempt {attempt + 1}/{max_retries}), "
+                f"retrying in {delay:.1f}s..."
+            )
+            time.sleep(delay)
+
+    raise RetryExhaustedError(max_retries, last_exception, last_verdict) from last_exception
+
+
+def _status_error(url: str, exc: Any) -> RemoteAccessError:
+    """The user-facing error for an HTTP status that will not be retried further."""
+    status = exc.response.status_code
+    if status == 401:
+        return RemoteAccessError(
+            url, "Authentication required. Use --token or --username/--password."
+        )
+    if status == 403:
+        return RemoteAccessError(
+            url, "Access denied. Check your credentials and service permissions."
+        )
+    if status == 404:
+        return RemoteAccessError(url, "Service not found (404). Check the URL.")
+    # Not str(exc): httpx spells out the full request URL there, and on
+    # ArcGIS the token rides in the query string.
+    return RemoteAccessError(url, f"HTTP error {status} {exc.response.reason_phrase}".rstrip())
+
+
 def make_request_with_retry(
     method: str,
     url: str,
@@ -180,8 +338,8 @@ def make_request_with_retry(
         params: Query parameters (for GET)
         data: Form data (for POST)
         headers: Additional headers (Accept-Encoding: gzip added automatically)
-        max_retries: Number of retry attempts
-        retry_delay: Base delay between retries (exponential backoff)
+        max_retries: Number of attempts
+        retry_delay: Base delay between retries (doubles per attempt)
         timeout: Request timeout in seconds
         parse_json: If True, parse response as JSON and raise BatchTooLargeError
             on parse failure. If False, return raw bytes.
@@ -202,132 +360,96 @@ def make_request_with_retry(
     """
     import httpx
 
-    last_exception: Exception | None = None
-
     # Build headers with compression support
     request_headers = {"Accept-Encoding": "gzip, deflate"}
     if headers:
         request_headers.update(headers)
 
-    for attempt in range(max_retries):
+    def attempt() -> dict[str, Any] | bytes:
+        client = get_shared_http_client(timeout=timeout)
+
+        # Pass timeout per-request as well: the shared client caches the
+        # timeout it was first created with, so a later call asking for a
+        # longer timeout would otherwise be silently capped at that value.
+        if method == "GET":
+            response = client.get(url, params=params, headers=request_headers, timeout=timeout)
+        else:
+            response = client.post(url, data=data, headers=request_headers, timeout=timeout)
+
         try:
-            client = get_shared_http_client(timeout=timeout)
-
-            # Pass timeout per-request as well: the shared client caches the
-            # timeout it was first created with, so a later call asking for a
-            # longer timeout would otherwise be silently capped at that value.
-            if method == "GET":
-                response = client.get(url, params=params, headers=request_headers, timeout=timeout)
-            else:
-                response = client.post(url, data=data, headers=request_headers, timeout=timeout)
-
             response.raise_for_status()
-
-            if parse_json:
-                try:
-                    return cast(dict[str, Any], response.json())
-                except json.JSONDecodeError as e:
-                    # Server returned non-JSON (likely HTML error page).
-                    # Don't include response content in error - may contain
-                    # sensitive tokens; the status code and Content-Type are
-                    # safe and make a WAF/proxy block page distinguishable
-                    # from a genuine payload-size truncation.
-                    content_type = response.headers.get("content-type", "unknown")
-                    detail = (
-                        f"Server returned non-JSON response "
-                        f"(Content-Type: {content_type}, HTTP {response.status_code}), "
-                        f"likely an HTML error or block page"
-                    )
-                    if batch_size is None:
-                        # No batch was requested (e.g. a feature-count or
-                        # layer-info query), so reducing the batch size cannot
-                        # help and BatchTooLargeError would be misleading.
-                        raise RemoteAccessError(url, detail) from e
-                    # This is NOT retryable with same params - batch is too large
-                    raise BatchTooLargeError(
-                        url=url,
-                        batch_size=batch_size,
-                        reason=detail,
-                    ) from e
-            else:
-                return bytes(response.content)
-
-        except httpx.RemoteProtocolError as e:
-            # Server disconnected - reset connection pool and retry
-            last_exception = e
-            warn(f"HTTP protocol error (attempt {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                reset_http_client()
-                time.sleep(retry_delay * (attempt + 1))
-
-        except httpx.TimeoutException as e:
-            last_exception = e
-            warn(f"HTTP timeout after {timeout}s (attempt {attempt + 1}/{max_retries})")
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))
-
-        except httpx.NetworkError as e:
-            last_exception = e
-            warn(f"HTTP network error (attempt {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))
-
         except httpx.HTTPStatusError as e:
-            status = e.response.status_code
-            page_refused = batch_size is not None and status in PAGE_REFUSAL_STATUSES
-
-            if page_refused and parse_json and status == 500:
-                envelope = _json_error_envelope(e.response)
-                if envelope is not None:
-                    # Newer ArcGIS servers mirror their JSON error code into the
-                    # HTTP status - always their own 500, never a proxy's 502/504,
-                    # whose JSON bodies (if any) are the proxy's and keep the
-                    # retries below. The envelope is the server's considered
-                    # answer, and the caller's classifier (not this loop) decides
-                    # whether it is a page-size problem or a specific, fatal error.
-                    return envelope
-
-            # Retry on rate limit or server errors
-            if status == 429 or (500 <= status < 600):
-                last_exception = e
-                warn(f"HTTP {status} (attempt {attempt + 1}/{max_retries})")
-                if attempt < max_retries - 1:
-                    retry_after = parse_retry_after(e.response.headers.get("Retry-After"))
-                    delay = retry_after if retry_after is not None else retry_delay * (attempt + 1)
-                    time.sleep(delay)
-                    continue
-                if page_refused and batch_size is not None:  # the latter narrows the type
-                    # A 500/502/504 without a JSON body that survived every
-                    # same-size retry on a *paged* request: ArcGIS Server answers
-                    # a page it cannot serialize with HTTP 500 + an HTML error
-                    # page on the GeoJSON path, and a proxy in front of it gives
-                    # up with 502/504 (#1134). The page size is the one lever
-                    # left, and it belongs to the caller's batch-size ladder.
-                    raise BatchTooLargeError(
-                        url=url,
-                        batch_size=batch_size,
-                        reason=f"HTTP {status} persisted after {max_retries} attempts",
-                    ) from e
-
-            # Fatal errors - don't retry
-            if status == 401:
-                raise RemoteAccessError(
-                    url, "Authentication required. Use --token or --username/--password."
-                ) from None
-            if status == 403:
-                raise RemoteAccessError(
-                    url, "Access denied. Check your credentials and service permissions."
-                ) from None
-            if status == 404:
-                raise RemoteAccessError(url, "Service not found (404). Check the URL.") from None
-
-            # Not str(e): httpx spells out the full request URL there, and on
-            # ArcGIS the token rides in the query string.
-            reason_phrase = e.response.reason_phrase
-            raise RemoteAccessError(url, f"HTTP error {status} {reason_phrase}".rstrip()) from e
-
-        except BatchTooLargeError:
-            # Don't retry BatchTooLargeError - caller needs to reduce batch size
+            if _is_page_refusal(e.response.status_code, batch_size) and parse_json:
+                if e.response.status_code == 500:
+                    envelope = _json_error_envelope(e.response)
+                    if envelope is not None:
+                        # Newer ArcGIS servers mirror their JSON error code into
+                        # the HTTP status - always their own 500, never a proxy's
+                        # 502/504, whose JSON bodies (if any) are the proxy's and
+                        # keep the retries. The envelope is the server's considered
+                        # answer, and the caller's classifier (not this loop)
+                        # decides whether it is a page-size problem or a specific,
+                        # fatal error.
+                        return envelope
             raise
 
-    raise RemoteAccessError(url, f"Request failed after {max_retries} attempts: {last_exception}")
+        if not parse_json:
+            return bytes(response.content)
+        try:
+            return cast(dict[str, Any], response.json())
+        except json.JSONDecodeError as e:
+            # Server returned non-JSON (likely HTML error page).
+            # Don't include response content in error - may contain
+            # sensitive tokens; the status code and Content-Type are
+            # safe and make a WAF/proxy block page distinguishable
+            # from a genuine payload-size truncation.
+            content_type = response.headers.get("content-type", "unknown")
+            detail = (
+                f"Server returned non-JSON response "
+                f"(Content-Type: {content_type}, HTTP {response.status_code}), "
+                f"likely an HTML error or block page"
+            )
+            if batch_size is None:
+                # No batch was requested (e.g. a feature-count or
+                # layer-info query), so reducing the batch size cannot
+                # help and BatchTooLargeError would be misleading.
+                raise RemoteAccessError(url, detail) from e
+            # This is NOT retryable with same params - batch is too large
+            raise BatchTooLargeError(url=url, batch_size=batch_size, reason=detail) from e
+
+    try:
+        return cast(
+            "dict[str, Any] | bytes",
+            run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay),
+        )
+    except httpx.HTTPStatusError as e:
+        raise _status_error(url, e) from _cause(e)
+    except RetryExhaustedError as e:
+        last = e.last_exception
+        if isinstance(last, httpx.HTTPStatusError):
+            status = last.response.status_code
+            if batch_size is not None and status in PAGE_REFUSAL_STATUSES:
+                # A 500/502/504 without a JSON body that survived every
+                # same-size retry on a *paged* request: ArcGIS Server answers
+                # a page it cannot serialize with HTTP 500 + an HTML error
+                # page on the GeoJSON path, and a proxy in front of it gives
+                # up with 502/504 (#1134). The page size is the one lever
+                # left, and it belongs to the caller's batch-size ladder.
+                raise BatchTooLargeError(
+                    url=url,
+                    batch_size=batch_size,
+                    reason=f"HTTP {status} persisted after {max_retries} attempts",
+                ) from last
+            raise _status_error(url, last) from _cause(last)
+        raise RemoteAccessError(
+            url, f"Request failed after {max_retries} attempts: {last}"
+        ) from last
+
+
+def _is_page_refusal(status: int, batch_size: int | None) -> bool:
+    return batch_size is not None and status in PAGE_REFUSAL_STATUSES
+
+
+def _cause(exc: Any) -> Any:
+    """The chained cause of a status error: none for the fixed 401/403/404 messages."""
+    return None if exc.response.status_code in (401, 403, 404) else exc

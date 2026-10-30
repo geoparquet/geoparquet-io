@@ -162,7 +162,7 @@ def test_a_dropped_connection_resets_the_pool_then_succeeds(monkeypatch):
     assert http.sleeps == [1.0]
 
 
-def test_a_timeout_backs_off_linearly_then_gives_up(monkeypatch):
+def test_a_timeout_backs_off_then_gives_up(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, timeout_error())
 
@@ -180,7 +180,7 @@ def test_a_network_error_is_retried(monkeypatch):
 
     assert _make_request(SERVICE) == b"<ok/>"
     assert http.sleeps == [1.0]
-    assert http.resets == 0
+    assert http.resets == 1  # one policy: a broken connection resets the pool
 
 
 def test_a_custom_retry_delay_scales_the_backoff(monkeypatch):
@@ -233,7 +233,7 @@ def test_an_http_date_retry_after_is_honoured_and_capped(monkeypatch):
     assert http.sleeps == [MAX_RETRY_AFTER]
 
 
-def test_an_unreadable_retry_after_degrades_to_linear_backoff(monkeypatch):
+def test_an_unreadable_retry_after_degrades_to_the_plain_backoff(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, error_reply(503, retry_after="later"), xml_reply(b"<ok/>"))
 
@@ -590,11 +590,21 @@ def test_another_400_reports_the_body(monkeypatch):
         _fetch_wfs_page(SERVICE)
 
 
-def test_a_5xx_page_is_not_retried_by_the_page_fetcher(monkeypatch):
+def test_a_5xx_page_is_retried_by_the_page_fetcher_then_reported(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, error_reply(503))
 
     with pytest.raises(WFSError, match="HTTP 503"):
+        _fetch_wfs_page(SERVICE)
+    assert len(http.requests) == 3
+    assert http.sleeps == [2.0, 4.0]
+
+
+def test_a_4xx_page_is_not_retried_by_the_page_fetcher(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(SERVICE, error_reply(404))
+
+    with pytest.raises(WFSError, match="HTTP 404"):
         _fetch_wfs_page(SERVICE)
     assert len(http.requests) == 1
 
@@ -1084,3 +1094,35 @@ def test_an_unresolvable_layer_crs_fails_before_any_feature_is_requested(monkeyp
         )
 
     assert not [r for r in http.requests if _is_getfeature(r) or _is_hits(r)]
+
+
+def test_extract_wfs_retries_a_503_through_the_shared_owner(monkeypatch, tmp_path):
+    """`gpio extract wfs` rides out a 503 on a page via ``http_retry.run_with_retry``."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+    from geoparquet_io.core import wfs as wfs_module
+
+    http = FakeTransport.install(monkeypatch)
+    wfs_capabilities(monkeypatch, CAPABILITIES, SCHEMA)
+    http.respond(_is_getfeature, error_reply(503), _pages(6, 100_000))
+    stub_service(http, total=6)
+    seen = []
+    real = wfs_module.run_with_retry
+
+    def recording(*args, **kwargs):
+        seen.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(wfs_module, "run_with_retry", recording)
+    out = tmp_path / "retried.parquet"
+
+    result = CliRunner().invoke(
+        cli,
+        ["extract", "wfs", SERVICE, TYPENAME, str(out), "--wfs-version", "1.1.0", "--skip-hilbert"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert pq.read_metadata(out).num_rows == 6
+    assert seen, "the page was fetched without going through http_retry.run_with_retry"
+    assert http.sleeps == [2.0]  # the page fetcher's retry_delay, one doubling step

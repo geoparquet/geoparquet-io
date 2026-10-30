@@ -33,7 +33,13 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, sanitize_error_message
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
-from geoparquet_io.core.http_retry import parse_retry_after
+from geoparquet_io.core.http_retry import (
+    RetryExhaustedError,
+    RetryVerdict,
+    is_retryable_status,
+    parse_retry_after,
+    run_with_retry,
+)
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
@@ -61,7 +67,6 @@ PROBE_DETAIL_BYTES = 2048
 
 # Statuses that mean "try again": the server is asking for it (429), asked the
 # client to resend (408), or is itself failing (5xx).
-_RETRYABLE_STATUSES = {408, 429}
 
 # Failures that happened on this machine, not at the server: the query never
 # produced a response to classify, so there is nothing to probe for and no
@@ -883,7 +888,7 @@ def _is_retryable(status: _CartoStatus) -> bool:
     if status.local:
         return False
     code = status.code
-    return code is None or code in _RETRYABLE_STATUSES or code >= 500
+    return code is None or is_retryable_status(code)
 
 
 def _fatal_status_error(
@@ -926,14 +931,13 @@ def _fatal_status_error(
     return CartoError(message)
 
 
-def _retry_warning(status: _CartoStatus, attempt: int, max_retries: int, delay: float) -> str:
+def _retry_description(status: _CartoStatus) -> str:
     """Word the retry warning from the classified status, not from the message."""
-    suffix = f"(attempt {attempt + 1}/{max_retries}), retrying in {delay:.1f}s..."
     if status.timed_out:
-        return f"Request timed out {suffix}"
+        return "Request timed out"
     if status.code is None:
-        return f"Could not reach Carto {suffix}"
-    return f"Carto returned HTTP {status.code} {suffix}"
+        return "Could not reach Carto"
+    return f"Carto returned HTTP {status.code}"
 
 
 def _fetch_with_retry(
@@ -958,7 +962,7 @@ def _fetch_with_retry(
         api_key: Optional API key
         timeout: Request timeout in seconds
         max_retries: Number of retry attempts
-        retry_delay: Base delay between retries (exponential backoff)
+        retry_delay: Base delay between retries (doubles per attempt)
 
     Returns:
         PyArrow Table from DuckDB
@@ -980,58 +984,54 @@ def _fetch_with_retry(
 
     debug(f"Request URL: {full_url[:100]}...")
 
-    last_exception: Exception | None = None
+    started = time.monotonic()
 
-    for attempt in range(max_retries):
+    def attempt() -> pa.Table:
+        nonlocal started
+        conn = get_duckdb_connection()
+        conn.execute("SET allow_asterisks_in_http_paths = true")
+        conn.execute(f"SET http_timeout = {int(timeout * 1000)}")  # milliseconds
+
+        # The clock that decides "timed out" starts at the request, not at
+        # the connection: loading the spatial extension on a cold macOS
+        # runner took longer than a 2 s --timeout and read as one.
         started = time.monotonic()
-        try:
-            conn = get_duckdb_connection()
-            conn.execute("SET allow_asterisks_in_http_paths = true")
-            conn.execute(f"SET http_timeout = {int(timeout * 1000)}")  # milliseconds
+        return conn.sql(f"SELECT * FROM {read_expr}").arrow().read_all()
 
-            # The clock that decides "timed out" starts at the request, not at
-            # the connection: loading the spatial extension on a cold macOS
-            # runner took longer than a 2 s --timeout and read as one.
-            started = time.monotonic()
-            table = conn.sql(f"SELECT * FROM {read_expr}").arrow().read_all()
-            return table
+    def classify(exc: BaseException) -> RetryVerdict:
+        # Classify on the HTTP status the transport reported -- never on the
+        # exception message, which embeds full_url and therefore the user's
+        # own table name, WHERE clause and LIMIT (#1020).
+        status = _classify_fetch_failure(exc, full_url, timeout, elapsed=time.monotonic() - started)
+        fatal = _fatal_status_error(status, table_name, fmt_param, exc)
+        if fatal is not None:
+            raise fatal from exc
+        # Retryable: a 408/429/5xx, or no status at all (refused, DNS, timeout).
+        return RetryVerdict(
+            True,
+            retry_after=status.retry_after,
+            description=_retry_description(status),
+            detail=status,
+        )
 
-        except Exception as e:
-            last_exception = e
-
-            # Classify on the HTTP status the transport reported -- never on the
-            # exception message, which embeds full_url and therefore the user's
-            # own table name, WHERE clause and LIMIT (#1020).
-            status = _classify_fetch_failure(
-                e, full_url, timeout, elapsed=time.monotonic() - started
-            )
-
-            fatal = _fatal_status_error(status, table_name, fmt_param, e)
-            if fatal is not None:
-                raise fatal from e
-
-            # Retryable: a 408/429/5xx, or no status at all (refused, DNS, timeout).
-            if attempt < max_retries - 1:
-                delay = retry_delay * (2**attempt)  # Exponential backoff
-                if status.retry_after is not None:
-                    # The server said how long it wants; a 429 answered with more
-                    # requests on our own schedule is the wrong direction.
-                    delay = max(delay, status.retry_after)
-                warn(_retry_warning(status, attempt, max_retries, delay))
-                time.sleep(delay)
-            elif status.timed_out:
-                raise CartoError(
-                    f"Request timed out after {max_retries} attempts. "
-                    "The table may be too large. Try using --limit or --where to reduce the result set, "
-                    "or increase --timeout."
-                ) from e
-
-    # All retries exhausted. The DuckDB message names the URL it failed on, key
-    # and all; sanitized rather than echoed.
-    raise CartoError(
-        f"Failed to fetch data from Carto after {max_retries} attempts: "
-        f"{sanitize_error_message(str(last_exception))}"
-    ) from last_exception
+    try:
+        return run_with_retry(
+            attempt, max_retries=max_retries, retry_delay=retry_delay, classify=classify
+        )
+    except RetryExhaustedError as e:
+        last = e.last_exception
+        if e.verdict is not None and e.verdict.detail.timed_out:
+            raise CartoError(
+                f"Request timed out after {max_retries} attempts. "
+                "The table may be too large. Try using --limit or --where to reduce the result set, "
+                "or increase --timeout."
+            ) from last
+        # The DuckDB message names the URL it failed on, key and all; sanitized
+        # rather than echoed.
+        raise CartoError(
+            f"Failed to fetch data from Carto after {max_retries} attempts: "
+            f"{sanitize_error_message(str(last))}"
+        ) from last
 
 
 def carto_to_table(

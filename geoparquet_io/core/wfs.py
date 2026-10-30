@@ -56,10 +56,11 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
-    get_shared_http_client as _get_shared_http_client_base,
+    RetryExhaustedError,
+    run_with_retry,
 )
 from geoparquet_io.core.http_retry import (
-    parse_retry_after,
+    get_shared_http_client as _get_shared_http_client_base,
 )
 from geoparquet_io.core.http_retry import (
     reset_http_client as _reset_http_client_base,
@@ -218,8 +219,6 @@ def _make_request(
     """
     import httpx
 
-    last_exception: Exception | None = None
-
     headers = {
         "Accept-Encoding": "gzip, deflate",
     }
@@ -234,59 +233,40 @@ def _make_request(
             param_summary += f", ... ({len(params)} params)"
         request_desc = f"{url}?{param_summary}"
 
-    for attempt in range(max_retries):
-        try:
-            debug(f"HTTP GET: {request_desc[:100]}{'...' if len(request_desc) > 100 else ''}")
-            start_time = time.time()
-            client = _get_shared_http_client(timeout=timeout)
-            # The timeout rides on the request, not just the client: the shared
-            # client keeps the timeout of whichever caller built it first, so a
-            # client-level timeout alone would cap every later caller (#1184).
-            response = client.get(url, params=params, headers=headers, timeout=timeout)
-            elapsed = time.time() - start_time
-            response.raise_for_status()
-            content = bytes(response.content)
-            debug(f"HTTP OK: {len(content):,} bytes in {elapsed:.1f}s")
-            return content
-        except httpx.RemoteProtocolError as e:
-            last_exception = e
-            warn(f"HTTP protocol error (attempt {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                _reset_http_client()
-                time.sleep(retry_delay * (attempt + 1))
-        except httpx.TimeoutException as e:
-            last_exception = e
-            warn(f"HTTP timeout after {timeout}s (attempt {attempt + 1}/{max_retries})")
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))
-        except httpx.NetworkError as e:
-            last_exception = e
-            warn(f"HTTP network error (attempt {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))
-        except httpx.HTTPStatusError as e:
-            status = e.response.status_code
-            if status == 429 or (500 <= status < 600):
-                last_exception = e
-                warn(f"HTTP {status} (attempt {attempt + 1}/{max_retries})")
-                if attempt < max_retries - 1:
-                    retry_after = parse_retry_after(e.response.headers.get("Retry-After"))
-                    delay = retry_after if retry_after is not None else retry_delay * (attempt + 1)
-                    time.sleep(delay)
-                    continue
-            elif status == 401:
-                raise WFSAuthenticationError(
-                    url, 401, "Authentication required. WFS server requires credentials."
-                ) from e
-            elif status == 403:
-                raise WFSAuthenticationError(
-                    url, 403, "Access denied. Check your permissions for this WFS service."
-                ) from e
-            elif status == 404:
-                raise WFSError(f"WFS service not found (404). Check the URL: {url}") from e
-            raise WFSError(f"HTTP error {status}: {e}") from e
+    def attempt() -> bytes:
+        debug(f"HTTP GET: {request_desc[:100]}{'...' if len(request_desc) > 100 else ''}")
+        start_time = time.time()
+        client = _get_shared_http_client(timeout=timeout)
+        # The timeout rides on the request, not just the client: the shared
+        # client keeps the timeout of whichever caller built it first, so a
+        # client-level timeout alone would cap every later caller (#1184).
+        response = client.get(url, params=params, headers=headers, timeout=timeout)
+        elapsed = time.time() - start_time
+        response.raise_for_status()
+        content = bytes(response.content)
+        debug(f"HTTP OK: {len(content):,} bytes in {elapsed:.1f}s")
+        return content
 
-    raise WFSError(f"Request failed after {max_retries} attempts: {last_exception}")
+    try:
+        return run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay)
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code
+        if status == 401:
+            raise WFSAuthenticationError(
+                url, 401, "Authentication required. WFS server requires credentials."
+            ) from e
+        if status == 403:
+            raise WFSAuthenticationError(
+                url, 403, "Access denied. Check your permissions for this WFS service."
+            ) from e
+        if status == 404:
+            raise WFSError(f"WFS service not found (404). Check the URL: {url}") from e
+        raise WFSError(f"HTTP error {status}: {e}") from e
+    except RetryExhaustedError as e:
+        last = e.last_exception
+        if isinstance(last, httpx.HTTPStatusError):
+            raise WFSError(f"HTTP error {last.response.status_code}: {last}") from last
+        raise WFSError(f"Request failed after {max_retries} attempts: {last}") from e
 
 
 def _clean_service_url(url: str) -> str:
@@ -2277,6 +2257,65 @@ def _accept_header_for(output_format: str | None) -> str:
     return output_format if "/" in output_format else "*/*"
 
 
+@dataclass
+class _WfsDownload:
+    """One downloaded GetFeature page: where it landed and how to parse it."""
+
+    tmp_dir: tempfile.TemporaryDirectory
+    tmp_path: str
+    content_type: str
+    body_kind: str
+    total_bytes: int
+    started: float = 0.0
+
+
+def _download_wfs_page(url: str, accept: str, tmp_dir: tempfile.TemporaryDirectory) -> _WfsDownload:
+    """One attempt at streaming a GetFeature response into ``tmp_dir``.
+
+    Raises ``httpx`` errors for ``run_with_retry`` to classify and ``WFSError``
+    for answers that retrying cannot change.
+    """
+    total_bytes = 0
+    client = _get_shared_http_client(timeout=_PAGE_TIMEOUT)
+
+    # Per-request timeout: the shared client was usually built by the
+    # 60s feature-count probe, and keeps that timeout (#1184).
+    with client.stream(
+        "GET",
+        url,
+        headers={"Accept": accept, "Accept-Encoding": "gzip, deflate"},
+        timeout=_PAGE_TIMEOUT,
+    ) as response:
+        # Check HTTP status
+        if response.status_code == 400:
+            body = response.read().decode("utf-8", errors="replace")
+            if "startindex" in body.lower():
+                raise WFSError(
+                    f"Server rejected paginated request (startIndex limit): {body.strip()}"
+                )
+            raise WFSError(f"WFS request failed with HTTP 400: {body[:500]}")
+        response.raise_for_status()
+
+        # Dispatch on the content-type the server actually sent. HTML and
+        # text/plain are never feature responses (error pages returned
+        # with 200 OK); XML/GML may be either a FeatureCollection or an
+        # ows:ExceptionReport, which the GML parser tells apart.
+        content_type = response.headers.get("content-type", "").lower()
+        body_kind = _classify_wfs_content_type(content_type)
+        if body_kind == "error":
+            preview = response.read().decode("utf-8", errors="replace")[:500]
+            raise _error_page_error(content_type, preview)
+
+        suffix = ".gml" if body_kind == "gml" else ".json"
+        tmp_path = str(Path(tmp_dir.name) / f"response{suffix}")
+        with open(tmp_path, "wb") as tmp_file:
+            for chunk in response.iter_bytes(chunk_size=65536):
+                tmp_file.write(chunk)
+                total_bytes += len(chunk)
+
+    return _WfsDownload(tmp_dir, tmp_path, content_type, body_kind, total_bytes)
+
+
 def _fetch_wfs_page(
     url: str,
     extract_fid: bool = False,
@@ -2310,89 +2349,46 @@ def _fetch_wfs_page(
     """
     import httpx
 
-    last_exception: Exception | None = None
     accept = _accept_header_for(output_format)
+    attempts_made = 0
 
-    for attempt in range(max_retries):
+    def attempt() -> _WfsDownload:
+        nonlocal attempts_made
         start_time = time.time()
-        if attempt > 0:
-            debug(f"Retry {attempt}/{max_retries - 1}: {url[:80]}...")
+        if attempts_made > 0:
+            debug(f"Retry {attempts_made}/{max_retries - 1}: {url[:80]}...")
         else:
             debug(f"Fetching: {url[:100]}...")
+        attempts_made += 1
 
         # Stream the response into a temp *directory*, not a temp file: GDAL
         # writes a .gfs schema sidecar next to a schema-less GML body, and only
         # a directory cleanup is guaranteed to take it with it.
         tmp_dir = tempfile.TemporaryDirectory(prefix="gpio-wfs-")
-        tmp_path = None
-        content_type = ""
-        body_kind = "json"
-        total_bytes = 0
         try:
-            client = _get_shared_http_client(timeout=_PAGE_TIMEOUT)
-
-            # Per-request timeout: the shared client was usually built by the
-            # 60s feature-count probe, and keeps that timeout (#1184).
-            with client.stream(
-                "GET",
-                url,
-                headers={"Accept": accept, "Accept-Encoding": "gzip, deflate"},
-                timeout=_PAGE_TIMEOUT,
-            ) as response:
-                # Check HTTP status
-                if response.status_code == 400:
-                    body = response.read().decode("utf-8", errors="replace")
-                    if "startindex" in body.lower():
-                        raise WFSError(
-                            f"Server rejected paginated request (startIndex limit): {body.strip()}"
-                        )
-                    raise WFSError(f"WFS request failed with HTTP 400: {body[:500]}")
-                response.raise_for_status()
-
-                # Dispatch on the content-type the server actually sent. HTML and
-                # text/plain are never feature responses (error pages returned
-                # with 200 OK); XML/GML may be either a FeatureCollection or an
-                # ows:ExceptionReport, which the GML parser tells apart.
-                content_type = response.headers.get("content-type", "").lower()
-                body_kind = _classify_wfs_content_type(content_type)
-                if body_kind == "error":
-                    preview = response.read().decode("utf-8", errors="replace")[:500]
-                    raise _error_page_error(content_type, preview)
-
-                suffix = ".gml" if body_kind == "gml" else ".json"
-                tmp_path = str(Path(tmp_dir.name) / f"response{suffix}")
-                with open(tmp_path, "wb") as tmp_file:
-                    for chunk in response.iter_bytes(chunk_size=65536):
-                        tmp_file.write(chunk)
-                        total_bytes += len(chunk)
-
-            # Success - break out of retry loop
-            download_time = time.time() - start_time
-            size_mb = total_bytes / (1024 * 1024)
-            debug(f"Downloaded {size_mb:.1f} MB in {download_time:.1f}s")
-            break
-
-        except httpx.HTTPStatusError as e:
-            tmp_dir.cleanup()
-            raise WFSError(f"WFS request failed with HTTP {e.response.status_code}") from e
-        except (httpx.RequestError, httpx.RemoteProtocolError) as e:
-            # Transient network error - retry
-            last_exception = e
-            tmp_dir.cleanup()
-            if attempt < max_retries - 1:
-                delay = retry_delay * (attempt + 1)
-                warn(f"Network error (attempt {attempt + 1}/{max_retries}): {e}")
-                warn(f"Retrying in {delay:.1f}s...")
-                _reset_http_client()
-                time.sleep(delay)
-                continue
-            raise WFSError(f"Failed to fetch WFS data after {max_retries} attempts: {e}") from e
-        except WFSError:
+            download = _download_wfs_page(url, accept, tmp_dir)
+        except BaseException:
             tmp_dir.cleanup()
             raise
-    else:
-        # Exhausted retries without success
-        raise WFSError(f"Failed to fetch WFS data after {max_retries} attempts: {last_exception}")
+        download.started = start_time
+        download_time = time.time() - start_time
+        size_mb = download.total_bytes / (1024 * 1024)
+        debug(f"Downloaded {size_mb:.1f} MB in {download_time:.1f}s")
+        return download
+
+    try:
+        download = run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay)
+    except httpx.HTTPStatusError as e:
+        raise WFSError(f"WFS request failed with HTTP {e.response.status_code}") from e
+    except RetryExhaustedError as e:
+        last = e.last_exception
+        if isinstance(last, httpx.HTTPStatusError):
+            raise WFSError(f"WFS request failed with HTTP {last.response.status_code}") from last
+        raise WFSError(f"Failed to fetch WFS data after {max_retries} attempts: {last}") from last
+
+    tmp_dir, tmp_path = download.tmp_dir, download.tmp_path
+    content_type, body_kind = download.content_type, download.body_kind
+    start_time = download.started
 
     con = None
     try:

@@ -1683,3 +1683,53 @@ class TestTableCrs:
         table, _ = self._extract([{"srid": 2272}], empty, None)
         assert table.num_rows == 0
         assert _geo_crs(table)["id"]["code"] == 2272
+
+
+class TestCartoRetriesThroughTheSharedOwner:
+    """`carto_to_table` rides out a 503 via ``http_retry.run_with_retry``."""
+
+    def test_a_503_then_a_good_read(self, monkeypatch):
+        import pyarrow as pa
+
+        from geoparquet_io.core import http_retry
+
+        class _Flaky:
+            reads = 0
+
+            def execute(self, sql, *args, **kwargs):
+                return self
+
+            def sql(self, query, *args, **kwargs):
+                if "SELECT * FROM" not in query:
+                    raise AssertionError(query)
+                type(self).reads += 1
+                if self.reads == 1:
+                    err = RuntimeError("HTTP GET error: 503")
+                    err.status_code = 503
+                    raise err
+                return self
+
+            def arrow(self):
+                return self
+
+            def read_all(self):
+                return pa.table({"cartodb_id": [1, 2]})
+
+        slept: list[float] = []
+        monkeypatch.setattr(http_retry.time, "sleep", slept.append)
+        monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: _Flaky())
+        seen = []
+        real = http_retry.run_with_retry
+
+        def recording(*args, **kwargs):
+            seen.append(kwargs["classify"])
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(carto_module, "run_with_retry", recording)
+
+        with mock.patch.object(carto_module, "_get_row_count", return_value=2):
+            table = carto_to_table("https://example.carto.com/api/v2/sql", "tbl", geometry=False)
+
+        assert table.num_rows == 2
+        assert seen, "the fetch did not go through http_retry.run_with_retry"
+        assert slept == [2.0]  # carto's DEFAULT_RETRY_DELAY, one step
