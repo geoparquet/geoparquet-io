@@ -166,6 +166,12 @@ Checks if data is spatially ordered. Spatially ordered data improves:
 - **Bbox-stats method**: Checks if consecutive row groups have overlapping bounding boxes. Non-overlapping row groups indicate good spatial ordering. Passes if < 30% of row group pairs overlap.
 - **Sampling method**: Compares average distance between consecutive features vs random feature pairs. Lower ratio indicates better spatial clustering. Passes if ratio < 0.5.
 
+`--fix` Hilbert-sorts the file and keeps at least as many row groups as it
+had: it writes 49,152 rows per group when that already keeps the count, and
+otherwise the largest whole 2,048-row vector that does, so a file the check
+could judge is not rewritten into one too coarse to judge
+([#1098](https://github.com/geoparquet/geoparquet-io/issues/1098)).
+
 The sampling method reads WKB, native Parquet GEOMETRY and GeoArrow coordinate
 struct columns. NULL, zero-length and unparsable values are skipped, and the
 spec validation reports them. When the geometry column is missing or has a type

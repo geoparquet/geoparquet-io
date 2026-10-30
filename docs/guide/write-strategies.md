@@ -224,6 +224,13 @@ matter, and a bare number means MB. So `--write-memory 1GB` is 1,000,000,000 byt
 bytes per row group, and the sizes gpio prints (`inspect`, `check`, `--min-size` reports)
 use the same 1000-based units.
 
+`--row-group-size-mb` becomes a row count the same way on every write path and strategy:
+gpio measures the rows' in-memory size once (a 20,000-row sample of the query, or the
+whole table for `Table.write`), snaps the count to whole 2,048-row writer vectors, never
+below one, and writes that. The plain `COPY` a GeoParquet 2.0 input takes and the
+`streaming` strategy used to ignore the target and write 122,880 and 100,000 rows per
+group ([#1215](https://github.com/geoparquet/geoparquet-io/issues/1215)).
+
 The precedence, highest first:
 
 1. **An explicit `--write-memory`** (or `memory_limit=`, where the Python API takes one).

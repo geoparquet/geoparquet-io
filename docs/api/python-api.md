@@ -890,7 +890,11 @@ handed the writer the raw value: `row_group_rows=50000` wrote 51,200-row groups
 while the identical CLI request wrote 49,152, and `None` inherited DuckDB's
 122,880 — both outside the 10,000–50,000 band `gpio check optimization` scores.
 Pass `row_group_size_mb` instead to size groups by bytes; the row-count default
-does not override it.
+does not override it. The target is measured once, on the table's in-memory
+Arrow size (large string and binary offsets counted at 32 bits), turned into a
+whole number of 2,048-row vectors and never fewer than one, and every
+`write_strategy` writes that count — the CLI's `--row-group-size-mb` lands on
+the same groups ([#1215](https://github.com/geoparquet/geoparquet-io/issues/1215)).
 
 **GeoParquet Version**
 
