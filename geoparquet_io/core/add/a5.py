@@ -123,7 +123,7 @@ def add_a5_table(
                        {a5_expr} AS {quote_identifier(a5_column_name)}
                 FROM {source_ref}
             """
-        result = con.execute(query).arrow().read_all()
+        result = con.sql(query).arrow().read_all()
 
         # Preserve metadata
         if table.schema.metadata:

@@ -75,7 +75,7 @@ def sort_by_column_table(
         order_clause = ", ".join(f"{quote_identifier(col)}{direction}" for col in column_list)
 
         query = f"SELECT * FROM __input_table ORDER BY {order_clause}"
-        result = con.execute(query).arrow().read_all()
+        result = con.sql(query).arrow().read_all()
 
         # Preserve metadata
         if table.schema.metadata:

@@ -181,7 +181,12 @@ class ValidationError(GeoParquetError):
 # was matching an offline user's error and telling them to wait for an upstream
 # republication that has nothing to do with their problem (#778). Only the 404
 # means the registry answered and does not have this build.
-_NOT_PUBLISHED_SIGNATURES = ("http 404",)
+#
+# DuckDB 2.0 adds a second shape: the community a5 build downloads and loads,
+# then its init refuses because a5 for 2.0+ is "distributed from the Query.Farm
+# extension repository, not the DuckDB community repository". Equally not a
+# network problem, and equally not published where gpio installs from.
+_NOT_PUBLISHED_SIGNATURES = ("http 404", "not the duckdb community repository")
 
 
 def is_unpublished_extension_error(exc: BaseException | str | None) -> bool:
@@ -211,6 +216,11 @@ def is_unpublished_extension_error(exc: BaseException | str | None) -> bool:
 # unpublished. Only add an entry when we know something the generic message
 # cannot say.
 _UNPUBLISHED_EXTENSION_HINTS = {
+    "a5": (
+        "For DuckDB 2.0 and later, a5 moved to the Query.Farm extension "
+        "repository, and gpio installs only from the DuckDB community repository. "
+        "Use DuckDB 1.5 for the a5 commands."
+    ),
     "geography": (
         "'geography' is published for gpio's whole DuckDB range on mainstream "
         "platforms (Linux/macOS amd64+arm64, Windows amd64), so a 404 here "

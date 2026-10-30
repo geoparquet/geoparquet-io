@@ -30,6 +30,7 @@ from geoparquet_io.core.carto import (
     _validate_table_name,
     carto_to_table,
 )
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import InvalidParameterError
 
 
@@ -886,6 +887,8 @@ class TestCartoReadExpressionEscaping:
                     raise RuntimeError("the read failed; only the SQL matters here")
                 return self
 
+            sql = execute
+
         monkeypatch.setattr(
             carto_module, "get_duckdb_connection", lambda *a, **k: _RecordingConnection()
         )
@@ -923,7 +926,7 @@ class TestCartoReadExpressionEscaping:
         con = duckdb.connect()
         try:
             # json_serialize_sql parses without binding or opening anything.
-            (payload,) = con.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()
+            (payload,) = fetch_one(con.execute("SELECT json_serialize_sql(?)", [sql]))
         finally:
             con.close()
         assert '"error":true' not in payload.replace(" ", ""), payload
@@ -950,6 +953,9 @@ class _AttemptCountingConnection:
             self.attempts += 1
             raise self.error
         return self
+
+    # The read goes through con.sql(...) since the DuckDB 2.0 migration.
+    sql = execute
 
 
 @pytest.fixture
@@ -1158,6 +1164,11 @@ class TestFailureClassificationIgnoresTheUsersSql:
                 if sql_text.lstrip().upper().startswith("SELECT"):
                     seen["attempts"] += 1
                 return self._inner.execute(sql_text, *args, **kwargs)
+
+            def sql(self, sql_text, *args, **kwargs):
+                if sql_text.lstrip().upper().startswith("SELECT"):
+                    seen["attempts"] += 1
+                return self._inner.sql(sql_text, *args, **kwargs)
 
         monkeypatch.setattr(
             carto_module, "get_duckdb_connection", lambda *a, **k: _Counting(real_get_conn())
@@ -1391,6 +1402,8 @@ class TestFailureClassificationUsesTheHttpStatus:
                 if sql.lstrip().upper().startswith("SELECT"):
                     time.sleep(0.05)
                 return super().execute(sql, *args, **kwargs)
+
+            sql = execute
 
         conn = _SlowConnection(RuntimeError("IO Error: Connection timeout: HTTP GET took too long"))
         monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)

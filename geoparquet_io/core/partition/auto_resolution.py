@@ -13,6 +13,7 @@ import math
 
 from geoparquet_io.core.crs_utils import source_crs_string, transform_geom_sql
 from geoparquet_io.core.duckdb_utils import (
+    fetch_one,
     get_duckdb_connection,
     load_community_extension,
     quote_identifier,
@@ -91,7 +92,7 @@ def _get_total_row_count(
     try:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
 
-        result = con.execute(_count_query(input_url, where)).fetchone()
+        result = fetch_one(con.execute(_count_query(input_url, where)))
         return result[0] if result else 0
     finally:
         if con is not None:
@@ -429,7 +430,7 @@ def _probe_distinct_cell_counts(
             f"WITH sample AS ({sample_cte}) SELECT {cols} FROM sample "
             f"WHERE lon IS NOT NULL AND lat IS NOT NULL"
         )
-    return list(con.execute(query).fetchone())
+    return list(fetch_one(con.execute(query)))
 
 
 def _select_closest_resolution(

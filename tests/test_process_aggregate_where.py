@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import ValidationError
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3
@@ -43,7 +44,7 @@ def _points_arrow_table():
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial; SET geometry_always_xy = true")
     tbl = (
-        con.execute("SELECT ST_AsWKB(ST_Point(10.0, 50.0)) AS geometry, 'wheat' AS crop")
+        con.sql("SELECT ST_AsWKB(ST_Point(10.0, 50.0)) AS geometry, 'wheat' AS crop")
         .arrow()
         .read_all()
     )
@@ -68,7 +69,7 @@ def test_read_grid_source_sql_appends_where(tmp_path):
         # The clause is closed on its own line so a trailing `--` comment in it
         # cannot swallow the paren (#612).
         assert "WHERE (area > 3\n)" in sql
-        count = con.execute(f"SELECT COUNT(*) FROM ({sql})").fetchone()[0]
+        count = fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sql})"))[0]
         assert count == 2  # areas 4.0 and 6.0
         # No clause -> unchanged behavior
         sql_all = read_grid_source_sql(con, str(src), "geometry")
@@ -309,7 +310,7 @@ def test_read_grid_source_sql_tolerates_trailing_sql_comment(tmp_path):
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         sql = read_grid_source_sql(con, str(src), "geometry", where="area > 3 -- big only")
-        assert con.execute(f"SELECT COUNT(*) FROM ({sql})").fetchone()[0] == 2
+        assert fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sql})"))[0] == 2
     finally:
         con.close()
 
@@ -357,9 +358,9 @@ def test_read_grid_source_sql_can_filter_on_hive_partition_column(tmp_path):
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         sql = read_grid_source_sql(con, glob, "geometry", where="year = 2025")
-        assert con.execute(f"SELECT COUNT(*) FROM ({sql})").fetchone()[0] == 1
+        assert fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sql})"))[0] == 1
         sql_all = read_grid_source_sql(con, glob, "geometry")
-        assert con.execute(f"SELECT COUNT(*) FROM ({sql_all})").fetchone()[0] == 3
+        assert fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sql_all})"))[0] == 3
     finally:
         con.close()
 
@@ -390,7 +391,7 @@ def test_grid_aggregation_output_has_no_hive_partition_column(tmp_path):
     try:
         source_sql = read_grid_source_sql(con, glob, "geometry")
         sql = build_grid_query(con, scheme, source_sql, 1, "test_cell", None, "crop", 20, "polygon")
-        cols = set(con.execute(sql).arrow().read_all().column_names)
+        cols = set(con.sql(sql).arrow().read_all().column_names)
         assert "year" not in cols
         assert {"test_cell", "count", "geometry"} <= cols
     finally:
@@ -422,7 +423,7 @@ def test_admin_joined_sql_can_filter_on_hive_partition_column(tmp_path):
             "geometry",
             where="year = 2025",
         )
-        assert con.execute(f"SELECT COUNT(*) FROM ({sql})").fetchone()[0] == 1
+        assert fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sql})"))[0] == 1
     finally:
         con.close()
 
@@ -539,7 +540,7 @@ def test_table_aggregate_a5_where():
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial; SET geometry_always_xy = true")
     tbl = (
-        con.execute(
+        con.sql(
             """
             SELECT ST_AsWKB(ST_Point(lon, lat)) AS geometry, crop FROM (VALUES
                 (10.0, 50.0, 'wheat'), (10.001, 50.001, 'corn')

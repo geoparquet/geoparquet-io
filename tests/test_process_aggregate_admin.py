@@ -68,9 +68,7 @@ def test_table_aggregate_admin_api(tmp_path):
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial; SET geometry_always_xy = true")
     tbl = (
-        con.execute("SELECT ST_AsWKB(ST_Point(2.35, 48.85)) AS geometry, 'a' AS cls")
-        .arrow()
-        .read_all()
+        con.sql("SELECT ST_AsWKB(ST_Point(2.35, 48.85)) AS geometry, 'a' AS cls").arrow().read_all()
     )
     result = Table(tbl).aggregate_admin(level="country")
     assert "admin_code" in result.column_names

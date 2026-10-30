@@ -49,6 +49,7 @@ __all__ = [
 from geoparquet_io.core.arrow_types import _cast_table_to_schema, _compute_unified_schema
 from geoparquet_io.core.crs_utils import _projjson_from_authority
 from geoparquet_io.core.duckdb_utils import (
+    fetch_one,
     get_duckdb_connection,
     quote_identifier,
     sql_path,
@@ -614,7 +615,8 @@ def _validate_crs_coordinates(
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
             con.register("data", table)
-            result = con.execute("""
+            result = fetch_one(
+                con.execute("""
                 SELECT
                     MIN(ST_XMin(ST_GeomFromWKB(geometry))) as xmin,
                     MIN(ST_YMin(ST_GeomFromWKB(geometry))) as ymin,
@@ -622,7 +624,8 @@ def _validate_crs_coordinates(
                     MAX(ST_YMax(ST_GeomFromWKB(geometry))) as ymax
                 FROM data
                 WHERE geometry IS NOT NULL
-            """).fetchone()
+            """)
+            )
 
             if result is None or result[0] is None:
                 return True, None
@@ -1799,7 +1802,8 @@ def _infer_column_types(table: pa.Table) -> pa.Table:
             quoted_col = quote_identifier(col_name)
 
             try:
-                stats = con.execute(f"""
+                stats = fetch_one(
+                    con.execute(f"""
                     SELECT
                         COUNT(*) AS total,
                         COUNT({quoted_col}) AS non_null,
@@ -1810,7 +1814,8 @@ def _infer_column_types(table: pa.Table) -> pa.Table:
                         SUM(CASE WHEN LOWER({quoted_col}) IN ('true', 'false', '1', '0')
                             THEN 1 ELSE 0 END) AS is_bool
                     FROM _wfs_data
-                """).fetchone()
+                """)
+                )
 
                 total, non_null, is_int, is_float, is_bool = stats
 
@@ -1823,7 +1828,7 @@ def _infer_column_types(table: pa.Table) -> pa.Table:
                 if is_int == non_null:
                     # All non-null values are valid integers
                     casted = (
-                        con.execute(f"""
+                        con.sql(f"""
                         SELECT CAST({quoted_col} AS BIGINT) FROM _wfs_data
                     """)
                         .arrow()
@@ -1834,7 +1839,7 @@ def _infer_column_types(table: pa.Table) -> pa.Table:
                 elif is_float == non_null and is_int < non_null:
                     # All non-null values are valid floats (but not all integers)
                     casted = (
-                        con.execute(f"""
+                        con.sql(f"""
                         SELECT CAST({quoted_col} AS DOUBLE) FROM _wfs_data
                     """)
                         .arrow()
@@ -1845,7 +1850,7 @@ def _infer_column_types(table: pa.Table) -> pa.Table:
                 elif is_bool == non_null:
                     # All non-null values are valid booleans
                     casted = (
-                        con.execute(f"""
+                        con.sql(f"""
                         SELECT CASE
                             WHEN LOWER({quoted_col}) IN ('true', '1') THEN TRUE
                             WHEN LOWER({quoted_col}) IN ('false', '0') THEN FALSE
@@ -1894,7 +1899,8 @@ def _probe_properties_type(
     See: https://github.com/geoparquet/geoparquet-io/issues/441
     """
     try:
-        props_type_result = con.execute(f"""
+        props_type_result = fetch_one(
+            con.execute(f"""
             WITH features AS (
                 SELECT unnest(features) AS feature
                 FROM read_json_auto({sql_path(response_path)}, maximum_object_size={max_object_size})
@@ -1902,7 +1908,8 @@ def _probe_properties_type(
             SELECT typeof(feature.properties) AS props_type
             FROM features
             LIMIT 1
-        """).fetchone()
+        """)
+        )
         props_type = props_type_result[0] if props_type_result else "NULL"
     except duckdb.BinderException as e:
         # Missing 'properties' key in feature struct (malformed GeoJSON per RFC 7946)
@@ -1986,12 +1993,14 @@ def _read_count_and_server_crs(
 
     See https://github.com/geoparquet/geoparquet-io/issues/499
     """
-    row = con.execute(f"""
+    row = fetch_one(
+        con.execute(f"""
         SELECT
             json_array_length(content, '$.features') AS cnt,
             json_extract_string(content, '$.crs.properties.name') AS crs_name
         FROM read_text({sql_path(response_path)})
-    """).fetchone()
+    """)
+    )
     if not row:
         return 0, None
     feature_count = row[0] or 0
@@ -2248,7 +2257,7 @@ def _parse_gml_response(
     select_parts.append(f"* EXCLUDE({exclude_list})")
 
     query = f"SELECT {', '.join(select_parts)} FROM ST_Read({sql_path(tmp_path)})"
-    table = con.execute(query).arrow().read_all()
+    table = con.sql(query).arrow().read_all()
     return _with_server_crs(table, server_crs)
 
 
@@ -2418,7 +2427,7 @@ def _fetch_wfs_page(
             tmp_path, extract_fid, can_unnest_props, _MAX_JSON_OBJECT_SIZE
         )
 
-        result = con.execute(query)
+        result = con.sql(query)
         table = result.arrow().read_all()
 
         parse_time = time.time() - parse_start
@@ -2587,7 +2596,7 @@ def _deduplicate_tiles(table: pa.Table) -> pa.Table:
                 ) WHERE _rn = 1
             """
 
-        result = con.execute(query)
+        result = con.sql(query)
         return result.arrow().read_all()
     finally:
         con.close()
@@ -3561,7 +3570,7 @@ def wfs_to_table(
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
             con.register("features", table)
-            filtered = con.execute(f"SELECT * FROM features WHERE {filter_sql}").arrow()
+            filtered = con.sql(f"SELECT * FROM features WHERE {filter_sql}").arrow()
             table = _with_server_crs(filtered.read_all(), server_crs)
             debug(f"After local filter: {table.num_rows:,} features")
         finally:

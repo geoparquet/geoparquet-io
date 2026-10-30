@@ -34,6 +34,7 @@ from geoparquet_io.core.process.aggregate.grid_common import (
     needed_source_columns,
     read_grid_source_sql,
 )
+from tests.conftest import skip_if_grid_unavailable
 
 SCHEMES = {"a5": A5_SCHEME, "h3": H3_SCHEME}
 CELL_COLUMN = {"a5": "a5_cell", "h3": "h3_cell"}
@@ -120,7 +121,7 @@ def _grid_result(
         out_geometry,
         breakdown_spec=parse_breakdown_metric(breakdown_metric),
     )
-    table = con.execute(sql).arrow().read_all()
+    table = con.sql(sql).arrow().read_all()
     con.execute("DROP TABLE IF EXISTS __agg_keyed")
     return table
 
@@ -269,6 +270,7 @@ class TestWhatIsRead:
         Parity alone cannot see this -- the two paths agree by construction --
         so the generated SQL is read back from ``--show-sql``.
         """
+        skip_if_grid_unavailable("a5")
         from click.testing import CliRunner
 
         from geoparquet_io.cli.main import cli
@@ -436,7 +438,7 @@ def _admin_result(con, src, admin_path, *, narrow: bool, breakdown=None, where=N
             column_types=None,
         )
     sql = _wrap_admin_geometry(_build_agg_sql(joined, metrics, breakdown_select), "polygon")
-    table = con.execute(sql).arrow().read_all()
+    table = con.sql(sql).arrow().read_all()
     con.execute("DROP TABLE IF EXISTS __agg_joined")
     return table
 

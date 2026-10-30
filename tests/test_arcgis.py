@@ -18,6 +18,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.duckdb_utils import fetch_one
 from tests.conftest import safe_unlink
 from tests.http_transport import FakeTransport, html_reply, json_reply
 from tests.native_geo_probes import geo_block_crs_id, spec_problems
@@ -2778,5 +2779,5 @@ class TestArcgisOutputCrsLive:
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial")
-        crs = con.execute(f"SELECT ST_CRS(geometry) FROM '{out}' LIMIT 1").fetchone()[0]
+        crs = fetch_one(con.execute(f"SELECT ST_CRS(geometry) FROM '{out}' LIMIT 1"))[0]
         assert "25830" in str(crs)

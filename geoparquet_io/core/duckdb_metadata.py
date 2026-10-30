@@ -23,7 +23,7 @@ from geoparquet_io.core.crs_utils import (
     geoarrow_crs_to_projjson,
     merge_longitude_ranges,
 )
-from geoparquet_io.core.duckdb_utils import _escape_sql_string, sql_path
+from geoparquet_io.core.duckdb_utils import _escape_sql_string, fetch_one, sql_path
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import (
     get_first_parquet_file,
@@ -493,11 +493,13 @@ def get_geo_metadata(parquet_file: str, con=None) -> dict | None:
 
     try:
         # Get raw bytes and decode manually to avoid DuckDB's VARCHAR escaping
-        result = connection.execute(f"""
+        result = fetch_one(
+            connection.execute(f"""
             SELECT value
             FROM parquet_kv_metadata({sql_path(metadata_path)})
             WHERE key::VARCHAR = 'geo'
-        """).fetchone()
+        """)
+        )
 
         if result and result[0]:
             # Decode raw bytes to string and parse JSON
@@ -544,9 +546,11 @@ def get_file_metadata(parquet_file: str, con=None) -> dict:
     connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
 
     try:
-        result = connection.execute(f"""
+        result = fetch_one(
+            connection.execute(f"""
             SELECT * FROM parquet_file_metadata({sql_path(metadata_path)})
-        """).fetchone()
+        """)
+        )
 
         columns = [desc[0] for desc in connection.description]
         return dict(zip(columns, result, strict=True)) if result else {}
@@ -1063,7 +1067,8 @@ def get_bbox_from_row_group_stats(
         # Use FILTER to aggregate stats for each bbox component
         # Use TRY_CAST to handle non-numeric stats gracefully
         escaped_bbox_col = _escape_sql_string(bbox_column)
-        result = connection.execute(f"""
+        result = fetch_one(
+            connection.execute(f"""
             SELECT
                 MIN(TRY_CAST(stats_min AS DOUBLE))
                     FILTER (WHERE path_in_schema = '{escaped_bbox_col}, xmin') as xmin,
@@ -1074,7 +1079,8 @@ def get_bbox_from_row_group_stats(
                 MAX(TRY_CAST(stats_max AS DOUBLE))
                     FILTER (WHERE path_in_schema = '{escaped_bbox_col}, ymax') as ymax
             FROM parquet_metadata({sql_path(metadata_path)})
-        """).fetchone()
+        """)
+        )
 
         if result and all(v is not None for v in result):
             return [float(v) for v in result]
@@ -1174,11 +1180,13 @@ def get_row_group_stats_summary(parquet_file: str, con=None) -> dict:
         total_rows = file_meta.get("num_rows", 0)
 
         # Get total size from row groups
-        result = connection.execute(f"""
+        result = fetch_one(
+            connection.execute(f"""
             SELECT
                 SUM(total_compressed_size) as total_size
             FROM parquet_metadata({sql_path(metadata_path)})
-        """).fetchone()
+        """)
+        )
 
         total_size = result[0] if result and result[0] else 0
 

@@ -29,14 +29,14 @@ import duckdb
 import pytest
 
 from geoparquet_io.core import memory_limits
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 GIB = 1024**3
 
 
 def _setting(con, key):
-    return con.execute(f"SELECT current_setting('{key}')").fetchone()[0]
+    return fetch_one(con.execute(f"SELECT current_setting('{key}')"))[0]
 
 
 def _points_parquet(con, path: str, rows: int = 500) -> str:

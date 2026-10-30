@@ -41,6 +41,7 @@ import functools  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
 import os  # noqa: E402
+import re  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
@@ -798,27 +799,66 @@ def _is_unpublished_extension_error(exc) -> bool:
     return isinstance(exc, ExtensionUnavailableError) and is_unpublished_extension_error(exc)
 
 
+#: What ExtensionUnavailableError says only once it has classified the failure
+#: as unpublished, and the extension it names. A test that drives a command
+#: through Click, or through a wrapper such as PartitionError, sees this text
+#: in its assertion message or a wrapping exception, not the exception itself.
+_UNPUBLISHED_TEXT = re.compile(
+    r"community extension '([^']+)'.*?is not published for this one", re.DOTALL
+)
+
+
+def _unavailable_extension_named_in(exc) -> str | None:
+    """The extension an unpublished failure anywhere in ``exc``'s chain names.
+
+    Text alone is not trusted: the name is returned only when the session
+    probe confirms the extension really is unavailable here, so a test that
+    builds the message on purpose still fails on its own merits.
+    """
+    seen: set[int] = set()
+    cur = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if _is_unpublished_extension_error(cur):
+            return cur.name
+        match = _UNPUBLISHED_TEXT.search(str(cur))
+        if match and not _community_extension_available(match.group(1)):
+            return match.group(1)
+        cur = cur.__cause__ or cur.__context__
+    return None
+
+
+def _skip_unpublished_extension_failure(outcome) -> None:
+    excinfo = outcome.excinfo
+    if excinfo is None:
+        return
+    name = _unavailable_extension_named_in(excinfo[1])
+    if name is not None:
+        outcome.force_exception(
+            pytest.skip.Exception(
+                f"Optional DuckDB community extension '{name}' is not available for "
+                f"DuckDB {duckdb.__version__} in this environment (community "
+                f"extensions are built per DuckDB release)."
+            )
+        )
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_call(item):
-    """Convert an unpublished-extension (404) failure into a clean skip.
+    """Convert an unpublished-extension failure into a clean skip.
 
     Any other DuckDB error in the extension-loading path propagates unchanged
     and fails the test.
     """
     outcome = yield
-    excinfo = outcome.excinfo
-    if excinfo is None:
-        return
+    _skip_unpublished_extension_failure(outcome)
 
-    exc = excinfo[1]
-    if _is_unpublished_extension_error(exc):
-        outcome.force_exception(
-            pytest.skip.Exception(
-                f"Optional DuckDB community extension '{exc.name}' is not "
-                f"available for DuckDB {exc.duckdb_version} in this environment "
-                f"(community extensions are built per DuckDB release)."
-            )
-        )
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_setup(item):
+    """The same, for a fixture that builds its input with an unpublished extension."""
+    outcome = yield
+    _skip_unpublished_extension_failure(outcome)
 
 
 # ---------------------------------------------------------------------------
@@ -855,6 +895,25 @@ def skip_if_geography_unavailable() -> None:
         pytest.skip(
             f"DuckDB community extension 'geography' (S2) is not published for "
             f"DuckDB {duckdb.__version__}"
+        )
+
+
+#: The DuckDB community extension each grid command loads.
+_GRID_EXTENSIONS = {"a5": "a5", "h3": "h3", "s2": "geography"}
+
+
+def skip_if_grid_unavailable(grid: str) -> None:
+    """Skip a CLI test of grid command ``grid`` when its extension is not published.
+
+    A no-op for grids that need no community extension (quadkey, kdtree). On
+    DuckDB 2.0, for example, 'geography' is not yet built and 'a5' moved to
+    another repository, while h3 is published for both.
+    """
+    extension = _GRID_EXTENSIONS.get(grid)
+    if extension is not None and not _community_extension_available(extension):
+        pytest.skip(
+            f"DuckDB community extension '{extension}' ({grid}) is not published "
+            f"for DuckDB {duckdb.__version__}"
         )
 
 

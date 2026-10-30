@@ -122,7 +122,7 @@ def _has_bbox_struct_column(con, source: str, bbox_column_name: str) -> bool:
     ``covering`` may point at -- passed as gpio's own and the stream wrote
     nothing at all (#1176).
     """
-    schema = con.execute(f"SELECT * FROM {source} LIMIT 0").arrow().read_all().schema
+    schema = con.sql(f"SELECT * FROM {source} LIMIT 0").arrow().read_all().schema
     if bbox_column_name not in schema.names:
         return False
     return _is_bbox_struct_field(schema.field(bbox_column_name))
@@ -172,7 +172,7 @@ def add_bbox_table(
             ) AS {quoted_bbox_col}
             FROM (SELECT {read.shape_expr} AS __g FROM __input_table)
         """
-        bbox_column = con.execute(bbox_query).arrow().read_all().column(0)
+        bbox_column = con.sql(bbox_query).arrow().read_all().column(0)
 
         # Append the computed column; everything else keeps its exact bytes,
         # Arrow types and column order.

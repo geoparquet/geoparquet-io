@@ -15,6 +15,7 @@ import logging
 
 import pytest
 
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.logging_config import get_logger
 from geoparquet_io.core.partition.auto_resolution import (
     _calculate_a5_resolution,
@@ -426,7 +427,7 @@ def _count_distinct_cells(parquet_file, index_type, resolution):
             expr = f"lat_lon_to_quadkey({lat}, {lon}, {resolution})"
         else:
             raise ValueError(index_type)
-        row = con.execute(f"SELECT COUNT(DISTINCT {expr}) FROM '{parquet_file}'").fetchone()
+        row = fetch_one(con.execute(f"SELECT COUNT(DISTINCT {expr}) FROM '{parquet_file}'"))
         return row[0]
     finally:
         con.close()

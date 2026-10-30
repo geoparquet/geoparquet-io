@@ -18,7 +18,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.compression import resolve_process_compression_level
-from geoparquet_io.core.duckdb_utils import quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
@@ -364,7 +364,7 @@ def _build_levels(
         sql = build_level_sql(con, info, source_sql, level)
         if show_sql or verbose:
             debug(sql)
-        table = con.execute(sql).arrow().read_all()
+        table = con.sql(sql).arrow().read_all()
         _write_overview(
             table,
             out_path,
@@ -521,11 +521,13 @@ def _measured_gsds(con, paths: list[str], cell_detail: float) -> list[float]:
     gsds: list[float] = []
     for path in paths:
         url = resolve_file_url(path)
-        row = con.execute(
-            "SELECT median(ST_XMax(geometry) - ST_XMin(geometry)), "
-            "median(ST_YMax(geometry) - ST_YMin(geometry)) "
-            f"FROM read_parquet({sql_path(url)}) WHERE geometry IS NOT NULL"
-        ).fetchone()
+        row = fetch_one(
+            con.execute(
+                "SELECT median(ST_XMax(geometry) - ST_XMin(geometry)), "
+                "median(ST_YMax(geometry) - ST_YMin(geometry)) "
+                f"FROM read_parquet({sql_path(url)}) WHERE geometry IS NOT NULL"
+            )
+        )
         dx, dy = (float(v or 0.0) for v in (row or (0.0, 0.0)))
         width_m = math.sqrt(dx * dy) * METERS_PER_DEGREE
         if not width_m > 0:

@@ -30,7 +30,7 @@ from geoparquet_io.core.crs_utils import (
     transform_source_crs,
     transform_source_label,
 )
-from geoparquet_io.core.duckdb_utils import _escape_sql_string
+from geoparquet_io.core.duckdb_utils import _escape_sql_string, fetch_one
 from geoparquet_io.core.exceptions import GeoParquetError
 
 TM_PROJ4 = (
@@ -60,7 +60,7 @@ def _transform_point(src: str, xy=TM_XY):
         con.execute("LOAD spatial")
         con.execute("SET geometry_always_xy = true")
         expr = transform_geom_sql(f"ST_Point({xy[0]}, {xy[1]})", src)
-        return con.execute(f"SELECT ST_X(g), ST_Y(g) FROM (SELECT {expr} AS g)").fetchone()
+        return fetch_one(con.execute(f"SELECT ST_X(g), ST_Y(g) FROM (SELECT {expr} AS g)"))
     finally:
         con.close()
 
@@ -280,8 +280,8 @@ class TestSinks:
             con.execute("LOAD spatial")
             con.execute("SET geometry_always_xy = true")
             con.execute("CREATE TABLE t AS SELECT 1 AS id")
-            row = con.execute(f"SELECT ST_X(g), ST_Y(g) FROM (SELECT {sql_expr} AS g)").fetchone()
-            assert con.execute("SELECT count(*) FROM t").fetchone()[0] == 1
+            row = fetch_one(con.execute(f"SELECT ST_X(g), ST_Y(g) FROM (SELECT {sql_expr} AS g)"))
+            assert fetch_one(con.execute("SELECT count(*) FROM t"))[0] == 1
             return row
         finally:
             con.close()

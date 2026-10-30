@@ -28,7 +28,11 @@ from geoparquet_io.core.arrow_geo_metadata import (
 )
 from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.crs_utils import apply_output_crs
-from geoparquet_io.core.duckdb_utils import _wrap_query_with_wkb_conversion, quote_identifier
+from geoparquet_io.core.duckdb_utils import (
+    _wrap_query_with_wkb_conversion,
+    fetch_one,
+    quote_identifier,
+)
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     NATIVE_GEOMETRY_VERSIONS,
@@ -170,6 +174,39 @@ def _narrows_to_32_bit_binary(field_type: pa.DataType) -> bool:
     return storage == pa.binary()
 
 
+def _rebatch(batches, rows: int):
+    """Yield the stream's rows in batches of exactly ``rows`` (the last may be short).
+
+    Each batch becomes one output row group. DuckDB 1.5's
+    ``fetch_record_batch(n)`` re-chunked a result to ``n`` rows; 2.0's
+    ``to_arrow_reader(batch_size=n)`` only caps a batch at ``n``, so a source
+    written in small row groups would stream back -- and be written -- in
+    those small groups. Holds at most ``rows`` rows.
+    """
+    pending: list[pa.RecordBatch] = []
+    held = 0
+    for batch in batches:
+        while batch.num_rows:
+            take = min(rows - held, batch.num_rows)
+            pending.append(batch.slice(0, take))
+            held += take
+            batch = batch.slice(take)
+            if held == rows:
+                yield pa.concat_batches(pending)
+                pending, held = [], 0
+    if held:
+        yield pa.concat_batches(pending)
+
+
+def _sized_reader(con, query: str, batch_size: int) -> pa.RecordBatchReader:
+    """Stream ``query`` in ``batch_size``-row batches (see :func:`_rebatch`).
+
+    On DuckDB 2.0 nothing else may run on ``con`` until the reader is drained.
+    """
+    reader = con.sql(query).to_arrow_reader(batch_size=batch_size)
+    return pa.RecordBatchReader.from_batches(reader.schema, _rebatch(reader, batch_size))
+
+
 def _binary_cast_spans(batch: pa.RecordBatch, schema: pa.Schema) -> list[tuple[int, int]]:
     """Row spans that keep every narrowed WKB column under Arrow's 32-bit ceiling.
 
@@ -234,9 +271,9 @@ def _check_geometry_type(
 ) -> tuple[bool, str]:
     """Check if geometry column needs WKB conversion. Returns (needs_conversion, final_sql)."""
 
-    type_result = con.execute(
-        f"SELECT TYPEOF({quote_identifier(geometry_column)}) FROM ({query}) LIMIT 1"
-    ).fetchone()
+    type_result = fetch_one(
+        con.execute(f"SELECT TYPEOF({quote_identifier(geometry_column)}) FROM ({query}) LIMIT 1")
+    )
     duckdb_type = type_result[0] if type_result else None
     needs_wkb = duckdb_type == "GEOMETRY"
 
@@ -347,8 +384,8 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         if verbose:
             debug(f"Executing query with batch size {batch_size:,}...")
 
-        result = con.execute(final_sql)
-        reader = result.fetch_record_batch(rows_per_batch=batch_size)
+        # Nothing below queries `con` while the reader is open.
+        reader = _sized_reader(con, final_sql, batch_size)
         schema = reader.schema
 
         if geometry_column not in schema.names:
@@ -1069,8 +1106,8 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         if verbose:
             debug(f"Executing query with batch size {batch_size:,}...")
 
-        result = con.execute(query)
-        reader = result.fetch_record_batch(rows_per_batch=batch_size)
+        # Nothing below queries `con` while the reader is open.
+        reader = _sized_reader(con, query, batch_size)
         schema = reader.schema
 
         writer_kwargs = {"compression": compression or "NONE"}

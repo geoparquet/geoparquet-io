@@ -63,6 +63,7 @@ from geoparquet_io.core.crs_utils import extract_crs_from_parquet, is_geographic
 from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
 from geoparquet_io.core.duckdb_utils import (
     disable_geoparquet_conversion,
+    fetch_one,
     get_duckdb_connection,
     is_interrupt,
     quote_identifier,
@@ -743,7 +744,7 @@ def _run_comparison(
         return _could_not_compare(read.problem, bbox_column, geometry_column)
 
     source, row_expr = _row_source(schema_info, raw_url)
-    (total_rows,) = con.execute(f"SELECT count(*) FROM {source}").fetchone()
+    (total_rows,) = fetch_one(con.execute(f"SELECT count(*) FROM {source}"))
     sampled = not all_rows and total_rows > sample_rows
     # Seeded, so the same file gets the same verdict every run.
     sample_clause = (
@@ -764,7 +765,7 @@ def _run_comparison(
         debug(f"Comparing bbox '{bbox_column}' against geometry '{geometry_column}'")
         debug(query)
 
-    row = con.execute(query).fetchone()
+    row = fetch_one(con.execute(query))
     report: dict = {
         **_empty_report(None, bbox_column, geometry_column),
         "checked": True,

@@ -19,6 +19,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.convert import convert_to_geoparquet, read_spatial_to_arrow
+from geoparquet_io.core.duckdb_utils import fetch_one
 
 
 def _geom_col(parquet: Path) -> str:
@@ -29,14 +30,17 @@ def _geom_col(parquet: Path) -> str:
 def _has_z(parquet: Path) -> bool:
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
+    con.execute("SET geometry_always_xy = true")
     col = _geom_col(parquet)
-    (column_type,) = con.execute(
-        f"SELECT column_type FROM (DESCRIBE SELECT \"{col}\" FROM read_parquet('{parquet}'))"
-    ).fetchone()
+    (column_type,) = fetch_one(
+        con.execute(
+            f"SELECT column_type FROM (DESCRIBE SELECT \"{col}\" FROM read_parquet('{parquet}'))"
+        )
+    )
     geom = f'"{col}"' if column_type.upper().startswith("GEOMETRY") else f'ST_GeomFromWKB("{col}")'
-    (has_z,) = con.execute(
-        f"SELECT bool_or(ST_HasZ({geom})) FROM read_parquet('{parquet}')"
-    ).fetchone()
+    (has_z,) = fetch_one(
+        con.execute(f"SELECT bool_or(ST_HasZ({geom})) FROM read_parquet('{parquet}')")
+    )
     return bool(has_z)
 
 
@@ -150,6 +154,7 @@ def compound_crs_gpkg(tmp_path: Path) -> Path:
     path = tmp_path / "compound.gpkg"
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
+    con.execute("SET geometry_always_xy = true")
     con.execute(
         f"""
         COPY (
@@ -181,6 +186,7 @@ def wgs84_plus_height_gpkg(tmp_path: Path) -> Path:
     path = tmp_path / "wgs84_height.gpkg"
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
+    con.execute("SET geometry_always_xy = true")
     con.execute(
         f"""
         COPY (
@@ -218,6 +224,7 @@ def test_force_2d_reduces_secondary_column_crs(tmp_path: Path):
     source = tmp_path / "two_geoms.parquet"
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
+    con.execute("SET geometry_always_xy = true")
     con.execute(
         f"""
         COPY (

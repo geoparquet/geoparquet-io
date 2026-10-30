@@ -8,7 +8,7 @@ import re
 import string
 from dataclasses import dataclass
 
-from geoparquet_io.core.duckdb_utils import fetch_rows, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, fetch_rows, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import warn
 
@@ -813,7 +813,7 @@ def antimeridian_aware_bbox(con, relation: str, geometry_column: str) -> list[fl
     qcol = quote_identifier(geometry_column)
     geom_expr = geometry_to_geom_expr(con, relation, geometry_column)
     params = {"relation": relation, "qcol": qcol, "geom_expr": geom_expr}
-    xmin, xmax, ymin, ymax = con.execute(_PLAIN_EXTENT_SQL.format(**params)).fetchone()
+    xmin, xmax, ymin, ymax = fetch_one(con.execute(_PLAIN_EXTENT_SQL.format(**params)))
     if xmin is None:
         return None
     plain = [xmin, ymin, xmax, ymax]
@@ -821,7 +821,7 @@ def antimeridian_aware_bbox(con, relation: str, geometry_column: str) -> list[fl
     # already reported tightly and must not pay for the part-level scan.
     if xmin > -180.0 + _ANTIMERIDIAN_EPS or xmax < 180.0 - _ANTIMERIDIAN_EPS:
         return plain
-    gap = con.execute(_WIDEST_LON_GAP_SQL.format(**params)).fetchone()
+    gap = fetch_one(con.execute(_WIDEST_LON_GAP_SQL.format(**params)))
     if gap is None or (gap[0] - gap[1]) <= (xmin + 360.0) - xmax:
         return plain
     return [gap[0], ymin, gap[1], ymax]

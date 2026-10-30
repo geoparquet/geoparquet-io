@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import InvalidParameterError
 
 # Estimated compressed bytes a single cell contributes to an MVT tile,
@@ -183,10 +184,12 @@ def probe_worst_tile_counts(con, cells_sql: str, max_zoom: int = MAX_PROBE_ZOOM)
     )
     counts: dict[int, int] = {}
     for z in range(max_zoom + 1):
-        row = con.execute(
-            "SELECT COALESCE(MAX(cnt), 0) FROM "
-            f"(SELECT COUNT(*) AS cnt FROM __overview_qk GROUP BY substr(qk, 1, {z}))"
-        ).fetchone()
+        row = fetch_one(
+            con.execute(
+                "SELECT COALESCE(MAX(cnt), 0) FROM "
+                f"(SELECT COUNT(*) AS cnt FROM __overview_qk GROUP BY substr(qk, 1, {z}))"
+            )
+        )
         counts[z] = int(row[0]) if row else 0
     return counts
 

@@ -1326,7 +1326,7 @@ def _json_doc_to_table(doc: dict, exclude: str, suffix: str, con=None) -> pa.Tab
         # Allow arbitrarily large/complex single features through GDAL's parser
         # (issue #517) — must be in effect while ST_Read reads the temp file.
         with _gdal_geojson_size_limit_lifted():
-            return con.execute(query).arrow().read_all()
+            return con.sql(query).arrow().read_all()
 
     finally:
         if owns_con:

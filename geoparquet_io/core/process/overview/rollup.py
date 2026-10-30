@@ -222,7 +222,7 @@ def rollup_table(
         info = detect_aggregate_info(con, "__overview_input", cell_column, scheme)
         level = validate_level(info, level)
         sql = build_level_sql(con, info, "SELECT * FROM __overview_input", level)
-        return con.execute(sql).arrow().read_all()
+        return con.sql(sql).arrow().read_all()
     finally:
         con.close()
         # Release GDAL/spatial native handles before the next spatial connection

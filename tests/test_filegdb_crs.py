@@ -14,7 +14,7 @@ import tempfile
 import pytest
 
 from geoparquet_io.core.crs_utils import detect_crs_from_spatial_file
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 
 # Timeout for ogr2ogr subprocess calls (seconds)
 OGR2OGR_TIMEOUT = 60
@@ -140,7 +140,7 @@ class TestFileGDBCrsDetection:
         """
         con = get_duckdb_connection(load_spatial=True)
         try:
-            result = con.execute(f"SELECT COUNT(*) FROM ST_Read('{filegdb_path}')").fetchone()
+            result = fetch_one(con.execute(f"SELECT COUNT(*) FROM ST_Read('{filegdb_path}')"))
 
             assert result[0] > 0, "ST_Read should be able to read FileGDB data"
         finally:
@@ -339,7 +339,7 @@ class TestFileGDBMultiLayerCrs:
                 if f.endswith(".gdbtable"):
                     path = os.path.join(multi_layer_filegdb_path, f)
                     try:
-                        result = con.execute(f"SELECT * FROM ST_Read_Meta('{path}')").fetchone()
+                        result = fetch_one(con.execute(f"SELECT * FROM ST_Read_Meta('{path}')"))
                         if result and result[3]:
                             for layer in result[3]:
                                 if not layer.get("name", "").startswith("GDB_"):

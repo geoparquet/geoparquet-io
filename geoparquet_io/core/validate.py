@@ -44,6 +44,7 @@ from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     _geoarrow_coord_exprs,
     disable_geoparquet_conversion,
+    fetch_one,
     is_interrupt,
     quote_identifier,
     sql_path,
@@ -1142,7 +1143,7 @@ def _describe_geom_type(con, raw_url: str, geom_col: str) -> str:
     type_query = (
         f"DESCRIBE SELECT {quote_identifier(geom_col)} FROM read_parquet({sql_path(raw_url)})"
     )
-    type_result = con.execute(type_query).fetchone()
+    type_result = fetch_one(con.execute(type_query))
     return type_result[1] if type_result else ""
 
 
@@ -1220,7 +1221,7 @@ def _check_geoarrow_encoding_matches_data(
     """
 
     try:
-        result = con.execute(query).fetchone()
+        result = fetch_one(con.execute(query))
     except Exception as e:
         return _geoarrow_layout_error(name, encoding, "geometry coordinates", e)
 
@@ -1419,7 +1420,7 @@ def _check_geoarrow_geometry_types(
         SELECT COUNT(*) FROM read_parquet({sql_path(raw_url)})
         WHERE {quoted_geom} IS NOT NULL {limit_clause}
     """
-    count_result = con.execute(count_query).fetchone()
+    count_result = fetch_one(con.execute(count_query))
     total_count = count_result[0] if count_result else 0
     return _compare_geometry_types({found}, declared_types, total_count, geom_col)
 
@@ -1803,7 +1804,7 @@ def _check_bbox_contains_data(
     try:
         col_type = _describe_geom_type(con, raw_url, geom_col)
         query = _build_bbox_query(raw_url, geom_col, col_type, xy, limit_clause, encoding)
-        result = con.execute(query).fetchone()
+        result = fetch_one(con.execute(query))
         check = _interpret_bbox_result(result, geom_col)
         if wrapped and check.status != CheckStatus.SKIPPED:
             # The wrap reading must never be invisible in the check output.
@@ -2427,7 +2428,7 @@ def _execute_bounds_query(con, raw_url: str, geom_col: str, limit_clause: str):
             {limit_clause}
         )
     """
-    return con.execute(query).fetchone()
+    return fetch_one(con.execute(query))
 
 
 # =============================================================================
@@ -3055,7 +3056,7 @@ def _check_native_geo_stats_contains_data(
                 {limit_clause}
             )
         """
-        result = con.execute(query).fetchone()
+        result = fetch_one(con.execute(query))
 
         if result:
             total, within = result
@@ -3856,7 +3857,7 @@ def _get_geometry_bounds(
                    COUNT(*) as total
             FROM ({_geoarrow_bounds_subquery(raw_url, geom_col, encoding, limit_clause)})
         """
-        result = con.execute(query).fetchone()
+        result = fetch_one(con.execute(query))
         if result is None or result[0] is None:
             return None
         return result[0], result[1], result[2], result[3], result[4]
@@ -3878,7 +3879,7 @@ def _get_geometry_bounds(
             {limit_clause}
         )
     """
-    result = con.execute(query).fetchone()
+    result = fetch_one(con.execute(query))
 
     if result is None or result[0] is None:
         return None

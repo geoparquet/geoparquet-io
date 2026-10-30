@@ -20,6 +20,7 @@ from geoparquet_io.core.column_selection import (
 )
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
+    fetch_one,
     get_duckdb_connection,
     quote_identifier,
     validate_where_clause,
@@ -325,7 +326,7 @@ def _get_table_row_count(
             'SELECT row_count FROM {metadata_table} WHERE table_id = "{table}"'
         )
         """
-        result = con.execute(query).fetchone()
+        result = fetch_one(con.execute(query))
         return result[0] if result else None
     except Exception:
         return None
@@ -560,6 +561,10 @@ _PORTABLE_TOKEN = re.compile(r"\S+\s*")
 
 def _where_portability_problem(text: str, kind: object) -> str | None:
     """Name what makes one token of a --where read differently in GoogleSQL."""
+    # DuckDB 2.0's tokenizer emits a comment as a token of its own; 1.5 skips
+    # it, which the unbroken-token check below catches instead.
+    if kind == duckdb.token_type.comment:
+        return "a comment"
     if kind == duckdb.token_type.string_const:
         if _PORTABLE_STRING.fullmatch(text):
             return None
@@ -589,10 +594,15 @@ def _require_where_portable_to_googlesql(where: str) -> None:
         ValidationError: If any token falls outside that subset.
     """
     tokens = duckdb.tokenize(where)
-    problem = "a comment" if tokens and where[: tokens[0][0]].strip() else None
+    if not tokens:
+        # Whitespace-only, or all comment on a tokenizer that skips comments:
+        # refuse cleanly instead of crashing on the zip's length mismatch.
+        problem = "a comment" if where.strip() else "no SQL at all"
+    else:
+        problem = "a comment" if where[: tokens[0][0]].strip() else None
     if "\\" in where:
         problem = "a backslash"
-    ends = [pos for pos, _ in tokens[1:]] + [len(where)]
+    ends = ([pos for pos, _ in tokens[1:]] + [len(where)]) if tokens else []
     for (start, kind), end in zip(tokens, ends, strict=True):
         problem = problem or _where_portability_problem(where[start:end], kind)
     if problem:
@@ -1347,7 +1357,7 @@ def _run_read(
         progress(f"SQL: {query}")
     debug(f"Executing BigQuery query: {query}")
     progress("Querying BigQuery...")
-    return con.execute(query).arrow().read_all()
+    return con.sql(query).arrow().read_all()
 
 
 def _read_with_view_fallback(

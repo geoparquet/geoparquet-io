@@ -24,6 +24,7 @@ import psutil
 
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
+    fetch_one,
     get_duckdb_connection,
     quote_identifier,
     sql_path,
@@ -119,10 +120,12 @@ def get_file_info(filepath: Path) -> dict[str, Any]:
         # leaked DuckDB handle breaks file cleanup on Windows.
         with get_duckdb_connection(load_httpfs=False) as conn:
             # Get feature count and basic info
-            result = conn.execute(f"""
+            result = fetch_one(
+                conn.execute(f"""
                 SELECT COUNT(*) as cnt
                 FROM ST_Read({sql_path(filepath)})
-            """).fetchone()
+            """)
+            )
 
             feature_count = result[0] if result else 0
 
@@ -142,11 +145,13 @@ def get_file_info(filepath: Path) -> dict[str, Any]:
             # Try to get geometry type from first row
             geom_type = "unknown"
             if geom_col:
-                geom_result = conn.execute(f"""
+                geom_result = fetch_one(
+                    conn.execute(f"""
                     SELECT ST_GeometryType({quote_identifier(geom_col)}) as geom_type
                     FROM ST_Read({sql_path(filepath)})
                     LIMIT 1
-                """).fetchone()
+                """)
+                )
                 geom_type = geom_result[0] if geom_result else "unknown"
 
         return {
@@ -724,21 +729,28 @@ def _normalize_extra_info(extra_info: dict | str) -> str:
 
 def _collect_operators(node: dict, depth: int = 0) -> list[dict]:
     """Recursively collect operators from a query plan tree."""
-    # Support both DuckDB profiling format and simplified format
-    name = node.get("operator_name") or node.get("name", "UNKNOWN")
+    # DuckDB 1.x profiling keys, the simplified format, then DuckDB 2.0's keys
+    # ("type", and "intermediate_rows" for the rows an operator emits).
+    name = node.get("operator_name") or node.get("name") or node.get("type", "UNKNOWN")
     timing = node.get("operator_timing") or node.get("timing", 0.0)
-    cardinality = node.get("operator_cardinality") or node.get("cardinality", 0)
+    cardinality = (
+        node.get("operator_cardinality")
+        or node.get("cardinality")
+        or node.get("intermediate_rows", 0)
+    )
     raw_extra = node.get("extra_info", "")
 
-    operators = [
-        {
-            "name": name,
-            "timing": timing,
-            "cardinality": cardinality,
-            "extra_info": _normalize_extra_info(raw_extra),
-            "depth": depth,
-        }
-    ]
+    operator = {
+        "name": name,
+        "timing": timing,
+        "cardinality": cardinality,
+        "extra_info": _normalize_extra_info(raw_extra),
+        "depth": depth,
+    }
+    # DuckDB 2.0 reports row groups as fields of the scan, not in extra_info.
+    if "row_groups_scanned" in node and "total_row_groups_to_scan" in node:
+        operator["row_groups"] = (node["row_groups_scanned"], node["total_row_groups_to_scan"])
+    operators = [operator]
 
     for child in node.get("children", []):
         operators.extend(_collect_operators(child, depth + 1))
@@ -762,6 +774,11 @@ def _detect_filter_pushdown(operators: list[dict]) -> bool:
 def _detect_row_group_skip(operators: list[dict]) -> bool:
     """Check if any operator shows row group skipping."""
     for op in operators:
+        if "row_groups" in op:
+            scanned, total = op["row_groups"]
+            if scanned < total:
+                return True
+            continue
         extra = op.get("extra_info", "")
         if isinstance(extra, dict):
             extra = str(extra)
@@ -792,7 +809,9 @@ def parse_query_plan(plan: dict) -> dict:
     Returns:
         Dictionary with operators list, filter/skip detection, and total time.
     """
-    operators = _collect_operators(plan)
+    # DuckDB 2.0 nests the tree under "operator", a list of root operators.
+    roots = plan["operator"] if isinstance(plan.get("operator"), list) else [plan]
+    operators = [op for root in roots for op in _collect_operators(root)]
     total_time = sum(op["timing"] for op in operators)
 
     return {

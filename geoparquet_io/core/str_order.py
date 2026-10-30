@@ -12,6 +12,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
+    fetch_one,
     get_duckdb_connection,
     quote_identifier,
     register_arrow,
@@ -154,11 +155,13 @@ def _str_order_query(
 
 def _count_spatial_rows(con: duckdb.DuckDBPyConnection, source: str, geometry_column: str) -> int:
     geom = quote_identifier(geometry_column)
-    result = con.execute(f"""
+    result = fetch_one(
+        con.execute(f"""
         SELECT count(*)
         FROM {source}
         WHERE {geom} IS NOT NULL AND NOT ST_IsEmpty({geom})
-    """).fetchone()
+    """)
+    )
     return int(result[0]) if result else 0
 
 
@@ -234,7 +237,7 @@ def str_order_table(
             tile_size,
             output_expressions=output_expressions,
         )
-        result = con.execute(query).arrow().read_all()
+        result = con.sql(query).arrow().read_all()
         if table.schema.metadata:
             result = result.replace_schema_metadata(table.schema.metadata)
         result = registered.restore_edges(result)

@@ -19,6 +19,7 @@ from geoparquet_io.core.duckdb_utils import (
     SPATIAL_JOIN_BBOX_PREFILTER,
     SPATIAL_JOIN_NATIVE,
     build_spatial_join_condition,
+    fetch_one,
     quote_identifier,
     s3_config_scope,
     spatial_join_strategy,
@@ -245,7 +246,7 @@ def _add_extent_filter(
             FROM {input_ref}
         """
 
-    extent = con.execute(extent_query).fetchone()
+    extent = fetch_one(con.execute(extent_query))
     if extent and all(v is not None for v in extent):
         xmin, xmax, ymin, ymax = extent
         q_admin_bbox = quote_identifier(admin_bbox_col)
@@ -334,7 +335,7 @@ def _get_result_stats(con, output_parquet, dataset, levels, verbose, prefix=None
     FROM {sql_path(output_parquet)};
     """
 
-    stats = con.execute(stats_query).fetchone()
+    stats = fetch_one(con.execute(stats_query))
     total_features = stats[0]
     features_with_admin = stats[1]
 
@@ -345,7 +346,7 @@ def _get_result_stats(con, output_parquet, dataset, levels, verbose, prefix=None
         FROM {sql_path(output_parquet)}
         WHERE {quote_identifier(output_col)} IS NOT NULL;
         """
-        result = con.execute(count_query).fetchone()
+        result = fetch_one(con.execute(count_query))
         unique_counts.append((level, result[0]))
 
     return total_features, features_with_admin, unique_counts
@@ -374,9 +375,9 @@ def _warn_if_row_count_changed(input_rows, output_rows):
 def _count_rows(con, source, is_table_ref=False):
     """Row count for a file/URL or a temp table, or None if it cannot be read."""
     try:
-        return con.execute(
-            f"SELECT COUNT(*) FROM {_format_input_ref(source, is_table_ref)}"
-        ).fetchone()[0]
+        return fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM {_format_input_ref(source, is_table_ref)}")
+        )[0]
     except Exception:
         return None
 
@@ -902,9 +903,9 @@ def add_admin_divisions_multi(
         try:
             # Get total input count (skip in dry-run)
             if not dry_run:
-                total_count = con.execute(
-                    f"SELECT COUNT(*) FROM {sql_path(input_path)}"
-                ).fetchone()[0]
+                total_count = fetch_one(
+                    con.execute(f"SELECT COUNT(*) FROM {sql_path(input_path)}")
+                )[0]
                 progress(f"Processing {total_count:,} input features...")
 
             # Build Vecorel metadata if requested (applied to whichever write path runs)

@@ -19,7 +19,7 @@ This module provides three injection styles:
   memory (WFS, ArcGIS, BigQuery, Carto).
 """
 
-from geoparquet_io.core.duckdb_utils import quote_identifier
+from geoparquet_io.core.duckdb_utils import fetch_one, quote_identifier
 from geoparquet_io.core.geo_metadata import GEOGRAPHY_EDGE_ALGORITHMS
 from geoparquet_io.core.logging_config import debug, warn
 
@@ -247,7 +247,7 @@ def repair_query_geometry(
         return query
 
     try:
-        n = con.execute(_layered_invalid_count_sql(f"({query})", parsed)).fetchone()[0]
+        n = fetch_one(con.execute(_layered_invalid_count_sql(f"({query})", parsed)))[0]
     except Exception:
         # Defensive: never let geometry repair break extraction.
         return query
@@ -271,7 +271,7 @@ def _repaired_rows(con, read):
     _layered_invalid_count_sql does (#642, #737).
     """
     return (
-        con.execute(
+        con.sql(
             "SELECT CASE WHEN __g IS NOT NULL AND NOT ST_IsValid(__g) "
             "THEN ST_AsWKB(ST_MakeValid(__g)) END AS __fixed "
             f"FROM (SELECT {read.expr} AS __g FROM _gpio_repair_src)"
@@ -397,7 +397,7 @@ def repair_arrow_table_geometry(
             # Count-only: the layered form — the single-WHERE form segfaults on
             # tables containing NULL geometry rows (#642).
             sql = _layered_invalid_count_sql("_gpio_repair_src", read.expr)
-            n = con.execute(sql).fetchone()[0]
+            n = fetch_one(con.execute(sql))[0]
             _warn_invalid(n, repaired=False)
             return table, n
         fixed = _repaired_rows(con, read)

@@ -17,7 +17,11 @@ cell nowhere near the seam is handed through untouched.
 
 import pytest
 
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, load_community_extension
+from geoparquet_io.core.duckdb_utils import (
+    fetch_one,
+    get_duckdb_connection,
+    load_community_extension,
+)
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME, aggregate_by_a5
 from geoparquet_io.core.process.aggregate.common import geometry_to_geom_expr
 from geoparquet_io.core.process.aggregate.grid_common import wrap_grid_geometry
@@ -83,15 +87,17 @@ def _vertex_report(parquet_file):
         relation = f"read_parquet('{parquet_file}')"
         geom = geometry_to_geom_expr(con, relation, "geometry")
         cells = f"SELECT {geom} AS g FROM {relation} WHERE geometry IS NOT NULL"
-        return con.execute(
-            f"""
+        return fetch_one(
+            con.execute(
+                f"""
             SELECT count(*),
                    count(*) FILTER (WHERE NOT ST_IsValid(g)),
                    count(*) FILTER (WHERE ST_XMin(g) < -180.0 OR ST_XMax(g) > 180.0),
                    count(*) FILTER (WHERE ST_GeometryType(g) = 'MULTIPOLYGON')
             FROM ({cells})
             """
-        ).fetchone()
+            )
+        )
     finally:
         con.close()
 
@@ -111,10 +117,12 @@ def test_the_raw_a5_boundary_leaves_the_valid_range(cell, side):
     written for them carries vertices outside [-180, 180]."""
     con = _a5_connection()
     try:
-        lo, hi = con.execute(
-            f"SELECT list_min(list_transform(a5_cell_to_boundary({cell}::UBIGINT), p -> p[1])), "
-            f"list_max(list_transform(a5_cell_to_boundary({cell}::UBIGINT), p -> p[1]))"
-        ).fetchone()
+        lo, hi = fetch_one(
+            con.execute(
+                f"SELECT list_min(list_transform(a5_cell_to_boundary({cell}::UBIGINT), lambda p: p[1])), "
+                f"list_max(list_transform(a5_cell_to_boundary({cell}::UBIGINT), lambda p: p[1]))"
+            )
+        )
     finally:
         con.close()
     assert lo < -180.0 or hi > 180.0, f"cell {cell} was expected to run {side}"
@@ -150,9 +158,11 @@ def test_the_fiji_cell_keeps_its_pinned_multipolygon():
     )
     con = _a5_connection()
     try:
-        (wkt,) = con.execute(
-            f"SELECT ST_AsText(ST_ReducePrecision(ST_GeomFromWKB(geometry), 0.000001)) FROM ({sql})"
-        ).fetchone()
+        (wkt,) = fetch_one(
+            con.execute(
+                f"SELECT ST_AsText(ST_ReducePrecision(ST_GeomFromWKB(geometry), 0.000001)) FROM ({sql})"
+            )
+        )
     finally:
         con.close()
     assert wkt == FIJI_CELL_R7_WKT
@@ -172,9 +182,9 @@ def test_a_cell_away_from_the_seam_is_handed_through_untouched():
     raw = A5_SCHEME.boundary_template.format(cell=f"{NULL_ISLAND_CELL_R7}::UBIGINT")
     con = _a5_connection()
     try:
-        written, untouched = con.execute(
-            f"SELECT (SELECT geometry FROM ({sql})), ST_AsWKB({raw})"
-        ).fetchone()
+        written, untouched = fetch_one(
+            con.execute(f"SELECT (SELECT geometry FROM ({sql})), ST_AsWKB({raw})")
+        )
     finally:
         con.close()
     assert bytes(written) == bytes(untouched)
@@ -237,9 +247,9 @@ def test_a5_overview_parents_are_dateline_safe(dateline_parquet, tmp_path):
 
     con = _a5_connection()
     try:
-        rolled_count, rolled_area = con.execute(
-            f"SELECT SUM(count), SUM(sum_area) FROM read_parquet('{parent_path}')"
-        ).fetchone()
+        rolled_count, rolled_area = fetch_one(
+            con.execute(f"SELECT SUM(count), SUM(sum_area) FROM read_parquet('{parent_path}')")
+        )
     finally:
         con.close()
     assert rolled_count == len(DATELINE_POINTS)

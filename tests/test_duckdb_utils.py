@@ -17,6 +17,7 @@ from geoparquet_io.core.duckdb_utils import (
     _install_and_load_extension,
     _wrap_query_with_blob_conversion,
     build_spatial_join_condition,
+    fetch_one,
     get_duckdb_connection,
     get_duckdb_connection_for_s3,
     load_community_extension,
@@ -198,7 +199,7 @@ class TestGetDuckdbConnection:
         """Basic connection can be created."""
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
         assert con is not None
-        result = con.execute("SELECT 1").fetchone()
+        result = fetch_one(con.execute("SELECT 1"))
         assert result == (1,)
         con.close()
 
@@ -213,7 +214,7 @@ class TestGetDuckdbConnection:
         spill = str(tmp_path / "spill")
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False, temp_directory=spill)
         try:
-            value = con.execute("SELECT current_setting('temp_directory')").fetchone()[0]
+            value = fetch_one(con.execute("SELECT current_setting('temp_directory')"))[0]
             assert value == spill
         finally:
             con.close()
@@ -222,7 +223,7 @@ class TestGetDuckdbConnection:
         """memory_limit is applied when provided."""
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False, memory_limit="2GB")
         try:
-            value = con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+            value = fetch_one(con.execute("SELECT current_setting('memory_limit')"))[0]
             # DuckDB normalises the units (e.g. "2.0 GiB"); just assert it changed.
             assert "GiB" in value or "GB" in value
         finally:
@@ -237,11 +238,11 @@ class TestGetDuckdbConnection:
         """
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
         try:
-            value = con.execute("SELECT current_setting('temp_directory')").fetchone()[0]
+            value = fetch_one(con.execute("SELECT current_setting('temp_directory')"))[0]
             assert value != ".tmp"
             assert os.path.isabs(value)
             assert not os.path.exists(value)
-            assert con.execute("SELECT 1").fetchone() == (1,)
+            assert fetch_one(con.execute("SELECT 1")) == (1,)
         finally:
             con.close()
 
@@ -419,13 +420,13 @@ class TestGetDuckdbConnectionS3Config:
             s3_endpoint="data.source.coop",
             s3_use_ssl=True,
         )
-        result = con.execute("SELECT current_setting('s3_endpoint')").fetchone()
+        result = fetch_one(con.execute("SELECT current_setting('s3_endpoint')"))
         assert result[0] == "data.source.coop"
 
-        result = con.execute("SELECT current_setting('s3_url_style')").fetchone()
+        result = fetch_one(con.execute("SELECT current_setting('s3_url_style')"))
         assert result[0] == "path"
 
-        result = con.execute("SELECT current_setting('s3_use_ssl')").fetchone()
+        result = fetch_one(con.execute("SELECT current_setting('s3_use_ssl')"))
         assert result[0] is True
         con.close()
 
@@ -436,7 +437,7 @@ class TestGetDuckdbConnectionS3Config:
             load_httpfs=True,
             s3_region="eu-west-1",
         )
-        result = con.execute("SELECT current_setting('s3_region')").fetchone()
+        result = fetch_one(con.execute("SELECT current_setting('s3_region')"))
         assert result[0] == "eu-west-1"
         con.close()
 
@@ -448,14 +449,14 @@ class TestGetDuckdbConnectionS3Config:
             s3_endpoint="minio.local:9000",
             s3_use_ssl=False,
         )
-        result = con.execute("SELECT current_setting('s3_use_ssl')").fetchone()
+        result = fetch_one(con.execute("SELECT current_setting('s3_use_ssl')"))
         assert result[0] is False
         con.close()
 
     def test_no_s3_params_no_set_statements(self):
         """Without S3 params, no custom SET statements are emitted."""
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
-        result = con.execute("SELECT current_setting('s3_endpoint')").fetchone()
+        result = fetch_one(con.execute("SELECT current_setting('s3_endpoint')"))
         assert not result[0]
         con.close()
 
@@ -466,7 +467,7 @@ class TestGetDuckdbConnectionS3Config:
             load_spatial=False,
             s3_endpoint="data.source.coop",
         )
-        result = con.execute("SELECT current_setting('s3_endpoint')").fetchone()
+        result = fetch_one(con.execute("SELECT current_setting('s3_endpoint')"))
         assert result[0] == "data.source.coop"
         con.close()
 
@@ -478,7 +479,7 @@ class TestAmbientS3Config:
         """get_duckdb_connection() reads ambient config when no explicit kwargs."""
         with s3_config_scope({"s3_endpoint": "ambient.example.com", "s3_use_ssl": True}):
             con = get_duckdb_connection(load_spatial=False, load_httpfs=True)
-            result = con.execute("SELECT current_setting('s3_endpoint')").fetchone()
+            result = fetch_one(con.execute("SELECT current_setting('s3_endpoint')"))
             assert result[0] == "ambient.example.com"
             con.close()
 
@@ -490,7 +491,7 @@ class TestAmbientS3Config:
                 load_httpfs=True,
                 s3_endpoint="explicit.example.com",
             )
-            result = con.execute("SELECT current_setting('s3_endpoint')").fetchone()
+            result = fetch_one(con.execute("SELECT current_setting('s3_endpoint')"))
             assert result[0] == "explicit.example.com"
             con.close()
 
@@ -499,7 +500,7 @@ class TestAmbientS3Config:
         with s3_config_scope({"s3_endpoint": "scoped.example.com"}):
             pass
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
-        result = con.execute("SELECT current_setting('s3_endpoint')").fetchone()
+        result = fetch_one(con.execute("SELECT current_setting('s3_endpoint')"))
         assert not result[0]
         con.close()
 
@@ -507,7 +508,7 @@ class TestAmbientS3Config:
         """Ambient s3_region is picked up by get_duckdb_connection()."""
         with s3_config_scope({"s3_region": "eu-west-1"}):
             con = get_duckdb_connection(load_spatial=False, load_httpfs=True)
-            result = con.execute("SELECT current_setting('s3_region')").fetchone()
+            result = fetch_one(con.execute("SELECT current_setting('s3_region')"))
             assert result[0] == "eu-west-1"
             con.close()
 

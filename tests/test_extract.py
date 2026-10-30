@@ -15,6 +15,7 @@ import duckdb
 import pyarrow as pa
 import pytest
 
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.extract import (
     build_column_selection,
@@ -610,7 +611,7 @@ class TestExtractIntegration:
         con = duckdb.connect()
         try:
             con.execute("INSTALL spatial; LOAD spatial;")
-            result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
+            result = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{output_file}'"))
             assert result[0] == 766  # Original row count
         finally:
             con.close()
@@ -701,7 +702,7 @@ class TestExtractIntegration:
         con = duckdb.connect()
         try:
             con.execute("INSTALL spatial; LOAD spatial;")
-            result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
+            result = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{output_file}'"))
             assert result[0] < 766  # Should be filtered
             assert result[0] > 0  # But not empty
         finally:
@@ -719,7 +720,7 @@ class TestExtractIntegration:
         con = duckdb.connect()
         try:
             con.execute("INSTALL spatial; LOAD spatial;")
-            result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
+            result = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{output_file}'"))
             assert result[0] < 766
             assert result[0] > 0
         finally:
@@ -739,7 +740,7 @@ class TestExtractIntegration:
         con = duckdb.connect()
         try:
             con.execute("INSTALL spatial; LOAD spatial;")
-            result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
+            result = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{output_file}'"))
             assert result[0] < 766
             assert result[0] > 0
         finally:
@@ -756,7 +757,7 @@ class TestExtractIntegration:
         con = duckdb.connect()
         try:
             con.execute("INSTALL spatial; LOAD spatial;")
-            result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
+            result = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{output_file}'"))
             assert result[0] < 766
             assert result[0] > 0
         finally:
@@ -781,7 +782,7 @@ class TestExtractIntegration:
             con.execute("INSTALL spatial; LOAD spatial;")
 
             # Check row count (should be very few with all filters)
-            result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
+            result = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{output_file}'"))
             assert result[0] < 766
 
             # Check columns
@@ -841,7 +842,7 @@ class TestExtractIntegration:
         con = duckdb.connect()
         try:
             con.execute("INSTALL spatial; LOAD spatial;")
-            result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
+            result = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{output_file}'"))
             assert result[0] == 0
         finally:
             con.close()
@@ -972,7 +973,7 @@ class TestExtractCLI:
         con = duckdb.connect()
         try:
             con.execute("INSTALL spatial; LOAD spatial;")
-            count = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()[0]
+            count = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{output_file}'"))[0]
             assert count < 766
             assert count > 0
         finally:
@@ -1034,7 +1035,7 @@ class TestExtractRemote:
         con = duckdb.connect()
         try:
             con.execute("INSTALL spatial; LOAD spatial;")
-            count = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()[0]
+            count = fetch_one(con.execute(f"SELECT COUNT(*) FROM '{output_file}'"))[0]
             assert count > 0
             assert count < 617941  # Less than total rows
         finally:
@@ -1316,7 +1317,7 @@ def _wkb_of(wkt: str) -> bytes:
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
     try:
-        return con.execute("SELECT ST_AsWKB(ST_GeomFromText(?))", [wkt]).fetchone()[0]
+        return fetch_one(con.execute("SELECT ST_AsWKB(ST_GeomFromText(?))", [wkt]))[0]
     finally:
         con.close()
 

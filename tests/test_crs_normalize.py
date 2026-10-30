@@ -16,7 +16,7 @@ from geoparquet_io.core.crs_utils import (
     source_crs_string,
     transform_geom_sql,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 
 EPSG_28992 = {"id": {"authority": "EPSG", "code": 28992}}
 
@@ -66,11 +66,13 @@ class TestTransformGeomSql:
         con = get_duckdb_connection(load_spatial=True)
         try:
             con.execute("SET geometry_always_xy = true;")
-            raw_x, lon, lat = con.execute(
-                f'SELECT ST_X(ST_Centroid("geometry")), '
-                f"ST_X(ST_Centroid({expr})), ST_Y(ST_Centroid({expr})) "
-                f"FROM '{fields_5070_file}' LIMIT 1"
-            ).fetchone()
+            raw_x, lon, lat = fetch_one(
+                con.execute(
+                    f'SELECT ST_X(ST_Centroid("geometry")), '
+                    f"ST_X(ST_Centroid({expr})), ST_Y(ST_Centroid({expr})) "
+                    f"FROM '{fields_5070_file}' LIMIT 1"
+                )
+            )
         finally:
             con.close()
         # Raw coords are projected metres (millions); transformed are valid degrees.
@@ -443,12 +445,12 @@ class TestAdminJoinIsCrsAware:
             }
             with_crs = _build_spatial_join_query(source_crs="EPSG:5070", **kwargs)
             without = _build_spatial_join_query(source_crs=None, **kwargs)
-            assigned = con.execute(
-                f"SELECT COUNT(*) FROM ({with_crs}) WHERE region IS NOT NULL"
-            ).fetchone()[0]
-            not_assigned = con.execute(
-                f"SELECT COUNT(*) FROM ({without}) WHERE region IS NOT NULL"
-            ).fetchone()[0]
+            assigned = fetch_one(
+                con.execute(f"SELECT COUNT(*) FROM ({with_crs}) WHERE region IS NOT NULL")
+            )[0]
+            not_assigned = fetch_one(
+                con.execute(f"SELECT COUNT(*) FROM ({without}) WHERE region IS NOT NULL")
+            )[0]
         finally:
             con.close()
         assert assigned > 0  # reprojected input intersects the admin polygon
@@ -473,9 +475,9 @@ class TestAdminJoinIsCrsAware:
                 source_crs="EPSG:5070",
             )
             con.execute(sql)
-            assigned = con.execute(
-                "SELECT COUNT(*) FROM _enriched WHERE region IS NOT NULL"
-            ).fetchone()[0]
+            assigned = fetch_one(
+                con.execute("SELECT COUNT(*) FROM _enriched WHERE region IS NOT NULL")
+            )[0]
         finally:
             con.close()
         assert assigned > 0
@@ -580,9 +582,9 @@ class TestAdminReprojectsAdminSideWithBbox:
                 source_crs="EPSG:5070",
             )
             con.execute(sql)
-            assigned = con.execute(
-                "SELECT COUNT(*) FROM _enriched WHERE region IS NOT NULL"
-            ).fetchone()[0]
+            assigned = fetch_one(
+                con.execute("SELECT COUNT(*) FROM _enriched WHERE region IS NOT NULL")
+            )[0]
         finally:
             con.close()
         assert assigned > 0

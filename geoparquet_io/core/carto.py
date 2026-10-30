@@ -24,6 +24,7 @@ from geoparquet_io.core.column_selection import (
 )
 from geoparquet_io.core.crs_utils import _projjson_from_authority
 from geoparquet_io.core.duckdb_utils import (
+    fetch_one,
     get_duckdb_connection,
     quote_identifier,
     sql_path,
@@ -322,9 +323,9 @@ def _get_row_count(
 
     conn = get_duckdb_connection()
     conn.execute(f"SET http_timeout = {int(timeout * 1000)}")  # DuckDB uses milliseconds
-    result = conn.execute(
-        f"SELECT rows[1].count FROM read_json_auto({sql_path(full_url)})"
-    ).fetchone()
+    result = fetch_one(
+        conn.execute(f"SELECT rows[1].count FROM read_json_auto({sql_path(full_url)})")
+    )
 
     return int(result[0]) if result else 0
 
@@ -992,7 +993,7 @@ def _fetch_with_retry(
             # the connection: loading the spatial extension on a cold macOS
             # runner took longer than a 2 s --timeout and read as one.
             started = time.monotonic()
-            table = conn.execute(f"SELECT * FROM {read_expr}").arrow().read_all()
+            table = conn.sql(f"SELECT * FROM {read_expr}").arrow().read_all()
             return table
 
         except Exception as e:

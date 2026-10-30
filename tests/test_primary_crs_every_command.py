@@ -23,7 +23,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet, source_crs_string
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 
 # POINT(10 10) in CRS84 projected to UTM 31N, and the H3 res-5 cell it lies in.
 UTM31_X, UTM31_Y = 1268980.13, 1113599.93
@@ -163,7 +163,7 @@ class TestPrimaryCrsResolver:
 def _first_row(path, expr: str):
     con = get_duckdb_connection(load_spatial=True)
     try:
-        return con.execute(f"SELECT {expr} FROM {sql_path(str(path))}").fetchone()
+        return fetch_one(con.execute(f"SELECT {expr} FROM {sql_path(str(path))}"))
     finally:
         con.close()
 

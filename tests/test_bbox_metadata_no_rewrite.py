@@ -23,7 +23,7 @@ import pytest
 
 from geoparquet_io.core.add import bbox_metadata
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
 
@@ -200,10 +200,12 @@ def test_the_fallback_on_a_native_file_writes_one_geo_entry(tmp_path, monkeypatc
             "SELECT decode(value) FROM parquet_kv_metadata(?) WHERE decode(key) = 'geo'",
             [path.as_posix()],
         ).fetchall()
-        logical = conn.execute(
-            "SELECT logical_type FROM parquet_schema(?) WHERE name = 'geometry'",
-            [path.as_posix()],
-        ).fetchone()[0]
+        logical = fetch_one(
+            conn.execute(
+                "SELECT logical_type FROM parquet_schema(?) WHERE name = 'geometry'",
+                [path.as_posix()],
+            )
+        )[0]
     finally:
         conn.close()
     assert len(entries) == 1, entries

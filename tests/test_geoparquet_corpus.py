@@ -42,6 +42,7 @@ from geoparquet_io.core.duckdb_metadata import (
     get_schema_info,
     parse_geometry_logical_type,
 )
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
 from tests.conftest import get_geo_metadata, get_geoparquet_version, has_native_geo_types
@@ -140,9 +141,9 @@ class TestValidFilesRead:
         con = duckdb.connect()
         try:
             con.execute("INSTALL spatial; LOAD spatial;")
-            (rows,) = con.execute(
-                f"SELECT count(*) FROM read_parquet('{path.as_posix()}')"
-            ).fetchone()
+            (rows,) = fetch_one(
+                con.execute(f"SELECT count(*) FROM read_parquet('{path.as_posix()}')")
+            )
         finally:
             con.close()
         assert rows == table.num_rows

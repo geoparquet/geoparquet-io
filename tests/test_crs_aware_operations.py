@@ -173,7 +173,7 @@ def _projected_table(crs84_file: str, target: str = "EPSG:5070"):
     con.execute("INSTALL spatial; LOAD spatial")
     con.execute("SET geometry_always_xy = true")
     table = (
-        con.execute(
+        con.sql(
             f"""
         SELECT * EXCLUDE(geometry),
                ST_AsWKB(ST_Transform(geometry, 'OGC:CRS84', '{target}')) AS geometry

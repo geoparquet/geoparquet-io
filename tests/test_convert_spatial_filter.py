@@ -20,7 +20,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import format_writers
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 from geoparquet_io.core.exceptions import InvalidParameterError, ValidationError
 from geoparquet_io.core.format_writers import write_csv, write_flatgeobuf, write_geopackage
 
@@ -39,7 +39,7 @@ BBOX_AS_WKT = "POLYGON((-0.5 10.0, 0.5 10.0, 0.5 11.0, -0.5 11.0, -0.5 10.0))"
 
 def _gpkg_table(db):
     """The one layer's table name (DuckDB's GDAL writer names it after the file)."""
-    return db.execute("SELECT table_name FROM gpkg_contents").fetchone()[0]
+    return fetch_one(db.execute("SELECT table_name FROM gpkg_contents"))[0]
 
 
 def _gpkg_values(path, column="fsq_place_id"):
@@ -57,7 +57,7 @@ def _gpkg_columns(path):
 def _read_layer_count(path):
     con = get_duckdb_connection(load_spatial=True)
     try:
-        return con.execute(f"SELECT count(*) FROM ST_Read('{path}')").fetchone()[0]
+        return fetch_one(con.execute(f"SELECT count(*) FROM ST_Read('{path}')"))[0]
     finally:
         con.close()
 
@@ -312,8 +312,8 @@ class TestDonorRegressions:
         out = tmp_path / "table.gpkg"
         write_geopackage(plain_parquet, str(out))
         with closing(sqlite3.connect(out)) as db:
-            data_type = db.execute("SELECT data_type FROM gpkg_contents").fetchone()[0]
-            geometry_rows = db.execute("SELECT count(*) FROM gpkg_geometry_columns").fetchone()[0]
+            data_type = fetch_one(db.execute("SELECT data_type FROM gpkg_contents"))[0]
+            geometry_rows = fetch_one(db.execute("SELECT count(*) FROM gpkg_geometry_columns"))[0]
         assert data_type == "attributes"
         assert geometry_rows == 0
         assert "geom" not in _gpkg_columns(out)

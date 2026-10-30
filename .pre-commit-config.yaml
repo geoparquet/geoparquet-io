@@ -73,6 +73,13 @@ repos:
               echo "ERROR: Use .arrow().read_all() instead of .to_arrow_table() (crashes in DuckDB 1.5)"
               errors=1
             fi
+            # DuckDB 2.0 removed .arrow()/.fetch_record_batch() from execute() results, and
+            # an execute() result read with a bare .fetchone() stays open and blocks the
+            # connection. Single-line catch; tests/test_duckdb2_result_api_guard.py walks the AST.
+            if grep -rn -E "\.fetch_record_batch\(|\.execute\([^)]*\)\.(arrow|fetchone)\(" geoparquet_io/ --include="*.py" | grep -v "^\s*#"; then
+              echo "ERROR: Use con.sql(q).arrow(), con.sql(q).to_arrow_reader(batch_size=n), or fetch_one(con.execute(q)) (DuckDB 2.0)"
+              errors=1
+            fi
             # TRY_CAST to GEOMETRY is broken - only match actual SQL, not comments
             if grep -rn 'TRY_CAST.*AS GEOMETRY' geoparquet_io/ --include="*.py" | grep -v "^\s*#" | grep -v "DuckDB 1.5" | grep -v "instead of"; then
               echo "ERROR: Use TRY(ST_GeomFromText(x)) instead of TRY_CAST(x AS GEOMETRY)"

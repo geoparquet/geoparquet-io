@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.duckdb_utils import fetch_one
 
 # Test data directory
 TEST_DATA_DIR = Path(__file__).parent
@@ -264,11 +265,13 @@ def verify_generated_files():
             con.execute("INSTALL spatial; LOAD spatial;")
 
             # Check CRS
-            result = con.execute(f"""
+            result = fetch_one(
+                con.execute(f"""
                 SELECT ST_SRID(geometry) as srid
                 FROM ST_Read('{gpkg_32632}')
                 LIMIT 1
-            """).fetchone()
+            """)
+            )
 
             if result and result[0] == 32632:
                 print(f"  ✓ {gpkg_32632.name} has correct CRS (EPSG:32632)")

@@ -32,6 +32,7 @@ from geoparquet_io.core.duckdb_metadata import (
 )
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
+    fetch_one,
     get_duckdb_connection,
     get_duckdb_connection_for_s3,
     quote_identifier,
@@ -184,14 +185,16 @@ def _get_data_bounds(input_parquet: str, geometry_col: str) -> tuple | None:
     try:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
         raw_url = resolve_file_url(input_parquet, verbose=False)
-        result = con.execute(f"""
+        result = fetch_one(
+            con.execute(f"""
             SELECT
                 MIN(ST_XMin({quote_identifier(geometry_col)})) as xmin,
                 MIN(ST_YMin({quote_identifier(geometry_col)})) as ymin,
                 MAX(ST_XMax({quote_identifier(geometry_col)})) as xmax,
                 MAX(ST_YMax({quote_identifier(geometry_col)})) as ymax
             FROM read_parquet({sql_path(raw_url)})
-        """).fetchone()
+        """)
+        )
         con.close()
         if result and all(v is not None for v in result):
             return result
@@ -281,9 +284,11 @@ def convert_geojson_to_wkt(geojson: dict) -> str:
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         geojson_str = _escape_sql_string(json.dumps(geojson))
-        result = con.execute(f"""
+        result = fetch_one(
+            con.execute(f"""
             SELECT ST_AsText(ST_GeomFromGeoJSON('{geojson_str}'))
-        """).fetchone()
+        """)
+        )
         return result[0]
     finally:
         con.close()
@@ -840,7 +845,7 @@ def extract_table(
                 nonplanar_edges=nonplanar_edges_of_arrow_table(table, geom_col),
             )
 
-        result = con.execute(query).arrow().read_all()
+        result = con.sql(query).arrow().read_all()
         if table.schema.metadata:
             metadata = _carry_metadata_to_columns(table.schema.metadata, result.column_names)
             if geometry_repaired:

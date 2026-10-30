@@ -17,6 +17,7 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 import pytest
 
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.streaming import (
     STREAM_MARKER,
     StreamingError,
@@ -927,7 +928,7 @@ class TestReadStdinToTempFile:
             # The whole point: DuckDB can now open the file.
             con = duckdb.connect()
             try:
-                assert con.execute(f"SELECT COUNT(*) FROM '{path}'").fetchone()[0] == 1
+                assert fetch_one(con.execute(f"SELECT COUNT(*) FROM '{path}'"))[0] == 1
             finally:
                 con.close()
         finally:

@@ -58,7 +58,7 @@ from geoparquet_io.core.duckdb_metadata import (
     get_per_row_group_bbox_stats,
     get_schema_info,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 from geoparquet_io.core.exceptions import FileNotFoundGeoParquetError
 from geoparquet_io.core.file_utils import safe_file_url
 
@@ -78,7 +78,7 @@ def apostrophe_file(tmp_path):
     values = ", ".join(
         f"({i + 1}, ST_AsWKB(ST_GeomFromText('POINT ({i} {i})')))" for i in range(10)
     )
-    table = con.execute(f"SELECT * FROM (VALUES {values}) AS t(id, geometry)").arrow().read_all()
+    table = con.sql(f"SELECT * FROM (VALUES {values}) AS t(id, geometry)").arrow().read_all()
     con.close()
 
     geo = {
@@ -226,7 +226,7 @@ class TestSqlPath:
     def test_result_is_a_usable_duckdb_literal(self, apostrophe_file):
         con = get_duckdb_connection(load_spatial=False)
         try:
-            rows = con.execute(f"SELECT count(*) FROM {sql_path(apostrophe_file)}").fetchone()
+            rows = fetch_one(con.execute(f"SELECT count(*) FROM {sql_path(apostrophe_file)}"))
         finally:
             con.close()
         assert rows[0] == 10
@@ -792,7 +792,7 @@ class TestAggregateByAdminSource:
 
         con = get_duckdb_connection(load_spatial=False)
         try:
-            assert con.execute(f"SELECT count(*) FROM {ref}").fetchone()[0] == 10
+            assert fetch_one(con.execute(f"SELECT count(*) FROM {ref}"))[0] == 10
         finally:
             con.close()
 

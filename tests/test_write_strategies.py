@@ -21,7 +21,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 from geoparquet_io.core.validate import validate_geoparquet
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 from geoparquet_io.core.write_strategies import (
@@ -1169,7 +1169,7 @@ class TestDuckDBKVWriteConfiguration:
 
         def snapshot():
             return {
-                key: con.execute(f"SELECT current_setting('{key}')").fetchone()[0]
+                key: fetch_one(con.execute(f"SELECT current_setting('{key}')"))[0]
                 for key in managed
             }
 
@@ -1502,7 +1502,7 @@ class TestNativeGeometryTypeAcrossStrategies:
         # "Geoparquet metadata does not have a version".
         con = duckdb.connect()
         try:
-            count = con.execute(f"SELECT count(*) FROM read_parquet({sql_path(out)})").fetchone()
+            count = fetch_one(con.execute(f"SELECT count(*) FROM read_parquet({sql_path(out)})"))
         finally:
             con.close()
         assert count[0] == 3

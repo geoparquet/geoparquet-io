@@ -11,7 +11,12 @@ import re
 from functools import lru_cache
 from typing import Any
 
-from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    _escape_sql_string,
+    fetch_one,
+    quote_identifier,
+    sql_path,
+)
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.geo_metadata import decode_carried_geo, sanitize_geo_metadata
 from geoparquet_io.core.geoarrow_compat import srid_crs_as_text
@@ -1224,9 +1229,11 @@ def _detect_crs_from_filegdb(gdb_path, con, verbose=False):
     for gdbtable_file in gdbtable_files:
         gdbtable_path = os.path.join(gdb_path, gdbtable_file)
         try:
-            result = con.execute(f"""
+            result = fetch_one(
+                con.execute(f"""
                 SELECT * FROM ST_Read_Meta({sql_path(gdbtable_path)})
-            """).fetchone()
+            """)
+            )
 
             if not result or not result[3]:
                 continue
@@ -1303,9 +1310,11 @@ def _crs_from_read_type(input_file, con):
 def detect_crs_from_spatial_file(input_file, con, verbose=False):
     """Detect CRS from a spatial file (GeoJSON, GPKG, Shapefile, FileGDB)."""
     try:
-        result = con.execute(f"""
+        result = fetch_one(
+            con.execute(f"""
             SELECT * FROM ST_Read_Meta({sql_path(input_file)})
-        """).fetchone()
+        """)
+        )
 
         if result:
             layers = result[3]

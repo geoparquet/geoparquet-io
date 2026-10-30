@@ -28,6 +28,7 @@ from geoparquet_io.core.crs_utils import (
 )
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
+    fetch_one,
     get_duckdb_connection,
     load_community_extension,
     quote_identifier,
@@ -126,7 +127,7 @@ _NEEDS_SEAM_REPAIR = (
 # The exterior ring as an open DOUBLE[2][] (the closing repeat is sliced off).
 _CELL_RING = (
     "list_slice(list_transform(ST_Dump(ST_Points(ST_ExteriorRing({g}))), "
-    "p -> [ST_X(p.geom), ST_Y(p.geom)]), 1, -2)"
+    "lambda p: [ST_X(p.geom), ST_Y(p.geom)]), 1, -2)"
 )
 
 # Cumulative unwrapping: each vertex is placed relative to the PREVIOUS one, and
@@ -135,11 +136,11 @@ _CELL_RING = (
 # degrees of it, which polar rings do not -- there the `> 180` test fires on
 # vertices that were never wrapped and tears a ring that was intact.
 _UNWRAP_STEPS = (
-    "list_transform({r}, (p, i) -> CASE WHEN i = 1 THEN 0.0 "
+    "list_transform({r}, lambda p, i: CASE WHEN i = 1 THEN 0.0 "
     "WHEN p[1] - {r}[i - 1][1] > 180.0 THEN -360.0 "
     "WHEN p[1] - {r}[i - 1][1] < -180.0 THEN 360.0 ELSE 0.0 END)"
 )
-_UNWRAP_RING = "list_transform({r}, (p, i) -> [p[1] + list_sum(list_slice({s}, 1, i)), p[2]])"
+_UNWRAP_RING = "list_transform({r}, lambda p, i: [p[1] + list_sum(list_slice({s}, 1, i)), p[2]])"
 
 # Longitude winding of the closed ring, as a multiple of 360. Zero for an
 # ordinary cell -- the unwrapped ring closes on itself. Plus or minus 360 for a
@@ -147,11 +148,11 @@ _UNWRAP_RING = "list_transform({r}, (p, i) -> [p[1] + list_sum(list_slice({s}, 1
 # of unwrapping closes it and it needs an explicit seam instead.
 _RING_WINDING = "(360.0 * round((({u})[-1][1] - ({u})[1][1]) / 360.0))"
 
-_RING_LONS = "list_transform({r}, p -> p[1])"
+_RING_LONS = "list_transform({r}, lambda p: p[1])"
 _RING_LON_SPAN = "(list_max(" + _RING_LONS + ") - list_min(" + _RING_LONS + "))"
 
 # The pole a ring encircles is the one its vertices sit next to.
-_RING_POLE = "CASE WHEN list_avg(list_transform({r}, p -> p[2])) > 0 THEN 90.0 ELSE -90.0 END"
+_RING_POLE = "CASE WHEN list_avg(list_transform({r}, lambda p: p[2])) > 0 THEN 90.0 ELSE -90.0 END"
 
 # Explicit seam for a pole-enclosing ring: carry on past the last vertex to
 # where the first one comes round again, run up to the pole, back along it, and
@@ -167,11 +168,13 @@ _POLE_SEAM_RING = (
 # [-180, 180). Everything east of it is then below +540, which is what lets the
 # cut below need only the one eastern box.
 _NORMALIZE_RING = (
-    "list_transform({r}, p -> "
+    "list_transform({r}, lambda p: "
     "[p[1] - 360.0 * floor((list_min(" + _RING_LONS + ") + 180.0) / 360.0), p[2]])"
 )
 
-_MAKE_RING_POLYGON = "ST_MakePolygon(ST_MakeLine(list_transform({r}, p -> ST_Point(p[1], p[2]))))"
+_MAKE_RING_POLYGON = (
+    "ST_MakePolygon(ST_MakeLine(list_transform({r}, lambda p: ST_Point(p[1], p[2]))))"
+)
 
 # RFC 7946 section 3.1.9: a polygon crossing the antimeridian is cut at it and
 # written as a MultiPolygon. ST_CollectionExtract(..., 3) drops the degenerate
@@ -785,11 +788,13 @@ def _warn_files_missing_column(con, input_path: str, column: str) -> None:
         return
     col_lit = _escape_sql_string(column)
     try:
-        total, with_col = con.execute(
-            f"SELECT count(DISTINCT file_name), "
-            f"count(DISTINCT file_name) FILTER (WHERE name = '{col_lit}') "
-            f"FROM parquet_schema({sql_path(input_path)})"
-        ).fetchone()
+        total, with_col = fetch_one(
+            con.execute(
+                f"SELECT count(DISTINCT file_name), "
+                f"count(DISTINCT file_name) FILTER (WHERE name = '{col_lit}') "
+                f"FROM parquet_schema({sql_path(input_path)})"
+            )
+        )
     except duckdb.Error:  # pragma: no cover - best-effort diagnostics only
         return
     if total and with_col < total:
@@ -957,7 +962,7 @@ def aggregate_grid_file(
         )
         if show_sql or verbose:
             debug(final_sql)
-        result = con.execute(final_sql).arrow().read_all()
+        result = con.sql(final_sql).arrow().read_all()
         # The cells are keyed in lon/lat, so the output is always geographic --
         # whatever the input CRS was -- which is what makes the wrap form
         # readable (see `antimeridian_aware_bbox`).
@@ -1074,7 +1079,7 @@ def aggregate_grid_table(
             breakdown_spec=breakdown_spec,
             source_columns=input_columns,
         )
-        return con.execute(final_sql).arrow().read_all()
+        return con.sql(final_sql).arrow().read_all()
     finally:
         con.close()
         # Release GDAL/spatial native handles before the next spatial connection

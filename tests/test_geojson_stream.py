@@ -106,6 +106,7 @@ class TestGetPropertyColumns:
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
+        con.execute("SET geometry_always_xy = true")
         con.execute("""
             CREATE TABLE test_data AS
             SELECT
@@ -740,6 +741,7 @@ class TestRepairAfterReprojection:
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
+        con.execute("SET geometry_always_xy = true")
         con.execute(
             f"CREATE TABLE t AS SELECT ST_GeomFromText('{self.SLIVER_25830}') "
             "AS geometry, 'sliver' AS name"
@@ -757,6 +759,7 @@ class TestRepairAfterReprojection:
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
+        con.execute("SET geometry_always_xy = true")
         con.execute(
             "CREATE TABLE t AS SELECT * FROM (VALUES "
             f"(ST_GeomFromText('{self.SLIVER_25830}'), 'kept'), "
@@ -822,6 +825,7 @@ class TestFeatureMembersEmitValidJson:
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
+        con.execute("SET geometry_always_xy = true")
         con.execute("CREATE TABLE t AS SELECT ST_Point(1, 2) AS geometry, 'a' AS name")
 
         for options in (
@@ -844,6 +848,7 @@ class TestFeatureMembersEmitValidJson:
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
+        con.execute("SET geometry_always_xy = true")
         con.execute(
             "CREATE TABLE t AS SELECT * FROM (VALUES "
             "(ST_Point(1, 2), 'has-id'), "
@@ -871,6 +876,7 @@ class TestFeatureMembersEmitValidJson:
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
+        con.execute("SET geometry_always_xy = true")
         con.execute(
             "CREATE TABLE t AS SELECT * FROM (VALUES "
             "(ST_Point(1, 2), 'point'), "

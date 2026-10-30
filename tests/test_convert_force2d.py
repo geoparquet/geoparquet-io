@@ -26,6 +26,7 @@ from geoparquet_io.core.convert import (
     force_2d_expr,
     read_spatial_to_arrow,
 )
+from geoparquet_io.core.duckdb_utils import fetch_one
 
 DATA = Path(__file__).parent / "data"
 
@@ -54,13 +55,15 @@ def _has_z(parquet: Path, col: str | None = None) -> bool:
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
     col = col or _geom_col(parquet)
-    (column_type,) = con.execute(
-        f"SELECT column_type FROM (DESCRIBE SELECT \"{col}\" FROM read_parquet('{parquet}'))"
-    ).fetchone()
+    (column_type,) = fetch_one(
+        con.execute(
+            f"SELECT column_type FROM (DESCRIBE SELECT \"{col}\" FROM read_parquet('{parquet}'))"
+        )
+    )
     geom = f'"{col}"' if column_type.upper().startswith("GEOMETRY") else f'ST_GeomFromWKB("{col}")'
-    (has_z,) = con.execute(
-        f"SELECT bool_or(ST_HasZ({geom})) FROM read_parquet('{parquet}')"
-    ).fetchone()
+    (has_z,) = fetch_one(
+        con.execute(f"SELECT bool_or(ST_HasZ({geom})) FROM read_parquet('{parquet}')")
+    )
     return bool(has_z)
 
 
@@ -164,7 +167,7 @@ def _table_has_z(table) -> bool:
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
     con.register("t", table)
-    (has_z,) = con.execute("SELECT bool_or(ST_HasZ(ST_GeomFromWKB(geometry))) FROM t").fetchone()
+    (has_z,) = fetch_one(con.execute("SELECT bool_or(ST_HasZ(ST_GeomFromWKB(geometry))) FROM t"))
     return bool(has_z)
 
 
@@ -204,6 +207,8 @@ class TestFallbacksKeepForce2D:
         class Con:
             def execute(self, query):
                 raise duckdb.InvalidInputException(TestFallbacksKeepForce2D.CURVE_ERROR)
+
+            sql = execute
 
         calls = []
 

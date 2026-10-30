@@ -9,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import add
+from geoparquet_io.core.duckdb_utils import fetch_one
 from tests.conftest import BUILDINGS_TEST_FILE
 
 
@@ -59,10 +60,10 @@ class TestAddCommands:
         assert "bbox_1" not in column_names
 
         # Row count matches the input.
-        input_count = conn.execute(
-            f'SELECT COUNT(*) FROM "{places_with_covering_file}"'
-        ).fetchone()[0]
-        output_count = conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"').fetchone()[0]
+        input_count = fetch_one(
+            conn.execute(f'SELECT COUNT(*) FROM "{places_with_covering_file}"')
+        )[0]
+        output_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"'))[0]
         assert input_count == output_count
 
     def test_add_bbox_copies_when_covering_metadata_missing(
@@ -84,8 +85,8 @@ class TestAddCommands:
         columns = conn.execute(f'DESCRIBE SELECT * FROM "{temp_output_file}"').fetchall()
         column_names = [col[0] for col in columns]
         assert column_names.count("bbox") == 1
-        input_count = conn.execute(f'SELECT COUNT(*) FROM "{places_v11_file}"').fetchone()[0]
-        output_count = conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"').fetchone()[0]
+        input_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{places_v11_file}"'))[0]
+        output_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"'))[0]
         assert input_count == output_count
 
     def test_add_bbox_copy_to_s3_uses_the_configured_endpoint(self, places_with_covering_file):
@@ -347,8 +348,8 @@ class TestAddCommands:
         assert len(bbox_columns) == 1
 
         # Verify row count preserved
-        input_count = conn.execute(f'SELECT COUNT(*) FROM "{places_test_file}"').fetchone()[0]
-        output_count = conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"').fetchone()[0]
+        input_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{places_test_file}"'))[0]
+        output_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"'))[0]
         assert input_count == output_count
 
     def test_add_bbox_force_with_custom_name(self, places_test_file, temp_output_file):
@@ -518,8 +519,8 @@ class TestAddBboxCLI:
         input_columns = conn.execute(f'DESCRIBE SELECT * FROM "{BUILDINGS_TEST_FILE}"').fetchall()
         assert {col[0] for col in input_columns}.issubset(column_names)
 
-        input_count = conn.execute(f'SELECT COUNT(*) FROM "{BUILDINGS_TEST_FILE}"').fetchone()[0]
-        output_count = conn.execute(f'SELECT COUNT(*) FROM "{bbox_default_run}"').fetchone()[0]
+        input_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{BUILDINGS_TEST_FILE}"'))[0]
+        output_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{bbox_default_run}"'))[0]
         assert input_count == output_count
 
     def test_covering_metadata_is_written_without_being_asked_for(self, bbox_default_run):
@@ -588,17 +589,19 @@ class TestAddH3CLI:
         h3_col = next(col for col in columns if col[0] == "h3_cell")
         assert "VARCHAR" in h3_col[1]
 
-        output_count = conn.execute(f'SELECT COUNT(*) FROM "{h3_default_run}"').fetchone()[0]
-        valid_count = conn.execute(
-            f'SELECT COUNT(*) FROM "{h3_default_run}" '
-            f"WHERE h3_is_valid_cell(h3_string_to_h3(h3_cell))"
-        ).fetchone()[0]
+        output_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{h3_default_run}"'))[0]
+        valid_count = fetch_one(
+            conn.execute(
+                f'SELECT COUNT(*) FROM "{h3_default_run}" '
+                f"WHERE h3_is_valid_cell(h3_string_to_h3(h3_cell))"
+            )
+        )[0]
         assert valid_count == output_count
 
         # ...added to, not in place of, the input's rows and columns.
         input_columns = conn.execute(f'DESCRIBE SELECT * FROM "{BUILDINGS_TEST_FILE}"').fetchall()
         assert {col[0] for col in input_columns}.issubset(column_names)
-        input_count = conn.execute(f'SELECT COUNT(*) FROM "{BUILDINGS_TEST_FILE}"').fetchone()[0]
+        input_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{BUILDINGS_TEST_FILE}"'))[0]
         assert input_count == output_count
 
     def test_default_resolution_is_9(self, h3_default_run):
@@ -947,19 +950,23 @@ class TestAddBboxMetadataPreservesFileProperties:
         # BEFORE: Verify bloom filter and GEOMETRY type exist
         # Check bloom filter on 'name' column
         conn = duckdb.connect()
-        bloom_before = conn.execute(f"""
+        bloom_before = fetch_one(
+            conn.execute(f"""
             SELECT bloom_filter_offset IS NOT NULL AS has_bloom
             FROM parquet_metadata('{test_file}')
             WHERE path_in_schema = 'name'
             LIMIT 1
-        """).fetchone()[0]
+        """)
+        )[0]
 
         # Check GEOMETRY logical type
-        schema_before = conn.execute(f"""
+        schema_before = fetch_one(
+            conn.execute(f"""
             SELECT logical_type
             FROM parquet_schema('{test_file}')
             WHERE name = 'geometry'
-        """).fetchone()[0]
+        """)
+        )[0]
         conn.close()
 
         assert bloom_before, "BEFORE: Expected bloom filter on 'name' column"
@@ -976,18 +983,22 @@ class TestAddBboxMetadataPreservesFileProperties:
 
         # AFTER: Verify bloom filter and GEOMETRY type are preserved
         conn = duckdb.connect()
-        bloom_after = conn.execute(f"""
+        bloom_after = fetch_one(
+            conn.execute(f"""
             SELECT bloom_filter_offset IS NOT NULL AS has_bloom
             FROM parquet_metadata('{test_file}')
             WHERE path_in_schema = 'name'
             LIMIT 1
-        """).fetchone()[0]
+        """)
+        )[0]
 
-        schema_after = conn.execute(f"""
+        schema_after = fetch_one(
+            conn.execute(f"""
             SELECT logical_type
             FROM parquet_schema('{test_file}')
             WHERE name = 'geometry'
-        """).fetchone()[0]
+        """)
+        )[0]
         conn.close()
 
         # These assertions will FAIL on current code (issue #433)
@@ -1035,9 +1046,9 @@ class TestAddBboxMetadataPreservesFileProperties:
         """)
 
         # Read the geo metadata that DuckDB created
-        geo_meta_row = conn.execute(
-            f"SELECT value FROM parquet_kv_metadata('{test_file}') WHERE key = 'geo'"
-        ).fetchone()
+        geo_meta_row = fetch_one(
+            conn.execute(f"SELECT value FROM parquet_kv_metadata('{test_file}') WHERE key = 'geo'")
+        )
         geo_meta_value = geo_meta_row[0].decode("utf-8") if geo_meta_row else "{}"
 
         # DuckDB's 'V1' declares GeoParquet 1.0.0, which cannot carry the 1.1-only
@@ -1155,9 +1166,9 @@ class TestAddBboxMetadataPreservesFileProperties:
             ) TO '{test_file}' (FORMAT PARQUET, GEOPARQUET_VERSION 'V1')
         """)
 
-        geo_meta_row = conn.execute(
-            f"SELECT value FROM parquet_kv_metadata('{test_file}') WHERE key = 'geo'"
-        ).fetchone()
+        geo_meta_row = fetch_one(
+            conn.execute(f"SELECT value FROM parquet_kv_metadata('{test_file}') WHERE key = 'geo'")
+        )
         geo_meta_value = geo_meta_row[0].decode("utf-8") if geo_meta_row else "{}"
         # 'V1' declares 1.0.0, which cannot carry the 1.1-only covering key.
         geo_meta_value = geo_meta_value.replace('"version":"1.0.0"', '"version":"1.1.0"').replace(

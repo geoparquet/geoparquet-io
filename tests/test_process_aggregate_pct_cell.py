@@ -21,7 +21,7 @@ import duckdb
 import pyarrow as pa
 import pytest
 
-from geoparquet_io.core.duckdb_utils import load_community_extension
+from geoparquet_io.core.duckdb_utils import fetch_one, load_community_extension
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME
@@ -288,7 +288,7 @@ def _aggregate(con, scheme: str, src, *, resolution: int, metric: str) -> pa.Tab
         20,
         "none",
     )
-    return con.execute(sql).arrow().read_all()
+    return con.sql(sql).arrow().read_all()
 
 
 def _parsed(metric: str):
@@ -300,7 +300,7 @@ def _parsed(metric: str):
 def test_the_a5_cell_area_matches_the_measured_constant(con, resolution):
     """The denominator is the extension's own equal-area constant; these are the
     geodesically measured values the issue cross-checks it against."""
-    (area_m2,) = con.execute(f"SELECT a5_cell_area({resolution})").fetchone()
+    (area_m2,) = fetch_one(con.execute(f"SELECT a5_cell_area({resolution})"))
     assert area_m2 / 1e6 == pytest.approx(A5_AREA_KM2[resolution], rel=1e-3)
 
 
@@ -311,7 +311,7 @@ def test_pct_cell_is_the_percentage_of_the_a5_cell_covered(con, patch_parquet):
     assert table.column("count")[0].as_py() == len(PATCH_AREAS)
     assert float(table.column("sum_area_m2")[0].as_py()) == pytest.approx(sum(PATCH_AREAS))
 
-    (cell_area,) = con.execute("SELECT a5_cell_area(7)").fetchone()
+    (cell_area,) = fetch_one(con.execute("SELECT a5_cell_area(7)"))
     expected = 100.0 * sum(PATCH_AREAS) / cell_area
     assert table.column("pct_area_m2")[0].as_py() == pytest.approx(expected)
     assert expected == pytest.approx(1.0, rel=1e-3)
@@ -326,10 +326,12 @@ def test_pct_cell_reproduces_the_downstream_derivation(con, patch_parquet):
     )
     con.register("__agg", table)
     try:
-        mismatches = con.execute(
-            "SELECT count(*) FROM __agg "
-            "WHERE abs(pct_area_m2 - 100.0 * sum_area_m2 / a5_cell_area(7)) > 1e-9"
-        ).fetchone()[0]
+        mismatches = fetch_one(
+            con.execute(
+                "SELECT count(*) FROM __agg "
+                "WHERE abs(pct_area_m2 - 100.0 * sum_area_m2 / a5_cell_area(7)) > 1e-9"
+            )
+        )[0]
     finally:
         con.unregister("__agg")
     assert mismatches == 0
@@ -413,14 +415,18 @@ def test_overview_parents_recompute_the_percentage_from_the_total(con, patch_par
     assert len(written) == 1
     _level, parent_path = written[0]
 
-    child_pct, child_sum = con.execute(
-        f"SELECT pct_area_m2, sum_area_m2 FROM read_parquet('{base}') WHERE a5_cell IS NOT NULL"
-    ).fetchone()
-    parent_pct, parent_sum = con.execute(
-        f"SELECT pct_area_m2, sum_area_m2 FROM read_parquet('{parent_path}') "
-        "WHERE a5_cell IS NOT NULL"
-    ).fetchone()
-    (r5_area,) = con.execute("SELECT a5_cell_area(5)").fetchone()
+    child_pct, child_sum = fetch_one(
+        con.execute(
+            f"SELECT pct_area_m2, sum_area_m2 FROM read_parquet('{base}') WHERE a5_cell IS NOT NULL"
+        )
+    )
+    parent_pct, parent_sum = fetch_one(
+        con.execute(
+            f"SELECT pct_area_m2, sum_area_m2 FROM read_parquet('{parent_path}') "
+            "WHERE a5_cell IS NOT NULL"
+        )
+    )
+    (r5_area,) = fetch_one(con.execute("SELECT a5_cell_area(5)"))
 
     assert float(parent_sum) == pytest.approx(float(child_sum))
     assert parent_pct == pytest.approx(100.0 * float(parent_sum) / r5_area)

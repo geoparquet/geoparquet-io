@@ -25,6 +25,7 @@ from geoparquet_io.core.crs_utils import (
 )
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
+    fetch_one,
     free_column_name,
     get_duckdb_connection,
     quote_identifier,
@@ -304,7 +305,7 @@ def _drop_gpkg_geometry_column(path: str) -> None:
     from contextlib import closing
 
     with closing(sqlite3.connect(path)) as gpkg:
-        row = gpkg.execute("SELECT table_name, column_name FROM gpkg_geometry_columns").fetchone()
+        row = fetch_one(gpkg.execute("SELECT table_name, column_name FROM gpkg_geometry_columns"))
         if row is None:
             return
         table, column = (str(part) for part in row)

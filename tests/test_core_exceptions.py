@@ -27,6 +27,15 @@ _OFFLINE = (
     '"http://community-extensions.duckdb.org/v1.5.5/osx_arm64/geography.duckdb_extension.gz" '
     "(ERROR Could not establish connection)"
 )
+# DuckDB 2.0's community a5 build, verbatim (abridged after the first line):
+# it downloads, then its init refuses because a5 moved to Query.Farm's repository.
+_A5_MOVED = (
+    'Invalid Input Error: Initialization function "a5_duckdb_cpp_init" from file '
+    '"/home/u/.duckdb/extensions/v2.0.0/linux_amd64/a5.duckdb_extension" threw an '
+    'exception: "The a5 extension for DuckDB 2.0 and later is distributed from the '
+    "Query.Farm extension repository, not the DuckDB community repository.\n\n"
+    'Add the repository and install the extension once: ..."'
+)
 
 
 class TestCoreExceptions:
@@ -135,6 +144,16 @@ class TestCoreExceptions:
         assert is_unpublished_extension_error(_NOT_PUBLISHED)
         assert not is_unpublished_extension_error(_OFFLINE)
         assert not is_unpublished_extension_error(None)
+
+    def test_a5_moved_off_the_community_repository_counts_as_unpublished(self):
+        """On DuckDB 2.0 the community a5 is a stub: not a network problem."""
+        exc = ExtensionUnavailableError("a5", "2.0.0", _A5_MOVED, feature="gpio add a5")
+
+        assert exc.unpublished
+        message = str(exc)
+        assert "proxy, firewall" not in message
+        assert "Query.Farm" in message
+        assert "DuckDB 1.5" in message
 
     def test_file_not_found_error_with_detail(self):
         with pytest.raises(FileNotFoundGeoParquetError) as exc_info:

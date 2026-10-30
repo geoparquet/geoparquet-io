@@ -352,7 +352,7 @@ def aggregate_by_admin(
 
         if show_sql or verbose:
             debug(final_sql)
-        result = con.execute(final_sql).arrow().read_all()
+        result = con.sql(final_sql).arrow().read_all()
 
         # Derive unassigned count from the already-materialized result table to
         # avoid re-executing the (potentially expensive) spatial join a second time.

@@ -155,14 +155,22 @@ from geoparquet_io.core.logging_config import success, warn, error, info, debug
 from pathlib import Path  # Prefer over os.path
 ```
 
-### DuckDB 1.5 Patterns
+### DuckDB 1.5 / 2.0 Patterns
 
-**Enforced by `duckdb-antipatterns` pre-commit hook.** Violations fail the build.
+**Enforced by `duckdb-antipatterns` pre-commit hook** and, for the result-API
+and lambda rows, by `tests/test_duckdb2_result_api_guard.py` (an AST walk of
+`geoparquet_io/` and `tests/`). Violations fail the build. Code must run on
+both DuckDB 1.5.x and 2.0.
 
 | Old (crashes) | Correct |
 |---------------|---------|
-| `.fetch_arrow_table()` | `.arrow().read_all()` |
-| `.to_arrow_table()` | `.arrow().read_all()` |
+| `.fetch_arrow_table()` | `con.sql(q).arrow().read_all()` |
+| `.to_arrow_table()` | `con.sql(q).arrow().read_all()` |
+| `con.execute(q).arrow()` (gone in 2.0) | `con.sql(q).arrow().read_all()` (`params=` for parameters) |
+| `con.execute(q).fetch_record_batch(n)` (gone in 2.0) | `con.sql(q).to_arrow_reader(batch_size=n)` |
+| `con.execute(q).fetchone()` / `.fetchmany(n)` (2.0 leaves the result open) | `fetch_one(con.execute(q))`; drain a multi-row read |
+| `con.sql(q).fetchone()` / `.fetchmany()` (gone in 2.0) | `fetch_one(con.execute(q))` / `.fetchall()` |
+| `list_transform(l, x -> x + 1)` (2.0 rejects `->`) | `list_transform(l, lambda x: x + 1)` |
 | `TRY_CAST(x AS GEOMETRY)` | `TRY(ST_GeomFromText(x))` |
 | `f'"{col}"'` / `col.replace('"', '""')` | `quote_identifier(col)` |
 | `WHERE path = '{value}'` | `_escape_sql_string(value)` |
@@ -185,8 +193,19 @@ argument, or to a filesystem API, turns `o'brien` into `o''brien` and the file
 ambiguously both. `scripts/check_sql_path_literals.py` ratchets new
 `FROM '{path}'` sites out of the tree (`--update` regenerates its baseline).
 
+**DuckDB 2.0 result rules.** An `execute()` result stays open until a fetch
+returns no rows, and while it is open `con.sql()`, `con.register()`,
+`create_function()` and every relation read on that connection raise
+`ResourceInUseException`; `fetch_one` (in `core/duckdb_utils.py`) calls
+`complete()` after the row. A streaming reader blocks its connection the same
+way until drained, and a connection used from several threads needs a
+`con.cursor()` per thread. `to_arrow_reader(batch_size=n)` caps batches at `n`
+but does not merge smaller ones, so a writer that turns batches into row groups
+re-chunks them first (`_rebatch` in `write_strategies/arrow_streaming.py`).
+
 Additional patterns (not yet enforced):
 - `ST_Transform(..., always_xy := true)` → `SET geometry_always_xy = true` at session level
+  (2.0 refuses `ST_Transform` and a GDAL `SRS` until it is set; `get_duckdb_connection` sets it)
 - `apply_crs_to_parquet()` removed → use `_wrap_query_with_crs()`
 
 ---

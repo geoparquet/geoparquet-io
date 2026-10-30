@@ -24,6 +24,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.geo_metadata import (
     reset_malformed_geo_warnings,
     sanitize_geo_metadata,
@@ -978,7 +979,7 @@ def test_table_write_drops_a_wrong_typed_crs(strategy, tmp_path, caplog):
     assert not failed
 
     con = get_duckdb_connection(load_spatial=True)
-    assert con.execute(f"SELECT count(*) FROM read_parquet({sql_path(out)})").fetchone()[0] == 1
+    assert fetch_one(con.execute(f"SELECT count(*) FROM read_parquet({sql_path(out)})"))[0] == 1
 
 
 # =============================================================================

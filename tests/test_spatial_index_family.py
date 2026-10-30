@@ -103,7 +103,7 @@ from geoparquet_io.core.partition.by_quadkey import (
 )
 from geoparquet_io.core.partition.by_s2 import partition_by_s2
 from geoparquet_io.core.partition.common import calculate_partition_stats
-from tests.conftest import skip_if_geography_unavailable
+from tests.conftest import skip_if_geography_unavailable, skip_if_grid_unavailable
 
 # Row count of tests/data/places_test.parquet, pinned by the original
 # per-index file tests.
@@ -640,6 +640,7 @@ def test_add_cli_basic(spec, places_test_file, tmp_path):
     """Basic CLI invocation writes the cell column."""
     if spec.cli_needs_geography:
         skip_if_geography_unavailable()
+    skip_if_grid_unavailable(spec.name)
 
     output_file = str(tmp_path / "out.parquet")
     runner = CliRunner()
@@ -770,6 +771,7 @@ def test_partition_cli_basic(spec, places_test_file, tmp_path):
     """Basic CLI invocation creates partition files."""
     if spec.cli_needs_geography:
         skip_if_geography_unavailable()
+    skip_if_grid_unavailable(spec.name)
 
     output_folder = str(tmp_path / "parts")
     runner = CliRunner()
@@ -796,6 +798,7 @@ def test_partition_cli_preview(spec, places_test_file, tmp_path):
     """CLI preview mode creates no files."""
     if spec.cli_needs_geography:
         skip_if_geography_unavailable()
+    skip_if_grid_unavailable(spec.name)
 
     output_folder = str(tmp_path / "parts")
     runner = CliRunner()

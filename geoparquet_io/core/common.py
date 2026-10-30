@@ -35,6 +35,7 @@ from geoparquet_io.core.duckdb_utils import (
     _get_query_column_type,
     _get_query_columns,
     _strip_trailing_order_by,
+    fetch_one,
     get_duckdb_connection,
     load_community_extension,
     quote_identifier,
@@ -167,7 +168,7 @@ def calculate_file_bounds(file_path, geom_column=None, verbose=False):
                 MAX(ST_YMax({quote_identifier(geom_column)})) as ymax
             FROM read_parquet({sql_path(read_url)})
         """
-        result = con.execute(bounds_query).fetchone()
+        result = fetch_one(con.execute(bounds_query))
 
         if result and all(v is not None for v in result):
             if verbose:
@@ -479,7 +480,7 @@ def get_dataset_bounds(parquet_file, geometry_column=None, verbose=False):
 
     try:
         query = _build_bounds_query(read_url, bbox_info, geometry_column, verbose)
-        result = con.execute(query).fetchone()
+        result = fetch_one(con.execute(query))
 
         if result and all(v is not None for v in result):
             xmin, ymin, xmax, ymax = result
@@ -622,7 +623,7 @@ def add_computed_column(
 
     # Get total count (skip in dry-run)
     if not dry_run:
-        total_count = con.execute(f"SELECT COUNT(*) FROM {sql_path(input_path)}").fetchone()[0]
+        total_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM {sql_path(input_path)}"))[0]
         progress(f"Processing {total_count:,} features...")
 
     # Build the query

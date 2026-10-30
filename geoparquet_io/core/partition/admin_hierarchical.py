@@ -23,7 +23,7 @@ from geoparquet_io.core.crs_utils import (
     source_crs_string,
     transform_geom_sql,
 )
-from geoparquet_io.core.duckdb_utils import fetch_rows, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, fetch_rows, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
@@ -191,7 +191,7 @@ def _compute_input_extent(con, input_path, input_bbox_col, input_geom_col, sourc
                 MAX(ST_YMax({geom_ref})) as ymax
             FROM {sql_path(input_path)}
         """
-    extent = con.execute(extent_query).fetchone()
+    extent = fetch_one(con.execute(extent_query))
     if extent and all(v is not None for v in extent):
         return extent
     return None
@@ -495,7 +495,7 @@ def _verify_enrichment_results(con, enriched_table, output_column_names):
             COUNT(CASE WHEN {all_clause} THEN 1 END) as with_all_admin
         FROM {enriched_table}
     """
-    total_count, with_admin_count, with_all_count = con.execute(stats_query).fetchone()
+    total_count, with_admin_count, with_all_count = fetch_one(con.execute(stats_query))
 
     success(f"  ✓ Matched {with_admin_count:,} of {total_count:,} features to admin boundaries")
 

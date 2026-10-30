@@ -7,6 +7,7 @@ from geoparquet_io.core.check_spatial_order import (
     check_spatial_order,
     check_spatial_order_bbox_stats,
 )
+from geoparquet_io.core.duckdb_utils import fetch_one
 
 
 class TestCheckSpatialOrder:
@@ -362,13 +363,15 @@ class TestNativeGeoBboxDetection:
         assert "bbox" not in column_names, "Test file should not have bbox column"
 
         # Check for native geo_bbox stats - skip if DuckDB version doesn't support them
-        geo_bbox_result = conn.execute(f"""
+        geo_bbox_result = fetch_one(
+            conn.execute(f"""
             SELECT geo_bbox
             FROM parquet_metadata('{output_file}')
             WHERE path_in_schema = 'geometry'
               AND geo_bbox IS NOT NULL
             LIMIT 1
-        """).fetchone()
+        """)
+        )
 
         if not geo_bbox_result:
             pytest.skip(

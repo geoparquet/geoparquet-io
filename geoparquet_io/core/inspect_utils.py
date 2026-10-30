@@ -33,6 +33,7 @@ from geoparquet_io.core.duckdb_metadata import (
     get_row_count,
 )
 from geoparquet_io.core.duckdb_utils import (
+    fetch_one,
     fetch_row,
     get_duckdb_connection,
     is_interrupt,
@@ -503,12 +504,12 @@ def wkb_to_wkt_preview(wkb_bytes: bytes, max_length: int = 45) -> str:
             # vs standard ISO WKB (starts with 0x00 or 0x01 for byte order)
             if wkb_bytes[0] == 0x02:
                 # DuckDB internal GEOMETRY format - cast directly
-                result = con.execute("SELECT ST_AsText(?::GEOMETRY)", [wkb_bytes]).fetchone()
+                result = fetch_one(con.execute("SELECT ST_AsText(?::GEOMETRY)", [wkb_bytes]))
             else:
                 # Standard ISO WKB format
-                result = con.execute(
-                    "SELECT ST_AsText(ST_GeomFromWKB(?::BLOB))", [wkb_bytes]
-                ).fetchone()
+                result = fetch_one(
+                    con.execute("SELECT ST_AsText(ST_GeomFromWKB(?::BLOB))", [wkb_bytes])
+                )
 
         if result and result[0]:
             wkt = result[0]
@@ -715,7 +716,7 @@ def get_preview_data(
             mode = "head"
 
         # Execute query and convert to PyArrow table
-        table = con.execute(query).arrow().read_all()
+        table = con.sql(query).arrow().read_all()
 
         # Convert any native GeoArrow geometry columns to WKT strings for display.
         if native_geo_columns:
