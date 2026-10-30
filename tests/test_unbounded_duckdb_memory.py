@@ -281,7 +281,8 @@ class TestAdminJoinIsBounded:
             ),
         )
         seen: list[tuple] = []
-        with _recording_scope(monkeypatch, ah, seen):
+        # The join, its last table included, is run_admin_join's (admin_datasets).
+        with _recording_scope(monkeypatch, admin_datasets, seen):
             ah.partition_by_admin_hierarchical(
                 input_file,
                 str(tmp_path / "out"),
@@ -309,11 +310,8 @@ class TestAdminJoinIsBounded:
             ),
         )
         seen: list[tuple] = []
-        # The chained level joins run in admin_datasets, the last one in ah.
-        with (
-            _recording_scope(monkeypatch, ah, seen),
-            _recording_scope(monkeypatch, admin_datasets, seen),
-        ):
+        # Every level's join, the last included, runs in admin_datasets.
+        with _recording_scope(monkeypatch, admin_datasets, seen):
             ah.partition_by_admin_hierarchical(
                 input_file,
                 str(tmp_path / "out"),
@@ -362,7 +360,7 @@ class TestAdminJoinIsBounded:
             yield
             inside.append([str(call.args[0]) for call in mock_con.execute.call_args_list[before:]])
 
-        monkeypatch.setattr(ah, "scoped_write_memory_limit", fake_scope)
+        monkeypatch.setattr(admin_datasets, "scoped_write_memory_limit", fake_scope)
         admin_file = tmp_path / "admin.parquet"
         admin_file.write_bytes(b"")  # table_reference() checks it exists
         ah._enrich_with_admin(
@@ -380,7 +378,7 @@ class TestAdminJoinIsBounded:
         )
 
         assert len(inside) == 1
-        assert any("CREATE TEMP TABLE" in sql for sql in inside[0])
+        assert any("CREATE OR REPLACE TEMP TABLE enriched AS" in sql for sql in inside[0])
 
 
 class TestRemainingCopySitesAreBounded:

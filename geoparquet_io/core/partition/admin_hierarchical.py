@@ -18,6 +18,7 @@ import duckdb
 from geoparquet_io.core.admin_datasets import (
     AdminJoinStep,
     admin_column_ref,
+    admin_input_reprojected,
     open_admin_join_connection,
     resolve_admin_dataset,
     run_admin_join,
@@ -28,17 +29,18 @@ from geoparquet_io.core.crs_utils import (
     source_crs_string,
 )
 from geoparquet_io.core.duckdb_utils import (
+    SPATIAL_JOIN_BBOX_PREFILTER,
     fetch_one,
     fetch_rows,
     query_schema,
     quote_identifier,
+    spatial_join_strategy,
     sql_path,
 )
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import output_is_kept, resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, progress, success, warn
-from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.partition.common import raise_if_no_rows, sanitize_filename
 from geoparquet_io.core.partition.staging import (
@@ -66,6 +68,25 @@ def _get_input_file_info(input_parquet, verbose):
     input_bbox_col = input_bbox_info["bbox_column_name"]
 
     return input_path, input_geom_col, input_bbox_col
+
+
+def _report_join_strategy(input_bbox_col, admin_bbox_col, source_crs):
+    """Name the predicate the join runs, as the owner classifies it (#538).
+
+    ``partition admin`` keeps an input's bbox column whatever its geometry
+    encoding, so its join never takes the native-geometry path; the bbox
+    pre-filter goes only when the input geometry is rewritten (#525).
+    """
+    strategy = spatial_join_strategy(
+        False,
+        input_bbox_col,
+        admin_bbox_col,
+        admin_input_reprojected(source_crs, admin_bbox_col),
+    )
+    if strategy == SPATIAL_JOIN_BBOX_PREFILTER:
+        debug("  → Using bbox columns for optimized spatial join")
+    else:
+        debug("  → Using full geometry intersection (no bbox optimization)")
 
 
 def _build_admin_select_for_partitioning(levels, boundary_columns, dataset=None, vecorel=False):
@@ -147,10 +168,6 @@ def _enrich_with_admin(
                 f"joining {step.levels[0]} from {step.source}"
             )
 
-    def materialize(step: AdminJoinStep) -> None:
-        with scoped_write_memory_limit(con, memory_limit, verbose):
-            con.execute(f"CREATE TEMP TABLE {enriched_table} AS\n{step.query}")
-
     run_admin_join(
         con,
         dataset,
@@ -160,7 +177,7 @@ def _enrich_with_admin(
         input_bbox_col=input_bbox_col,
         admin_bbox_col=admin_bbox_col,
         select_for=select_for,
-        final_step=materialize,
+        final_table=enriched_table,
         source_crs=source_crs,
         memory_limit=memory_limit,
         verbose=verbose,
@@ -475,10 +492,8 @@ def partition_by_admin_hierarchical(
 
             enriched_table = "_enriched_with_admin"
 
-            if input_bbox_col and admin_bbox_col and verbose:
-                debug("  → Using bbox columns for optimized spatial join")
-            elif not (input_bbox_col and admin_bbox_col) and verbose:
-                debug("  → Using full geometry intersection (no bbox optimization)")
+            if verbose:
+                _report_join_strategy(input_bbox_col, admin_bbox_col, source_crs)
 
             output_column_names = _enrich_with_admin(
                 con,

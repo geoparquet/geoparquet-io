@@ -792,3 +792,147 @@ def test_a_single_source_dataset_refuses_a_per_level_source():
     assert not dataset.supports_per_level_sources()
     with pytest.raises(NotImplementedError, match="no per-level sources"):
         dataset.get_source_for_level("country")
+
+
+# --- one strategy report, one source rule, one materialize (#1367 T1d+T1e audit 3)
+
+
+def _spy_admin_join_queries(monkeypatch) -> list[str]:
+    queries: list[str] = []
+    real = admin_datasets.build_admin_join_query
+
+    def spy(**kwargs):
+        query = real(**kwargs)
+        queries.append(query)
+        return query
+
+    monkeypatch.setattr(admin_datasets, "build_admin_join_query", spy)
+    return queries
+
+
+@pytest.mark.parametrize("input_rewritten", [False, True], ids=["as-stored", "rewritten"])
+def test_partition_reports_the_join_strategy_its_sql_runs(
+    tmp_path, local_admin, monkeypatch, input_rewritten
+):
+    """partition admin's verbose strategy line reads the owner's rule
+    (``spatial_join_strategy`` over ``admin_input_reprojected``), not the two
+    bbox columns: when the rule rewrites the input geometry the bbox
+    pre-filter leaves the SQL, and the line has to say so."""
+    from geoparquet_io.core.partition import admin_hierarchical
+
+    local_admin()
+    if input_rewritten:
+        for module in (admin_datasets, admin_hierarchical):
+            monkeypatch.setattr(
+                module, "admin_input_reprojected", lambda crs, bbox: True, raising=False
+            )
+    queries = _spy_admin_join_queries(monkeypatch)
+    src = _write_points(tmp_path / "pts.parquet", bbox_name="bbox")
+    result = _invoke(
+        [
+            "partition",
+            "admin",
+            src,
+            str(tmp_path / "parts"),
+            "--dataset",
+            "overture",
+            "--levels",
+            "country",
+            "--hive",
+            "--verbose",
+        ]
+    )
+    (query,) = queries
+    prefilter = 'a."bbox".xmin <= b."bbox".xmax' in query
+    assert prefilter is not input_rewritten
+    said_bbox = "Using bbox columns for optimized spatial join" in result.output
+    said_full = "Using full geometry intersection" in result.output
+    assert (said_bbox, said_full) == (prefilter, not prefilter), result.output
+
+
+def test_one_rule_for_the_source_a_join_step_reads(monkeypatch):
+    """A per-level dataset reads each level's own source; any other reads its
+    own (``None``: :meth:`AdminDataset.table_reference` picks it)."""
+    gaul = admin_datasets.AdminDatasetFactory.create("gaul")
+    assert gaul.source_for_level("continent", no_cache=True) is None
+    monkeypatch.setattr(
+        admin_datasets.OvertureAdminDataset,
+        "get_source_for_level",
+        lambda self, level, no_cache=False: f"{level}:{no_cache}",
+    )
+    overture = admin_datasets.OvertureAdminDataset(source_path="admin.parquet")
+    assert overture.source_for_level("country", no_cache=True) == "country:True"
+    assert overture.source_for_level("region") == "region:False"
+
+
+def _functions_calling(path: Path, name: str) -> list[str]:
+    """``module:function`` for every function in ``path`` that calls ``name``."""
+    found = []
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and _calls_named(
+            ast.unparse(node), name
+        ):
+            found.append(f"{path.relative_to(PACKAGE)}:{node.name}")
+    return found
+
+
+def test_only_source_for_level_picks_a_per_level_source():
+    """``get_source_for_level if supports_per_level_sources() else <own>`` was
+    decided in run_admin_join and again in aggregate's ``_get_admin_ref``.
+    overview rollup reads Overture's country cache by name: it asks a
+    per-level dataset for one level and decides nothing."""
+    callers = []
+    for path in sorted(PACKAGE.rglob("*.py")):
+        callers += _functions_calling(path, "get_source_for_level")
+    assert callers == [
+        "core/admin_datasets.py:source_for_level",
+        "core/process/overview/rollup.py:get_admin_country_context",
+    ]
+
+
+def test_run_admin_join_fills_the_final_table(tmp_path):
+    con = du.get_duckdb_connection(load_spatial=True)
+    try:
+        admin_datasets.run_admin_join(
+            con,
+            admin_datasets.OvertureAdminDataset(
+                source_path=_write_admin(tmp_path / "admin.parquet")
+            ),
+            ["country"],
+            input_path=_write_points(tmp_path / "pts.parquet"),
+            input_geom_col="geometry",
+            input_bbox_col=None,
+            admin_bbox_col="bbox",
+            select_for=lambda levels, columns: (
+                f"{admin_datasets.admin_column_ref(0, columns[0])} AS c"
+            ),
+            final_table="_enriched",
+        )
+        rows = con.execute("SELECT id, c FROM _enriched ORDER BY id").fetchall()
+    finally:
+        con.close()
+    assert rows == [(1, "AA"), (2, "AA"), (3, "BB"), (4, None)]
+
+
+@pytest.mark.parametrize("sinks", [{}, {"final_step": print, "final_table": "_t"}])
+def test_run_admin_join_takes_exactly_one_sink(sinks):
+    with pytest.raises(ValueError, match="final_step or final_table"):
+        admin_datasets.run_admin_join(
+            None,
+            admin_datasets.OvertureAdminDataset(source_path="admin.parquet"),
+            ["country"],
+            input_path="in.parquet",
+            input_geom_col="geometry",
+            input_bbox_col=None,
+            admin_bbox_col=None,
+            select_for=lambda levels, columns: "",
+            **sinks,
+        )
+
+
+def test_partition_leaves_materializing_the_join_to_run_admin_join():
+    """The last step's ``CREATE TEMP TABLE`` under ``scoped_write_memory_limit``
+    is the driver's own statement; partition passes the table's name."""
+    source = (PACKAGE / "core/partition/admin_hierarchical.py").read_text()
+    assert _literals_containing(source, "TEMP TABLE") == 0
+    assert _calls_named(source, "scoped_write_memory_limit") == []

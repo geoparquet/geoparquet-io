@@ -499,7 +499,7 @@ class _FakeAdminDataset:
     def supports_per_level_sources(self):
         return True
 
-    def get_source_for_level(self, level):
+    def source_for_level(self, level, no_cache=False):
         return self._path
 
     def table_reference(self, source=None):

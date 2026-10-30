@@ -645,6 +645,17 @@ class AdminDataset(ABC):
         """The source of one admin level, for a dataset that :meth:`supports_per_level_sources`."""
         raise NotImplementedError(f"{self.get_dataset_name()} has no per-level sources")
 
+    def source_for_level(self, level: str, no_cache: bool = False) -> str | None:
+        """The source a join of ``level`` reads: the level's own, or ``None``.
+
+        The one rule for it: a dataset that :meth:`supports_per_level_sources`
+        reads each level from :meth:`get_source_for_level`; any other reads its
+        own source, which :meth:`table_reference` picks for ``None``.
+        """
+        if not self.supports_per_level_sources():
+            return None
+        return self.get_source_for_level(level, no_cache=no_cache)
+
     def get_read_parquet_options(self) -> dict:
         """
         Get additional options to pass to read_parquet() for this dataset.
@@ -1587,8 +1598,9 @@ class AdminJoinStep:
     ``levels`` are the admin levels it adds (one per step for a per-level
     dataset, all of them in one step otherwise), ``source`` the admin source it
     reads (``None``: the dataset's own), ``query`` the join's ``SELECT``, and
-    ``target`` the temp table it fills -- ``None`` for the last step, whose
-    query goes to the caller's ``final_step``.
+    ``target`` the temp table it fills -- for the last step the caller's
+    ``final_table``, or ``None`` when its query goes to the caller's
+    ``final_step``.
     """
 
     index: int
@@ -1610,6 +1622,22 @@ def _admin_join_steps(
     return [([level], [col]) for level, col in zip(levels, columns, strict=True)]
 
 
+def _run_admin_join_step(
+    con: duckdb.DuckDBPyConnection,
+    step: AdminJoinStep,
+    final_step: Callable[[AdminJoinStep], None] | None,
+    memory_limit: str | None,
+    verbose: bool,
+) -> None:
+    """Fill the step's temp table under the write memory policy, or hand it to ``final_step``."""
+    if step.target is None:
+        if final_step is not None:  # always, when there is no target table
+            final_step(step)
+        return
+    with scoped_write_memory_limit(con, memory_limit, verbose):
+        con.execute(f"CREATE OR REPLACE TEMP TABLE {step.target} AS {step.query}")
+
+
 def run_admin_join(
     con: duckdb.DuckDBPyConnection,
     dataset: "AdminDataset",
@@ -1620,7 +1648,8 @@ def run_admin_join(
     input_bbox_col: str | None,
     admin_bbox_col: str | None,
     select_for: Callable[[list[str], list[str]], str],
-    final_step: Callable[[AdminJoinStep], None],
+    final_step: Callable[[AdminJoinStep], None] | None = None,
+    final_table: str | None = None,
     admin_source: str | None = None,
     source_crs: str | None = None,
     no_cache: bool = False,
@@ -1647,13 +1676,17 @@ def run_admin_join(
       one reprojection rule, #525), with ``select_for(levels, columns)`` as
       the admin columns;
     - is handed to ``on_step``, then fills its temp table under
-      ``scoped_write_memory_limit`` (#1174), or, as the last step, goes to
-      ``final_step`` -- the caller's write.
+      ``scoped_write_memory_limit`` (#1174). The last step's table is
+      ``final_table``, filled the same way; a caller that writes the result
+      somewhere else passes ``final_step`` instead, which takes the last step.
+      Exactly one of the two is given.
 
     ``dry_run`` builds and hands out every step without running any.
     ``admin_bbox_col`` is the dataset's, passed by the caller that has
     already read it.
     """
+    if (final_step is None) == (final_table is None):
+        raise ValueError("run_admin_join takes final_step or final_table, not both or neither")
     admin_geom_col = dataset.get_geometry_column()
     extent = None
     if admin_bbox_col:
@@ -1665,11 +1698,7 @@ def run_admin_join(
     relation = sql_path(input_path)
     intermediates = []
     for i, (step_levels, step_columns) in enumerate(steps):
-        source = (
-            dataset.get_source_for_level(step_levels[0], no_cache=no_cache)
-            if per_level
-            else admin_source
-        )
+        source = dataset.source_for_level(step_levels[0], no_cache=no_cache) or admin_source
         admin_table_ref = dataset.table_reference(source)
         query = build_admin_join_query(
             input_relation=relation,
@@ -1690,18 +1719,16 @@ def run_admin_join(
             ),
             source_crs=source_crs,
         )
-        target = None if i == len(steps) - 1 else f"_gpio_admin_step_{i}"
+        last = i == len(steps) - 1
+        target = final_table if last else f"_gpio_admin_step_{i}"
         step = AdminJoinStep(i, len(steps), step_levels, source, query, target, per_level)
         if on_step is not None:
             on_step(step)
-        if target is not None:
-            relation = target
-            if not dry_run:
-                with scoped_write_memory_limit(con, memory_limit, verbose):
-                    con.execute(f"CREATE OR REPLACE TEMP TABLE {target} AS {query}")
-                intermediates.append(target)
-        elif not dry_run:
-            final_step(step)
+        relation = target or relation
+        if not dry_run:
+            _run_admin_join_step(con, step, final_step, memory_limit, verbose)
+            if not last:
+                intermediates.append(relation)
     for table in intermediates:
         con.execute(f"DROP TABLE IF EXISTS {table}")
 

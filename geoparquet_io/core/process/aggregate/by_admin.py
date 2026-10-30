@@ -56,8 +56,7 @@ def _get_admin_ref(dataset, level: str) -> str:
     level-specific cache file; for others, the dataset's own source. Either
     way :meth:`AdminDataset.table_reference` builds it, from a RAW path (#802).
     """
-    source = dataset.get_source_for_level(level) if dataset.supports_per_level_sources() else None
-    ref: str = dataset.table_reference(source)
+    ref: str = dataset.table_reference(dataset.source_for_level(level))
     return ref
 
 

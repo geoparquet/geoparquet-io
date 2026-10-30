@@ -154,7 +154,7 @@ class _FakeAdminDataset:
     def supports_per_level_sources(self):
         return True
 
-    def get_source_for_level(self, level):
+    def source_for_level(self, level, no_cache=False):
         if self._fail_on_source:
             # Stands in for the multi-GB boundary-cache download.
             raise AssertionError("admin boundaries resolved before validating columns")

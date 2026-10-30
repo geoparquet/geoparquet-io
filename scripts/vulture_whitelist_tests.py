@@ -45,11 +45,8 @@ _.log_message  # unused method (tests/test_carto.py:988) -- dynamic: override ca
 _.log_message  # unused method (tests/test_file_utils.py:580) -- dynamic: override called by the base class or the code under test
 _.log_message  # unused method (tests/test_file_utils.py:957) -- dynamic: override called by the base class or the code under test
 _.configure_s3  # unused method (tests/test_process_aggregate_breakdown_metric.py:333) -- dynamic: method of a stub, called by the code under test
-_.get_source_for_level  # unused method (tests/test_process_aggregate_breakdown_metric.py:342) -- dynamic: method of a stub, called by the code under test
 _.configure_s3  # unused method (tests/test_process_aggregate_bucket_point.py:737) -- dynamic: method of a stub, called by the code under test
-_.get_source_for_level  # unused method (tests/test_process_aggregate_bucket_point.py:746) -- dynamic: method of a stub, called by the code under test
 _.configure_s3  # unused method (tests/test_process_aggregate_column_validation.py:172) -- dynamic: method of a stub, called by the code under test
-_.get_source_for_level  # unused method (tests/test_process_aggregate_metric_nodata.py:502) -- dynamic: method of a stub, called by the code under test
 _.configure_s3  # unused method (tests/test_process_aggregate_metric_nodata.py:514) -- dynamic: method of a stub, called by the code under test
 _.log_message  # unused method (tests/test_remote_url_encoding.py:140) -- dynamic: override called by the base class or the code under test
 _.iter_bytes  # unused method (tests/test_wfs.py:1766) -- dynamic: method of a stub, called by the code under test
@@ -78,7 +75,6 @@ pytest_runtest_setup  # unused function (tests/conftest.py:857) -- dynamic: pyte
 session_tz  # unused function (tests/test_convert_geojson_timestamps.py:31) -- dynamic: pytest fixture, requested by name
 native_parquet  # unused function (tests/test_geoarrow_native.py:26) -- dynamic: pytest fixture, requested by name
 _fresh_warnings  # unused function (tests/test_parquet_geo_only_secondary_crs.py:41) -- dynamic: pytest fixture, requested by name
-_.get_source_for_level  # unused method (tests/test_process_aggregate_column_validation.py:157) -- dynamic: method of a stub, called by the code under test
 _.stub_reader  # unused method (tests/test_process_polygonize_validity.py:241) -- dynamic: pytest fixture, requested by name
 _.stub_reader_cli  # unused method (tests/test_process_polygonize_validity.py:292) -- dynamic: pytest fixture, requested by name
 _._clean_s3_env  # unused method (tests/test_remote_files.py:359) -- dynamic: pytest fixture, requested by name
