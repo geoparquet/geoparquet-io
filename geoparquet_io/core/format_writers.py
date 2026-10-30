@@ -56,8 +56,9 @@ ERROR_REMOTE_OUTPUT = "{format} output path must be local. Use upload() for clou
 ERROR_FILE_EXISTS = "{format} file already exists: {path}\nUse --overwrite to replace it."
 ERROR_CONVERSION_FAILED = "Failed to create {format}: {error}"
 ERROR_NO_GEOMETRY = "No geometry column found. Expected 'geometry', 'geom', or 'wkb_geometry'."
-ERROR_NO_COMPATIBLE_COLUMNS = (
-    "No compatible columns for {format} format. All columns are complex types (STRUCT, LIST, MAP)."
+ERROR_NATIVE_GEOMETRY = (
+    "Geometry column '{column}' uses a GeoArrow-native (nested) encoding, which the "
+    "GDAL writers cannot read. Re-encode it as WKB first."
 )
 # `-` reaches these writers as an ordinary path and dies inside GDAL/DuckDB as
 # "File not found: -", which describes neither what happened nor what to do.
@@ -252,21 +253,39 @@ def _should_promote_to_multi(input_path: str, geometry_col: str) -> bool:
     return len(names) > 1 and len({_MULTI_TYPES.get(name, name) for name in names}) == 1
 
 
-def _gdal_select_exprs(schema: pa.Schema, geometry_col: str | None, input_path: str) -> list[str]:
-    """Column expressions GDAL can hold: complex types dropped, mixed
-    single/multi geometry promoted to its multi type."""
+def _gdal_select_exprs(
+    schema: pa.Schema,
+    geometry_col: str | None,
+    input_path: str,
+    geometry_is_native: bool = True,
+) -> list[str]:
+    """Column expressions for a GDAL layer.
+
+    GDAL layers cannot hold nested types, so STRUCT, LIST and MAP attributes
+    are JSON-encoded to text (as :func:`write_csv` does) rather than dropped
+    (#1333). A geometry column DuckDB read as plain BLOB (WKB without a ``geo``
+    key) is decoded with ``ST_GeomFromWKB``: left as BLOB, GDAL sees a layer
+    with no geometry and FlatGeobuf dies on a "NULL geometry" (#1161). Mixed
+    single/multi geometry is promoted to its multi type.
+    """
     promote = geometry_col is not None and _should_promote_to_multi(input_path, geometry_col)
     exprs = []
     for field in schema:
-        if (
+        ident = quote_identifier(field.name)
+        is_geometry = field.name == geometry_col
+        if is_geometry and (pa.types.is_struct(field.type) or pa.types.is_list(field.type)):
+            raise GeoParquetError(ERROR_NATIVE_GEOMETRY.format(column=field.name))
+        if is_geometry and not geometry_is_native:
+            wrapped = f"ST_GeomFromWKB({ident})"
+            exprs.append(f"{'ST_Multi(' + wrapped + ')' if promote else wrapped} AS {ident}")
+        elif is_geometry and promote:
+            exprs.append(f"ST_Multi({ident}) AS {ident}")
+        elif (
             pa.types.is_struct(field.type)
             or pa.types.is_list(field.type)
             or pa.types.is_map(field.type)
         ):
-            continue
-        ident = quote_identifier(field.name)
-        if promote and field.name == geometry_col:
-            exprs.append(f"ST_Multi({ident}) AS {ident}")
+            exprs.append(f"to_json({ident}) AS {ident}")
         else:
             exprs.append(ident)
     return exprs
@@ -404,6 +423,7 @@ def write_gdal_format(
 
     # Get DuckDB connection
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_path))
+    wrote_output = False
 
     try:
         # Raw (validated) URL for direct reads; SQL-escaped only where interpolated.
@@ -451,8 +471,6 @@ def write_gdal_format(
         # Build layer creation options, as RAW strings: the one escape happens
         # at the join below, so a future part cannot be appended unescaped.
         lco_parts = []
-        if config.get("layer_option"):
-            lco_parts.append(f"{config['layer_option']}={layer_name}")
         if config.get("encoding_option"):
             lco_parts.append(f"{config['encoding_option']}={encoding}")
         if format_name == "geopackage":
@@ -468,10 +486,19 @@ def write_gdal_format(
         # pair, so space-separating several options silently corrupts them all.
         lco_options = ", ".join(f"'{_escape_sql_string(part)}'" for part in lco_parts)
         lco_clause = f", LAYER_CREATION_OPTIONS ({lco_options})" if lco_parts else ""
+        # LAYER_NAME is a COPY option of DuckDB's GDAL writer; as a layer
+        # creation option GDAL ignores it and names the layer after the file (#1320).
+        if config.get("layer_option"):
+            lco_clause = f", LAYER_NAME '{_escape_sql_string(layer_name)}'{lco_clause}"
 
-        compatible_cols = _gdal_select_exprs(schema, geometry_col, input_path)
-        if not compatible_cols:
-            raise GeoParquetError(ERROR_NO_COMPATIBLE_COLUMNS.format(format=config["description"]))
+        geometry_is_native = True
+        if geometry_col is not None:
+            describe = con.execute(
+                f"DESCRIBE SELECT {quote_identifier(geometry_col)} "
+                f"FROM read_parquet({sql_path(input_path)})"
+            ).fetchall()
+            geometry_is_native = str(describe[0][1]).upper() != "BLOB"
+        compatible_cols = _gdal_select_exprs(schema, geometry_col, input_path, geometry_is_native)
 
         where_filter = _build_convert_filter(
             input_path, geometry_col, bbox, geometry, where, use_first_geometry
@@ -499,6 +526,7 @@ def write_gdal_format(
             debug(f"Executing: {staging}")
             con.execute(staging)
             debug(f"Executing: {query}")
+            wrote_output = True
             con.execute(query)
 
         if format_name == "geopackage" and not has_geometry:
@@ -513,6 +541,9 @@ def write_gdal_format(
         raise
     except Exception as e:
         error_msg = str(e)
+        if wrote_output:
+            # A failed COPY leaves a partial file that blocks the retry (#1161).
+            output_file.unlink(missing_ok=True)
         if "already exists" in error_msg.lower():
             raise GeoParquetError(
                 ERROR_FILE_EXISTS.format(format=config["description"], path=output_path)
