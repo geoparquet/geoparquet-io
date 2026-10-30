@@ -748,9 +748,7 @@ def partition_options_base(func):
     func = click.option(
         "--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure"
     )(func)
-    func = click.option("--overwrite", is_flag=True, help="Overwrite existing partition files")(
-        func
-    )
+    func = overwrite_option(func, help_text="Overwrite existing partition files")
     func = click.option(
         "--preview",
         is_flag=True,
