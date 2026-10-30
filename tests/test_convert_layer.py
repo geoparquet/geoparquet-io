@@ -203,16 +203,16 @@ class TestLayerValidation:
 
     def test_validate_layer_name_normal(self):
         """Normal layer names should pass validation."""
-        assert _validate_layer_name("buildings") == "buildings"
-        assert _validate_layer_name("my_layer") == "my_layer"
-        assert _validate_layer_name("Layer 1") == "Layer 1"
-        assert _validate_layer_name("layer-with-dashes") == "layer-with-dashes"
+        assert _validate_layer_name("buildings") == "'buildings'"
+        assert _validate_layer_name("my_layer") == "'my_layer'"
+        assert _validate_layer_name("Layer 1") == "'Layer 1'"
+        assert _validate_layer_name("layer-with-dashes") == "'layer-with-dashes'"
 
     def test_validate_layer_name_escapes_quotes(self):
         """Single quotes in layer names should be escaped."""
         # Single quote should be doubled (SQL standard)
-        assert _validate_layer_name("O'Brien's Layer") == "O''Brien''s Layer"
-        assert _validate_layer_name("test'layer") == "test''layer"
+        assert _validate_layer_name("O'Brien's Layer") == "'O''Brien''s Layer'"
+        assert _validate_layer_name("test'layer") == "'test''layer'"
 
     def test_validate_layer_name_blocks_sql_injection(self):
         """SQL injection patterns should be rejected."""

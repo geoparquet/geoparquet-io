@@ -173,7 +173,7 @@ both DuckDB 1.5.x and 2.0.
 | `list_transform(l, x -> x + 1)` (2.0 rejects `->`) | `list_transform(l, lambda x: x + 1)` |
 | `TRY_CAST(x AS GEOMETRY)` | `TRY(ST_GeomFromText(x))` |
 | `f'"{col}"'` / `col.replace('"', '""')` | `quote_identifier(col)` |
-| `WHERE path = '{value}'` | `_escape_sql_string(value)` |
+| `WHERE path = '{value}'` | `sql_literal(value)` |
 | `FROM '{path}'` | `FROM {sql_path(path)}` |
 
 Never hand-roll SQL escaping. `quote_identifier()` is for **identifiers**

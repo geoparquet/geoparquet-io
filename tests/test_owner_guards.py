@@ -67,6 +67,7 @@ EXPECTED_COUNTS = {
     "G1.geo_parse": 0,
     "G1.set_memory_limit": 0,
     "G1.sql_escape": 0,
+    "G1.sql_escape_hand_quote": 0,
     "G1.cgroup": 0,
     "G1.duckdb_version": 0,
     "G1.retry_loop": 0,
@@ -81,9 +82,9 @@ EXPECTED_COUNTS = {
     "G1.scheme_test": 0,
     "G1.overwrite_check": 0,
     "G2.exemptions": 28,
-    "G3.pairs": 24,
-    "G3.baseline": 24,
-    "G3.pylint": 53,
+    "G3.pairs": 23,
+    "G3.baseline": 23,
+    "G3.pylint": 52,
     "G13.options": 13,
     "G13.bbox_parsers": 3,
     "G4.whitelist": 181,
@@ -412,6 +413,24 @@ def _find_sql_escape(m: _Module) -> Iterator[Hit]:
             continue
         old, new = (m.const(a) for a in node.args[-2:])
         if (old, new) in escapes:
+            yield m.hit(node)
+
+
+def _find_sql_escape_hand_quote(m: _Module) -> Iterator[Hit]:
+    """``_escape_sql_string`` reached from outside duckdb_utils: imported (under
+    any alias) or read as ``duckdb_utils._escape_sql_string``.
+
+    It is the bare escape under ``sql_literal`` and ``sql_path``; a caller of it
+    has to supply the quotes by hand (``f"'{_escape_sql_string(v)}'"``, or the
+    escaped value quoted lines later), and gets no NUL handling. Would have
+    caught the ~45 hand-quoted literals that bypassed ``sql_literal`` (#1367
+    T1e audit, finding 9).
+    """
+    name = "_escape_sql_string"
+    for node in ast.walk(m.tree):
+        if isinstance(node, ast.ImportFrom) and any(a.name == name for a in node.names):
+            yield m.hit(node)
+        elif isinstance(node, ast.Attribute) and node.attr == name:
             yield m.hit(node)
 
 
@@ -1111,6 +1130,9 @@ ARMS = {
         ("geoparquet_io/core/memory_limits.py", "geoparquet_io/core/duckdb_utils.py"),
     ),
     "sql_escape": Arm(_find_sql_escape, ("geoparquet_io/core/duckdb_utils.py",)),
+    "sql_escape_hand_quote": Arm(
+        _find_sql_escape_hand_quote, ("geoparquet_io/core/duckdb_utils.py",)
+    ),
     "cgroup": Arm(_find_cgroup, ("geoparquet_io/core/memory_limits.py",)),
     "duckdb_version": Arm(_find_duckdb_version, ("geoparquet_io/core/duckdb_utils.py",)),
     "parquet_metadata": Arm(_find_parquet_metadata, ("geoparquet_io/core/duckdb_metadata.py",)),
@@ -1607,6 +1629,10 @@ G1_PLANTS = {
     "geo_parse": 'import json\n\ndef read(md):\n    return json.loads(md[b"geo"])\n',
     "set_memory_limit": "def cap(con):\n    con.execute(\"SET memory_limit = '4GB'\")\n",
     "sql_escape": 'def esc(v):\n    return v.replace("\'", "\'\'")\n',
+    "sql_escape_hand_quote": (
+        "from geoparquet_io.core.duckdb_utils import _escape_sql_string\n\n"
+        "def where(v):\n    return f\"name = '{_escape_sql_string(v)}'\"\n"
+    ),
     "cgroup": 'CAP = "/sys/fs/cgroup/memory.max"\n',
     "duckdb_version": 'import duckdb\n\nNEW = duckdb.__version__.startswith("2")\n',
     "retry_loop": (
@@ -1641,6 +1667,10 @@ G1_CLEAN = {
     "geo_parse": "import json\n\ndef read(text):\n    return json.loads(text)\n",
     "set_memory_limit": '"""Never SET memory_limit here."""\n',
     "sql_escape": 'def esc(v):\n    return v.replace("a", "b")\n',
+    "sql_escape_hand_quote": (
+        "from geoparquet_io.core.duckdb_utils import sql_literal\n\n"
+        'def where(v):\n    return f"name = {sql_literal(v)}"  # not _escape_sql_string\n'
+    ),
     "cgroup": '"""Reads nothing under /sys/fs/cgroup."""\n',
     "duckdb_version": "import duckdb\n\nV = duckdb.connect\n",
     "retry_loop": (
@@ -2208,6 +2238,18 @@ G1_AUDIT_SHAPES = [
     ("sql_escape", "str.replace(v, ...)", 'def e(v):\n    return str.replace(v, "\'", "\'\'")\n'),
     ("sql_escape", "quote in a name", 'Q = "\'"\ndef e(v):\n    return v.replace(Q, Q * 2)\n'),
     ("sql_escape", "chr(39)", "def e(v):\n    return f\"'{v.replace(chr(39), chr(39)*2)}'\"\n"),
+    (
+        "sql_escape_hand_quote",
+        "escaped value quoted lines later",
+        "from geoparquet_io.core.duckdb_utils import _escape_sql_string as esc\n"
+        "def q(crs):\n    lit = esc(crs)\n    return f\"ST_Transform(g, '{lit}', 'EPSG:4326')\"\n",
+    ),
+    (
+        "sql_escape_hand_quote",
+        "through the module",
+        "from geoparquet_io.core import duckdb_utils\n"
+        'def q(v):\n    return "\'" + duckdb_utils._escape_sql_string(v) + "\'"\n',
+    ),
     (
         "duckdb_version",
         "from duckdb import __version__",

@@ -3,14 +3,17 @@
 """
 Add admin division columns from multiple datasets.
 
-This module extends the add_country_codes functionality to support
-multiple admin datasets with hierarchical level support.
+The one "which admin region is this feature in" implementation: every admin
+dataset, with hierarchical level support.
 """
 
 from geoparquet_io.core.admin_datasets import (
     AdminDatasetFactory,
+    admin_column_ref,
+    admin_input_extent,
+    admin_side_reprojected,
     build_admin_join_query,
-    build_admin_subquery,
+    build_admin_where_clause,
     get_or_cache_dataset,
     open_admin_join_connection,
 )
@@ -18,7 +21,6 @@ from geoparquet_io.core.bbox_structure import check_bbox_structure, get_bbox_adv
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.crs_utils import (
     source_crs_string,
-    transform_geom_sql,
 )
 from geoparquet_io.core.duckdb_utils import (
     SPATIAL_JOIN_BBOX_PREFILTER,
@@ -40,17 +42,6 @@ from geoparquet_io.core.remote import display_path
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 
-def _admin_reprojected(source_crs, admin_bbox_col) -> bool:
-    """Whether the admin side is reprojected into the input CRS (#525).
-
-    Only when there is a non-CRS84 input *and* the admin dataset has a bbox to
-    base a pre-filter on. Reprojecting the (small) admin side instead of the
-    large input keeps the join's bbox pre-filter usable (both sides share the
-    input CRS) — see :func:`reproject_to_source_sql`.
-    """
-    return bool(source_crs) and bool(admin_bbox_col)
-
-
 def _build_admin_select_clause(dataset, levels, partition_columns, prefix=None):
     """Build SELECT clause for admin columns with transformations."""
     use_coalesce = prefix == "vecorel"
@@ -59,13 +50,7 @@ def _build_admin_select_clause(dataset, levels, partition_columns, prefix=None):
         output_col_name = dataset.get_output_column_name(level, prefix=prefix)
         col_transform = dataset.get_column_transform(level)
 
-        if col_transform:
-            expr = col_transform
-        elif "[" in col or "(" in col:
-            expr = f"b._col_{i}"
-        else:
-            expr = f"b.{quote_identifier(col)}"
-
+        expr = col_transform or admin_column_ref(i, col)
         if use_coalesce:
             expr = f"COALESCE({expr}, 'ZZ')"
 
@@ -95,7 +80,7 @@ def _format_input_ref(input_source, is_table_ref=False):
 
 def _build_level_join_query(
     input_source,
-    admin_subquery,
+    admin_table_ref,
     admin_select_clause,
     input_bbox_col,
     admin_bbox_col,
@@ -103,106 +88,29 @@ def _build_level_join_query(
     admin_geom_col,
     *,
     boundary_columns,
+    admin_where_sql="",
     is_table_ref=False,
     source_crs=None,
 ):
     """Build the per-level admin spatial join query.
 
-    A ``LEFT JOIN`` that attaches to each input feature the admin columns of the
-    polygon it intersects. A feature that intersects two admin polygons (a
-    border-straddling feature, or a sliver where independently simplified
-    polygons overlap) is kept once, assigned to the polygon whose
-    ``boundary_columns`` sort first -- the owner's spill-safe one-match dedup,
-    see :func:`build_spatial_join_query` (#543).
-
-    All identifiers are quoted via the shared :func:`build_spatial_join_condition`
-    helper / :func:`quote_identifier`, so column names sourced from untrusted file
-    metadata cannot break out of the generated SQL. ``is_table_ref`` marks
-    ``input_source`` as a DuckDB table/CTE name (per-level chaining) vs a file path.
+    The join itself -- the ON clause, the one-match dedup (#543) and which side
+    a non-CRS84 input reprojects (#525) -- is :func:`build_admin_join_query`'s.
+    This only formats ``input_source``: ``is_table_ref`` marks it as a DuckDB
+    table/CTE name (per-level chaining) vs a RAW file path.
     """
-    input_ref = _format_input_ref(input_source, is_table_ref)
-
-    # CRS handling for a non-CRS84 input (#525):
-    #  - If the admin side was reprojected into the input CRS (it has a bbox), the
-    #    join runs entirely in the input CRS, so the input geometry is left
-    #    untouched and the cheap bbox pre-filter is kept (avoids the #460 hang).
-    #  - Otherwise (admin has no bbox) reproject the input geometry inline; without
-    #    a bbox there is no pre-filter to preserve either way.
-    input_geom_sql = None
-    if source_crs and not _admin_reprojected(source_crs, admin_bbox_col):
-        input_geom_sql = transform_geom_sql(f"a.{quote_identifier(input_geom_col)}", source_crs)
-
     return build_admin_join_query(
-        input_relation=input_ref,
-        admin_relation=admin_subquery,
+        input_relation=_format_input_ref(input_source, is_table_ref),
+        admin_table_ref=admin_table_ref,
         admin_select_clause=admin_select_clause,
         input_geom_col=input_geom_col,
         admin_geom_col=admin_geom_col,
         input_bbox_col=input_bbox_col,
         admin_bbox_col=admin_bbox_col,
         boundary_columns=boundary_columns,
-        input_geom_sql=input_geom_sql,
+        admin_where_sql=admin_where_sql,
+        source_crs=source_crs,
     )
-
-
-def _add_extent_filter(
-    con,
-    input_source,
-    input_bbox_col,
-    input_geom_col,
-    admin_bbox_col,
-    verbose,
-    is_table_ref=False,
-    source_crs=None,
-):
-    """Add bbox extent filter to admin where clauses.
-
-    The admin boundaries are in OGC:CRS84, so the extent must be in CRS84 too.
-    For a non-CRS84 input the stored bbox is in the source CRS and can't be used —
-    compute the extent over the reprojected geometry instead (#525).
-    """
-    if not admin_bbox_col:
-        return None
-
-    input_ref = _format_input_ref(input_source, is_table_ref)
-
-    if input_bbox_col and not source_crs:
-        q_input_bbox = quote_identifier(input_bbox_col)
-        extent_query = f"""
-            SELECT
-                MIN({q_input_bbox}.xmin) as xmin,
-                MAX({q_input_bbox}.xmax) as xmax,
-                MIN({q_input_bbox}.ymin) as ymin,
-                MAX({q_input_bbox}.ymax) as ymax
-            FROM {input_ref}
-        """
-    else:
-        geom_ref = transform_geom_sql(quote_identifier(input_geom_col), source_crs)
-        extent_query = f"""
-            SELECT
-                MIN(ST_XMin({geom_ref})) as xmin,
-                MAX(ST_XMax({geom_ref})) as xmax,
-                MIN(ST_YMin({geom_ref})) as ymin,
-                MAX(ST_YMax({geom_ref})) as ymax
-            FROM {input_ref}
-        """
-
-    extent = fetch_one(con.execute(extent_query))
-    if extent and all(v is not None for v in extent):
-        xmin, xmax, ymin, ymax = extent
-        q_admin_bbox = quote_identifier(admin_bbox_col)
-        extent_filter = f"""
-            ({q_admin_bbox}.xmin <= {xmax} AND
-             {q_admin_bbox}.xmax >= {xmin} AND
-             {q_admin_bbox}.ymin <= {ymax} AND
-             {q_admin_bbox}.ymax >= {ymin})
-        """
-        if verbose:
-            debug(
-                f"Filtering admin boundaries to input extent: ({xmin:.2f}, {ymin:.2f}, {xmax:.2f}, {ymax:.2f})"
-            )
-        return extent_filter
-    return None
 
 
 def _handle_bbox_optimization(input_parquet, input_bbox_info, add_bbox_flag, verbose):
@@ -285,36 +193,6 @@ def _get_result_stats(con, output_parquet, dataset, levels, verbose, prefix=None
     return total_features, features_with_admin, unique_counts
 
 
-def _warn_if_row_count_changed(input_rows, output_rows):
-    """Warn when the per-level admin join did not preserve the row count.
-
-    The per-level caches are built to be non-overlapping precisely so a plain
-    LEFT JOIN is row-preserving (see ``_build_level_cache_query``). When that
-    breaks — a maritime polygon slipping back in, overlapping territories, a
-    custom ``--admin-source`` — nothing errors: the output just silently gains
-    duplicate features. Naming both counts turns the whole class of bug into a
-    visible one, at the cost of a metadata-only ``COUNT(*)``.
-    """
-    if input_rows is None or output_rows is None or input_rows == output_rows:
-        return
-    verb = "duplicated" if output_rows > input_rows else "dropped"
-    warn(
-        f"Admin join {verb} rows: {input_rows} input features, {output_rows} in the "
-        "output. Overlapping admin polygons emit one row per match; check the "
-        "admin dataset for overlapping boundaries."
-    )
-
-
-def _count_rows(con, source, is_table_ref=False):
-    """Row count for a file/URL or a temp table, or None if it cannot be read."""
-    try:
-        return fetch_one(
-            con.execute(f"SELECT COUNT(*) FROM {_format_input_ref(source, is_table_ref)}")
-        )[0]
-    except Exception:
-        return None
-
-
 def _setup_dataset_and_columns(
     input_parquet, dataset_name, dataset_source, levels, verbose, no_cache=False, memory_limit=None
 ):
@@ -389,31 +267,26 @@ def _build_admin_where_clauses_list(
     source_crs=None,
     admin_source=None,
 ):
-    """Build WHERE clauses for admin boundaries."""
-    admin_where_clauses = []
-    # The admin source decides how much filtering the clause has to do: a
-    # pre-filtered cache needs only the subtype clause, a raw release needs the
-    # level's whole predicate (#819).
-    subtype_filter = dataset.get_subtype_filter(levels, source=admin_source)
-    if subtype_filter:
-        admin_where_clauses.append(subtype_filter)
-        if verbose and not dry_run:
-            debug(f"Filtering admin boundaries: {subtype_filter}")
-
-    extent_filter = _add_extent_filter(
-        con,
-        input_source,
-        input_bbox_col,
-        input_geom_col,
-        admin_bbox_col,
-        verbose and not dry_run,
-        is_table_ref=is_table_ref,
-        source_crs=source_crs,
+    """The admin side's WHERE for this level: subtype filter and input extent."""
+    extent = (
+        admin_input_extent(
+            con,
+            _format_input_ref(input_source, is_table_ref),
+            input_bbox_col,
+            input_geom_col,
+            source_crs,
+        )
+        if admin_bbox_col
+        else None
     )
-    if extent_filter:
-        admin_where_clauses.append(extent_filter)
-
-    return admin_where_clauses
+    return build_admin_where_clause(
+        dataset,
+        levels,
+        admin_bbox_col,
+        extent,
+        admin_source=admin_source,
+        verbose=verbose and not dry_run,
+    )
 
 
 def _report_join_strategy(
@@ -462,17 +335,7 @@ def _build_query_components(
     has_native_geometry=False,
 ):
     """Build all query components."""
-    # Use provided admin_source (may be cached local path or remote URL)
-    # Quote the path for SQL safety
-    read_options = dataset.get_read_parquet_options()
-    admin_table_ref = (
-        f"read_parquet({sql_path(admin_source)}, "
-        f"{', '.join([f'{k}={v}' for k, v in read_options.items()])})"
-        if read_options
-        else sql_path(admin_source)
-    )
-
-    admin_where_clauses = _build_admin_where_clauses_list(
+    admin_where_sql = _build_admin_where_clauses_list(
         con,
         dataset,
         levels,
@@ -490,17 +353,9 @@ def _build_query_components(
     admin_select_clause = _build_admin_select_clause(
         dataset, levels, partition_columns, prefix=prefix
     )
-    admin_subquery = build_admin_subquery(
-        admin_table_ref,
-        admin_geom_col,
-        admin_bbox_col,
-        partition_columns,
-        "WHERE " + " AND ".join(admin_where_clauses) if admin_where_clauses else "",
-        reproject_to=source_crs if _admin_reprojected(source_crs, admin_bbox_col) else None,
-    )
 
     if not dry_run:
-        input_geom_rewritten = bool(source_crs) and not _admin_reprojected(
+        input_geom_rewritten = bool(source_crs) and not admin_side_reprojected(
             source_crs, admin_bbox_col
         )
         _report_join_strategy(
@@ -513,13 +368,14 @@ def _build_query_components(
 
     query = _build_level_join_query(
         input_source,
-        admin_subquery,
+        dataset.table_reference(admin_source),
         admin_select_clause,
         input_bbox_col,
         admin_bbox_col,
         input_geom_col,
         admin_geom_col,
         boundary_columns=partition_columns,
+        admin_where_sql=admin_where_sql,
         is_table_ref=is_table_ref,
         source_crs=source_crs,
     )
@@ -605,12 +461,10 @@ def _execute_per_level_joins(
     """Run separate spatial joins per admin level for per-level-source datasets.
 
     Each level joins against its own cache file, chaining results through DuckDB
-    temp tables. Per-level caches are non-overlapping, so each plain LEFT JOIN
-    normally preserves the row count.
+    temp tables. Each join keeps one row per input feature
+    (:func:`build_admin_join_query`, #543), so the row count is preserved.
     """
     current_source = input_source
-    # Cheap (metadata-only) baseline for the row-preservation check below.
-    input_rows = None if dry_run else _count_rows(con, input_source)
 
     for i, (level, col) in enumerate(zip(levels, partition_columns, strict=True)):
         level_admin_source = dataset.get_source_for_level(level, no_cache=no_cache)
@@ -682,11 +536,7 @@ def _execute_per_level_joins(
     if dry_run:
         return None, None, None
 
-    total_features, features_with_admin, unique_counts = _get_result_stats(
-        con, output_parquet, dataset, levels, verbose, prefix=prefix
-    )
-    _warn_if_row_count_changed(input_rows, total_features)
-    return total_features, features_with_admin, unique_counts
+    return _get_result_stats(con, output_parquet, dataset, levels, verbose, prefix=prefix)
 
 
 def add_admin_divisions_multi(
@@ -866,7 +716,7 @@ def add_admin_divisions_multi(
                     compression_level,
                     has_native_geometry=has_native_geometry,
                     input_geom_rewritten=(
-                        bool(source_crs) and not _admin_reprojected(source_crs, admin_bbox_col)
+                        bool(source_crs) and not admin_side_reprojected(source_crs, admin_bbox_col)
                     ),
                     con=con,
                     row_group_rows=row_group_rows,

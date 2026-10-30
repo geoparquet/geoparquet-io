@@ -28,10 +28,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     describe_query,
     fetch_one,
     quote_identifier,
+    sql_literal,
 )
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.logging_config import warn
@@ -245,10 +245,10 @@ def decoded_names(names: list[str] | None, plan: SourceText) -> list[str] | None
 
 def _guard(column: str) -> str:
     quoted = quote_identifier(column)
-    message = _escape_sql_string(f'Column "{column}" {_NOT_UTF8}. {_ENCODING_HINT}')
+    message = sql_literal(f'Column "{column}" {_NOT_UTF8}. {_ENCODING_HINT}')
     return (
         f"CASE WHEN {quoted} IS NULL OR TRY(decode(encode({quoted}))) IS NOT NULL "
-        f"THEN {quoted} ELSE error('{message}') END AS {quoted}"
+        f"THEN {quoted} ELSE error({message}) END AS {quoted}"
     )
 
 

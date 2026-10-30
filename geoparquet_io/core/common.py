@@ -686,7 +686,7 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
     Add a bbox struct column to a GeoParquet file in-place.
 
     Internal helper function used by --add-bbox flags in other commands
-    (hilbert_order, add_country_codes). Modifies the file in-place by
+    (hilbert_order). Modifies the file in-place by
     writing to a temporary file and replacing the original.
 
     Raises an error if the bbox column already exists.

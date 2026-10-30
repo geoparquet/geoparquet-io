@@ -24,7 +24,6 @@ import psutil
 
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     duckdb_capabilities,
     fetch_one,
     get_duckdb_connection,
@@ -897,8 +896,8 @@ def _build_explain_query(file_path: str, query: str | None) -> str:
     """Build the EXPLAIN ANALYZE query string."""
     if query:
         # The user's own query supplies the quotes around ``{file}``, so the
-        # placeholder takes a bare escaped literal rather than a complete one.
-        sql = query.replace("{file}", _escape_sql_string(file_path))
+        # placeholder takes sql_path's escaped literal without its quotes.
+        sql = query.replace("{file}", sql_path(file_path)[1:-1])
     else:
         sql = f"SELECT * FROM read_parquet({sql_path(file_path)})"
     return f"EXPLAIN ANALYZE {sql}"

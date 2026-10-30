@@ -31,13 +31,13 @@ from geoparquet_io.core.compression import ResolvedCodec, resolve_codec
 from geoparquet_io.core.crs_utils import _wrap_query_with_crs as _common_wrap_query_with_crs
 from geoparquet_io.core.crs_utils import is_default_crs, is_unknown_type_crs
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     _wrap_query_with_blob_conversion,
     build_kv_metadata_clause,
     describe_query,
     duckdb_type_is_geometry,
     quote_identifier,
     register_arrow,
+    sql_literal,
     sql_path,
 )
 from geoparquet_io.core.geo_metadata import (
@@ -170,9 +170,9 @@ def _table_query_with_native_geometry(
         expr = f"ST_GeomFromWKB({ident})"
         crs = type_crs_for(metadata.get(name)) if name != geometry_column else None
         if is_unknown_type_crs(crs):
-            expr = f"ST_SetCRS({expr}, '{_escape_sql_string(crs)}')"
+            expr = f"ST_SetCRS({expr}, {sql_literal(crs)})"
         elif isinstance(crs, dict) and crs and not is_default_crs(crs):
-            expr = f"ST_SetCRS({expr}, '{_escape_sql_string(json.dumps(crs))}')"
+            expr = f"ST_SetCRS({expr}, {sql_literal(json.dumps(crs))})"
         replacements.append(f"{expr} AS {ident}")
     if not replacements:
         return "SELECT * FROM input_table"

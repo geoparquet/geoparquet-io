@@ -325,22 +325,19 @@ def _run_add_quadkey(input_path: Path, output_dir: Path) -> dict[str, Any]:
 
 
 def _run_add_country(input_path: Path, output_dir: Path) -> dict[str, Any]:
-    """Benchmark adding country codes.
+    """Benchmark adding country codes (``gpio add admin-divisions --levels country``).
 
     Note: This operation uses the default Overture Maps admin boundaries,
     which requires network access and can be slow for the first run.
     """
-    from geoparquet_io.core.add.country_codes import add_country_codes
+    from geoparquet_io.core.add.admin_divisions import add_admin_divisions_multi
 
     output_path = output_dir / "output.parquet"
-    # Use default Overture countries (countries_parquet=None)
-    add_country_codes(
+    add_admin_divisions_multi(
         input_parquet=str(input_path),
-        countries_parquet=None,  # Use default Overture data
         output_parquet=str(output_path),
-        add_bbox_flag=False,
-        dry_run=False,
-        verbose=False,
+        dataset_name="overture",
+        levels=["country"],
     )
     result_table = pq.read_table(output_path)
     return {"rows_with_country": result_table.num_rows}

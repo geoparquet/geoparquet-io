@@ -26,13 +26,13 @@ from geoparquet_io.core.crs_utils import (
     is_geographic_crs,
 )
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     describe_query,
     fetch_one,
     get_duckdb_connection,
     load_community_extension,
     quote_identifier,
     register_arrow,
+    sql_literal,
     sql_path,
     validate_where_clause,
     where_sql_fragment,
@@ -786,12 +786,12 @@ def _warn_files_missing_column(con, input_path: str, column: str) -> None:
     """
     if not has_glob_pattern(input_path):
         return
-    col_lit = _escape_sql_string(column)
+    col_lit = sql_literal(column)
     try:
         total, with_col = fetch_one(
             con.execute(
                 f"SELECT count(DISTINCT file_name), "
-                f"count(DISTINCT file_name) FILTER (WHERE name = '{col_lit}') "
+                f"count(DISTINCT file_name) FILTER (WHERE name = {col_lit}) "
                 f"FROM parquet_schema({sql_path(input_path)})"
             )
         )

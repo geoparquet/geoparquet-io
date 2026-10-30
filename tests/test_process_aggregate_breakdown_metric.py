@@ -341,6 +341,11 @@ class _SquareAdmin:
     def get_source_for_level(self, level):
         return str(self._path)
 
+    def table_reference(self, source=None):
+        from geoparquet_io.core.duckdb_utils import sql_path
+
+        return sql_path(source or str(self._path))
+
 
 def test_admin_engine_pivots_and_keeps_off_a_metric_name(tmp_path, monkeypatch):
     con = duckdb.connect()

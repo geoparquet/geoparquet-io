@@ -41,7 +41,6 @@ from geoparquet_io.core.crs_utils import (
     warn_null_crs_once,
 )
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     describe_query,
     duckdb_capabilities,
     duckdb_type_contains_geometry,
@@ -49,6 +48,7 @@ from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     quote_identifier,
     register_arrow,
+    sql_literal,
     sql_path,
     uses_aws_profile,
 )
@@ -277,10 +277,10 @@ def _reprojected_source_ref(source_ref: str, quoted_geom: str, source_crs: str) 
     """
     # source_crs comes straight out of a file's own geo metadata, so it can
     # be any free-form string -- escape it like every other SQL literal.
-    source_crs_literal = _escape_sql_string(source_crs)
+    source_crs_literal = sql_literal(source_crs)
     return (
         f"(SELECT * REPLACE ("
-        f"ST_Transform({quoted_geom}, '{source_crs_literal}', '{WGS84_CRS}') AS {quoted_geom}"
+        f"ST_Transform({quoted_geom}, {source_crs_literal}, {sql_literal(WGS84_CRS)}) AS {quoted_geom}"
         f") FROM {source_ref} WHERE {quoted_geom} IS NOT NULL)"
     )
 
@@ -478,7 +478,7 @@ def _native_feature_collection_to_file(
     copy_query = (
         f"COPY (SELECT {select_list} FROM {source_ref} WHERE {quoted_geom} IS NOT NULL) "
         f"TO {sql_path(output_path)} (FORMAT GEOJSON, ID_COLUMN '', "
-        f"GEOMETRY_COLUMN '{_escape_sql_string(geometry_column)}')"
+        f"GEOMETRY_COLUMN {sql_literal(geometry_column)})"
     )
     debug(f"Native GeoJSON COPY: {copy_query}")
     with scoped_write_memory_limit(con, None, verbose):

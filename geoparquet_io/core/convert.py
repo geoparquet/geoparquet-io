@@ -24,7 +24,6 @@ from geoparquet_io.core.crs_utils import (
     parse_crs_string_to_projjson,
 )
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     _geoarrow_coord_exprs,
     _get_query_columns,
     _install_and_load_extension,
@@ -35,6 +34,7 @@ from geoparquet_io.core.duckdb_utils import (
     free_column_name,
     get_duckdb_connection,
     quote_identifier,
+    sql_literal,
     sql_path,
     uses_aws_profile,
 )
@@ -95,13 +95,14 @@ def _validate_layer_name(layer: str) -> str:
     """Validate and sanitize a layer name for use in SQL.
 
     Layer names in GeoPackage/FileGDB can contain letters, numbers, underscores,
-    and spaces. We escape single quotes to prevent SQL injection.
+    and spaces. The name comes back as a complete SQL string literal
+    (:func:`sql_literal`), so a quote in it cannot break out.
 
     Args:
         layer: Layer name to validate
 
     Returns:
-        Sanitized layer name safe for SQL interpolation
+        The layer name as a quoted, escaped SQL literal
 
     Raises:
         ValueError: If layer name contains dangerous characters
@@ -114,8 +115,7 @@ def _validate_layer_name(layer: str) -> str:
                 f"Invalid layer name '{layer}': contains unsafe character sequence '{pattern}'"
             )
 
-    # Escape single quotes (SQL standard: double them)
-    return _escape_sql_string(layer)
+    return sql_literal(layer)
 
 
 _OPEN_OPTION_RE = re.compile(r"^[A-Z][A-Z0-9_]*=[A-Za-z0-9._:/ -]+$")
@@ -348,7 +348,7 @@ def _build_st_read_expr(
     if keep_wkb:
         params += ", keep_wkb := true"
     if layer:
-        params += f", layer := '{_validate_layer_name(layer)}'"
+        params += f", layer := {_validate_layer_name(layer)}"
     if open_options:
         joined = ", ".join(f"'{_validate_open_option(option)}'" for option in open_options)
         params += f", open_options := [{joined}]"
@@ -869,10 +869,10 @@ def _build_csv_read_expr(input_url: str, delimiter: str | None, encoding: str | 
     size_options = f"max_line_size={max_line_size}, buffer_size={buffer_size}"
     reader_encoding = csv_encoding(encoding)
     if reader_encoding:
-        size_options += f", encoding='{_escape_sql_string(reader_encoding)}'"
+        size_options += f", encoding={sql_literal(reader_encoding)}"
     if delimiter:
         return (
-            f"read_csv({sql_path(input_url)}, delim='{_escape_sql_string(delimiter)}', "
+            f"read_csv({sql_path(input_url)}, delim={sql_literal(delimiter)}, "
             f"header=true, AUTO_DETECT=TRUE, {size_options})"
         )
     return f"read_csv_auto({sql_path(input_url)}, {size_options})"

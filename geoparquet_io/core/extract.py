@@ -31,7 +31,6 @@ from geoparquet_io.core.duckdb_metadata import (
     parse_geometry_logical_type,
 )
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     _get_query_columns,
     describe_query,
     fetch_one,
@@ -39,6 +38,7 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection_for_s3,
     quote_identifier,
     register_arrow,
+    sql_literal,
     sql_path,
     validate_where_clause,
 )
@@ -285,10 +285,10 @@ def convert_geojson_to_wkt(geojson: dict) -> str:
     """
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        geojson_str = _escape_sql_string(json.dumps(geojson))
+        geojson_str = sql_literal(json.dumps(geojson))
         result = fetch_one(
             con.execute(f"""
-            SELECT ST_AsText(ST_GeomFromGeoJSON('{geojson_str}'))
+            SELECT ST_AsText(ST_GeomFromGeoJSON({geojson_str}))
         """)
         )
         return result[0]
@@ -598,9 +598,9 @@ def build_spatial_filter(
             )
 
     if geometry_wkt:
-        escaped_wkt = _escape_sql_string(geometry_wkt)
+        wkt_literal = sql_literal(geometry_wkt)
         conditions.append(
-            f"ST_Intersects({quote_identifier(geometry_col)}, ST_GeomFromText('{escaped_wkt}'))"
+            f"ST_Intersects({quote_identifier(geometry_col)}, ST_GeomFromText({wkt_literal}))"
         )
 
     return " AND ".join(conditions) if conditions else None

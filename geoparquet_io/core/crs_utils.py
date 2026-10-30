@@ -12,11 +12,11 @@ from functools import lru_cache
 from typing import Any
 
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     describe_query,
     fetch_one,
     parse_duckdb_geo_type,
     quote_identifier,
+    sql_literal,
     sql_path,
 )
 from geoparquet_io.core.exceptions import GeoParquetError
@@ -790,9 +790,9 @@ def _wrap_query_with_crs(
         warn("input_crs does not look like valid PROJJSON — skipping CRS application")
         return query
 
-    crs_json = _escape_sql_string(json.dumps(input_crs))
+    crs_json = sql_literal(json.dumps(input_crs))
     return f"""
-        SELECT * REPLACE (ST_SetCRS({quote_identifier(geometry_column)}, '{crs_json}') AS {quote_identifier(geometry_column)})
+        SELECT * REPLACE (ST_SetCRS({quote_identifier(geometry_column)}, {crs_json}) AS {quote_identifier(geometry_column)})
         FROM ({query})
     """
 
@@ -1850,10 +1850,7 @@ def transform_geom_sql(geom_expr: str, source_crs, target_crs: str = DEFAULT_TAR
     src = transform_source_crs(source_crs)
     if src is None:
         return geom_expr
-    return (
-        f"ST_Transform({geom_expr}, '{_escape_sql_string(src)}', "
-        f"'{_escape_sql_string(target_crs)}')"
-    )
+    return f"ST_Transform({geom_expr}, {sql_literal(src)}, {sql_literal(target_crs)})"
 
 
 def source_crs_string(
@@ -1884,9 +1881,7 @@ def reproject_to_source_sql(geom_expr: str, source_crs, base_crs: str = DEFAULT_
     src = transform_source_crs(source_crs)
     if src is None:
         return geom_expr
-    return (
-        f"ST_Transform({geom_expr}, '{_escape_sql_string(base_crs)}', '{_escape_sql_string(src)}')"
-    )
+    return f"ST_Transform({geom_expr}, {sql_literal(base_crs)}, {sql_literal(src)})"
 
 
 def crs_string_from_geo_meta(geo_meta: dict | None, geom_col: str) -> str | None:

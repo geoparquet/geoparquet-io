@@ -571,8 +571,7 @@ class TestDisplayedPathsAreNotEscaped:
         """No ``--`` prose line may carry an escaped path.
 
         The SQL these runs echo is another matter: there ``o''brien`` is the
-        correct literal, and ``add/country_codes.py:_print_dry_run_bounds_info``
-        prints SQL on purpose.
+        correct literal.
         """
         prose = [line for line in text.splitlines() if line.strip().startswith("--")]
         assert prose, text
@@ -642,39 +641,6 @@ class TestDisplayedPathsAreNotEscaped:
         assert f"-- Input file: {apostrophe_file}" in result.output
         self._assert_shows_raw(result.output, apostrophe_file)
 
-    def test_add_country_codes_dry_run_header(self, apostrophe_file, tmp_path, caplog):
-        """Both the input and the ``--countries`` path are shown raw (#802)."""
-        from geoparquet_io.core.add.country_codes import add_country_codes
-
-        countries = _make_countries_file(apostrophe_file, tmp_path / "o'brien" / "c.parquet")
-        with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            add_country_codes(
-                input_parquet=apostrophe_file,
-                countries_parquet=countries,
-                output_parquet=str(tmp_path / "o'brien" / "cc_out.parquet"),
-                add_bbox_flag=False,
-                dry_run=True,
-                verbose=False,
-            )
-
-        assert f"-- Input file: {apostrophe_file}" in caplog.text
-        assert f"-- Countries file: {countries}" in caplog.text
-        self._assert_shows_raw(caplog.text, apostrophe_file)
-
-
-def _make_countries_file(source_parquet, dest):
-    """A countries file built from ``source_parquet``'s own geometries."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    con = get_duckdb_connection(load_spatial=True)
-    try:
-        con.execute(
-            f"COPY (SELECT geometry, 'US' AS country_code FROM {sql_path(source_parquet)}) "
-            f"TO {sql_path(dest)} (FORMAT PARQUET)"
-        )
-    finally:
-        con.close()
-    return str(dest)
-
 
 class TestEscapedValuesDoNotCrossFunctionBoundaries:
     """Issue #802 part 2: a function hands back a RAW path.
@@ -683,14 +649,6 @@ class TestEscapedValuesDoNotCrossFunctionBoundaries:
     escaped value outliving the function that escaped it is exactly the shape
     that produced #718's crashes: the next consumer added has to know.
     """
-
-    def test_get_countries_config_returns_a_raw_path(self, apostrophe_file, tmp_path):
-        from geoparquet_io.core.add.country_codes import _get_countries_config
-
-        countries = _make_countries_file(apostrophe_file, tmp_path / "o'brien" / "c.parquet")
-        countries_path, _, _ = _get_countries_config(countries, using_default=False, verbose=False)
-
-        assert countries_path == countries
 
     def test_get_input_file_info_returns_a_raw_path(self, apostrophe_file):
         from geoparquet_io.core.partition.admin_hierarchical import _get_input_file_info
@@ -806,16 +764,16 @@ class TestAggregateByAdminSource:
         dataset = AdminDatasetFactory.create("overture", source_path=apostrophe_file)
         assert dataset.supports_per_level_sources()
 
-        ref = _get_admin_ref(dataset, None, "country")
+        ref = _get_admin_ref(dataset, "country")
 
-        assert ref == f"read_parquet({sql_path(apostrophe_file)})"
+        assert ref == f"read_parquet({sql_path(apostrophe_file)}, hive_partitioning=1)"
 
     def test_per_level_source_ref_is_runnable_sql(self, apostrophe_file):
         from geoparquet_io.core.admin_datasets import AdminDatasetFactory
         from geoparquet_io.core.process.aggregate.by_admin import _get_admin_ref
 
         dataset = AdminDatasetFactory.create("overture", source_path=apostrophe_file)
-        ref = _get_admin_ref(dataset, None, "country")
+        ref = _get_admin_ref(dataset, "country")
 
         con = get_duckdb_connection(load_spatial=False)
         try:

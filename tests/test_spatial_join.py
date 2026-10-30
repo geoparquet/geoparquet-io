@@ -385,10 +385,10 @@ def _calls_named(source: str, name: str) -> list[ast.Call]:
 
 
 def test_admin_join_query_is_built_only_in_admin_datasets():
-    """``add admin-divisions`` and ``partition admin`` join the full geometry
-    through ``admin_datasets.build_admin_join_query``; only the two joins with a
-    different shape call the generic owner directly: aggregate admin joins a
-    POINT under its own alias, add country-codes keeps every match."""
+    """``add admin-divisions``, ``partition admin`` and ``process aggregate
+    admin`` (a POINT join, under its own alias) all join through
+    ``admin_datasets.build_admin_join_query``; nothing else calls the generic
+    owner."""
     found = {}
     for path in sorted(PACKAGE.rglob("*.py")):
         rel = path.relative_to(PACKAGE).as_posix()
@@ -397,13 +397,13 @@ def test_admin_join_query_is_built_only_in_admin_datasets():
         count = len(_calls_named(path.read_text(), "build_spatial_join_query"))
         if count:
             found[rel] = count
-    assert found == {"core/add/country_codes.py": 1, "core/process/aggregate/by_admin.py": 1}
+    assert found == {}
 
 
 def test_admin_join_query_keeps_one_match_per_feature():
     sql = admin_datasets.build_admin_join_query(
         input_relation="read_parquet('in.parquet')",
-        admin_relation="(SELECT * FROM admin)",
+        admin_table_ref="admin",
         admin_select_clause='b."country" AS country',
         input_geom_col="geometry",
         admin_geom_col="geometry",
@@ -461,3 +461,134 @@ def test_admin_join_connection_default_keeps_duckdb_threads(tmp_path, monkeypatc
         assert not (tmp_path / "cache").exists()
     finally:
         con.close()
+
+
+# --- the admin side of the join lives in admin_datasets (#1367 T1d audit 1-7, 12) ---
+
+ADMIN_CALLERS = (
+    "core/add/admin_divisions.py",
+    "core/partition/admin_hierarchical.py",
+    "core/process/aggregate/by_admin.py",
+)
+
+#: What each admin caller used to spell for itself, and the owner that spells it now.
+ADMIN_SIDE_LITERALS = {
+    "MIN(ST_XMin(": "admin_input_extent",
+    "MIN({": "admin_input_extent",
+    ".xmin <= ": "build_admin_where_clause",
+    "_col_": "admin_column_ref",
+    "read_parquet(": "AdminDataset.table_reference",
+    "geometry_always_xy": "get_duckdb_connection",
+}
+ADMIN_SIDE_CALLS = {
+    "transform_geom_sql": "admin_side_reprojected / build_admin_join_query",
+    "build_admin_subquery": "build_admin_join_query",
+    "build_spatial_join_condition": "build_admin_join_query",
+    "open_bounded_connection": "open_admin_join_connection",
+    "get_duckdb_connection": "open_admin_join_connection",
+}
+
+
+def admin_side_spellings(source: str) -> list[str]:
+    found = [lit for lit in ADMIN_SIDE_LITERALS if _literals_containing(source, lit)]
+    found += [name for name in ADMIN_SIDE_CALLS if _calls_named(source, name)]
+    return found
+
+
+def test_admin_callers_leave_the_admin_side_to_admin_datasets():
+    """The extent pre-filter, the boundary-column naming, the admin relation,
+    the reprojection decision and the connection are each decided once, in
+    admin_datasets; the three admin commands only call it."""
+    found = {}
+    for rel in ADMIN_CALLERS:
+        spelled = admin_side_spellings((PACKAGE / rel).read_text())
+        if spelled:
+            found[rel] = spelled
+    assert found == {}
+
+
+def test_admin_side_guard_sees_a_hand_rolled_extent_filter():
+    source = 'def f(b, x):\n    return f"({b}.xmin <= {x})"\n'
+    assert admin_side_spellings(source) == [".xmin <= "]
+
+
+def _projected_points(tmp_path):
+    """The four POINTS reprojected to EPSG:3857, with no bbox column."""
+    src = _write_points(tmp_path / "pts_crs84.parquet")
+    out = tmp_path / "pts_3857.parquet"
+    _invoke(["convert", "reproject", src, str(out), "--dst-crs", "EPSG:3857"])
+    assert "bbox" not in pq.read_schema(out).names
+    return str(out)
+
+
+def test_one_reprojection_rule_for_partition_and_add():
+    """A non-CRS84 input with no bbox, against an admin dataset with one: both
+    commands reproject the admin side (it has a bbox to rebuild), never the
+    input (#525). partition used to reproject the input here."""
+    from geoparquet_io.core.add.admin_divisions import _build_level_join_query
+    from geoparquet_io.core.partition.admin_hierarchical import _build_enrichment_query
+
+    common = {
+        "admin_select_clause": 'b."country" AS country',
+        "admin_geom_col": "geometry",
+        "admin_bbox_col": "bbox",
+        "input_geom_col": "geometry",
+        "input_bbox_col": None,
+        "source_crs": "EPSG:3857",
+    }
+    add_sql = _build_level_join_query("in.parquet", "admin", boundary_columns=["country"], **common)
+    part_sql = _build_enrichment_query(
+        input_source="in.parquet",
+        admin_table_ref="admin",
+        admin_where_clause="",
+        boundary_columns=["country"],
+        enriched_table="_e",
+        **common,
+    )
+    assert "ST_Transform(\"geometry\", 'OGC:CRS84', 'EPSG:3857')" in add_sql
+    assert 'ST_Transform(a."geometry"' not in add_sql
+    assert part_sql == f"CREATE TEMP TABLE _e AS\n{add_sql}"
+
+
+def test_partition_admin_assigns_a_projected_input_without_bbox(tmp_path, local_admin):
+    """The same assignments as the CRS84 input: the admin side is reprojected
+    into EPSG:3857 (it has a bbox), and every feature lands where it did."""
+    local_admin()
+    crs84 = _partition_admin(tmp_path / "a", _write_points(tmp_path / "pts.parquet"))
+    projected = _partition_admin(tmp_path / "b", _projected_points(tmp_path))
+    assert projected == crs84
+    assert crs84 == [(1, "AA"), (2, "AA"), (3, "BB")]
+
+
+def test_aggregate_admin_opens_the_admin_join_connection(tmp_path, local_admin, monkeypatch):
+    """aggregate's connection comes from the owner, in its materialize shape."""
+    from geoparquet_io.core.process.aggregate import by_admin
+
+    local_admin()
+    calls = []
+    real = admin_datasets.open_admin_join_connection
+
+    def spy(**kwargs):
+        calls.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(by_admin, "open_admin_join_connection", spy, raising=False)
+    src = _write_points(tmp_path / "pts.parquet")
+    _aggregate_admin(tmp_path, src)
+    assert calls == [
+        {"spill_to_cache": False, "materialize": True, "memory_limit": None, "verbose": False}
+    ]
+
+
+def test_admin_join_connection_materialize_carries_the_memory_limit():
+    con = admin_datasets.open_admin_join_connection(
+        spill_to_cache=False, materialize=True, memory_limit="512MB"
+    )
+    try:
+        assert _setting(con, "memory_limit") in ("488.2 MiB", "512.0 MB", "488.2MiB")
+        assert _setting(con, "preserve_insertion_order") is False
+        assert _setting(con, "geometry_always_xy") is True
+    finally:
+        con.close()
+    with pytest.raises(ValueError, match="spill_to_cache"):
+        admin_datasets.open_admin_join_connection(spill_to_cache=True, materialize=True)

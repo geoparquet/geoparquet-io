@@ -219,35 +219,6 @@ class TestGetColumnStatistics:
         assert captured == [{"load_httpfs": True}]
 
 
-class TestCountryCodesCreateConnection:
-    """core/add/country_codes.py (_create_duckdb_connection)."""
-
-    def test_local_countries_file_needs_no_cloud_access(self, monkeypatch):
-        import geoparquet_io.core.add.country_codes as country_codes
-
-        captured = _spy_factory(monkeypatch, country_codes)
-
-        with country_codes._create_duckdb_connection(using_default=False):
-            pass
-
-        assert captured == [{"load_httpfs": False}]
-
-    def test_using_default_reads_overture_over_httpfs(self, monkeypatch):
-        """The default countries source is the remote Overture release on S3,
-        so it needs both httpfs and the bucket's region. Asking for the region
-        while declaring load_httpfs=False was self-contradictory: DuckDB
-        autoloads httpfs on `SET s3_region` anyway."""
-        import geoparquet_io.core.add.country_codes as country_codes
-
-        captured = _spy_factory(monkeypatch, country_codes)
-
-        with country_codes._create_duckdb_connection(using_default=True) as con:
-            region = fetch_one(con.execute("SELECT current_setting('s3_region')"))[0]
-
-        assert captured == [{"load_httpfs": True, "s3_region": "us-west-2"}]
-        assert region == "us-west-2"
-
-
 class TestDiskRewriteWriteFromTable:
     """core/write_strategies/disk_rewrite.py (write_from_table)."""
 

@@ -313,7 +313,6 @@ module = [
     "geoparquet_io.core.add.admin_divisions",
     "geoparquet_io.core.add.bbox",
     "geoparquet_io.core.add.bbox_metadata",
-    "geoparquet_io.core.add.country_codes",
     "geoparquet_io.core.add.h3",
     "geoparquet_io.core.add.kdtree",
     "geoparquet_io.core.add.quadkey",

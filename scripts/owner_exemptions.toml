@@ -504,9 +504,6 @@ reason = "index add workflow, one copy per index; T5b's index_ops driver replace
 pair = "geoparquet_io/core/add/a5.py:add_a5_table|geoparquet_io/core/add/h3.py:add_h3_table"
 reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
 [[G3.pairs]]
-pair = "geoparquet_io/core/add/admin_divisions.py:_print_dry_run_header|geoparquet_io/core/add/country_codes.py:_print_dry_run_header"
-reason = "one dry-run banner with the dataset label as a parameter; T5c (T2e moved its remote-path display into remote.display_path)"
-[[G3.pairs]]
 pair = "geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query|geoparquet_io/core/add/s2.py:_add_s2_streaming.make_query"
 reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
 [[G3.pairs]]
@@ -625,9 +622,6 @@ block = "core.add.a5:add_a5_table|core.add.h3:add_h3_table"
 reason = "index add workflow per index; T5b's index_ops driver"
 [[G3.pylint]]
 block = "core.add.admin_divisions:_execute_per_level_joins|core.str_order:_str_order_file_based"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.add.admin_divisions:add_admin_divisions_multi|core.add.country_codes:add_country_codes"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
 block = "core.add.admin_divisions:add_admin_divisions_multi|core.str_order:_str_order_file_based"

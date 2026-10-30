@@ -20,6 +20,7 @@ from pathlib import Path
 
 import duckdb
 import pyarrow.parquet as pq
+import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
@@ -146,6 +147,31 @@ def _string_args(sql):
                 break
             out.append(sql[position + 1 : end].replace("''", "'"))
     return out
+
+
+@pytest.mark.parametrize(
+    ("raw", "literal"),
+    [
+        ("my_table", "'my_table'"),
+        ("it's", "'it\\'s'"),
+        ("a\\b", "'a\\\\b'"),
+        ("\\'", "'\\\\\\''"),
+    ],
+)
+def test_googlesql_string_backslash_escapes(raw, literal):
+    """GoogleSQL escapes with a backslash, not DuckDB's doubling: ``it's`` is
+    ``'it\\'s'``, and a backslash is escaped first so ``\\'`` cannot end the
+    string."""
+    from geoparquet_io.core.extract_bigquery import _googlesql_string
+
+    assert _googlesql_string(raw) == literal
+
+
+def test_googlesql_string_rejects_a_nul_byte():
+    from geoparquet_io.core.extract_bigquery import _googlesql_string
+
+    with pytest.raises(ValueError, match="NUL"):
+        _googlesql_string("a\x00b")
 
 
 def test_row_count_query_contains_a_hostile_table_name():

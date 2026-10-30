@@ -17,15 +17,16 @@ import duckdb
 
 from geoparquet_io.core.admin_datasets import (
     AdminDatasetFactory,
+    admin_column_ref,
+    admin_input_extent,
     build_admin_join_query,
-    build_admin_subquery,
+    build_admin_where_clause,
     open_admin_join_connection,
 )
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.crs_utils import (
     source_crs_string,
-    transform_geom_sql,
 )
 from geoparquet_io.core.duckdb_utils import (
     fetch_one,
@@ -75,123 +76,22 @@ def _build_enrichment_query(
     by :func:`sql_path` -- escaping it earlier would carry the escape into the
     branch that emits a bare table name (#802).
 
-    ``source_crs`` (an ``"AUTH:CODE"`` string) reprojects a non-CRS84 input to
-    the admin CRS before ``ST_Intersects`` (#525). When set, the input's stored
-    bbox is in the source CRS and is skipped for the pre-filter.
+    The join -- ON clause, one-match dedup (#543), and which side a non-CRS84
+    input (``source_crs``) reprojects (#525) -- is :func:`build_admin_join_query`'s.
     """
-    input_ref = input_source if input_is_table_ref else sql_path(input_source)
-
-    both_bboxes = bool(input_bbox_col and admin_bbox_col)
-    # Non-CRS84 input with bboxes on both sides: the (small) admin side is
-    # reprojected into the input CRS so the bbox pre-filter survives (#525). With
-    # a bbox missing on either side there is no pre-filter to keep, so the input
-    # geometry is reprojected inline instead.
-    reproject_admin = bool(source_crs) and both_bboxes
-    admin_relation = build_admin_subquery(
-        admin_table_ref,
-        admin_geom_col,
-        admin_bbox_col,
-        boundary_columns,
-        admin_where_clause,
-        reproject_to=source_crs if reproject_admin else None,
-        include_bbox=both_bboxes,
-    )
-    input_geom_sql = None
-    if source_crs and not reproject_admin:
-        input_geom_sql = transform_geom_sql(f"a.{quote_identifier(input_geom_col)}", source_crs)
-
     join = build_admin_join_query(
-        input_relation=input_ref,
-        admin_relation=admin_relation,
+        input_relation=input_source if input_is_table_ref else sql_path(input_source),
+        admin_table_ref=admin_table_ref,
         admin_select_clause=admin_select_clause,
         input_geom_col=input_geom_col,
         admin_geom_col=admin_geom_col,
         input_bbox_col=input_bbox_col,
         admin_bbox_col=admin_bbox_col,
         boundary_columns=boundary_columns,
-        input_geom_sql=input_geom_sql,
+        admin_where_sql=admin_where_clause,
+        source_crs=source_crs,
     )
     return f"CREATE TEMP TABLE {enriched_table} AS\n{join}"
-
-
-def _compute_input_extent(con, input_path, input_bbox_col, input_geom_col, source_crs=None):
-    """Compute the input's (xmin, xmax, ymin, ymax) extent in one scan.
-
-    ``input_path`` is RAW; ``sql_path`` escapes it at each interpolation (#802).
-
-    The extent does not change across admin levels, so callers compute it once
-    and reuse it for every level's WHERE clause (issue #480) rather than
-    re-scanning the input per level — important when there is no bbox column and
-    the fallback decodes every geometry.
-
-    The admin boundaries are OGC:CRS84, so for a non-CRS84 input the extent must
-    be computed over the reprojected geometry (the stored bbox is in the source
-    CRS) so the admin extent filter is in the right units (#525).
-    """
-    if input_bbox_col and not source_crs:
-        # ``input_bbox_col`` is read from the input file's schema; quote the
-        # column segment of the struct-field access, leaving ``.xmin`` bare (#926).
-        q_input_bbox = quote_identifier(input_bbox_col)
-        extent_query = f"""
-            SELECT
-                MIN({q_input_bbox}.xmin) as xmin,
-                MAX({q_input_bbox}.xmax) as xmax,
-                MIN({q_input_bbox}.ymin) as ymin,
-                MAX({q_input_bbox}.ymax) as ymax
-            FROM {sql_path(input_path)}
-        """
-    else:
-        geom_ref = transform_geom_sql(quote_identifier(input_geom_col), source_crs)
-        extent_query = f"""
-            SELECT
-                MIN(ST_XMin({geom_ref})) as xmin,
-                MAX(ST_XMax({geom_ref})) as xmax,
-                MIN(ST_YMin({geom_ref})) as ymin,
-                MAX(ST_YMax({geom_ref})) as ymax
-            FROM {sql_path(input_path)}
-        """
-    extent = fetch_one(con.execute(extent_query))
-    if extent and all(v is not None for v in extent):
-        return extent
-    return None
-
-
-def _build_admin_where_clause(dataset, levels, admin_bbox_col, extent, verbose, admin_source=None):
-    """Build WHERE clause for admin boundaries with filters.
-
-    ``extent`` is the precomputed input extent (from ``_compute_input_extent``)
-    or None; it is reused across levels instead of being recomputed each call.
-    ``admin_source`` is the resolved source for these levels: how much
-    filtering the subtype clause has to carry depends on whether it is a
-    pre-filtered cache or a raw release (#819).
-    """
-    admin_where_clauses = []
-
-    # Add subtype filter if applicable
-    subtype_filter = dataset.get_subtype_filter(levels, source=admin_source)
-    if subtype_filter:
-        admin_where_clauses.append(subtype_filter)
-        if verbose:
-            debug(f"  → Filtering admin boundaries: {subtype_filter}")
-
-    # Add bbox extent filter
-    if admin_bbox_col and extent:
-        xmin, xmax, ymin, ymax = extent
-        # Quote the column segment of the struct-field access (#926).
-        q_admin_bbox = quote_identifier(admin_bbox_col)
-        extent_filter = f"""
-            ({q_admin_bbox}.xmin <= {xmax} AND
-             {q_admin_bbox}.xmax >= {xmin} AND
-             {q_admin_bbox}.ymin <= {ymax} AND
-             {q_admin_bbox}.ymax >= {ymin})
-        """
-        admin_where_clauses.append(extent_filter)
-        if verbose:
-            debug(
-                f"  → Filtering admin boundaries to input extent: ({xmin:.2f}, {ymin:.2f}, {xmax:.2f}, {ymax:.2f})"
-            )
-
-    return "WHERE " + " AND ".join(admin_where_clauses) if admin_where_clauses else ""
 
 
 def _setup_admin_dataset(dataset_name, verbose, levels):
@@ -248,26 +148,11 @@ def _build_admin_select_for_partitioning(levels, boundary_columns, dataset=None,
             col_transform = None
         output_column_names.append(output_col)
 
-        # Handle struct field access vs simple column names
-        if col_transform:
-            expr = col_transform
-        elif "[" in col or "(" in col:
-            expr = f"b._col_{i}"
-        else:
-            expr = f"b.{quote_identifier(col)}"
+        expr = col_transform or admin_column_ref(i, col)
 
         admin_select_parts.append(f"{expr} as {quote_identifier(output_col)}")
 
     return ", ".join(admin_select_parts), output_column_names
-
-
-def _build_admin_table_reference(dataset, admin_source):
-    """Build admin table reference with read options if needed."""
-    read_options = dataset.get_read_parquet_options()
-    if read_options:
-        options_str = ", ".join([f"{k}={v}" for k, v in read_options.items()])
-        return f"read_parquet({admin_source}, {options_str})"
-    return admin_source
 
 
 def _perform_enrichment_join(
@@ -351,18 +236,20 @@ def _perform_per_level_enrichment_join(
 
     # The data extent does not change across levels, so compute it once and reuse
     # it for every level's WHERE clause rather than re-scanning per level (#480).
-    extent = _compute_input_extent(con, input_path, input_bbox_col, input_geom_col, source_crs)
+    extent = admin_input_extent(
+        con, sql_path(input_path), input_bbox_col, input_geom_col, source_crs
+    )
 
     for i, (level, col) in enumerate(zip(levels, boundary_columns, strict=True)):
         level_source = dataset.get_source_for_level(level)
-        admin_table_ref = _build_admin_table_reference(dataset, sql_path(level_source))
+        admin_table_ref = dataset.table_reference(level_source)
         select_clause, level_outputs = _build_admin_select_for_partitioning(
             [level], [col], dataset=dataset, vecorel=vecorel
         )
         output_column_names.extend(level_outputs)
 
-        admin_where_clause = _build_admin_where_clause(
-            dataset, [level], admin_bbox_col, extent, verbose, admin_source=level_source
+        admin_where_clause = build_admin_where_clause(
+            dataset, [level], admin_bbox_col, extent, admin_source=level_source, verbose=verbose
         )
 
         is_last = i == len(levels) - 1
@@ -729,21 +616,20 @@ def partition_by_admin_hierarchical(
                     memory_limit=memory_limit,
                 )
             else:
-                admin_source = dataset.prepare_data_source(con)
                 admin_select_clause, output_column_names = _build_admin_select_for_partitioning(
                     levels, boundary_columns, dataset=dataset, vecorel=vecorel
                 )
-                admin_table_ref = _build_admin_table_reference(dataset, admin_source)
-                extent = _compute_input_extent(
-                    con, input_path, input_bbox_col, input_geom_col, source_crs
+                admin_table_ref = dataset.table_reference()
+                extent = admin_input_extent(
+                    con, sql_path(input_path), input_bbox_col, input_geom_col, source_crs
                 )
-                admin_where_clause = _build_admin_where_clause(
+                admin_where_clause = build_admin_where_clause(
                     dataset,
                     levels,
                     admin_bbox_col,
                     extent,
-                    verbose,
                     admin_source=dataset.get_source(),
+                    verbose=verbose,
                 )
                 _perform_enrichment_join(
                     con,

@@ -6,7 +6,7 @@ with appropriate extensions loaded for GeoParquet operations.
 
 ``import duckdb`` is deferred into the functions that touch it (#1307): the
 embeddable core modules (see docs/guide/embedding.md) import this module for
-``quote_identifier``/``_escape_sql_string``/``sql_path``-style helpers, and a
+``quote_identifier``/``sql_literal``/``sql_path``-style helpers, and a
 host application without DuckDB installed must be able to import them and fail
 only when a connection is actually asked for.
 """
@@ -164,15 +164,15 @@ def _s3_secret_sql(settings: Mapping[str, Any]) -> str:
     profile = settings.get("profile")
     if profile:
         params.append(f"CHAIN '{_NAMED_PROFILE_CHAIN}'")
-        params.append(f"PROFILE '{_escape_sql_string(profile)}'")
+        params.append(f"PROFILE {sql_literal(profile)}")
     endpoint = settings.get("endpoint")
     if endpoint:
-        params.append(f"ENDPOINT '{_escape_sql_string(endpoint)}'")
+        params.append(f"ENDPOINT {sql_literal(endpoint)}")
         params.append("URL_STYLE 'path'")
         params.append(f"USE_SSL {'false' if settings.get('use_ssl') is False else 'true'}")
     region = settings.get("region")
     if region:
-        params.append(f"REGION '{_escape_sql_string(region)}'")
+        params.append(f"REGION {sql_literal(region)}")
     body = ",\n    ".join(params)
     return f"CREATE OR REPLACE SECRET (\n    {body}\n);"
 
@@ -199,14 +199,14 @@ def _apply_s3_settings(con, settings: Mapping[str, Any]) -> None:
     """``SET`` the resolved endpoint and region for reads that use no secret."""
     endpoint = settings.get("endpoint")
     if endpoint:
-        con.execute(f"SET s3_endpoint='{_escape_sql_string(endpoint)}';")
+        con.execute(f"SET s3_endpoint={sql_literal(endpoint)};")
         con.execute("SET s3_url_style='path';")
         ssl_value = "false" if settings.get("use_ssl") is False else "true"
         con.execute(f"SET s3_use_ssl={ssl_value};")
 
     region = settings.get("region")
     if region:
-        con.execute(f"SET s3_region='{_escape_sql_string(region)}';")
+        con.execute(f"SET s3_region={sql_literal(region)};")
 
 
 def get_active_s3_config() -> dict:
@@ -268,6 +268,18 @@ def _escape_sql_string(value: str) -> str:
         String with single quotes escaped for safe SQL interpolation
     """
     return value.replace("'", "''")
+
+
+def _require_str(value: object) -> str:
+    """``value`` unchanged if it is a ``str``; a ``TypeError`` otherwise.
+
+    For the literal builders whose input must already be text: ``sql_literal``
+    renders anything through ``str()``, which would turn a ``bytes`` payload
+    into the characters ``b'...'`` instead of failing.
+    """
+    if not isinstance(value, str):
+        raise TypeError(f"expected str, got {type(value).__name__}")
+    return value
 
 
 def sql_literal(value: object) -> str:
@@ -534,7 +546,7 @@ def _current_setting(con: duckdb.DuckDBPyConnection, key: str) -> object:
 
 def _set_setting(con: duckdb.DuckDBPyConnection, key: str, value: object) -> None:
     if isinstance(value, str):
-        con.execute(f"SET {key} = '{_escape_sql_string(value)}'")
+        con.execute(f"SET {key} = {sql_literal(value)}")
     else:
         con.execute(f"SET {key} = {value}")
 
@@ -569,8 +581,13 @@ def sql_path(path: str | os.PathLike[str]) -> str:
     may legally contain two apostrophes in a row -- so the rule is structural: a
     path is escaped exactly once, here.
 
-    For a non-path SQL string literal use :func:`_escape_sql_string` and supply
-    your own quotes; for an identifier use :func:`quote_identifier`.
+    For a non-path SQL value use :func:`sql_literal`, which supplies the quotes
+    too; for an identifier use :func:`quote_identifier`. A path is a string
+    literal like any other, so this is ``sql_literal`` on its ``fspath``.
+
+    The bare escape under both, ``_escape_sql_string``, is private to this
+    module: a call site that adds its own quotes around it is one that can
+    forget them, and gets no NUL handling.
 
     A ``PathLike`` is accepted as well as a ``str``: callers hold ``Path``
     objects just as often, and ``str.replace`` on a ``Path`` is the completely
@@ -583,7 +600,7 @@ def sql_path(path: str | os.PathLike[str]) -> str:
     Returns:
         The path as a quoted, escaped SQL string literal.
     """
-    return f"'{_escape_sql_string(os.fspath(path))}'"
+    return sql_literal(_require_str(os.fspath(path)))
 
 
 def build_kv_metadata_clause(pairs: Mapping[str, str] | None) -> str | None:
@@ -604,7 +621,7 @@ def build_kv_metadata_clause(pairs: Mapping[str, str] | None) -> str | None:
     if not pairs:
         return None
     body = ", ".join(
-        f"'{_escape_sql_string(key)}': '{_escape_sql_string(value)}'"
+        f"{sql_literal(_require_str(key))}: {sql_literal(_require_str(value))}"
         for key, value in pairs.items()
     )
     return f"KV_METADATA {{{body}}}"
@@ -625,7 +642,7 @@ def quote_identifier(name: str) -> str:
     something already quoted.
 
     For a SQL *string literal* (e.g. ``WHERE path_in_schema = '...'``) use
-    :func:`_escape_sql_string` instead; the two escapes are not interchangeable.
+    :func:`sql_literal` instead; the two escapes are not interchangeable.
 
     Args:
         name: The identifier (column name, table name, etc.) to quote
@@ -1453,7 +1470,7 @@ def _apply_memory_limit(
     to match a limit.
     """
     if limit is not None:
-        con.execute(f"SET memory_limit = '{_escape_sql_string(str(limit))}';")
+        con.execute(f"SET memory_limit = {sql_literal(str(limit))};")
         if verbose:
             debug(f"DuckDB memory limit: {limit}")
     if thread_cap is not None and thread_cap < int(str(_current_setting(con, "threads"))):
@@ -1612,7 +1629,7 @@ class ProfiledConnection:
             target = os.path.join(self._directory, name)
             if not os.path.exists(target):
                 break
-        self._con.execute(f"SET profiling_output = '{_escape_sql_string(target)}';")
+        self._con.execute(f"SET profiling_output = {sql_path(target)};")
 
     def execute(self, *args, **kwargs):
         self._rotate_profile_output()
@@ -1756,8 +1773,7 @@ def get_duckdb_connection(
     # so a per-write override cannot be applied to the connections gpio shares
     # across writes (a partition loop finalizes N files on one connection).
     effective_temp_dir = temp_directory if temp_directory is not None else spill_directory()
-    safe_temp_dir = _escape_sql_string(str(effective_temp_dir))
-    con.execute(f"SET temp_directory = '{safe_temp_dir}';")
+    con.execute(f"SET temp_directory = {sql_path(effective_temp_dir)};")
     _apply_connection_limits(con, memory_limit, threads)
 
     # Always load spatial extension by default (core use case). None is the

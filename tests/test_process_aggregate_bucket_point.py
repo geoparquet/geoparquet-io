@@ -11,7 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.duckdb_utils import fetch_one, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3
@@ -746,6 +746,9 @@ class _FakeAdminDataset:
 
     def get_source_for_level(self, level):
         return self._path
+
+    def table_reference(self, source=None):
+        return sql_path(source or self._path)
 
 
 def _write_admin_polygons(path):

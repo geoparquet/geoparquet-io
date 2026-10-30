@@ -29,7 +29,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core import memory_limits
+from geoparquet_io.core import admin_datasets, memory_limits
 from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.process.aggregate import by_admin, grid_common
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_a5_table, aggregate_by_a5
@@ -121,7 +121,7 @@ def connection_spy(monkeypatch):
         )
         return con
 
-    for module in (grid_common, by_admin, detect, rollup):
+    for module in (grid_common, admin_datasets, detect, rollup):
         monkeypatch.setattr(module, "open_bounded_connection", spy, raising=True)
     return records
 
@@ -141,20 +141,25 @@ def _fake_cgroups(tmp_path, proc_lines: list[str], files: dict[str, str]):
 # Layer 0: no aggregate/overview site may open an unbounded connection
 # ---------------------------------------------------------------------------
 
+BOUNDED = "open_bounded_connection"
 SITES = [
-    pytest.param(grid_common, "aggregate_grid_file", id="aggregate-grid-file"),
-    pytest.param(grid_common, "aggregate_grid_table", id="aggregate-grid-table"),
-    pytest.param(by_admin, "aggregate_by_admin", id="aggregate-by-admin"),
-    pytest.param(detect, "aggregate_connection", id="overview-aggregate-connection"),
-    pytest.param(rollup, "rollup_table", id="overview-rollup-table"),
+    pytest.param(grid_common, "aggregate_grid_file", BOUNDED, id="aggregate-grid-file"),
+    pytest.param(grid_common, "aggregate_grid_table", BOUNDED, id="aggregate-grid-table"),
+    # The admin join's connection is admin_datasets' (#1367); it opens the
+    # bounded one for aggregate's client-side read.
+    pytest.param(
+        by_admin, "aggregate_by_admin", "open_admin_join_connection", id="aggregate-by-admin"
+    ),
+    pytest.param(detect, "aggregate_connection", BOUNDED, id="overview-aggregate-connection"),
+    pytest.param(rollup, "rollup_table", BOUNDED, id="overview-rollup-table"),
 ]
 
 
-@pytest.mark.parametrize("module,func", SITES)
-def test_site_opens_a_bounded_connection_and_forwards_the_limit(module, func):
+@pytest.mark.parametrize("module,func,helper", SITES)
+def test_site_opens_a_bounded_connection_and_forwards_the_limit(module, func, helper):
     """A hand-kept list of call sites goes stale; reading their source cannot."""
     source = inspect.getsource(inspect.unwrap(getattr(module, func)))
-    assert "open_bounded_connection(" in source, f"{func} does not use the bounded helper"
+    assert f"{helper}(" in source, f"{func} does not use the bounded helper"
     assert "get_duckdb_connection(" not in source, f"{func} still opens a raw connection"
     assert "memory_limit=memory_limit" in source, f"{func} drops its memory_limit argument"
 

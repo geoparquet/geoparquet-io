@@ -6,7 +6,7 @@ is whoever wrote the file, not the person running the command. Interpolated
 without quoting, a hostile name injects SQL into the user's DuckDB session, and
 a legitimate name with a space or quote crashes with a ParserException.
 
-- PR #461 regression (todo 008): `add admin-divisions` / `add country-codes`
+- PR #461 regression (todo 008): `add admin-divisions`
   with a hostile primary geometry column name.
 - #926: `partition admin` with a hostile or space-containing bbox column name.
   The struct-field subtlety: only the column segment is quoted
@@ -83,38 +83,6 @@ def test_admin_divisions_quotes_malicious_geom_column(malicious_geom_column_file
     # The embedded double-quote must be doubled inside a quoted identifier; the
     # raw `AS pwn` breakout must never appear as executable SQL.
     assert 'geom"") AS pwn' in result.output
-
-
-def test_country_codes_join_quotes_a_malicious_geom_column(malicious_geom_column_file, tmp_path):
-    """country_codes joins a hostile geometry column name without injecting.
-
-    The country_codes module is exercised by benchmarks/legacy paths rather than
-    a CLI command, so it is driven through its core function, against a local
-    countries file covering the input. Its ON clause comes from
-    ``build_spatial_join_condition``; a breakout would add a ``pwn`` column or
-    fail to parse.
-    """
-    from geoparquet_io.core.add.country_codes import add_country_codes
-
-    countries = tmp_path / "countries.parquet"
-    con = duckdb.connect()
-    try:
-        con.execute("INSTALL spatial; LOAD spatial")
-        con.execute(
-            "COPY (SELECT 'ZZ' AS country, "
-            "ST_GeomFromText('POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))') "
-            f"AS geometry) TO '{countries}' (FORMAT PARQUET)"
-        )
-    finally:
-        con.close()
-    out = tmp_path / "out.parquet"
-
-    add_country_codes(malicious_geom_column_file, str(countries), str(out), False, False, False)
-
-    table = pq.read_table(out)
-    assert "pwn" not in table.column_names
-    assert table.num_rows == pq.read_metadata(malicious_geom_column_file).num_rows
-    assert set(table.column("admin:country_code").to_pylist()) == {"ZZ"}
 
 
 # --------------------------------------------------------------------------- #

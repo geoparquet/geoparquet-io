@@ -502,6 +502,11 @@ class _FakeAdminDataset:
     def get_source_for_level(self, level):
         return self._path
 
+    def table_reference(self, source=None):
+        from geoparquet_io.core.duckdb_utils import sql_path
+
+        return sql_path(source or str(self._path))
+
     def get_level_column_mapping(self):
         return {"country": "country"}
 

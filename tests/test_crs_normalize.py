@@ -436,7 +436,7 @@ class TestAdminJoinIsCrsAware:
         try:
             kwargs = {
                 "input_source": fields_5070_file,
-                "admin_subquery": "(SELECT geom, region FROM _admin)",
+                "admin_table_ref": "_admin",
                 "admin_select_clause": 'b."region" AS region',
                 "input_bbox_col": None,
                 "admin_bbox_col": None,
@@ -498,7 +498,7 @@ class TestAdminReprojectsAdminSideWithBbox:
 
         sql = _build_level_join_query(
             input_source="x.parquet",
-            admin_subquery="(SELECT geom, bbox, region FROM admin)",
+            admin_table_ref="admin",
             admin_select_clause='b."region" AS region',
             input_bbox_col="bbox",
             admin_bbox_col="bbox",
@@ -507,9 +507,10 @@ class TestAdminReprojectsAdminSideWithBbox:
             boundary_columns=["region"],
             source_crs="EPSG:5070",
         )
-        # The join itself does not transform the input (admin reproject lives in
-        # the subquery); the bbox pre-filter is retained.
-        assert "ST_Transform" not in sql
+        # The join does not transform the input: the admin side is reprojected,
+        # in its subquery, and the bbox pre-filter is retained.
+        assert 'ST_Transform(a."geometry"' not in sql
+        assert "ST_Transform(\"geom\", 'OGC:CRS84', 'EPSG:5070')" in sql
         assert ".xmin" in sql and ".xmax" in sql
 
     def test_admin_subquery_reprojects_admin_and_synthesizes_bbox(self):

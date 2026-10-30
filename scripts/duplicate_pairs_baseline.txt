@@ -13,7 +13,6 @@ geoparquet_io/core/add/a5.py:_add_a5_streaming|geoparquet_io/core/add/h3.py:_add
 geoparquet_io/core/add/a5.py:_add_a5_streaming|geoparquet_io/core/add/s2.py:_add_s2_streaming
 geoparquet_io/core/add/a5.py:add_a5_column|geoparquet_io/core/add/h3.py:add_h3_column
 geoparquet_io/core/add/a5.py:add_a5_table|geoparquet_io/core/add/h3.py:add_h3_table
-geoparquet_io/core/add/admin_divisions.py:_print_dry_run_header|geoparquet_io/core/add/country_codes.py:_print_dry_run_header
 geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query|geoparquet_io/core/add/s2.py:_add_s2_streaming.make_query
 geoparquet_io/core/add/h3.py:_add_h3_streaming|geoparquet_io/core/add/s2.py:_add_s2_streaming
 geoparquet_io/core/arrow_geo_metadata.py:_compute_bbox_from_data|geoparquet_io/core/geo_metadata.py:_compute_bbox_from_data
