@@ -342,6 +342,14 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
+      - id: vulture-tests
+        name: vulture (tests)
+        description: Find unused code in tests/ (a test calling a package name is not its use)
+        entry: uv run vulture tests scripts/vulture_whitelist_tests.py --min-confidence 60
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
       - id: xenon
         name: xenon
         description: Monitor code complexity (same scope as CI)

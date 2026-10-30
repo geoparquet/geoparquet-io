@@ -263,28 +263,36 @@ Each concept (writing a file, the memory ceiling, the `geo` block, CRS checks, H
 retries, ...) has one owner module, and these checks fail a new copy of it (#1367):
 
 - **G1, banned calls** — ruff `TID251` bans `pyarrow.parquet.write_table`/`ParquetWriter`,
-  `psutil`, `os.sysconf`, `requests` and `httpx` outside their owners (the message names
-  the owner); `tests/test_owner_guards.py` walks the AST for a `json.loads` of the `geo`
-  key, `SET memory_limit`, hand-rolled SQL escapes, `/sys/fs/cgroup`, `duckdb.__version__`,
-  private HTTP retry policy (a request plus a wait in a loop or a recursive call; retry,
-  backoff and attempt constants, or a `*_TIMEOUT` restating the owner's default;
-  `max_retries=`/`retries=`/`backoff=`/`timeout=` defaults that are not `None` or an owner
-  constant; retryable statuses as literals or comparisons; `Retry-After` reads; thin
-  wrappers, `functools.partial` or policy literals around an owner function) and bare
-  `json.dumps` in `cli/`.
+  `psutil`, `os.sysconf`, `requests`, `httpx` and `urllib.request` outside their owners
+  (the message names the owner); `tests/test_owner_guards.py` walks the AST, through
+  import aliases and simple constants, for a `json.loads` of the `geo` key (also when the
+  key was fetched an assignment or two earlier), `SET`/`PRAGMA memory_limit` or a
+  `memory_limit` connection config, hand-rolled SQL escapes, `/sys/fs/cgroup`, reading
+  DuckDB's version, private HTTP retry policy (a request plus a wait in a loop, also via a
+  helper the loop calls, or in a recursive call; retry, tries, backoff and attempt
+  constants at any level, or a `*_TIMEOUT` restating the owner's default; retry-named
+  parameter defaults that are not `None` or an owner constant; retryable statuses as
+  literals, names, `HTTPStatus` members, `range()` or comparisons; `Retry-After` reads;
+  short wrappers, lambdas, `functools.partial` or policy literals around an owner
+  function) and `json.dumps`/`json.dump` in `cli/` and `core/` (modules that only
+  serialize metadata are allowed per file).
 - **G2, owner-only definitions** — `scripts/check_owner_defs.py` (the
-  `owner-only-defs` hook): a `def` named like `is_geographic*`,
-  `resolve_*version*`, `parse_size*`, `atomic_write`, ... lives only in its owner, per the
+  `owner-only-defs` hook): a `def` named like `is_geographic*`, `resolve_*version*`,
+  `parse_size*`, `atomic_write`, ... (a leading underscore does not matter, and
+  `[G2.known_copies]` names renamed copies) lives only in its owner, per the
   `[G2.owners]` table.
-- **G4, dead code** — vulture at `min_confidence = 60`, baseline in
-  `scripts/vulture_whitelist.py`.
+- **G4, dead code** — vulture at `min_confidence = 60`, the package on its own (a test
+  calling a name is not a use; baseline `scripts/vulture_whitelist.py`) and the tests on
+  their own (the `vulture-tests` hook; `scripts/vulture_whitelist_tests.py`). Each
+  whitelist line is tagged `dynamic: <how>` or `dead: <track> deletes`.
 - **G5, `core/common.py`** — `tests/test_common_split_guards.py` pins its public and
-  private names and caps its size.
+  private names and its size, both ways: shrinking it fails until the pin is lowered.
 
 Every exemption lives in `scripts/owner_exemptions.toml` with a reason, and
-`tests/test_owner_guards.py` pins how many each check has and fails on a stale one. A
-failure means: call the owner. When you delete a copy, delete its entry and lower the count
-in the same commit. Never add an entry to make new code pass.
+`tests/test_owner_guards.py` pins how many each check has and fails on an entry whose
+`count` no longer matches the tree. A failure means: call the owner. When you delete a
+copy, delete its entry and lower the count in the same commit. Never add an entry to make
+new code pass.
 
 ### External extractors
 

@@ -23,158 +23,168 @@
 path = "geoparquet_io/api/ops.py"
 name = "pyarrow.parquet.write_table"
 count = 3
-reason = "stages an in-memory table to a temp file for a file-based core call (T2)"
+reason = "stages an in-memory table to a temp file for a file-based core call; T2c routes it through the facade"
 [[G1.tid251]]
 path = "geoparquet_io/benchmarks/operations.py"
 name = "pyarrow.parquet.write_table"
-reason = "benchmark fixture write; the benchmark modules own psutil, not writes"
+reason = "permanent: benchmark fixture write that measures pyarrow itself; not a gpio output path"
 [[G1.tid251]]
 path = "geoparquet_io/core/add/kdtree.py"
 name = "pyarrow.parquet.write_table"
-reason = "temp view for the kdtree pass; private write, T2 routes it through the facade"
+reason = "temp view for the kdtree pass; private write, T2c routes it through the facade"
 [[G1.tid251]]
 path = "geoparquet_io/core/arcgis.py"
 name = "pyarrow.parquet.ParquetWriter"
-reason = "paged ArcGIS stream writer; private write, T2 routes it through the facade"
+reason = "paged ArcGIS stream writer; private write, T2c routes it through the facade"
 [[G1.tid251]]
 path = "geoparquet_io/core/arrow_geo_metadata.py"
 name = "pyarrow.parquet.write_table"
-reason = "_write_table_with_settings, a second funnel beside write_funnels; T2 routes it through the facade"
+reason = "_write_table_with_settings, a second funnel beside write_funnels; T2c routes it through the facade"
 [[G1.tid251]]
 path = "geoparquet_io/core/carto.py"
 name = "httpx"
-reason = "CARTO status probe streams one request with httpx.stream to read the status without the body; outside http_retry (T4a kept it)"
+reason = "permanent: CARTO status probe streams one request with httpx.stream to read the status without the body; accepted by the T4a audit"
 [[G1.tid251]]
 path = "geoparquet_io/core/constants.py"
 name = "pyarrow.parquet.ParquetWriter"
-reason = "vecorel schema fix rewrites the file itself; private write outside the facade (T2)"
+reason = "vecorel schema fix rewrites the file itself; private write outside the facade, T2f"
 [[G1.tid251]]
 path = "geoparquet_io/core/derive_geo_from_file.py"
 name = "pyarrow.parquet.ParquetWriter"
 count = 2
-reason = "footer rewrite with derived geo metadata (annotation + call); private write outside the facade (T2)"
+reason = "footer rewrite with derived geo metadata (annotation + call); private write outside the facade, T2f"
 [[G1.tid251]]
 path = "geoparquet_io/core/duckdb_utils.py"
 name = "psutil"
-reason = "process-liveness check for stale DuckDB temp dirs, not a memory fact; optional import (#1330)"
+reason = "permanent: process-liveness check for stale DuckDB temp dirs, not a memory fact; optional import (#1330)"
 [[G1.tid251]]
 path = "geoparquet_io/core/extract_bigquery.py"
 name = "pyarrow.parquet.write_table"
-reason = "geometry-free BigQuery result written directly (#1335 class); T2"
+reason = "geometry-free BigQuery result written directly (#1335 class); T2c"
 [[G1.tid251]]
 path = "geoparquet_io/core/file_utils.py"
 name = "httpx"
-reason = "streams an HTTP source to disk chunk by chunk; legitimate stream, to move behind http_retry"
+reason = "streams an HTTP source to disk chunk by chunk; T2e moves the download behind http_retry"
 [[G1.tid251]]
 path = "geoparquet_io/core/process/aggregate/by_admin.py"
 name = "pyarrow.parquet.write_table"
 count = 2
-reason = "geometry-free aggregate output bypasses the facade's row-group count (approved change 2; T2)"
+reason = "geometry-free aggregate output bypasses the facade's row-group count (approved change 2); T2c"
 [[G1.tid251]]
 path = "geoparquet_io/core/process/aggregate/grid_common.py"
 name = "pyarrow.parquet.write_table"
 count = 2
-reason = "geometry-free aggregate output bypasses the facade's row-group count (approved change 2; T2)"
+reason = "geometry-free aggregate output bypasses the facade's row-group count (approved change 2); T2c"
 [[G1.tid251]]
 path = "geoparquet_io/core/process/overview/overview_file.py"
 name = "pyarrow.parquet.ParquetWriter"
 count = 2
-reason = "overview writer (annotation + call); private write outside the facade (T2)"
+reason = "overview writer (annotation + call); private write outside the facade, T2f"
 [[G1.tid251]]
 path = "geoparquet_io/core/process/overview/run.py"
 name = "pyarrow.parquet.write_table"
-reason = "geometry-free overview output bypasses the facade's row-group count (approved change 2; T2)"
+reason = "geometry-free overview output bypasses the facade's row-group count (approved change 2); T2c"
 [[G1.tid251]]
 path = "geoparquet_io/core/process/simplify.py"
 name = "pyarrow.parquet.ParquetWriter"
-reason = "streaming simplify writer; private write outside the facade (T2)"
+reason = "streaming simplify writer; private write outside the facade, T2f"
 [[G1.tid251]]
 path = "geoparquet_io/core/reproject.py"
 name = "pyarrow.parquet.ParquetWriter"
-reason = "null-CRS sanitize rewrite; private write outside the facade (T2)"
+reason = "null-CRS sanitize rewrite; private write outside the facade, T2f"
 [[G1.tid251]]
 path = "geoparquet_io/core/streaming.py"
 name = "pyarrow.parquet.write_table"
-reason = "stdin spooled to a temp file; private write outside the facade (T2)"
+reason = "stdin spooled to a temp file; private write outside the facade, T2c"
 [[G1.tid251]]
 path = "geoparquet_io/core/wfs.py"
 name = "httpx"
 count = 4
-reason = "WFS request, feature count, streaming page download and startIndex probe import httpx for its exception types and stream; retries now run through http_retry (T4a)"
+reason = "permanent: WFS request, feature count, streaming page download and startIndex probe use httpx for its exception types and stream; retries run through http_retry (T4a)"
+[[G1.tid251]]
+path = "geoparquet_io/core/carto.py"
+name = "urllib.request"
+count = 3
+reason = "CARTO SQL API GET via urllib.request outside http_retry (no retry, its own timeout); T4c moves it behind make_request_with_retry"
+[[G1.tid251]]
+path = "geoparquet_io/core/overture.py"
+name = "urllib.request"
+count = 2
+reason = "latest-release lookup via urllib.request with its own 5 s timeout, outside http_retry; T4c"
 # json.loads of the geo key: parse through core/geo_metadata.py (#982, #913, #1120, #1169).
 [[G1.geo_parse]]
 path = "geoparquet_io/api/table.py"
 name = "Table.metadata"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3)"
+reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
 [[G1.geo_parse]]
 path = "geoparquet_io/core/add/bbox.py"
 name = "_declare_computed_bbox"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3)"
+reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
 [[G1.geo_parse]]
 path = "geoparquet_io/core/add/bbox.py"
 name = "_passthrough_version"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3)"
+reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
 [[G1.geo_parse]]
 path = "geoparquet_io/core/arrow_geo_metadata.py"
 name = "_detect_version_from_table"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3)"
+reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
 [[G1.geo_parse]]
 path = "geoparquet_io/core/crs_utils.py"
 name = "parse_geo_metadata_from_schema"
 count = 2
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3)"
+reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
 [[G1.geo_parse]]
 path = "geoparquet_io/core/derive_geo_from_file.py"
 name = "_with_primary_column"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3)"
+reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
 [[G1.geo_parse]]
 path = "geoparquet_io/core/duckdb_metadata.py"
 name = "_pyarrow_get_geo_metadata"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3)"
+reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
 [[G1.geo_parse]]
 path = "geoparquet_io/core/process/overview/overview_file.py"
 name = "_output_schema"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3)"
+reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
 [[G1.geo_parse]]
 path = "geoparquet_io/core/reproject.py"
 name = "_sanitize_null_crs_file"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3)"
+reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
 [[G1.geo_parse]]
 path = "geoparquet_io/core/streaming.py"
 name = "extract_version_from_metadata"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3)"
+reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
 [[G1.geo_parse]]
 path = "geoparquet_io/core/streaming.py"
 name = "extract_geo_metadata"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3)"
+reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
 [[G1.geo_parse]]
 path = "geoparquet_io/core/streaming.py"
 name = "extract_crs_from_table"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3)"
+reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
 [[G1.geo_parse]]
 path = "geoparquet_io/core/write_funnels.py"
 name = "_block_edges"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3)"
+reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
 [[G1.geo_parse]]
 path = "geoparquet_io/core/write_funnels.py"
 name = "apply_nonplanar_edges"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3)"
-[[G1.set_memory_limit]]
-path = "geoparquet_io/core/extract_bigquery.py"
-name = "_execute_bigquery_extraction"
-reason = "the BigQuery SET: a second memory ceiling beside memory_limits (T1)"
+reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
+[[G1.geo_parse]]
+path = "geoparquet_io/core/arrow_geo_metadata.py"
+name = "_parse_geo_metadata_quietly"
+reason = "parses a geo key it fetched one or two assignments earlier, not via the owner (T3a; T3e composes the caller)"
+[[G1.geo_parse]]
+path = "geoparquet_io/core/duckdb_metadata.py"
+name = "get_geo_metadata"
+reason = "parses a geo key it fetched one or two assignments earlier, not via the owner (T3a; T3e composes the caller)"
+[[G1.geo_parse]]
+path = "geoparquet_io/core/write_funnels.py"
+name = "_read_geo_key"
+reason = "parses a geo key it fetched one or two assignments earlier, not via the owner (T3a; T3e composes the caller)"
 [[G1.sql_escape]]
 path = "geoparquet_io/core/process/aggregate/common.py"
 name = "sql_literal"
 reason = "hand-rolled string-literal escape (#1101 class); use _escape_sql_string (T1)"
-[[G1.duckdb_version]]
-path = "geoparquet_io/core/benchmark.py"
-name = "get_environment_info"
-reason = "records the DuckDB version in a benchmark report; not a gate"
-[[G1.duckdb_version]]
-path = "geoparquet_io/core/geojson_stream.py"
-name = "_native_geojson_writer_available"
-reason = "private DuckDB-2.0 gate (#1357/#1358/#1360 class); removed by T1a"
 # HTTP retry policy: core/http_retry.py owns attempts, delay, timeout, statuses and Retry-After.
 [[G1.retry_param_defaults]]
 path = "geoparquet_io/api/table.py"
@@ -185,30 +195,199 @@ path = "geoparquet_io/core/carto.py"
 name = "_probe_request_status"
 count = 2
 reason = "400 <= code < 500 and code != 429 picks which 4xx answers get a detail probe for the error message; not a retry decision (T4a kept it)"
-# Bare json.dumps reports in cli/: use core/json_output.dumps_json (#1226).
+[[G1.retry_status_sets]]
+path = "geoparquet_io/core/arcgis.py"
+name = "_is_page_pressure_error"
+reason = "permanent: ArcGIS JSON error-body code 500 marks page pressure (halve the page size), not an HTTP retry classification"
+# Bare json.dumps / json.dump in cli/ and core/: reports go through
+# core/json_output.dumps_json (#1226). A count = "*" entry allows a whole core/
+# module whose json.dumps calls serialize metadata (the geo block, footer keys,
+# PROJJSON, GeoJSON data), not a report; a new report in one of them is not
+# caught, which is the price of not listing 60 serializer lines one by one.
 [[G1.json_dumps]]
 path = "geoparquet_io/cli/commands/benchmark.py"
 name = "benchmark_report"
-reason = "benchmark report JSON; dumps_json (T5)"
+reason = "benchmark report JSON; dumps_json (T5c)"
 [[G1.json_dumps]]
 path = "geoparquet_io/cli/commands/inspect.py"
 name = "inspect_layers"
 count = 2
-reason = "inspect layers --json; dumps_json (T5)"
+reason = "inspect layers --json; dumps_json (T5c)"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/benchmark.py"
+name = "format_json_output"
+reason = "benchmark --json report; dumps_json (T5c)"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/benchmark.py"
+name = "format_explain_output"
+reason = "benchmark explain --json report; dumps_json (T5c)"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/benchmark_suite.py"
+name = "SuiteResult.to_json"
+reason = "benchmark suite report; dumps_json (T5c)"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/add/bbox.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/add/bbox_metadata.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block (and its debug dump)"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/add/stac_metadata.py"
+count = "*"
+reason = "metadata serialization, not a report: stac-geoparquet footer payload"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/arcgis.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block and a staged ArcGIS JSON document"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/arrow_geo_metadata.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/bbox_structure.py"
+count = "*"
+reason = "metadata serialization, not a report: debug dump of the geo block"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/carto.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/check_fixes.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block repair"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/constants.py"
+count = "*"
+reason = "metadata serialization, not a report: collection footer key"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/crs_utils.py"
+count = "*"
+reason = "metadata serialization, not a report: PROJJSON for SQL, cache keys and messages"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/derive_geo_from_file.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/duckdb_metadata.py"
+count = "*"
+reason = "metadata serialization, not a report: CRS inside a GEOMETRY type string"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/duckdb_utils.py"
+count = "*"
+reason = "metadata serialization, not a report: ARROW:extension:metadata"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/extract.py"
+count = "*"
+reason = "metadata serialization, not a report: GeoJSON geometry handed to SQL"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/format_writers.py"
+count = "*"
+reason = "metadata serialization, not a report: SRS parameter for GDAL"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/geo_metadata.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block (owner of its encoding)"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/geoarrow_compat.py"
+count = "*"
+reason = "metadata serialization, not a report: ARROW:extension:metadata"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/geojson_stream.py"
+count = "*"
+reason = "metadata serialization, not a report: GeoJSON output (the data, not a report)"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/metadata_utils.py"
+count = "*"
+reason = "metadata serialization, not a report: PROJJSON/covering pretty-printed inside the human meta view"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/parquet_footer.py"
+count = "*"
+reason = "metadata serialization, not a report: ARROW:extension:metadata"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/pmtiles.py"
+count = "*"
+reason = "metadata serialization, not a report: GeoJSON feature lines fed to tippecanoe"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/pmtiles_chunks.py"
+count = "*"
+reason = "metadata serialization, not a report: chunk manifest file"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/process/overview/overview_file.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block and overviews footer key"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/process/raster/output.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/process/simplify.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/reproject.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/stac.py"
+count = "*"
+reason = "metadata serialization, not a report: STAC item/collection JSON file"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/stream_io.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/streaming.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/wfs.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/write_funnels.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/write_strategies/arrow_streaming.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/write_strategies/base.py"
+count = "*"
+reason = "metadata serialization, not a report: PROJJSON literal for SQL"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/write_strategies/disk_rewrite.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/write_strategies/duckdb_kv.py"
+count = "*"
+reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 
 # ---------------------------------------------------------------------------
 # G2: owner-only definitions (scripts/check_owner_defs.py)
 # ---------------------------------------------------------------------------
 # Each key is an fnmatch glob over a def name; only the listed modules may
-# define a matching name anywhere under geoparquet_io/.
+# define a name in its family anywhere under geoparquet_io/. A leading
+# underscore on either side is ignored (_is_geographic_crs is an
+# is_geographic*), and [G2.known_copies] adds renamed copies by exact name.
 [G2.owners]
 "is_geographic*" = ["geoparquet_io/core/crs_utils.py"]
 "*crs_equal*" = ["geoparquet_io/core/crs_utils.py"]
 "resolve_*version*" = ["geoparquet_io/core/parquet_writer.py"]
-"*covering*" = ["geoparquet_io/core/geo_metadata.py", "geoparquet_io/core/bbox_structure.py"]
+# Covering *builders* only. The wider *covering* also caught 19 checks,
+# predicates, lookups and repairs that read a covering and are not copies of
+# build_bbox_covering (T0b audit), so the family is narrowed to the builder shapes.
+"build_*covering*" = ["geoparquet_io/core/geo_metadata.py", "geoparquet_io/core/bbox_structure.py"]
+"*covering_for" = ["geoparquet_io/core/geo_metadata.py", "geoparquet_io/core/bbox_structure.py"]
+"*covering_metadata" = ["geoparquet_io/core/geo_metadata.py", "geoparquet_io/core/bbox_structure.py"]
 "parse_size*" = ["geoparquet_io/core/sizing.py"]
 "format_size*" = ["geoparquet_io/core/sizing.py"]
-"atomic_write" = ["geoparquet_io/core/file_utils.py"]
+# atomic_write lives in write_strategies/base.py until T2f moves it to
+# file_utils (re-exported from write_funnels); T2f changes this owner with the move.
+"atomic_write" = ["geoparquet_io/core/write_strategies/base.py"]
 "_is_geography_column" = ["geoparquet_io/core/duckdb_metadata.py"]
 "_compute_geometry_types" = ["geoparquet_io/core/geo_metadata.py"]
 "_compute_bbox_from_data" = ["geoparquet_io/core/geo_metadata.py"]
@@ -223,213 +402,174 @@ reason = "inspect layers --json; dumps_json (T5)"
 "_align*schema" = ["geoparquet_io/core/arrow_types.py"]
 "_unify*schema" = ["geoparquet_io/core/arrow_types.py"]
 "_reconcile*schema" = ["geoparquet_io/core/arrow_types.py"]
+# Owners T1a/T1b (#1375) created: DuckDB capability and connection plumbing in
+# duckdb_utils, the memory-limit display in sizing.
+"duckdb_capabilities" = ["geoparquet_io/core/duckdb_utils.py"]
+"complete_without_fetch" = ["geoparquet_io/core/duckdb_utils.py"]
+"resolve_load_spatial" = ["geoparquet_io/core/duckdb_utils.py"]
+"_apply_memory_limit" = ["geoparquet_io/core/duckdb_utils.py"]
+"pin_duckdb_settings" = ["geoparquet_io/core/duckdb_utils.py"]
+"format_memory_limit" = ["geoparquet_io/core/sizing.py"]
+"nudged_size" = ["geoparquet_io/core/sizing.py"]
+
+# Renamed copies no glob sees, by the family they belong to (the #1367
+# Copies rows and the T0b audit). Each is also an exemption below.
+[G2.known_copies]
+"resolve_*version*" = ["_detect_version_from_table", "extract_version_from_metadata", "detect_version_for_output"]
+"*crs_equal*" = ["_crs_are_equivalent", "_crs_matches"]
+"*unique_name*" = ["free_column_name", "_suffixed_to_unique"]
+"parse_bbox" = ["_normalize_bbox", "_validated_bbox"]
 
 # Owners named above that do not exist yet. bbox_parse.py is a placeholder
-# (#1367 track T5 decides parse_bbox's home); index_ops.py arrives with T3/T5.
+# (T5c decides parse_bbox's home); index_ops.py arrives with T5b.
 [G2.pending_owners]
-"geoparquet_io/core/bbox_parse.py" = "placeholder home for parse_bbox; T5 decides"
-"geoparquet_io/core/index_ops.py" = "created by T3/T5 for the _ensure_*_column family"
+"geoparquet_io/core/bbox_parse.py" = "placeholder home for parse_bbox; T5c decides"
+"geoparquet_io/core/index_ops.py" = "created by T5b for the _ensure_*_column family"
 
-# The definitions outside their owner today. The check matches on (path, name),
-# so one entry covers every def of that name in that file.
-
+# The definitions outside their owner today, each with the track that deletes
+# it. count = how many defs of that name the file holds (default 1); the check
+# fails when the tree differs.
 [[G2.exemptions]]
 path = "geoparquet_io/core/add/bbox.py"
 name = "_bbox_covering_metadata"
-reason = "covering builder copy; T3"
-
-[[G2.exemptions]]
-path = "geoparquet_io/core/add/bbox_metadata.py"
-name = "require_geo_metadata_for_covering"
-reason = "covering precondition outside the owner; T2/T3"
-
+reason = "covering builder copy of build_bbox_covering; T3e"
 [[G2.exemptions]]
 path = "geoparquet_io/core/add/bbox_metadata.py"
 name = "_covering_for"
-reason = "covering builder copy; T2/T3"
-
+reason = "covering builder copy of build_bbox_covering; T3e"
+[[G2.exemptions]]
+path = "geoparquet_io/core/add/bbox_metadata.py"
+name = "_is_remote_url"
+reason = "remote-URL test with 6 schemes (owner has 10); T2e"
+[[G2.exemptions]]
+path = "geoparquet_io/core/add/admin_divisions.py"
+name = "_build_spatial_join_query"
+reason = "spatial-join builder copy; T1d"
+[[G2.exemptions]]
+path = "geoparquet_io/core/add/country_codes.py"
+name = "_build_spatial_join_query"
+reason = "spatial-join builder copy; T1d"
+[[G2.exemptions]]
+path = "geoparquet_io/core/add/quadkey.py"
+name = "_is_geographic_crs"
+reason = "is-geographic copy (approved change 8); T4c"
 [[G2.exemptions]]
 path = "geoparquet_io/core/arrow_geo_metadata.py"
 name = "_compute_geometry_types"
-reason = "stats twin of geo_metadata's; T3"
-
+reason = "stats twin of geo_metadata's; T3b"
 [[G2.exemptions]]
 path = "geoparquet_io/core/arrow_geo_metadata.py"
 name = "_compute_bbox_from_data"
-reason = "stats twin of geo_metadata's; T3"
-
+reason = "stats twin of geo_metadata's; T3b"
+[[G2.exemptions]]
+path = "geoparquet_io/core/arrow_geo_metadata.py"
+name = "_detect_version_from_table"
+reason = "version resolver copy (approved change 10); T2b"
 [[G2.exemptions]]
 path = "geoparquet_io/core/carto.py"
 name = "_fetch_with_retry"
-reason = "private retry wrapper; T4"
-
+reason = "permanent: caller-specific classify wrapper over run_with_retry, accepted by the T4a audit"
 [[G2.exemptions]]
-path = "geoparquet_io/core/check_fixes.py"
-name = "fix_bboxless_covering"
-reason = "covering repair outside the owner; T2"
-
-[[G2.exemptions]]
-path = "geoparquet_io/core/check_fixes.py"
-name = "_apply_covering_fix"
-reason = "covering repair outside the owner; T2"
-
-[[G2.exemptions]]
-path = "geoparquet_io/core/check_parquet_structure.py"
-name = "check_covering_encoding"
-reason = "checks or reads a covering rather than building one; decide owner or rename (T3)"
-
+path = "geoparquet_io/core/common.py"
+name = "_resolve_auto_version"
+reason = "version resolver copy; T2b"
 [[G2.exemptions]]
 path = "geoparquet_io/core/common.py"
 name = "resolve_geoparquet_version_from_file"
-reason = "copy; removed by T2b"
-
+reason = "version resolver copy; T2b"
 [[G2.exemptions]]
 path = "geoparquet_io/core/common.py"
 name = "resolve_geoparquet_version_from_table"
-reason = "copy; removed by T2b"
-
+reason = "version resolver copy; T2b"
+[[G2.exemptions]]
+path = "geoparquet_io/core/convert.py"
+name = "_suffixed_to_unique"
+reason = "column-name suffixer copy; T5a"
+[[G2.exemptions]]
+path = "geoparquet_io/core/duckdb_utils.py"
+name = "free_column_name"
+reason = "column-name suffixer copy; T5a"
 [[G2.exemptions]]
 path = "geoparquet_io/core/extract.py"
 name = "is_geographic_crs"
-reason = "is-geographic copy (approved change 8); T4"
-
+reason = "is-geographic copy (approved change 8); T4c"
 [[G2.exemptions]]
 path = "geoparquet_io/core/extract.py"
 name = "parse_bbox"
-reason = "parse_bbox copy; T5 decides the home"
-
+reason = "parse_bbox copy; T5c"
+[[G2.exemptions]]
+path = "geoparquet_io/core/format_writers.py"
+name = "_normalize_bbox"
+reason = "parse_bbox copy; T5c"
 [[G2.exemptions]]
 path = "geoparquet_io/core/geo_metadata.py"
 name = "_get_query_columns"
-reason = "copy of duckdb_utils'; T1"
-
+reason = "copy of duckdb_utils'; T1c"
 [[G2.exemptions]]
-path = "geoparquet_io/core/memory_limits.py"
-name = "parse_size"
-reason = "size parser copy (approved change 5); T1"
-
+path = "geoparquet_io/core/hilbert_order.py"
+name = "_resolve_output_version"
+reason = "re-derives the DEFAULT_GEOPARQUET_VERSION fallback beside the owner call; T2b"
 [[G2.exemptions]]
-path = "geoparquet_io/core/metadata_utils.py"
-name = "_is_bbox_covering_paths"
-reason = "checks or reads a covering rather than building one; decide owner or rename (T3)"
-
+path = "geoparquet_io/core/inspect_utils.py"
+name = "_crs_are_equivalent"
+reason = "CRS equality copy (approved change 9); T4c"
 [[G2.exemptions]]
 path = "geoparquet_io/core/partition/by_a5.py"
 name = "_ensure_a5_column"
-reason = "_ensure_*_column family; moves to index_ops (T5)"
-
+reason = "_ensure_*_column family; moves to index_ops (T5b)"
 [[G2.exemptions]]
 path = "geoparquet_io/core/partition/by_h3.py"
 name = "_ensure_h3_column"
-reason = "_ensure_*_column family; moves to index_ops (T5)"
-
+reason = "_ensure_*_column family; moves to index_ops (T5b)"
 [[G2.exemptions]]
 path = "geoparquet_io/core/partition/by_quadkey.py"
 name = "_ensure_quadkey_column"
-reason = "_ensure_*_column family; moves to index_ops (T5)"
-
+reason = "_ensure_*_column family; moves to index_ops (T5b)"
 [[G2.exemptions]]
 path = "geoparquet_io/core/partition/by_s2.py"
 name = "_ensure_s2_column"
-reason = "_ensure_*_column family; moves to index_ops (T5)"
-
+reason = "_ensure_*_column family; moves to index_ops (T5b)"
 [[G2.exemptions]]
 path = "geoparquet_io/core/preview.py"
-name = "_covering_bbox_column"
-reason = "covering lookup copy; T3"
-
+name = "_validated_bbox"
+reason = "parse_bbox copy; T5c"
 [[G2.exemptions]]
 path = "geoparquet_io/core/process/aggregate/common.py"
 name = "_unique_name"
-reason = "copy of column_selection's; T5"
-
+reason = "copy of column_selection's; T5a"
 [[G2.exemptions]]
-path = "geoparquet_io/core/process/simplify.py"
-name = "_refresh_bbox_covering"
-reason = "covering rebuild outside the owner; T3"
-
+path = "geoparquet_io/core/streaming.py"
+name = "extract_version_from_metadata"
+reason = "version resolver copy; T2b"
 [[G2.exemptions]]
-path = "geoparquet_io/core/validate.py"
-name = "_columns_declaring_covering"
-reason = "checks or reads a covering rather than building one; decide owner or rename (T3)"
-
-[[G2.exemptions]]
-path = "geoparquet_io/core/validate.py"
-name = "_covering_verdict"
-reason = "checks or reads a covering rather than building one; decide owner or rename (T3)"
-
-[[G2.exemptions]]
-path = "geoparquet_io/core/validate.py"
-name = "_declares_bbox_covering"
-reason = "checks or reads a covering rather than building one; decide owner or rename (T3)"
-
-[[G2.exemptions]]
-path = "geoparquet_io/core/validate.py"
-name = "_resolve_bbox_covering"
-reason = "checks or reads a covering rather than building one; decide owner or rename (T3)"
-
-[[G2.exemptions]]
-path = "geoparquet_io/core/validate.py"
-name = "_covering_bbox_column"
-reason = "covering lookup copy; T3"
-
-[[G2.exemptions]]
-path = "geoparquet_io/core/validate.py"
-name = "_check_covering_is_object"
-reason = "checks or reads a covering rather than building one; decide owner or rename (T3)"
-
-[[G2.exemptions]]
-path = "geoparquet_io/core/validate.py"
-name = "_check_covering_has_bbox"
-reason = "checks or reads a covering rather than building one; decide owner or rename (T3)"
-
-[[G2.exemptions]]
-path = "geoparquet_io/core/validate.py"
-name = "_check_covering_bbox_paths"
-reason = "checks or reads a covering rather than building one; decide owner or rename (T3)"
-
-[[G2.exemptions]]
-path = "geoparquet_io/core/validate.py"
-name = "_check_covering_bbox_column_exists"
-reason = "checks or reads a covering rather than building one; decide owner or rename (T3)"
-
-[[G2.exemptions]]
-path = "geoparquet_io/core/validate.py"
-name = "_check_covering_bbox_structure"
-reason = "checks or reads a covering rather than building one; decide owner or rename (T3)"
-
-[[G2.exemptions]]
-path = "geoparquet_io/core/validate.py"
-name = "_check_covering_bbox_field_types"
-reason = "checks or reads a covering rather than building one; decide owner or rename (T3)"
-
+path = "geoparquet_io/core/streaming.py"
+name = "detect_version_for_output"
+reason = "version resolver copy; T2b"
 [[G2.exemptions]]
 path = "geoparquet_io/core/validate.py"
 name = "_is_geography_column"
-reason = "two definitions in validate.py, the first shadowed; T1"
-
+count = 2
+reason = "two definitions in validate.py, the first shadowed; T1c"
 [[G2.exemptions]]
 path = "geoparquet_io/core/validate.py"
 name = "_crs_equals"
-reason = "CRS equality copy (approved change 9); T4"
-
+reason = "CRS equality copy (approved change 9); T4c"
 [[G2.exemptions]]
-path = "geoparquet_io/core/write_funnels.py"
-name = "_custom_covering_survives"
-reason = "checks or reads a covering rather than building one; decide owner or rename (T3)"
-
+path = "geoparquet_io/core/wfs.py"
+name = "_is_geographic_crs"
+reason = "is-geographic copy (approved change 8); T4c"
 [[G2.exemptions]]
-path = "geoparquet_io/core/write_strategies/base.py"
-name = "atomic_write"
-reason = "atomic_write copy of file_utils'; T2"
-
+path = "geoparquet_io/core/wfs.py"
+name = "_crs_matches"
+reason = "CRS equality copy (approved change 9); T4c"
 
 # ---------------------------------------------------------------------------
 # G4: dead code (vulture at min_confidence = 60)
 # ---------------------------------------------------------------------------
 [G4]
 whitelist = "scripts/vulture_whitelist.py"
-reason = "The findings vulture reported at 60 when the level dropped from 80 (#1367): dead code the tracks delete, plus names used only dynamically. Delete a whitelist line with the code it names."
+tests_whitelist = "scripts/vulture_whitelist_tests.py"
+reason = "The findings vulture reported at 60 when the level dropped from 80 (#1367), package and tests scanned apart so a test is not a use: dead code (tagged with the track that deletes it, T0e for most) plus names used only dynamically (tagged with how). Delete a whitelist line with the code it names."
 
 # ---------------------------------------------------------------------------
 # G5: core/common.py (tests/test_common_split_guards.py)

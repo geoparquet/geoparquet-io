@@ -224,6 +224,7 @@ ignore = [
 "os.sysconf".msg = "Memory facts come from core/memory_limits.py (#1156, #1174)."
 "requests".msg = "HTTP goes through core/http_retry.py, which owns retries, timeouts and Retry-After."
 "httpx".msg = "HTTP goes through core/http_retry.py, which owns retries, timeouts and Retry-After."
+"urllib.request".msg = "HTTP goes through core/http_retry.py, which owns retries, timeouts and Retry-After."
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # unused imports in __init__.py
@@ -247,6 +248,7 @@ ignore = [
 "conftest.py" = ["TID251"]
 # vulture's whitelist format is bare names, never executed (guard G4).
 "scripts/vulture_whitelist.py" = ["F821", "B018"]
+"scripts/vulture_whitelist_tests.py" = ["F821", "B018"]
 # G1 copies that exist today, one line per file; each is listed with its
 # reason in scripts/owner_exemptions.toml ([[G1.tid251]]). Delete the line
 # with the copy.
@@ -262,6 +264,7 @@ ignore = [
 "geoparquet_io/core/file_utils.py" = ["TID251"]
 "geoparquet_io/core/process/aggregate/by_admin.py" = ["TID251"]
 "geoparquet_io/core/process/aggregate/grid_common.py" = ["TID251"]
+"geoparquet_io/core/overture.py" = ["TID251"]
 "geoparquet_io/core/process/overview/overview_file.py" = ["TID251"]
 "geoparquet_io/core/process/overview/run.py" = ["TID251"]
 "geoparquet_io/core/process/simplify.py" = ["TID251"]
@@ -445,10 +448,12 @@ major_version_zero = true
 # Guard G4 of #1367. At 80 vulture reports only unused imports and arguments;
 # unused functions score 60, so 80 let a function with no caller pass. The
 # findings that existed when the level dropped are the whitelist, whose entry
-# count tests/test_owner_guards.py pins (it can only go down).
+# count tests/test_owner_guards.py pins (it can only go down). The package is
+# scanned alone, so a name only a test calls is still dead; the test tree has
+# its own run and whitelist (the vulture-tests pre-push hook).
 [tool.vulture]
 min_confidence = 60
-paths = ["geoparquet_io", "tests", "scripts/vulture_whitelist.py"]
+paths = ["geoparquet_io", "scripts/vulture_whitelist.py"]
 sort_by_size = true
 verbose = false
 

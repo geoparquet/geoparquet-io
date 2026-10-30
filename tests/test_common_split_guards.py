@@ -19,6 +19,8 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[1]
 COMMON = REPO / "geoparquet_io" / "core" / "common.py"
 
@@ -27,14 +29,34 @@ def _common_tree(common: Path = COMMON) -> ast.Module:
     return ast.parse(common.read_text(encoding="utf-8"))
 
 
+def _module_level(body: list[ast.stmt]) -> list[ast.stmt]:
+    """The module's own statements, looking through ``try``/``if``/``with``/
+    loops at module level (a ``def`` under ``try: ... except ImportError`` is
+    still the module's) but not into a function or class."""
+    found: list[ast.stmt] = []
+    for node in body:
+        found.append(node)
+        if isinstance(node, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+            found += _module_level(node.body + node.orelse)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            found += _module_level(node.body)
+        elif isinstance(node, ast.Try) or type(node).__name__ == "TryStar":
+            handlers = [s for h in node.handlers for s in h.body]
+            found += _module_level(node.body + handlers + node.orelse + node.finalbody)
+    return found
+
+
 def _names_common_defines(common: Path = COMMON) -> set[str]:
-    """Names common.py binds itself: functions, classes and module constants."""
+    """Names common.py binds itself: functions, classes and module constants,
+    plain or annotated, including those bound under a module-level ``try`` or
+    ``if``."""
     defined: set[str] = set()
-    for node in _common_tree(common).body:
+    for node in _module_level(_common_tree(common).body):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             defined.add(node.name)
         elif isinstance(node, ast.Assign):
-            defined.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            for target in node.targets:
+                defined.update(n.id for n in ast.walk(target) if isinstance(n, ast.Name))
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             defined.add(node.target.id)
     return defined
@@ -173,28 +195,43 @@ PRIVATE_NAMES_CEILING = frozenset(
     }
 )
 
-#: Size ceilings measured on the tree G5 landed on: 789 lines, 15 module-level
-#: functions and classes. Growth fails; shrinking needs no edit here (lower the
-#: numbers when you can, so the slack does not become a budget).
-LINE_CEILING = 789
-DEF_CEILING = 15
+#: Sizes measured on the tree G5 landed on: 789 lines, 15 module-level
+#: functions and classes. These are pins, not ceilings: growth fails, and so
+#: does shrinking until the number here is lowered to match, so slack left by a
+#: deletion never becomes a budget for the next helper (T0b audit).
+LINE_PIN = 789
+DEF_PIN = 15
+
+
+def _private_names(common: Path = COMMON) -> set[str]:
+    return {n for n in _names_common_defines(common) if n.startswith("_")}
 
 
 def new_private_names(common: Path = COMMON) -> set[str]:
-    return {n for n in _names_common_defines(common) if n.startswith("_")} - PRIVATE_NAMES_CEILING
+    return _private_names(common) - PRIVATE_NAMES_CEILING
+
+
+def gone_private_names(common: Path = COMMON) -> set[str]:
+    """Pinned private names common.py no longer binds: drop them from the pin."""
+    return PRIVATE_NAMES_CEILING - _private_names(common)
 
 
 def size_overruns(common: Path = COMMON) -> list[str]:
+    """Every way the measured size differs from the pins, either direction."""
     lines = len(common.read_text(encoding="utf-8").splitlines())
     defs = sum(
         isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-        for n in _common_tree(common).body
+        for n in _module_level(_common_tree(common).body)
     )
     overruns = []
-    if lines > LINE_CEILING:
-        overruns.append(f"{lines} lines > ceiling {LINE_CEILING}")
-    if defs > DEF_CEILING:
-        overruns.append(f"{defs} module-level defs > ceiling {DEF_CEILING}")
+    if lines > LINE_PIN:
+        overruns.append(f"{lines} lines > pin {LINE_PIN}")
+    elif lines < LINE_PIN:
+        overruns.append(f"{lines} lines < pin {LINE_PIN}: lower LINE_PIN to {lines}")
+    if defs > DEF_PIN:
+        overruns.append(f"{defs} module-level defs > pin {DEF_PIN}")
+    elif defs < DEF_PIN:
+        overruns.append(f"{defs} module-level defs < pin {DEF_PIN}: lower DEF_PIN to {defs}")
     return overruns
 
 
@@ -203,6 +240,11 @@ def test_no_new_private_helper_lands_in_common():
     private helper is still the grab-bag starting again. Put it in the module
     that owns its question."""
     assert new_private_names() == set()
+
+
+def test_the_private_name_pin_has_no_gone_names():
+    """A name deleted from common.py leaves the pin too, so the set only shrinks."""
+    assert gone_private_names() == set(), "remove from PRIVATE_NAMES_CEILING"
 
 
 def test_common_does_not_grow():
@@ -220,7 +262,51 @@ def test_g12_the_private_name_guard_fails_on_a_new_helper(tmp_path):
 
 def test_g12_the_size_ceilings_fail_on_growth(tmp_path):
     planted = tmp_path / "common.py"
-    extra = "".join(f"\n\ndef _pad_{i}():\n    return {i}\n" for i in range(DEF_CEILING))
+    extra = "".join(f"\n\ndef _pad_{i}():\n    return {i}\n" for i in range(DEF_PIN))
     planted.write_text(COMMON.read_text(encoding="utf-8") + extra, encoding="utf-8")
     overruns = size_overruns(planted)
     assert len(overruns) == 2, overruns
+
+
+def test_g12_the_size_pins_fail_on_shrinking(tmp_path):
+    planted = tmp_path / "common.py"
+    source = COMMON.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    last = [n for n in tree.body if isinstance(n, ast.FunctionDef)][-1]
+    lines = source.splitlines(keepends=True)
+    del lines[last.lineno - 1 - len(last.decorator_list) : last.end_lineno]
+    planted.write_text("".join(lines), encoding="utf-8")
+    overruns = size_overruns(planted)
+    assert len(overruns) == 2 and all("lower" in o for o in overruns), overruns
+
+
+def test_g12_the_private_name_pin_fails_on_a_deleted_name(tmp_path):
+    planted = tmp_path / "common.py"
+    source = COMMON.read_text(encoding="utf-8")
+    planted.write_text(source.replace("def _build_bounds_query(", "def build_bounds_query("))
+    assert gone_private_names(planted) == {"_build_bounds_query"}
+
+
+@pytest.mark.parametrize(
+    ("label", "extra", "name"),
+    [
+        ("annotated constant", "\n_NEW_MAP: dict = {}\n", "_NEW_MAP"),
+        (
+            "def under try",
+            "\ntry:\n    def _h1():\n        return 1\nexcept ImportError:\n    pass\n",
+            "_h1",
+        ),
+        (
+            "def in except",
+            "\ntry:\n    pass\nexcept ImportError:\n    def _h2():\n        return 1\n",
+            "_h2",
+        ),
+        ("def under if", "\nif True:\n    def _h3():\n        return 1\n", "_h3"),
+        ("lambda assigned", "\n_f = lambda x: x\n", "_f"),
+        ("tuple target", "\n_a, _b = 1, 2\n", "_a"),
+    ],
+)
+def test_g12_the_private_name_guard_sees_nested_module_bindings(tmp_path, label, extra, name):
+    planted = tmp_path / "common.py"
+    planted.write_text(COMMON.read_text(encoding="utf-8") + extra, encoding="utf-8")
+    assert name in new_private_names(planted), label
