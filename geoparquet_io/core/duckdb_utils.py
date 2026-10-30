@@ -1586,6 +1586,90 @@ def _opt_out_of_extension_telemetry() -> None:
     os.environ.setdefault(_TELEMETRY_OPT_OUT_VAR, "1")
 
 
+# a5 for DuckDB 2.0 and later is distributed from Query.Farm's own extension
+# repository; the community registry carries only a stub whose init refuses and
+# points there (#1347). gpio trusts that repository for a5. The trust anchor is
+# TLS to the hard-coded HTTPS host below: CREATE EXTENSION REPOSITORY fetches
+# the repository's OWN public keys from
+# <prefix>/.well-known/duckdb-extension-repo.json and persists them (in
+# ~/.duckdb/extension_repositories/query_farm.duckdb_extension.repo.json), so
+# every later install is signature-verified against whatever keys the domain
+# served at first registration -- trust-on-first-use, not DuckDB's community
+# key. Signature checks stay on (the LOAD runs with
+# allow_unsigned_extensions=false, pinned by tests), and the build honors the
+# same QUERY_FARM_TELEMETRY_OPT_OUT variable as the community builds (#779).
+# On DuckDB 1.5 the community a5 is the real extension and nothing changes.
+_QUERY_FARM_REPOSITORY = "query_farm"
+_QUERY_FARM_REPOSITORY_PREFIX = "https://duckdb-extensions.query.farm"
+_QUERY_FARM_EXTENSIONS = frozenset({"a5"})
+
+
+def _installs_from_query_farm(name: str) -> bool:
+    """True when ``name`` is distributed from Query.Farm for the running DuckDB."""
+    import duckdb
+
+    if name not in _QUERY_FARM_EXTENSIONS:
+        return False
+    return int(duckdb.__version__.split(".")[0]) >= 2
+
+
+def _install_from_query_farm(name: str) -> None:
+    """INSTALL ``name`` from the Query.Farm repository, on a throwaway connection.
+
+    ``allow_extension_repositories`` is a one-way latch per database instance:
+    it moves 'undecided' -> 'allowed' -> 'forbidden' and never back, so it
+    cannot be restored after the INSTALL. A throwaway in-memory instance keeps
+    the 'allowed' state scoped to this one statement; the caller's connection
+    never changes. The downloaded file lands in DuckDB's shared extension
+    directory (under ``repositories/query_farm/``), where ``LOAD ... FROM
+    query_farm`` on any connection finds it without settings of its own.
+
+    FORCE INSTALL, not INSTALL: a plain INSTALL short-circuits on an existing
+    file, so it could never replace a stale or corrupt cached extension --
+    the exact case :func:`_load_from_query_farm`'s retry exists for. A cold
+    install downloads either way, so FORCE costs nothing there.
+
+    Deliberately NOT enabled: ``allow_unsigned_extensions``. The Query.Farm
+    build is signed and must stay loadable without weakening signature checks.
+    """
+    import duckdb
+
+    con = duckdb.connect()
+    try:
+        con.execute("SET allow_extension_repositories = 'allowed';")
+        con.execute(
+            f"CREATE EXTENSION REPOSITORY IF NOT EXISTS {_QUERY_FARM_REPOSITORY} "
+            f"WITH PREFIX '{_QUERY_FARM_REPOSITORY_PREFIX}';"
+        )
+        con.execute(f"FORCE INSTALL {name} FROM {_QUERY_FARM_REPOSITORY};")
+    finally:
+        con.close()
+
+
+def _load_from_query_farm(con, name: str) -> None:
+    """LOAD ``name`` from Query.Farm, installing it first when it is not cached.
+
+    ``LOAD ... FROM query_farm`` reads the already-installed file and needs no
+    repository registration or settings change on ``con``, so it is tried
+    first: after the one-time install every later load is offline and
+    setting-free.
+    """
+    import duckdb
+
+    load_sql = f"LOAD {name} FROM {_QUERY_FARM_REPOSITORY};"
+    try:
+        con.execute(load_sql)
+        return
+    except duckdb.Error:
+        # Not installed yet, or a stale/corrupt cached file: FORCE INSTALL a
+        # fresh copy (a plain INSTALL would keep the existing file), then load
+        # for real. A failure that is not fixed by reinstalling re-raises from
+        # the LOAD below, so nothing is swallowed.
+        pass
+    _install_from_query_farm(name)
+    con.execute(load_sql)
+
+
 def load_community_extension(con, name: str, feature: str | None = None) -> None:
     """INSTALL and LOAD a DuckDB community extension with a clear error message.
 
@@ -1595,6 +1679,11 @@ def load_community_extension(con, name: str, feature: str | None = None) -> None
     HTTP 404. Translate that into an actionable :class:`ExtensionUnavailableError`
     so users understand the extension simply isn't published for their DuckDB
     version yet.
+
+    Extensions that moved to the Query.Farm repository for DuckDB 2.0+ (a5,
+    see ``_QUERY_FARM_EXTENSIONS``) install from there instead; the error for
+    a failed Query.Farm install says so rather than blaming the community
+    registry.
 
     Args:
         con: An open DuckDB connection.
@@ -1609,10 +1698,26 @@ def load_community_extension(con, name: str, feature: str | None = None) -> None
 
     _opt_out_of_extension_telemetry()
     try:
-        con.execute(f"INSTALL {name} FROM community;")
-        con.execute(f"LOAD {name};")
+        if _installs_from_query_farm(name):
+            _load_from_query_farm(con, name)
+        else:
+            con.execute(f"INSTALL {name} FROM community;")
+            con.execute(f"LOAD {name};")
     except duckdb.Error as e:
-        raise ExtensionUnavailableError(name, duckdb.__version__, str(e), feature=feature) from e
+        detail = str(e)
+        from_query_farm = _installs_from_query_farm(name)
+        if from_query_farm:
+            detail = (
+                f"installing '{name}' from the Query.Farm repository "
+                f"({_QUERY_FARM_REPOSITORY_PREFIX}) failed: {detail}"
+            )
+        raise ExtensionUnavailableError(
+            name,
+            duckdb.__version__,
+            detail,
+            feature=feature,
+            query_farm=from_query_farm,
+        ) from e
 
 
 def require_community_extension(name: str, feature: str | None = None) -> None:

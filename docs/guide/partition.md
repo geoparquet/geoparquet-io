@@ -346,7 +346,12 @@ Auto-resolution probes your data's actual extent (see [How auto-resolution is ch
 
 ## By A5 Cells
 
-Partition by A5 spatial cells:
+Partition by A5 spatial cells. A5 partitioning uses the `a5` DuckDB extension,
+which gpio installs on first use (from the Query.Farm repository on DuckDB
+2.0+); see [A5 Cells](add.md#a5-cells) for how the cells are computed. Cell
+IDs are not stable across a5 builds — the DuckDB 2.0 build numbers cells
+differently from the 1.5-era community build — so partitions written under
+one DuckDB major use different IDs for the same cells than the other:
 
 === "CLI"
 
