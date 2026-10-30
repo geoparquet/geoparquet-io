@@ -24,7 +24,7 @@ import xml.etree.ElementTree as ET  # nosec B405 - the one parse here (_is_empty
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import duckdb
@@ -1660,7 +1660,7 @@ def _get_feature_count(
     try:
         # The one HTTP owner: gzip, shared client, retry policy and the
         # 401/403/404 wording all live in `http_retry`.
-        content = bytes(make_request_with_retry("GET", url, parse_json=False))
+        content = cast(bytes, make_request_with_retry("GET", url, parse_json=False))
     except (WFSError, RemoteAccessError, httpx.HTTPError, OSError) as e:
         # Expected failure modes: the service is down, unreachable, rejecting us,
         # or timing out. Degrade to "count unknown" rather than aborting the
