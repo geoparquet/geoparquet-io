@@ -354,17 +354,17 @@ class TestFixBboxRemovalSqlInjection:
 
 
 class TestPreservedVersionFromCheckResults:
-    """The repair policy fed from check results: ``version_for_file_type(..., preserve_input=True)``."""
+    """The repair policy fed from check results: ``resolve_output_geoparquet_version(..., preserve_input=True)``."""
 
     def test_v2_detection(self):
         """Test detecting GeoParquet v2."""
-        from geoparquet_io.core.parquet_writer import version_for_file_type
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {"bbox": {"file_type": "geoparquet_v2", "version": "2.0.0"}}
 
-        version = version_for_file_type(
-            check_results.get("bbox", {}).get("file_type"),
-            check_results.get("bbox", {}).get("version"),
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
             preserve_input=True,
         )
 
@@ -372,13 +372,13 @@ class TestPreservedVersionFromCheckResults:
 
     def test_parquet_geo_only_detection(self):
         """Test detecting parquet-geo-only files."""
-        from geoparquet_io.core.parquet_writer import version_for_file_type
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {"bbox": {"file_type": "parquet_geo_only"}}
 
-        version = version_for_file_type(
-            check_results.get("bbox", {}).get("file_type"),
-            check_results.get("bbox", {}).get("version"),
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
             preserve_input=True,
         )
 
@@ -386,13 +386,13 @@ class TestPreservedVersionFromCheckResults:
 
     def test_v1_0_detection(self):
         """Test detecting GeoParquet v1.0."""
-        from geoparquet_io.core.parquet_writer import version_for_file_type
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {"bbox": {"file_type": "geoparquet_v1", "version": "1.0.0"}}
 
-        version = version_for_file_type(
-            check_results.get("bbox", {}).get("file_type"),
-            check_results.get("bbox", {}).get("version"),
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
             preserve_input=True,
         )
 
@@ -400,45 +400,45 @@ class TestPreservedVersionFromCheckResults:
 
     def test_v1_1_detection(self):
         """Test detecting GeoParquet v1.1."""
-        from geoparquet_io.core.parquet_writer import version_for_file_type
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {"bbox": {"file_type": "geoparquet_v1", "version": "1.1.0"}}
 
-        version = version_for_file_type(
-            check_results.get("bbox", {}).get("file_type"),
-            check_results.get("bbox", {}).get("version"),
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
             preserve_input=True,
         )
 
         assert version == "1.1"
 
-    def test_unknown_defaults_to_none(self):
-        """Test unknown file type defaults to None."""
-        from geoparquet_io.core.parquet_writer import version_for_file_type
+    def test_unknown_takes_the_default(self):
+        """A file the check could not type has nothing to preserve: the default."""
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {"bbox": {"file_type": "unknown"}}
 
-        version = version_for_file_type(
-            check_results.get("bbox", {}).get("file_type"),
-            check_results.get("bbox", {}).get("version"),
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
             preserve_input=True,
         )
 
-        assert version is None
+        assert version == "1.1"
 
     def test_missing_bbox_result(self):
-        """Test handling missing bbox result."""
-        from geoparquet_io.core.parquet_writer import version_for_file_type
+        """No bbox result: nothing to preserve, so the default."""
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {}
 
-        version = version_for_file_type(
-            check_results.get("bbox", {}).get("file_type"),
-            check_results.get("bbox", {}).get("version"),
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
             preserve_input=True,
         )
 
-        assert version is None
+        assert version == "1.1"
 
 
 class TestFixSpatialOrdering:
@@ -730,3 +730,9 @@ class TestRowGroupFixIdempotency:
         assert result["row_status"] != "optimal"
         # Should offer fix
         assert result["fix_available"] is True
+
+
+def _detected(check_results):
+    """The bbox check's file-type answer, in ``detect_geoparquet_file_type``'s shape."""
+    bbox = check_results.get("bbox", {})
+    return {"file_type": bbox.get("file_type"), "geo_version": bbox.get("version")}

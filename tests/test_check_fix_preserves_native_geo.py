@@ -217,7 +217,7 @@ def test_an_explicit_version_still_wins_and_still_states_the_crs(native_geo_snap
 def test_check_all_fix_leaves_a_native_geo_only_file_native_geo_only(native_geo_snappy):
     """The control for ``check all``, which names the version from its own checks.
 
-    ``version_for_file_type(..., preserve_input=True)`` answers ``parquet-geo-only``
+    ``resolve_output_geoparquet_version(..., preserve_input=True)`` answers ``parquet-geo-only``
     here, and an explicit answer wins, so the output keeps no ``geo`` key at all
     -- with its CRS still in the logical type, which is the only place that file
     shape has to put one.

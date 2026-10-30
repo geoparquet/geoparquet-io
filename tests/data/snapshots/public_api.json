@@ -518,7 +518,6 @@
     "resolve_row_group_rows_for_query",
     "resolve_row_group_rows_for_rewrite",
     "resolve_row_group_rows_for_table",
-    "version_for_file_type",
     "without_geometry_dictionary",
     "writable_geoparquet_version",
     "write_arrow_table"

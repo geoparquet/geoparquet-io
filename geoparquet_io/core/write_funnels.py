@@ -605,7 +605,7 @@ def _plain_copy_to(
 
     # Map version to DuckDB GEOPARQUET_VERSION parameter
     version_config = GEOPARQUET_VERSIONS[geoparquet_version]
-    duckdb_version = version_config.get("duckdb_param", "V1")
+    duckdb_version = version_config["duckdb_param"]
 
     # DuckDB 1.5+: Apply CRS via ST_SetCRS so it's written natively into the
     # Parquet schema during COPY TO — no post-processing file rewrite needed.

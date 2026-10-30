@@ -222,16 +222,15 @@ def test_add_bbox_on_a_native_geo_only_input_with_a_bbox_writes_2_0(inputs, tmp_
 )
 def test_the_repair_policy_keeps_the_inputs_own_version(inputs, input_name, preserved):
     from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
-    from geoparquet_io.core.parquet_writer import (
-        resolve_output_geoparquet_version,
-        version_for_file_type,
-    )
+    from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
     path = str(inputs[input_name])
     resolved = resolve_output_geoparquet_version(None, input_file=path, preserve_input=True)
     bbox = check_metadata_and_bbox(path, verbose=False, return_results=True, quiet=True)
-    from_checks = version_for_file_type(
-        bbox.get("file_type"), bbox.get("version"), preserve_input=True
+    from_checks = resolve_output_geoparquet_version(
+        None,
+        file_type={"file_type": bbox.get("file_type"), "geo_version": bbox.get("version")},
+        preserve_input=True,
     )
     assert resolved == from_checks == preserved
 
@@ -267,3 +266,48 @@ def test_a_non_string_declared_version_reads_as_none_everywhere(bad):
     table = pa.table({"geometry": pa.array([b""], pa.binary())})
     table = table.replace_schema_metadata({b"geo": json.dumps(geo).encode()})
     assert Table(table).geoparquet_version is None
+
+
+def test_preserve_applies_to_the_carried_key_when_the_file_cannot_be_read(tmp_path):
+    """An unreadable input falls through to the carried key, which must not upgrade 1.0."""
+    from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+
+    carried = {b"geo": json.dumps({"version": "1.0.0", "primary_column": "geometry"}).encode()}
+    missing = str(tmp_path / "gone.parquet")
+    assert (
+        resolve_output_geoparquet_version(
+            None, input_file=missing, original_metadata=carried, preserve_input=True
+        )
+        == "1.0"
+    )
+    assert (
+        resolve_output_geoparquet_version(None, input_file=missing, original_metadata=carried)
+        == "1.1"
+    )
+
+
+def test_preserve_applies_to_a_tables_own_schema():
+    import pyarrow as pa
+
+    from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+
+    geo = {"version": "1.0.0", "primary_column": "geometry", "columns": {"geometry": {}}}
+    table = pa.table({"geometry": pa.array([b""], pa.binary())})
+    table = table.replace_schema_metadata({b"geo": json.dumps(geo).encode()})
+    assert resolve_output_geoparquet_version(None, table=table, preserve_input=True) == "1.0"
+    assert resolve_output_geoparquet_version(None, table=table) == "1.1"
+
+
+def test_a_pre_detected_file_type_answers_like_the_file(inputs):
+    from geoparquet_io.core.file_type import detect_geoparquet_file_type
+    from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+
+    for name in ("v10", "v11", "v20", "pgo"):
+        path = str(inputs[name])
+        detected = detect_geoparquet_file_type(path, False)
+        for preserve in (False, True):
+            assert resolve_output_geoparquet_version(
+                None, file_type=detected, preserve_input=preserve
+            ) == resolve_output_geoparquet_version(
+                None, input_file=path, preserve_input=preserve
+            ), (name, preserve)

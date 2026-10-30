@@ -43,7 +43,6 @@ from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
     resolve_output_geoparquet_version,
     resolve_row_group_rows_for_rewrite,
-    version_for_file_type,
 )
 from geoparquet_io.core.remote import (
     get_remote_error_hint,
@@ -827,8 +826,13 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
     # A repair keeps the input's own version (the facade's preserve policy),
     # read off the bbox check, which already detected the file type.
     bbox_result = check_results.get("bbox", {})
-    geoparquet_version = version_for_file_type(
-        bbox_result.get("file_type"), bbox_result.get("version"), preserve_input=True
+    geoparquet_version = resolve_output_geoparquet_version(
+        None,
+        file_type={
+            "file_type": bbox_result.get("file_type"),
+            "geo_version": bbox_result.get("version"),
+        },
+        preserve_input=True,
     )
     if verbose and geoparquet_version:
         debug(f"Preserving GeoParquet version: {geoparquet_version}")

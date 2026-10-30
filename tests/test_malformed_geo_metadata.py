@@ -2157,13 +2157,15 @@ def test_check_spec_reports_a_non_string_version_as_a_finding(case, bad, tmp_pat
 def test_check_fix_version_resolution_survives_a_non_string_version(case, bad, tmp_path):
     """`check bbox --fix` picks the rewrite version off the check results."""
     from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
-    from geoparquet_io.core.parquet_writer import version_for_file_type
+    from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
     reset_malformed_geo_warnings()
     path = _file_with_geo(tmp_path, f"fixver_{case}", _version_block(bad))
     bbox = check_metadata_and_bbox(path, verbose=False, return_results=True, quiet=True)
-    assert version_for_file_type(
-        bbox.get("file_type"), bbox.get("version"), preserve_input=True
+    assert resolve_output_geoparquet_version(
+        None,
+        file_type={"file_type": bbox.get("file_type"), "geo_version": bbox.get("version")},
+        preserve_input=True,
     ) in {"1.0", "1.1", "2.0", None}
 
 

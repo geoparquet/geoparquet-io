@@ -502,6 +502,7 @@ def resolve_output_geoparquet_version(
     original_metadata: Mapping | None = None,
     table: pa.Table | None = None,
     source_version: str | None = None,
+    file_type: Mapping | None = None,
     preserve_input: bool = False,
     verbose: bool = False,
 ) -> str:
@@ -513,7 +514,10 @@ def resolve_output_geoparquet_version(
     inputs write 1.1; bare native geo types upgrade to 2.0", asked of the
     witnesses in this order:
 
-    1. ``input_file`` -- the file itself (:func:`_version_of_file`);
+    1. ``input_file`` -- the file itself (:func:`_version_of_file`), or
+       ``file_type``, that file already detected (a
+       ``file_type.detect_geoparquet_file_type`` answer: ``file_type`` and
+       ``geo_version``), when the caller holds it and need not read it again;
     2. ``original_metadata`` -- the carried ``geo`` key
        (:func:`carried_geoparquet_version`);
     3. ``table`` -- an Arrow table's own schema: its carried key, else a
@@ -529,10 +533,11 @@ def resolve_output_geoparquet_version(
     rather than reaching a writer that would quietly write 1.1 in its place.
     Every answer is therefore a key the callers index directly.
 
-    ``preserve_input=True`` is the repair policy (``check --fix``): the file
-    witness keeps the input's own version exactly -- a 1.0 file stays 1.0 and
-    a native-geo-only file writes no ``geo`` key -- instead of auto mode's
-    upgrades. Same steps, same map (:func:`version_for_file_type`), one option.
+    ``preserve_input=True`` is the repair policy (``check --fix``,
+    ``check spec``'s label): every witness keeps the input's own version
+    exactly -- a 1.0 file or carried key stays 1.0 and a native-geo-only file
+    writes no ``geo`` key -- instead of auto mode's upgrades. Same steps, same
+    map (:func:`_version_for_file_type`), one option.
 
     The default is part of the decision, so no caller adds an ``or "1.1"`` of
     its own: before #1367 ``extract``, ``sort hilbert``, ``Table.write`` and
@@ -572,10 +577,16 @@ def resolve_output_geoparquet_version(
             )
         return requested
 
+    if file_type is not None:
+        from_file = _version_of_file_type(file_type, preserve_input)
+    elif input_file:
+        from_file = _version_of_file(input_file, verbose, preserve_input)
+    else:
+        from_file = None
     detected = (
-        (_version_of_file(input_file, verbose, preserve_input) if input_file else None)
-        or carried_geoparquet_version(original_metadata)
-        or (_version_of_table(table, verbose) if table is not None else None)
+        from_file
+        or carried_geoparquet_version(original_metadata, preserve_input=preserve_input)
+        or (_version_of_table(table, verbose, preserve_input) if table is not None else None)
         or source_version
     )
     if detected:
@@ -585,7 +596,9 @@ def resolve_output_geoparquet_version(
     return DEFAULT_GEOPARQUET_VERSION
 
 
-def carried_geoparquet_version(metadata: Mapping | None) -> str | None:
+def carried_geoparquet_version(
+    metadata: Mapping | None, *, preserve_input: bool = False
+) -> str | None:
     """The version a carried ``geo`` key resolves to: ``"1.1"``, ``"2.0"`` or None.
 
     Every 1.x reads as 1.1 (backwards compatible, and the version the writer
@@ -599,19 +612,25 @@ def carried_geoparquet_version(metadata: Mapping | None) -> str | None:
     paths already read it as no version.)
     """
     return writable_geoparquet_version(
-        carried_version(sanitized_carried_geo(metadata).get("version"))
+        carried_version(sanitized_carried_geo(metadata).get("version")),
+        preserve_input=preserve_input,
     )
 
 
-def writable_geoparquet_version(declared: str | None) -> str | None:
+def writable_geoparquet_version(
+    declared: str | None, *, preserve_input: bool = False
+) -> str | None:
     """A declared ``geo.version`` as the version this writer writes for it (1.x -> 1.1, 2.x -> 2.0).
 
-    None for anything else (no version, no minor, a major this writer does not know).
+    ``preserve_input`` keeps a 1.0.x as 1.0. None for anything else (no
+    version, no minor, a major this writer does not know).
     """
     parts = declared.split(".") if declared else []
     if len(parts) < 2:
         return None
-    return {"1": "1.1", "2": "2.0"}.get(parts[0])
+    if parts[0] == "1":
+        return _declared_1x(declared) if preserve_input else "1.1"
+    return "2.0" if parts[0] == "2" else None
 
 
 def declared_geoparquet_version(geo_meta: Mapping, default: str | None = "") -> str | None:
@@ -627,7 +646,14 @@ def declared_geoparquet_version(geo_meta: Mapping, default: str | None = "") -> 
     return carried_version(geo_meta.get("version")) or default
 
 
-def version_for_file_type(
+def _version_of_file_type(info: Mapping, preserve_input: bool = False) -> str | None:
+    """Step 1 from an already-detected file (``file_type`` and ``geo_version``)."""
+    return _version_for_file_type(
+        info.get("file_type"), info.get("geo_version"), preserve_input=preserve_input
+    )
+
+
+def _version_for_file_type(
     file_type: str | None, declared: str | None = None, *, preserve_input: bool = False
 ) -> str | None:
     """The version a file of this kind writes: the one map both policies share.
@@ -669,8 +695,8 @@ def _version_of_file(
         return None
 
     file_type = info.get("file_type")
-    # The repair policy keeps the declared 1.x as is (``version_for_file_type``),
-    # the answer ``check --fix`` reads off its check results, so both agree.
+    # The repair policy keeps the declared 1.x as is (``_version_for_file_type``),
+    # the answer ``check --fix`` gets from its check results, so both agree.
     auto_v1 = file_type == "geoparquet_v1" and not preserve_input
     if auto_v1 and _declares_geoarrow_encoding(parquet_file):
         # A GeoArrow-native 1.1 file declares version 1.1.0 just as a WKB one
@@ -679,7 +705,7 @@ def _version_of_file(
         # contradicting the schema beside it (#1176). "1.1-geoarrow" is the one
         # version that preserves what the input actually is.
         return "1.1-geoarrow"
-    return version_for_file_type(file_type, info.get("geo_version"), preserve_input=preserve_input)
+    return _version_of_file_type(info, preserve_input)
 
 
 def _declares_geoarrow_encoding(parquet_file: str) -> bool:
@@ -691,21 +717,24 @@ def _declares_geoarrow_encoding(parquet_file: str) -> bool:
         return False
 
 
-def _version_of_table(table: pa.Table, verbose: bool = False) -> str | None:
+def _version_of_table(
+    table: pa.Table, verbose: bool = False, preserve_input: bool = False
+) -> str | None:
     """What an Arrow table's own schema says about its version.
 
     A carried ``geo`` key answers through :func:`carried_geoparquet_version`.
     With no key, a GeoArrow column -- read off the field, not just the type,
     so a metadata-declared one counts whether or not ``geoarrow.pyarrow`` was
-    imported (#792) -- is native data, which writes 2.0.
+    imported (#792) -- is native data: a native-geo-only table, which writes
+    2.0 (or stays keyless under ``preserve_input``, as the file map says).
     """
     metadata = table.schema.metadata
     if metadata and b"geo" in metadata:
-        return carried_geoparquet_version(metadata)
+        return carried_geoparquet_version(metadata, preserve_input=preserve_input)
     if any(is_geoarrow_extension_field(field) for field in table.schema):
         if verbose:
-            debug("Native geo types with no geo key: writing GeoParquet 2.0")
-        return "2.0"
+            debug("Native geo types with no geo key: native-geo-only data")
+        return _version_for_file_type("parquet_geo_only", preserve_input=preserve_input)
     return None
 
 
