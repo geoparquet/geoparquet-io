@@ -108,7 +108,7 @@ class TestResolver:
 
     @pytest.mark.parametrize(
         ("codec", "level"),
-        [("GZIP", 6), ("BROTLI", 6), ("SNAPPY", None), ("LZ4", None), ("UNCOMPRESSED", None)],
+        [("GZIP", 6), ("BROTLI", 11), ("SNAPPY", None), ("LZ4", None), ("UNCOMPRESSED", None)],
     )
     def test_only_zstd_moves(self, codec, level):
         # The measurement is ZSTD's. GZIP and BROTLI have their own curves and
@@ -173,12 +173,11 @@ class TestRewriteWriterKwargs:
     def test_a_levelless_codec_gets_no_level(self, codec):
         assert "compression_level" not in _rewrite_writer_kwargs(codec, None)
 
-    @pytest.mark.parametrize("codec", ["GZIP", "BROTLI"])
-    def test_unset_gzip_and_brotli_resolve_to_their_codec_default(self, codec):
-        # Deliberate: these now get gpio's documented default of 6 instead of
-        # pyarrow's own implicit default, the same unset-means-the-documented-
-        # number rule as ZSTD. Nothing has measured other levels for them.
-        assert _rewrite_writer_kwargs(codec, None)["compression_level"] == 6
+    @pytest.mark.parametrize(("codec", "level"), [("GZIP", 6), ("BROTLI", 11)])
+    def test_unset_gzip_and_brotli_resolve_to_their_codec_default(self, codec, level):
+        # Deliberate: gpio's documented default instead of pyarrow's implicit
+        # one, and the same level a DuckDB COPY always writes for the codec.
+        assert _rewrite_writer_kwargs(codec, None)["compression_level"] == level
 
     def test_the_codec_still_round_trips(self):
         assert _rewrite_writer_kwargs("SNAPPY", None)["compression"] == "snappy"

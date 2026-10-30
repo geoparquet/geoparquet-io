@@ -52,7 +52,7 @@ _FOOTER_ALIASES = {"LZ4_RAW": "LZ4"}
 COMPRESSION_RANGES = {
     "GZIP": (1, 9, 6),
     "ZSTD": (1, 22, 15),
-    "BROTLI": (1, 11, 6),
+    "BROTLI": (1, 11, 11),
 }
 
 #: The widest level any codec takes; the CLI's first bound before the codec
@@ -78,7 +78,8 @@ PROCESS_ZSTD_LEVEL = 9
 #: The level DuckDB's Parquet ``COPY`` writes for a codec it takes no level for:
 #: miniz's ``MZ_DEFAULT_LEVEL`` for GZIP and ``BROTLI_DEFAULT_QUALITY`` for BROTLI
 #: (``extension/parquet/column_writer.cpp`` in DuckDB 1.5.6 and 2.0.0). gpio's
-#: GZIP default is the same 6, so an unset GZIP level agrees on both encoders.
+#: GZIP and BROTLI defaults in :data:`COMPRESSION_RANGES` are these same levels,
+#: so an unset level writes the same on a COPY and a pyarrow write.
 DUCKDB_COPY_FIXED_LEVELS = {"GZIP": 6, "BROTLI": 11}
 
 #: ``gpio process`` defaults, where they differ from :data:`COMPRESSION_RANGES`.

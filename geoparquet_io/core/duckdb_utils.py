@@ -950,6 +950,41 @@ def spatial_join_strategy(
     return SPATIAL_JOIN_NO_BBOX
 
 
+_SPATIAL_JOIN_NOTES = {
+    SPATIAL_JOIN_NATIVE: "-- Using native geometry with DuckDB SPATIAL_JOIN",
+    SPATIAL_JOIN_BBOX_PREFILTER: "-- Using bbox columns for optimized spatial join",
+    SPATIAL_JOIN_NO_BBOX: "-- Using full geometry intersection (no bbox optimization)",
+}
+
+
+def print_spatial_join_dry_run(
+    strategy: str,
+    query: str,
+    output_parquet: str,
+    compression: str | None,
+    compression_level: int | None,
+) -> None:
+    """Print the dry run of a spatial-join ``COPY`` (``add admin-divisions``/``country-codes``).
+
+    The strategy note says which predicate runs (#538); the codec clauses and
+    description are the owner's (``core.compression``), so the display shows
+    the level the write uses. The output path goes through :func:`sql_path`:
+    the printed query has to be valid SQL the user can paste, and it is a raw
+    CLI argument that may contain an apostrophe (#718).
+    """
+    from geoparquet_io.core.compression import resolve_codec
+    from geoparquet_io.core.logging_config import info, progress
+
+    info(_SPATIAL_JOIN_NOTES[strategy])
+    codec = resolve_codec(compression, compression_level, context="write")
+    progress(
+        f"COPY ({query.strip()})\nTO {sql_path(output_parquet)}\n"
+        f"(FORMAT PARQUET, {', '.join(codec.duckdb_copy_options())});"
+    )
+    info(f"\n-- Note: Using {codec.description} compression")
+    info("-- Original metadata would also be preserved in the output file")
+
+
 def _install_and_load_extension(con, name: str) -> None:
     """INSTALL (best-effort) then LOAD a DuckDB extension.
 

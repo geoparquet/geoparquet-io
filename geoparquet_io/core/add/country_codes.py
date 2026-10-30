@@ -10,6 +10,7 @@ from geoparquet_io.core.duckdb_utils import (
     build_spatial_join_condition,
     fetch_one,
     get_duckdb_connection,
+    print_spatial_join_dry_run,
     quote_identifier,
     spatial_join_strategy,
     sql_path,
@@ -389,26 +390,7 @@ def _print_dry_run_query(
     info(f"-- Step {final_step}: Main spatial join query")
 
     strategy = spatial_join_strategy(has_native_geometry, input_bbox_col, countries_bbox_col)
-    if strategy == SPATIAL_JOIN_NATIVE:
-        info("-- Using native geometry with DuckDB SPATIAL_JOIN")
-    elif strategy == SPATIAL_JOIN_BBOX_PREFILTER:
-        info("-- Using bbox columns for optimized spatial join")
-    else:
-        info("-- Using full geometry intersection (no bbox optimization)")
-
-    from geoparquet_io.core.compression import resolve_codec
-
-    codec = resolve_codec(compression, compression_level, context="write")
-
-    # sql_path: the printed query has to be valid SQL the user can paste, and
-    # output_parquet is a raw CLI argument that may contain an apostrophe (#718).
-    display_query = f"""COPY ({query.strip()})
-TO {sql_path(output_parquet)}
-(FORMAT PARQUET, {", ".join(codec.duckdb_copy_options())});"""
-    progress(display_query)
-
-    info(f"\n-- Note: Using {codec.description} compression")
-    info("-- Original metadata would also be preserved in the output file")
+    print_spatial_join_dry_run(strategy, query, output_parquet, compression, compression_level)
 
 
 def _output_has_subdivision(con, output_parquet):

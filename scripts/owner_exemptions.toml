@@ -824,9 +824,6 @@ reason = "permanent: the same keyword-argument list forwarded to one callee (API
 [[G3.pylint]]
 block = "core.sort_quadkey:sort_by_quadkey_table|core.str_order:str_order_table"
 reason = "sort result read back with the input's schema metadata carried, copied per sort; T2c"
-[[G3.pylint]]
-block = "core.write_funnels:_plain_copy_to|core.write_strategies.disk_rewrite:DiskRewriteStrategy.write_from_query"
-reason = "codec name map copied; T2a (compression owner)"
 
 # ---------------------------------------------------------------------------
 # G13: shared-option consistency (tests/test_cli_shared_options.py)

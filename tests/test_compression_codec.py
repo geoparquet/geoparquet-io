@@ -122,9 +122,9 @@ RESOLVE_TABLE = [
         None,
         "write",
         "BROTLI",
-        6,
+        11,
         ["COMPRESSION BROTLI"],
-        {"compression": "brotli", "compression_level": 6},
+        {"compression": "brotli", "compression_level": 11},
     ),
     (
         "BROTLI",
@@ -273,7 +273,7 @@ def test_no_injected_level_reaches_a_copy_clause(bad):
         ("LZ4", None, "LZ4", None),
         ("UNCOMPRESSED", None, "UNCOMPRESSED", None),
         ("GZIP", None, "GZIP", 6),
-        ("BROTLI", None, "BROTLI", 6),
+        ("BROTLI", None, "BROTLI", 11),
         ("SNAPPY", 9, "SNAPPY", None),
         ("LZO", None, "ZSTD", 15),
         ("", None, "ZSTD", 15),
@@ -332,13 +332,14 @@ def test_copy_level_is_the_level_a_duckdb_copy_writes(codec, level, copy_level):
 
 
 @pytest.mark.parametrize("context", ["write", "process"])
-def test_an_unset_gzip_level_is_the_same_on_copy_and_pyarrow(context):
-    """The GZIP COPY write and the GZIP pyarrow write use one level: 6."""
-    codec = resolve_codec("GZIP", None, context=context)
-    assert codec.pyarrow_kwargs()["compression_level"] == codec.copy_level == 6
+@pytest.mark.parametrize(("name", "level"), [("GZIP", 6), ("BROTLI", 11)])
+def test_an_unset_level_is_the_same_on_copy_and_pyarrow(context, name, level):
+    """A COPY and a pyarrow write of GZIP (6) or BROTLI (11) use one level."""
+    codec = resolve_codec(name, None, context=context)
+    assert codec.pyarrow_kwargs()["compression_level"] == codec.copy_level == level
 
 
-@pytest.mark.parametrize(("codec", "level", "written"), [("GZIP", 9, 6), ("BROTLI", None, 11)])
+@pytest.mark.parametrize(("codec", "level", "written"), [("GZIP", 9, 6), ("BROTLI", 4, 11)])
 def test_a_copy_that_cannot_write_the_level_says_which_it_writes(caplog, codec, level, written):
     import logging
 
@@ -349,7 +350,10 @@ def test_a_copy_that_cannot_write_the_level_says_which_it_writes(caplog, codec, 
     assert f"not {resolved.level}" in caplog.text
 
 
-@pytest.mark.parametrize(("codec", "level"), [("GZIP", None), ("GZIP", 6), ("ZSTD", None)])
+@pytest.mark.parametrize(
+    ("codec", "level"),
+    [("GZIP", None), ("GZIP", 6), ("BROTLI", None), ("BROTLI", 11), ("ZSTD", None)],
+)
 def test_a_copy_at_the_level_asked_for_is_quiet(caplog, codec, level):
     import logging
 
@@ -1157,3 +1161,26 @@ def test_add_computed_column_dry_run_prints_the_owner_clauses(caplog):
         )
     assert "COMPRESSION GZIP);" in caplog.text
     assert "Using GZIP:6 compression" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("strategy", "note"),
+    [
+        ("native", "Using native geometry with DuckDB SPATIAL_JOIN"),
+        ("bbox_prefilter", "Using bbox columns for optimized spatial join"),
+        ("no_bbox", "Using full geometry intersection (no bbox optimization)"),
+    ],
+)
+def test_one_spatial_join_dry_run_display(caplog, strategy, note):
+    """admin-divisions and country-codes print their dry run through one helper."""
+    import logging
+
+    from geoparquet_io.core.duckdb_utils import print_spatial_join_dry_run
+
+    with caplog.at_level(logging.INFO, logger="geoparquet_io"):
+        print_spatial_join_dry_run(strategy, " SELECT 1 ", "o'brien.parquet", "BROTLI", None)
+    assert note in caplog.text
+    assert "COPY (SELECT 1)\nTO 'o''brien.parquet'\n(FORMAT PARQUET, COMPRESSION BROTLI);" in (
+        caplog.text
+    )
+    assert "Using BROTLI:11 compression" in caplog.text

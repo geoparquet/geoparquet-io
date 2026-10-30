@@ -1405,7 +1405,7 @@ result = sub_partition_directory(
 - `force` (bool): Force operation even with warnings (default: False)
 - `skip_analysis` (bool): Skip partition analysis for performance (default: True)
 - `compression` (str | None): Compression codec (default: None, which is ZSTD)
-- `compression_level` (int | None): Compression level (default: None — gpio's default for the codec: ZSTD 15, GZIP and BROTLI 6 (a DuckDB `COPY` path writes GZIP at 6 and BROTLI at 11, and warns when you asked for another level); a level outside the codec's range is rejected, e.g. GZIP is 1-9)
+- `compression_level` (int | None): Compression level (default: None — gpio's default for the codec: ZSTD 15, GZIP 6, BROTLI 11 (a DuckDB `COPY` path can write GZIP and BROTLI only at those levels, and warns when you ask for another); a level outside the codec's range is rejected, e.g. GZIP is 1-9)
 - `auto` (bool): Auto-calculate resolution (default: False)
 - `target_rows` (int): Target rows per partition for auto mode (default: 100000)
 - `max_partitions` (int): Max partitions for auto mode (default: 10000)
