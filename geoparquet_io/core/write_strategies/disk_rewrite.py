@@ -46,9 +46,9 @@ from geoparquet_io.core.parquet_writer import (
     apply_output_kv_metadata,
     output_schema_metadata,
     resolve_row_group_rows_for_query,
-    resolve_row_group_rows_for_table,
+    write_arrow_table,
 )
-from geoparquet_io.core.remote import is_remote_url, upload_if_remote
+from geoparquet_io.core.remote import is_remote_url, remote_write_context, upload_if_remote
 from geoparquet_io.core.write_strategies.arrow_streaming import to_geoarrow_column
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
@@ -309,18 +309,28 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         carried_geo = _parse_geo_metadata_quietly(table.schema.metadata)
         table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
 
-        # Handle non-geo tables: write plain Parquet without geo metadata
+        # Handle non-geo tables: write plain Parquet without geo metadata,
+        # through the facade's one pyarrow table write, which decides the row
+        # count, codec, statistics, format version and dictionary policy.
         if geometry_column is None:
-            self._write_plain_parquet_from_table(
-                table,
-                output_path,
-                compression,
-                compression_level,
-                verbose,
-                resolve_row_group_rows_for_table(
-                    table, row_group_rows, row_group_size_mb, verbose=verbose
-                ),
-            )
+            with remote_write_context(output_path, is_directory=False, verbose=verbose) as (
+                local_path,
+                is_remote,
+            ):
+                write_arrow_table(
+                    table,
+                    local_path,
+                    compression=compression,
+                    compression_level=compression_level,
+                    row_group_rows=row_group_rows,
+                    row_group_size_mb=row_group_size_mb,
+                    geoparquet_version=geoparquet_version,
+                    geometry_column=None,
+                    verbose=verbose,
+                    extra_kv_metadata=extra_kv_metadata,
+                )
+                if is_remote:
+                    upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
             return
 
         # Auto-detect version from table schema metadata if not specified
@@ -366,44 +376,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             )
         finally:
             con.close()
-
-    def _write_plain_parquet_from_table(
-        self,
-        table: pa.Table,
-        output_path: str,
-        compression: str,
-        compression_level: int | None,
-        verbose: bool,
-        row_group_rows: int | None = None,
-    ) -> None:
-        """Write plain Parquet (no geo metadata) from an Arrow table."""
-
-        codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
-        writer_kwargs = codec.pyarrow_kwargs()
-        if row_group_rows:
-            writer_kwargs["row_group_size"] = row_group_rows
-
-        is_remote = is_remote_url(output_path)
-        work_dir = tempfile.mkdtemp(prefix="gpio_disk_rewrite_") if is_remote else None
-
-        try:
-            local_path = os.path.join(work_dir, "output.parquet") if is_remote else output_path
-
-            if verbose:
-                debug(f"Writing plain Parquet with {codec.name} compression...")
-
-            pq.write_table(table, local_path, **writer_kwargs)
-
-            if is_remote:
-                upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
-
-            if verbose:
-                success(f"Wrote {table.num_rows:,} rows to {output_path}")
-        finally:
-            if work_dir and os.path.exists(work_dir):
-                import shutil
-
-                shutil.rmtree(work_dir, ignore_errors=True)
 
     def _write_plain_parquet_from_query(
         self,

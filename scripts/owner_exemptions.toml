@@ -23,7 +23,7 @@
 path = "geoparquet_io/api/ops.py"
 name = "pyarrow.parquet.write_table"
 count = 3
-reason = "stages an in-memory table to a temp file for a file-based core call; T2c routes it through the facade"
+reason = "permanent scratch copy: stages the in-memory input table to a temp file a file-based core call reads back; never an output, so not a facade write. Its hand-rolled temp path (gettempdir + uuid) is T2f's (concept 11)"
 [[G1.tid251]]
 path = "geoparquet_io/benchmarks/operations.py"
 name = "pyarrow.parquet.write_table"
@@ -31,11 +31,11 @@ reason = "permanent: benchmark fixture write that measures pyarrow itself; not a
 [[G1.tid251]]
 path = "geoparquet_io/core/add/kdtree.py"
 name = "pyarrow.parquet.write_table"
-reason = "temp view for the kdtree pass; private write, T2c routes it through the facade"
+reason = "permanent scratch copy: the planar view the kdtree pass reads back with DuckDB; never an output, so not a facade write. Its hand-rolled temp path (mkstemp) is T2f's (concept 11)"
 [[G1.tid251]]
 path = "geoparquet_io/core/arcgis.py"
 name = "pyarrow.parquet.ParquetWriter"
-reason = "paged ArcGIS stream writer; private write, T2c routes it through the facade"
+reason = "permanent scratch copy: the paged ArcGIS spool, read back by pq.read_table; never an output, so not a facade write. Its hand-rolled temp path is T2f's (concept 11)"
 [[G1.tid251]]
 path = "geoparquet_io/core/carto.py"
 name = "httpx"
@@ -73,7 +73,7 @@ reason = "null-CRS sanitize rewrite; private write outside the facade, T2f"
 [[G1.tid251]]
 path = "geoparquet_io/core/streaming.py"
 name = "pyarrow.parquet.write_table"
-reason = "stdin spooled to a temp file; private write outside the facade, T2c"
+reason = "permanent scratch copy: stdin spooled to a temp file the command then reads; never an output, so not a facade write. Its hand-rolled temp path is T2f's (concept 11)"
 [[G1.tid251]]
 path = "geoparquet_io/core/wfs.py"
 name = "httpx"
@@ -163,6 +163,15 @@ reason = "parses a geo key it fetched one or two assignments earlier, not via th
 path = "geoparquet_io/core/process/aggregate/common.py"
 name = "sql_literal"
 reason = "hand-rolled string-literal escape (#1101 class); use _escape_sql_string (T1)"
+# Row-group count: core/parquet_writer.py owns the default and every resolver (#981, #1215).
+[[G1.row_group_policy]]
+path = "geoparquet_io/core/benchmark.py"
+line_pattern = "ROW_GROUP_SIZE 100000"
+reason = "permanent: the benchmark's fixed DuckDB baseline layout; it measures DuckDB, not a gpio output"
+[[G1.row_group_policy]]
+path = "geoparquet_io/core/benchmark.py"
+line_pattern = "ROW_GROUP_SIZE=100000"
+reason = "permanent: the same baseline, named in the benchmark's report"
 # HTTP retry policy: core/http_retry.py owns attempts, delay, timeout, statuses and Retry-After.
 [[G1.retry_param_defaults]]
 path = "geoparquet_io/api/table.py"
@@ -795,9 +804,6 @@ block = "core.process.aggregate.by_a5:aggregate_by_a5|core.process.aggregate.by_
 count = 2
 reason = "permanent: aggregate-by-a5/h3 public entry points forward the same parameters to one grid driver (grid_common)"
 [[G3.pylint]]
-block = "core.process.aggregate.by_admin:aggregate_by_admin|core.process.aggregate.grid_common:aggregate_grid_file"
-reason = "geometry-free aggregate raw write (approved change 2); T2c"
-[[G3.pylint]]
 block = "core.process.raster.contour:contour_file|core.process.raster.polygonize:polygonize_file"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
@@ -805,7 +811,7 @@ block = "core.sort_by_column:sort_by_column|core.sort_quadkey:sort_by_quadkey"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
 block = "core.sort_quadkey:sort_by_quadkey_table|core.str_order:str_order_table"
-reason = "sort result read back with the input's schema metadata carried, copied per sort; T2c"
+reason = "sort result read back with the input's schema metadata carried verbatim (replace_schema_metadata), copied per sort; the version and geo handling of a sorted table is T2b/T3e's, not a row-group or raw-write question"
 
 # ---------------------------------------------------------------------------
 # G13: shared-option consistency (tests/test_cli_shared_options.py)

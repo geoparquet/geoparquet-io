@@ -626,7 +626,6 @@ def add_computed_column(
         total_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM {sql_path(input_path)}"))[0]
         progress(f"Processing {total_count:,} features...")
 
-    # Build the query
     # Quote column name to handle special characters (e.g., colons in "metrics:area")
     quoted_col = quote_identifier(column_name)
 
@@ -646,12 +645,13 @@ def add_computed_column(
         FROM {sql_path(input_path)}
     """
 
-    # Handle dry-run display
     if dry_run:
         from geoparquet_io.core.compression import print_copy_dry_run
+        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_query
 
+        rows = resolve_row_group_rows_for_query(con, query, row_group_rows, row_group_size_mb)
         info("-- Main query:")
-        print_copy_dry_run(query, output_parquet, compression, compression_level)
+        print_copy_dry_run(query, output_parquet, compression, compression_level, rows)
         info("-- This query creates a new parquet file with the computed column added")
         info("-- The covering metadata is updated only if the output has a bbox column")
         con.close()

@@ -46,7 +46,7 @@ from geoparquet_io.core.process.aggregate.grid_common import (
     needed_source_columns,
     source_select_list,
 )
-from geoparquet_io.core.write_funnels import write_geoparquet_table, write_plain_parquet_table
+from geoparquet_io.core.write_funnels import write_aggregate_table
 
 
 def _get_admin_ref(dataset, con, level: str) -> str:
@@ -368,22 +368,13 @@ def aggregate_by_admin(
         # opens; leaked native state can segfault sibling xdist tests.
         gc.collect()
 
-    if out_geometry == "none":
-        write_plain_parquet_table(
-            result,
-            output_parquet,
-            compression=compression,
-            compression_level=compression_level,
-            verbose=verbose,
-        )
-    else:
-        write_geoparquet_table(
-            result,
-            output_parquet,
-            geometry_column="geometry",
-            compression=compression,
-            compression_level=compression_level,
-            geoparquet_version=geoparquet_version,
-            verbose=verbose,
-        )
+    write_aggregate_table(
+        result,
+        output_parquet,
+        out_geometry,
+        compression=compression,
+        compression_level=compression_level,
+        geoparquet_version=geoparquet_version,
+        verbose=verbose,
+    )
     success(f"Aggregated to {result.num_rows} admin regions -> {output_parquet}")

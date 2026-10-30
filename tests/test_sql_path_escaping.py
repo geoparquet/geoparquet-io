@@ -741,26 +741,49 @@ class TestEscapedValuesDoNotCrossFunctionBoundaries:
         assert "FROM _admin_step_0 a" in query
 
 
-class TestBboxMetadataNativeGeometryProbe:
-    """``_detect_native_geometry`` interpolates the file's own column name.
+class TestBboxMetadataFallbackPath:
+    """The ``add bbox-metadata`` fallback rewrite reads a RAW path (#718).
 
-    The name comes from the file's ``geo`` metadata, so it is untrusted input
-    like any other: an apostrophe in it broke the probe's SQL, and the caller
-    reads the result as "this file is not GeoParquet 2.0".
+    It reads the input through ``sql_path`` and hands the same RAW path to the
+    funnel as its witness, so an apostrophe in a directory name must reach
+    neither a SQL parser unescaped nor a filesystem call escaped.
     """
 
-    def test_apostrophe_in_the_geometry_column_name(self, tmp_path):
-        from geoparquet_io.core.add.bbox_metadata import _detect_native_geometry
+    def test_apostrophe_in_the_directory(self, tmp_path, monkeypatch):
+        import json
 
-        path = str(tmp_path / "o'brien" / "odd_col.parquet")
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.add import bbox_metadata
+        from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
+
         (tmp_path / "o'brien").mkdir()
-        con = get_duckdb_connection(load_spatial=False)
+        path = str(tmp_path / "o'brien" / "points.parquet")
+        geo = {
+            "version": "1.1.0",
+            "primary_column": "geometry",
+            "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+        }
+        con = get_duckdb_connection(load_spatial=True)
         try:
-            con.execute(f'COPY (SELECT 1 AS "it\'s_geom") TO {sql_path(path)} (FORMAT PARQUET)')
-            # No ParserException, and an INTEGER column is not native geometry.
-            assert _detect_native_geometry(con, path, "it's_geom") is False
+            con.execute(
+                "COPY (SELECT {'xmin': 1.0::DOUBLE, 'ymin': 1.0::DOUBLE, 'xmax': 1.0::DOUBLE, "
+                "'ymax': 1.0::DOUBLE} AS bbox, "
+                "ST_AsWKB(ST_Point(1, 1))::BLOB AS geometry) "
+                f"TO {sql_path(path)} (FORMAT PARQUET, GEOPARQUET_VERSION 'NONE', "
+                f"KV_METADATA {{geo: '{json.dumps(geo)}'}})"
+            )
         finally:
             con.close()
+
+        def refuse(*args, **kwargs):
+            raise FooterPatchUnsupported("planted")
+
+        monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+        bbox_metadata.add_bbox_metadata(path)
+
+        written = json.loads(pq.read_metadata(path).metadata[b"geo"])
+        assert "covering" in written["columns"]["geometry"]
 
 
 class TestAggregateByAdminSource:

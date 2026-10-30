@@ -840,20 +840,21 @@ class ParquetWriteSettings:
     #: ZSTD, at the codec's documented level.
     compression: str | None = None
     compression_level: int | None = None
-    row_group_rows: int | None = None
-    row_group_size_mb: int | None = None
 
     DEFAULT_PARQUET_VERSION = "2.6"
 
     def get_pyarrow_kwargs(
         self,
-        calculated_row_group_size: int | None = None,
+        row_group_rows: int,
         schema: pa.Schema | None = None,
         geometry_columns: Collection[str] = (),
     ) -> dict:
         """Get kwargs dict for PyArrow write_table().
 
-        With ``schema``, dictionary encoding is limited to the non-geometry
+        ``row_group_rows`` is the count :func:`resolve_row_group_rows_for_table`
+        (or one of its siblings) already decided; these settings decide none of
+        their own, so there is no fallback here that could skip the
+        validation, the vector snap or an MB target. With ``schema``, dictionary encoding is limited to the non-geometry
         columns (:func:`dictionary_columns`). Without it, pyarrow's default
         applies to every column.
         """
@@ -863,14 +864,8 @@ class ParquetWriteSettings:
             self.compression, self.compression_level, context="write"
         ).pyarrow_kwargs()
 
-        # Last resort, not a second policy: a caller that reached here without
-        # going through resolve_row_group_rows still lands on the one number
-        # rather than the 100,000 this used to carry -- which was neither
-        # DuckDB's 122,880 nor the band gpio's own check scores (#981).
-        row_group_size = calculated_row_group_size or self.row_group_rows or DEFAULT_ROW_GROUP_ROWS
-
         kwargs = {
-            "row_group_size": row_group_size,
+            "row_group_size": row_group_rows,
             **codec_kwargs,
             "write_statistics": True,
             "use_dictionary": (
@@ -929,14 +924,9 @@ def write_arrow_table(
     rows_per_group = resolve_row_group_rows_for_table(table, row_group_rows, row_group_size_mb)
 
     # Use central configuration for write settings
-    settings = ParquetWriteSettings(
-        compression=compression,
-        compression_level=compression_level,
-        row_group_rows=row_group_rows,
-        row_group_size_mb=row_group_size_mb,
-    )
+    settings = ParquetWriteSettings(compression=compression, compression_level=compression_level)
     write_kwargs = settings.get_pyarrow_kwargs(
-        calculated_row_group_size=rows_per_group,
+        rows_per_group,
         schema=table.schema,
         geometry_columns=[geometry_column] if geometry_column else (),
     )

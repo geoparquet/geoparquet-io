@@ -16,21 +16,13 @@ are not supported for in-place metadata modification.
 """
 
 import json
-import os
 from typing import TYPE_CHECKING
-
-import duckdb
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.check_parquet_structure import get_compression_info
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.compression import codec_from_footer
-from geoparquet_io.core.duckdb_metadata import get_schema_info, is_native_geo_column
-from geoparquet_io.core.duckdb_utils import (
-    _wrap_query_with_blob_conversion,
-    get_duckdb_connection,
-    sql_path,
-)
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
@@ -43,10 +35,10 @@ from geoparquet_io.core.geo_metadata import (
 )
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, success, warn
-from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_footer import FooterPatchUnsupported, patch_footer_kv
-from geoparquet_io.core.parquet_writer import geoparquet_copy_options, resolve_row_group_rows
 from geoparquet_io.core.streaming import find_geometry_column_from_table
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+from geoparquet_io.core.write_strategies.base import atomic_write
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -56,69 +48,6 @@ def _is_remote_url(path: str) -> bool:
     """Check if the path is a remote URL (S3, GCS, Azure, HTTP)."""
     remote_prefixes = ("s3://", "gs://", "az://", "azure://", "http://", "https://")
     return path.lower().startswith(remote_prefixes)
-
-
-def _detect_native_geometry(
-    conn: duckdb.DuckDBPyConnection, parquet_file: str, geometry_column: str
-) -> bool:
-    """Detect if the file uses native GEOMETRY logical type (GeoParquet 2.0).
-
-    Args:
-        conn: DuckDB connection (reused to avoid repeated INSTALL/LOAD)
-        parquet_file: RAW (unescaped) path to the parquet file
-        geometry_column: Name of the geometry column to check
-
-    Returns:
-        True if the file has native GEOMETRY type, False otherwise
-    """
-    return (
-        is_native_geo_column(get_schema_info(parquet_file, con=conn), geometry_column) is not None
-    )
-
-
-def _get_existing_kv_metadata(conn: duckdb.DuckDBPyConnection, parquet_file: str) -> dict:
-    """Read existing key-value metadata from a parquet file.
-
-    Args:
-        conn: DuckDB connection
-        parquet_file: RAW (unescaped) path to the parquet file
-
-    Returns:
-        Dict mapping metadata keys to values (both as strings)
-    """
-    result = conn.execute(
-        f"SELECT key, value FROM parquet_kv_metadata({sql_path(parquet_file)})"
-    ).fetchall()
-
-    metadata = {}
-    for key, value in result:
-        # Keys and values come as bytes, decode them
-        key_str = key.decode("utf-8") if isinstance(key, bytes) else str(key)
-        value_str = value.decode("utf-8") if isinstance(value, bytes) else str(value)
-        metadata[key_str] = value_str
-
-    return metadata
-
-
-def _kv_pairs_with_geo(existing_metadata: dict, new_geo_meta: dict) -> dict[str, str]:
-    """The file-level KV pairs the rewrite writes: every existing key, new ``geo``.
-
-    DuckDB's KV_METADATA replaces all metadata, so every existing key we want
-    to preserve has to be carried, plus the updated geo key. The pairs stay RAW:
-    ``geoparquet_copy_options`` builds the clause through the shared
-    ``build_kv_metadata_clause()``, which quotes key names as well as escaping
-    them. A preserved key containing ``:`` -- ``stac:collection``, or pyarrow's
-    ``ARROW:schema`` -- used to make DuckDB's parser reject the whole COPY
-    (#756).
-
-    Args:
-        existing_metadata: Dict of existing key-value pairs (raw, unescaped)
-        new_geo_meta: The new geo metadata dict to set
-    """
-    # Carry every existing key except 'geo', which this rewrite replaces.
-    pairs = {key: value for key, value in existing_metadata.items() if key != "geo"}
-    pairs["geo"] = json.dumps(new_geo_meta)
-    return pairs
 
 
 def require_geo_metadata_for_covering(geo_meta: object, source: str | None = None) -> dict:
@@ -459,106 +388,49 @@ def _rewrite_with_geo(
     primary_col: str,
     verbose: bool,
 ) -> None:
-    """Re-encode the file with DuckDB, carrying the amended `geo` block.
+    """Re-encode the file through the query funnel, carrying the amended `geo` block.
 
     The fallback for a file whose footer cannot be patched. It decodes and
     re-encodes every page, which is why it cannot preserve the compression
     level -- Parquet does not record it, so the file's codec comes back at the
-    owner's default level for it (ZSTD 15; ``codec_from_footer``) -- and why it
-    writes the facade's row groups (``resolve_row_group_rows``) rather than the
-    input's. Everything
-    it does defend (the geometry column's physical type, #712; the quoting of
-    preserved keys, #700 and #756) is a consequence of re-encoding that the
-    footer patch does not have to think about.
+    owner's default level for it (``codec_from_footer``) -- and why it writes
+    the facade's row groups rather than the input's (approved change 3).
+
+    It is ``write_funnels.write_parquet_with_metadata``'s write, not one of its
+    own: the funnel decides the row-group count, the output version (from the
+    input file, so a native 2.0 input stays native and a 1.x one stays WKB,
+    #712), the one ``geo`` key (#1225) and the footer keys, which drop the
+    input's ``pandas`` and ``ARROW:schema`` the way every other write does
+    (``parquet_writer.output_schema_metadata``) and keep its sidecar keys
+    (#700, #756). The destination is staged beside itself by
+    ``atomic_write`` and replaced once the connection reading the input has
+    closed, so an in-place rewrite never writes over the file it reads.
     """
-    # The row-group count is the facade's, like every other write's: the
-    # input's *average* rows per group re-chunked an uneven file into groups it
-    # never had, and a one-group input stayed one group (approved change 3).
     compression_info = get_compression_info(parquet_file, primary_col)
-    row_group_size = resolve_row_group_rows(None, None)
-    compression = compression_info[primary_col]
+    codec = codec_from_footer(compression_info[primary_col], None)
+    metadata, _ = get_parquet_metadata(parquet_file)
+    original_metadata = {**(metadata or {}), b"geo": json.dumps(geo_meta).encode("utf-8")}
 
-    # A destination that already exists (the input itself, in place) is
-    # replaced through a sibling scratch file; a fresh destination is written
-    # directly, so a caller that has already staged gets a single pass.
-    temp_file = output_file + ".tmp" if os.path.exists(output_file) else output_file
+    if verbose:
+        debug("\nPreserving file properties:")
+        debug(f"Compression: {codec.name}")
+        debug(f"Existing metadata keys: {[bytes(key).decode() for key in original_metadata]}")
+
     try:
-        # Use DuckDB COPY TO with KV_METADATA to preserve file properties
-        # This preserves bloom filters and native GEOMETRY logical type (fixes #433)
-        # The connection is closed on every exit, a failed step included (#1244).
-        with get_duckdb_connection() as conn:
-            # Detect if file uses native GEOMETRY type (GeoParquet 2.0)
-            # Pass the actual geometry column name - it might not be 'geometry'
-            has_native_geometry = _detect_native_geometry(conn, read_url, primary_col)
-
-            # Read existing KV metadata to preserve non-geo keys
-            existing_kv = _get_existing_kv_metadata(conn, read_url)
-
-            if verbose:
-                debug("\nPreserving file properties:")
-                debug(f"Row group size: {row_group_size:,} rows")
-                debug(f"Compression: {compression}")
-                debug(f"Native GEOMETRY type: {has_native_geometry}")
-                debug(f"Existing metadata keys: {list(existing_kv.keys())}")
-
-            # Build COPY options. Ask for what the output is: 'V2' keeps the native
-            # GEOMETRY logical type of a 2.0 input, 'NONE' leaves a 1.x input's
-            # metadata to us. Because this rewrite always supplies its own `geo`
-            # block, geoparquet_copy_options sends 'NONE' either way, or DuckDB
-            # would append its own generated `geo` key beside ours (#1225). 'NONE'
-            # governs the *metadata* only, so a 2.0 input keeps its native type,
-            # CRS and statistics. Keeping the v1.x geometry columns physically WKB
-            # is what _wrap_query_with_blob_conversion below is for (#712).
-            copy_options = [
-                "FORMAT PARQUET",
-                # The input's codec, at the owner's level for it: the footer
-                # records no level, and an omitted one is DuckDB's 3 (#1335).
-                *codec_from_footer(compression, None).duckdb_copy_options(),
-                *geoparquet_copy_options(
-                    "V2" if has_native_geometry else "NONE",
-                    _kv_pairs_with_geo(existing_kv, geo_meta),
-                ),
-                f"ROW_GROUP_SIZE {row_group_size}",
-            ]
-
-            # This command is documented as metadata-only, so the geometry columns'
-            # physical types have to survive it. With the spatial extension loaded --
-            # and GEOPARQUET_VERSION above loads it whether or not we ask -- DuckDB
-            # reads a v1.x WKB column as its own GEOMETRY type, and the COPY then
-            # writes a native Parquet GEOMETRY logical type back out while the declared
-            # version stays 1.1.0. gpio's own validator rejects that combination
-            # (#712). Casting straight back to BLOB keeps the columns plain WKB, which
-            # is what a 1.x file must carry. Every column the file declares as geometry
-            # needs that cast, not just the primary one -- the validator names any
-            # native column, and a 1.1 file may carry several. A file that is *already*
-            # native is left alone: there the native type is the correct output.
-            source_query = f"SELECT * FROM {sql_path(read_url)}"
-            if not has_native_geometry:
-                secondary_cols = [col for col in geo_meta["columns"] if col != primary_col]
-                source_query = _wrap_query_with_blob_conversion(
-                    source_query, primary_col, conn, secondary_columns=secondary_cols
+        with atomic_write(output_file) as staged:
+            # The connection is closed on every exit, a failed step included
+            # (#1244), and before atomic_write moves the result into place.
+            with get_duckdb_connection() as conn:
+                write_parquet_with_metadata(
+                    conn,
+                    f"SELECT * FROM {sql_path(read_url)}",
+                    staged,
+                    original_metadata=original_metadata,
+                    compression=codec.name,
+                    compression_level=codec.level,
+                    verbose=verbose,
+                    show_sql=verbose,
+                    input_file=parquet_file,
                 )
-
-            copy_sql = f"""
-                COPY ({source_query})
-                TO {sql_path(temp_file)}
-                ({", ".join(copy_options)})
-            """
-
-            if verbose:
-                debug(f"\nDuckDB COPY SQL:\n{copy_sql}")
-
-            # This fallback re-encodes the whole file, so bound it like every
-            # other gpio write (#1156) instead of DuckDB's own 80%-of-RAM default.
-            with scoped_write_memory_limit(conn, None, verbose):
-                conn.execute(copy_sql)
-
-        if temp_file != output_file:
-            # Replace the existing destination atomically
-            os.replace(temp_file, output_file)
-
     except Exception as e:
-        # Clean up temporary file if something goes wrong
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
         raise GeoParquetError(f"Failed to update metadata: {str(e)}") from e

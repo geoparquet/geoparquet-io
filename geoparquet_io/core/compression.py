@@ -270,11 +270,15 @@ def print_copy_dry_run(
     output_parquet: str,
     compression: str | None,
     compression_level: int | None,
+    row_group_rows: int,
 ) -> None:
     """Print the dry run of a ``COPY ... TO`` write: the one body every display uses.
 
     The clauses and the level in the note are the ones that ``COPY`` writes
-    (:attr:`ResolvedCodec.copy_description`). The output path goes through
+    (:attr:`ResolvedCodec.copy_description`), and ``row_group_rows`` is the
+    count the write's funnel resolves (``parquet_writer``'s
+    ``resolve_row_group_rows_for_query``), so the printed statement is the one
+    gpio runs rather than one that would write DuckDB's own default. The output path goes through
     ``sql_path``: the printed query has to be valid SQL the user can paste, and
     it is a raw CLI argument that may contain an apostrophe (#718).
     """
@@ -284,6 +288,7 @@ def print_copy_dry_run(
     codec = resolve_codec(compression, compression_level, context="write")
     progress(
         f"COPY ({query.strip()})\nTO {sql_path(output_parquet)}\n"
-        f"(FORMAT PARQUET, {', '.join(codec.duckdb_copy_options())});"
+        f"(FORMAT PARQUET, {', '.join(codec.duckdb_copy_options())}, "
+        f"ROW_GROUP_SIZE {row_group_rows});"
     )
     info(f"\n-- Note: Using {codec.copy_description} compression")

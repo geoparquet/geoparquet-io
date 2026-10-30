@@ -60,7 +60,7 @@ from geoparquet_io.core.process.aggregate.common import (
     validate_metric_nodata,
 )
 from geoparquet_io.core.remote import needs_httpfs
-from geoparquet_io.core.write_funnels import write_geoparquet_table, write_plain_parquet_table
+from geoparquet_io.core.write_funnels import write_aggregate_table
 
 
 @dataclass(frozen=True)
@@ -982,25 +982,16 @@ def aggregate_grid_file(
             f"({_unassigned_reason(bucket_point, bbox_column)})"
         )
 
-    if out_geometry == "none":
-        write_plain_parquet_table(
-            result,
-            output_parquet,
-            compression=compression,
-            compression_level=compression_level,
-            verbose=verbose,
-        )
-    else:
-        write_geoparquet_table(
-            result,
-            output_parquet,
-            geometry_column="geometry",
-            compression=compression,
-            compression_level=compression_level,
-            geoparquet_version=geoparquet_version,
-            verbose=verbose,
-            geo_bbox=geo_bbox,
-        )
+    write_aggregate_table(
+        result,
+        output_parquet,
+        out_geometry,
+        compression=compression,
+        compression_level=compression_level,
+        geoparquet_version=geoparquet_version,
+        verbose=verbose,
+        geo_bbox=geo_bbox,
+    )
     success(f"Aggregated to {result.num_rows} {scheme.name} cells -> {output_parquet}")
 
 

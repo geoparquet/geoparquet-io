@@ -22,7 +22,6 @@ constant and no ``rows or <fallback>`` second default outside the owner.
 
 from __future__ import annotations
 
-import ast
 import json
 import math
 import re
@@ -276,137 +275,207 @@ def test_a_rewrite_keeps_at_least_the_input_row_groups(num_rows, groups, expecte
         assert math.ceil(num_rows / rows) >= groups
 
 
+# The guard against a second row-group policy outside the owner is G1's
+# ``row_group_policy`` arm in tests/test_owner_guards.py; its exemptions are in
+# scripts/owner_exemptions.toml with every other owner guard's.
+
+
 # ---------------------------------------------------------------------------
-# The guard: no second row-group policy outside the owner
+# The pyarrow kwargs take the owner's answer; they hold no fallback of their own
 # ---------------------------------------------------------------------------
 
-#: Sites that may name a literal row count, each with its reason.
-JUSTIFIED = {
-    ("geoparquet_io/core/benchmark.py", "ROW_GROUP_SIZE 100000"): (
-        "the benchmark's fixed DuckDB baseline layout; it measures DuckDB, not a gpio output"
-    ),
-    ("geoparquet_io/core/benchmark.py", "ROW_GROUP_SIZE=100000"): (
-        "the same baseline, named in the benchmark's report"
-    ),
+
+def test_the_pyarrow_settings_take_the_resolved_count_and_decide_none_of_their_own():
+    """``get_pyarrow_kwargs`` once fell back to ``self.row_group_rows or DEFAULT``.
+
+    That branch skipped the validation and the vector snap and ignored an MB
+    target: a second policy, dormant only because its one caller always passed
+    the resolved count. The count is now a required argument and the settings
+    carry no row-group fields to fall back to.
+    """
+    import dataclasses
+
+    from geoparquet_io.core.parquet_writer import ParquetWriteSettings
+
+    fields = {field.name for field in dataclasses.fields(ParquetWriteSettings)}
+    assert not fields & {"row_group_rows", "row_group_size_mb"}
+    with pytest.raises(TypeError):
+        ParquetWriteSettings().get_pyarrow_kwargs()  # type: ignore[call-arg]
+    assert ParquetWriteSettings().get_pyarrow_kwargs(4_096)["row_group_size"] == 4_096
+
+
+def test_the_mb_option_states_the_owners_rule():
+    """``--row-group-size-mb``'s help said only what units it took.
+
+    The rule the owner applies -- measured once, snapped to whole writer
+    vectors, never below one -- is the one the docs state; the help is built
+    from the same constants as ``--row-group-size``'s, so it cannot drift.
+    """
+    command = cli.commands["sort"].commands["hilbert"]
+    option = next(p for p in command.params if p.name == "row_group_size_mb")
+    assert f"{WRITER_VECTOR_ROWS:,}-row" in option.help
+    assert "never below" in option.help
+    assert "--row-group-size" in option.help
+
+
+# ---------------------------------------------------------------------------
+# A dry run prints the COPY gpio runs, row-group count included
+# ---------------------------------------------------------------------------
+
+_DRY_RUN_COMMANDS = {
+    "extract": ("extract",),
+    "add_bbox": ("add", "bbox"),
 }
 
-_ROW_GROUP_NAME = re.compile(r"(?i)row_?group|batch_size")
-_COPY_LITERAL = re.compile(r"(?i)ROW_GROUP_SIZE[\s=]+\d+")
+
+@pytest.mark.parametrize("option", sorted(OPTIONS))
+@pytest.mark.parametrize("command", sorted(_DRY_RUN_COMMANDS))
+def test_a_dry_run_prints_the_row_group_count_the_write_uses(
+    command, option, source, tmp_path, caplog
+):
+    """The printed ``COPY`` had no ``ROW_GROUP_SIZE``: pasted into DuckDB it
+    wrote DuckDB's 122,880-row groups, not the owner's count gpio writes."""
+    import logging
+
+    if pq.read_metadata(str(source)).num_rows <= DEFAULT_ROW_GROUP_ROWS:
+        pytest.skip("needs an input with more than one row group at every option")
+    args = (*_DRY_RUN_COMMANDS[command], source, tmp_path / "out.parquet", *OPTIONS[option])
+    with caplog.at_level(logging.INFO, logger="geoparquet_io"):
+        _run(*args, "--dry-run")
+    shown = re.findall(r"ROW_GROUP_SIZE (\d+)", caplog.text)
+    assert shown, f"the dry run printed no ROW_GROUP_SIZE:\n{caplog.text[-1500:]}"
+
+    _run(*args)
+    assert [int(n) for n in shown] == [_group_sizes(tmp_path / "out.parquet")[0]]
 
 
-def _default_literal(node: ast.AST) -> bool:
-    return (
-        isinstance(node, ast.Constant)
-        and type(node.value) is int
-        and node.value in (DEFAULT_ROW_GROUP_ROWS, 50_000, 100_000, 122_880)
+# ---------------------------------------------------------------------------
+# The owner's MB measurement, and the 32-bit offsets it counts at
+# ---------------------------------------------------------------------------
+
+
+def _int64_rows(n: int) -> pa.Table:
+    """``n`` rows of one int64 column: exactly 8 bytes a row."""
+    return pa.table({"x": pa.array(range(n), pa.int64())})
+
+
+def test_an_mb_target_becomes_a_whole_vector_count():
+    from geoparquet_io.core.parquet_writer import _rows_for_byte_target, estimate_row_size
+    from geoparquet_io.core.sizing import mb_to_bytes
+
+    sample = _int64_rows(10_000)
+    assert estimate_row_size(sample) == 8
+    # 10,000 rows' worth of bytes is not a whole vector: it snaps up to 10,240.
+    assert _rows_for_byte_target(sample, 10_000 * 8 / mb_to_bytes(1)) == 10_240
+    # Exactly five vectors' worth stays five vectors.
+    assert _rows_for_byte_target(sample, 5 * WRITER_VECTOR_ROWS * 8 / mb_to_bytes(1)) == 10_240
+
+
+def test_an_mb_target_below_one_vector_floors_at_one_vector():
+    from geoparquet_io.core.parquet_writer import _rows_for_byte_target
+
+    assert _rows_for_byte_target(_int64_rows(10_000), 1e-6) == WRITER_VECTOR_ROWS
+
+
+@pytest.mark.parametrize("mb", [0.05, 0.3, 1, 4.3, 64])
+def test_an_mb_target_is_always_a_whole_vector_and_grows_with_the_target(mb):
+    from geoparquet_io.core.parquet_writer import _rows_for_byte_target
+
+    sample = _int64_rows(10_000)
+    rows = _rows_for_byte_target(sample, mb)
+    assert rows % WRITER_VECTOR_ROWS == 0 and rows >= WRITER_VECTOR_ROWS
+    assert _rows_for_byte_target(sample, mb * 2) >= rows
+
+
+def test_large_offset_types_weigh_what_the_small_ones_do():
+    """#1215: a DuckDB sample (large types) and a pyarrow table (small types)
+    holding the same rows must weigh the same, or one MB target lands on two counts."""
+    from geoparquet_io.core.parquet_writer import estimate_row_size
+
+    names = [f"name-{i:05d}" for i in range(1_000)]
+    blobs = [name.encode() * 3 for name in names]
+
+    def table(string_type, binary_type):
+        return pa.table(
+            {
+                "s": pa.array(names, string_type),
+                "b": pa.array(blobs, binary_type),
+                "i": pa.array(range(1_000), pa.int64()),
+            }
+        )
+
+    small = table(pa.string(), pa.binary())
+    large = table(pa.large_string(), pa.large_binary())
+    assert large.get_total_buffer_size() > small.get_total_buffer_size()
+    assert estimate_row_size(large) == estimate_row_size(small)
+
+
+# ---------------------------------------------------------------------------
+# The funnel's geometry-free door
+# ---------------------------------------------------------------------------
+
+
+def _plain_table(n: int) -> pa.Table:
+    """A geometry-free table that still carries what an input's schema would."""
+    table = pa.table(
+        {
+            "id": pa.array(range(n), pa.int64()),
+            "geom": pa.array([b"\x01" * 8] * n, pa.binary()),
+        }
+    )
+    return table.replace_schema_metadata(
+        {
+            b"geo": json.dumps(geo_block()).encode(),
+            b"pandas": b"{}",
+            b"stac:collection": b'{"id": "c"}',
+        }
     )
 
 
-def _fallback_count(node: ast.AST) -> bool:
-    """An int literal or a CONSTANT name: what ``rows or <this>`` falls back to."""
-    if isinstance(node, ast.Constant):
-        return type(node.value) is int
-    name = node.id if isinstance(node, ast.Name) else getattr(node, "attr", "")
-    return bool(name) and name.isupper()
+def test_the_plain_door_writes_no_geo_key_and_keeps_sidecar_keys(tmp_path):
+    from geoparquet_io.core.write_funnels import write_plain_parquet_table
 
+    out = tmp_path / "plain.parquet"
+    write_plain_parquet_table(_plain_table(100), str(out))
 
-def _names_row_groups(node: ast.AST) -> bool:
-    if isinstance(node, ast.Name):
-        return bool(_ROW_GROUP_NAME.search(node.id))
-    if isinstance(node, ast.Attribute):
-        return bool(_ROW_GROUP_NAME.search(node.attr))
-    if isinstance(node, ast.Call):
-        return _names_row_groups(node.func)
-    return False
-
-
-def row_group_policy_hits(path: Path, rel: str) -> list[str]:
-    """Every place ``path`` decides a row-group count for itself."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    hits = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and type(node.value) is int:
-            if node.value == DEFAULT_ROW_GROUP_ROWS:
-                hits.append(f"{rel}:{node.lineno}: the default typed as a literal")
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            for match in _COPY_LITERAL.findall(node.value):
-                if (rel, match) not in JUSTIFIED:
-                    hits.append(f"{rel}:{node.lineno}: COPY {match!r}")
-        if isinstance(node, ast.keyword) and node.arg == "row_group_size":
-            if isinstance(node.value, ast.Constant):
-                hits.append(f"{rel}:{node.lineno}: row_group_size={node.value.value!r}")
-        if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
-            first, *rest = node.values
-            if _names_row_groups(first) and any(_fallback_count(r) for r in rest):
-                hits.append(f"{rel}:{node.lineno}: a second default after `or`")
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if any(_names_row_groups(t) for t in targets) and _default_literal(node.value):
-                hits.append(f"{rel}:{node.lineno}: a row-group constant")
-    return hits
-
-
-def _package_hits(root: Path) -> list[str]:
-    hits = []
-    for path in sorted(root.rglob("*.py")):
-        rel = path.relative_to(root.parent).as_posix()
-        if path.resolve() == OWNER.resolve() or rel.endswith("core/parquet_writer.py"):
-            continue
-        hits.extend(row_group_policy_hits(path, rel))
-    return hits
-
-
-def test_no_row_group_policy_outside_the_owner():
-    assert _package_hits(PACKAGE) == []
-
-
-def test_every_justified_site_still_exists():
-    for rel, text in JUSTIFIED:
-        assert text in (REPO / rel).read_text(encoding="utf-8"), f"stale: {rel} {text!r}"
+    keys = pq.read_metadata(str(out)).metadata
+    assert b"geo" not in keys, "a geometry-free output declared GeoParquet"
+    assert b"pandas" not in keys, "the input's pandas block was carried"
+    assert keys[b"stac:collection"] == b'{"id": "c"}'
+    # ``geom`` is a plain column here: nothing is geometry by request.
+    assert pq.read_schema(str(out)).field("geom").type == pa.binary()
 
 
 @pytest.mark.parametrize(
-    "source",
+    ("kwargs", "expected"),
     [
-        "x = 49152\n",
-        "pq.write_table(t, p, row_group_size=100_000)\n",
-        "writer.write_table(t, row_group_size=10000)\n",
-        "con.execute('COPY t TO f (ROW_GROUP_SIZE 122880)')\n",
-        "batch_size = row_group_rows or DEFAULT_BATCH_SIZE\n",
-        "rows = self.row_group_rows or 50000\n",
-        "rows = resolve_row_group_rows(None, None) or DEFAULT_ROW_GROUP_ROWS\n",
-        "DEFAULT_BATCH_SIZE = 100_000\n",
-        "ROW_GROUP_ROWS: int = 50_000\n",
+        ({}, [DEFAULT_ROW_GROUP_ROWS, 60_000 - DEFAULT_ROW_GROUP_ROWS]),
+        ({"row_group_rows": 25_000}, [26_624, 26_624, 60_000 - 2 * 26_624]),
     ],
 )
-def test_the_guard_catches_a_second_policy(tmp_path, source):
-    pkg = tmp_path / "geoparquet_io" / "core"
-    pkg.mkdir(parents=True)
-    (pkg / "planted.py").write_text(source)
-    assert _package_hits(tmp_path / "geoparquet_io"), source
+def test_the_plain_door_writes_the_owners_row_groups(tmp_path, kwargs, expected):
+    from geoparquet_io.core.write_funnels import write_plain_parquet_table
+
+    out = tmp_path / "plain.parquet"
+    write_plain_parquet_table(_plain_table(60_000), str(out), **kwargs)
+    assert _group_sizes(out) == expected
 
 
-@pytest.mark.parametrize(
-    "source",
-    [
-        "rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)\n",
-        "writer.write_table(t, row_group_size=rows_per_group)\n",
-        "options.append(f'ROW_GROUP_SIZE {row_group_rows}')\n",
-        "_LINEARIZE_BATCH_ROWS = 20_000\n",
-        "count = len(groups) or 1\n",
-        "chunks = get_native_geo_stats_by_row_group(path, col) or []\n",
-        "if row_group_rows or row_group_size_mb:\n    pass\n",
-    ],
-)
-def test_the_guard_leaves_owner_answers_alone(tmp_path, source):
-    pkg = tmp_path / "geoparquet_io" / "core"
-    pkg.mkdir(parents=True)
-    (pkg / "planted.py").write_text(source)
-    assert _package_hits(tmp_path / "geoparquet_io") == [], source
+def test_the_plain_door_takes_the_owners_codec(tmp_path):
+    from geoparquet_io.core.write_funnels import write_plain_parquet_table
+
+    default, snappy = tmp_path / "default.parquet", tmp_path / "snappy.parquet"
+    write_plain_parquet_table(_plain_table(100), str(default))
+    write_plain_parquet_table(_plain_table(100), str(snappy), compression="snappy")
+    assert pq.read_metadata(str(default)).row_group(0).column(0).compression == "ZSTD"
+    assert pq.read_metadata(str(snappy)).row_group(0).column(0).compression == "SNAPPY"
 
 
-def test_the_owner_itself_is_exempt(tmp_path):
-    pkg = tmp_path / "geoparquet_io" / "core"
-    pkg.mkdir(parents=True)
-    (pkg / "parquet_writer.py").write_text("DEFAULT_ROW_GROUP_ROWS = 49152\n")
-    assert _package_hits(tmp_path / "geoparquet_io") == []
+def test_the_plain_door_refuses_a_bad_count_before_writing(tmp_path):
+    from geoparquet_io.core.exceptions import InvalidParameterError
+    from geoparquet_io.core.write_funnels import write_plain_parquet_table
+
+    out = tmp_path / "plain.parquet"
+    with pytest.raises(InvalidParameterError):
+        write_plain_parquet_table(_plain_table(10), str(out), row_group_rows=0)
+    assert not out.exists()

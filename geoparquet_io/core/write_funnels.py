@@ -1909,3 +1909,44 @@ def write_plain_parquet_table(
             upload_if_remote(
                 actual_output, output_file, profile=profile, is_directory=False, verbose=verbose
             )
+
+
+def write_aggregate_table(
+    table,
+    output_file: str,
+    out_geometry: str,
+    *,
+    compression: str | None = None,
+    compression_level: int | None = None,
+    geoparquet_version: str | None = None,
+    verbose: bool = False,
+    geo_bbox: list[float] | None = None,
+) -> None:
+    """Write a ``process aggregate`` / ``process overview`` result: the door chooses.
+
+    Those commands take ``--out-geometry``, and ``none`` means the output has no
+    geometry by request. The answer to "which table door" is the funnel's, so it
+    is asked here once: ``none`` goes to :func:`write_plain_parquet_table`, any
+    other value to :func:`write_geoparquet_table` with the result's
+    ``geometry`` column. Each command used to carry the same ``if`` and both
+    calls itself.
+    """
+    if out_geometry == "none":
+        write_plain_parquet_table(
+            table,
+            output_file,
+            compression=compression,
+            compression_level=compression_level,
+            verbose=verbose,
+        )
+        return
+    write_geoparquet_table(
+        table,
+        output_file,
+        geometry_column="geometry",
+        compression=compression,
+        compression_level=compression_level,
+        geoparquet_version=geoparquet_version,
+        verbose=verbose,
+        geo_bbox=geo_bbox,
+    )

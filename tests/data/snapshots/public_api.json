@@ -536,6 +536,7 @@
     "extract_preserved_kv_metadata",
     "read_preserved_kv_metadata",
     "table_nonplanar_edges",
+    "write_aggregate_table",
     "write_geoparquet_table",
     "write_parquet_with_metadata",
     "write_plain_parquet_table"

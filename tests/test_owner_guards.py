@@ -53,6 +53,7 @@ try:
 except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
+from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
 from tests._precommit_hook import core_tree, hook_entry
 
 REPO = Path(__file__).resolve().parents[1]
@@ -76,10 +77,11 @@ EXPECTED_COUNTS = {
     "G1.retry_wrappers": 0,
     "G1.json_dumps": 40,
     "G1.parquet_metadata": 0,
+    "G1.row_group_policy": 2,
     "G2.exemptions": 31,
     "G3.pairs": 26,
     "G3.baseline": 26,
-    "G3.pylint": 56,
+    "G3.pylint": 55,
     "G13.options": 13,
     "G13.bbox_parsers": 3,
     "G4.whitelist": 183,
@@ -906,6 +908,73 @@ def _find_json_dumps(m: _Module) -> Iterator[Hit]:
             yield m.hit(node)
 
 
+#: The row-group count's owner: the default and every resolver live there.
+_ROW_GROUP_OWNER = ("geoparquet_io/core/parquet_writer.py",)
+_ROW_GROUP_NAME = re.compile(r"(?i)row_?group|batch_size")
+_COPY_ROW_GROUP_LITERAL = re.compile(r"(?i)ROW_GROUP_SIZE[\s=]+\d+")
+#: Row counts that have been some writer's default: gpio's, 50,000 and
+#: 100,000 (two old gpio copies) and DuckDB's own 122,880.
+_ROW_GROUP_DEFAULTS = (DEFAULT_ROW_GROUP_ROWS, 50_000, 100_000, 122_880)
+
+
+def _row_group_default_literal(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Constant)
+        and type(node.value) is int
+        and node.value in _ROW_GROUP_DEFAULTS
+    )
+
+
+def _row_group_fallback(node: ast.AST) -> bool:
+    """An int literal or a CONSTANT name: what ``rows or <this>`` falls back to."""
+    if isinstance(node, ast.Constant):
+        return type(node.value) is int
+    name = node.id if isinstance(node, ast.Name) else getattr(node, "attr", "")
+    return bool(name) and name.isupper()
+
+
+def _names_row_groups(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return bool(_ROW_GROUP_NAME.search(node.id))
+    if isinstance(node, ast.Attribute):
+        return bool(_ROW_GROUP_NAME.search(node.attr))
+    if isinstance(node, ast.Call):
+        return _names_row_groups(node.func)
+    return False
+
+
+def _find_row_group_policy(m: _Module) -> Iterator[Hit]:
+    """A row-group count decided outside ``parquet_writer`` (#981, #1030, #1215).
+
+    The default typed as a literal; a literal ``ROW_GROUP_SIZE n`` in a COPY;
+    ``row_group_size=<literal>``; a second default after ``or``
+    (``rows or DEFAULT_BATCH_SIZE``, ``self.row_group_rows or 50000``); and a
+    row-group-named constant bound to a past default. Each was a copy that
+    wrote its own number: 100,000 in the pyarrow settings, ``DEFAULT_BATCH_SIZE``
+    in the streaming strategy, the input's average in ``add bbox-metadata``.
+    """
+    strings = {id(node) for node in m.strings()}
+    for node in ast.walk(m.tree):
+        if _row_group_policy_node(node, strings):
+            yield m.hit(node)
+
+
+def _row_group_policy_node(node: ast.AST, strings: set[int]) -> bool:
+    if isinstance(node, ast.Constant):
+        if type(node.value) is int:
+            return node.value == DEFAULT_ROW_GROUP_ROWS
+        return id(node) in strings and bool(_COPY_ROW_GROUP_LITERAL.search(node.value))
+    if isinstance(node, ast.keyword):
+        return node.arg == "row_group_size" and isinstance(node.value, ast.Constant)
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        first, *rest = node.values
+        return _names_row_groups(first) and any(_row_group_fallback(r) for r in rest)
+    if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        return any(_names_row_groups(t) for t in targets) and _row_group_default_literal(node.value)
+    return False
+
+
 @dataclass(frozen=True)
 class Arm:
     finder: Callable[..., Iterator[Hit]]
@@ -940,6 +1009,7 @@ ARMS = {
         ("geoparquet_io/core/json_output.py",),
         ("geoparquet_io/cli", "geoparquet_io/core"),
     ),
+    "row_group_policy": Arm(_find_row_group_policy, _ROW_GROUP_OWNER),
 }
 
 
@@ -1435,6 +1505,7 @@ G1_PLANTS = {
     "retry_after": 'def wait(resp):\n    return resp.headers.get("Retry-After")\n',
     "retry_wrappers": "def fetch(url):\n    return make_request_with_retry('GET', url)\n",
     "json_dumps": "import json\n\ndef show(d):\n    print(json.dumps(d))\n",
+    "row_group_policy": "rows = row_group_rows or 50000\n",
     "parquet_metadata": (
         "def rows(con, path):\n"
         "    return con.execute(f\"SELECT * FROM parquet_metadata('{path}')\").fetchall()\n"
@@ -1461,6 +1532,7 @@ G1_CLEAN = {
         "    log(rows)\n    return [r for r in rows if r]\n"
     ),
     "json_dumps": "from geoparquet_io.core.json_output import dumps_json\n",
+    "row_group_policy": "rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)\n",
     "parquet_metadata": (
         '"""Reads parquet_metadata() through the owner."""\n'
         "from geoparquet_io.core.duckdb_metadata import get_row_group_sizes\n"
@@ -2254,3 +2326,37 @@ def test_g12_g3_update_refuses_to_write_on_a_failing_run(tmp_path):
     result = _run_check_duplicates(repo, "--baseline", str(baseline), "--update")
     assert result.returncode == 1 and "not updating" in result.stdout
     assert baseline.read_text(encoding="utf-8") == original
+
+
+#: Second row-group policies the arm must catch, and owner answers it must not.
+ROW_GROUP_POLICIES = [
+    "x = 49152\n",
+    "pq.write_table(t, p, row_group_size=100_000)\n",
+    "writer.write_table(t, row_group_size=10000)\n",
+    "con.execute('COPY t TO f (ROW_GROUP_SIZE 122880)')\n",
+    "batch_size = row_group_rows or DEFAULT_BATCH_SIZE\n",
+    "rows = self.row_group_rows or 50000\n",
+    "rows = resolve_row_group_rows(None, None) or DEFAULT_ROW_GROUP_ROWS\n",
+    "DEFAULT_BATCH_SIZE = 100_000\n",
+    "ROW_GROUP_ROWS: int = 50_000\n",
+]
+ROW_GROUP_OWNER_ANSWERS = [
+    "rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)\n",
+    "writer.write_table(t, row_group_size=rows_per_group)\n",
+    "options.append(f'ROW_GROUP_SIZE {row_group_rows}')\n",
+    "_LINEARIZE_BATCH_ROWS = 20_000\n",
+    "count = len(groups) or 1\n",
+    "chunks = get_native_geo_stats_by_row_group(path, col) or []\n",
+    "if row_group_rows or row_group_size_mb:\n    pass\n",
+    '"""A docstring may say ROW_GROUP_SIZE 100000."""\n',
+]
+
+
+@pytest.mark.parametrize("source", ROW_GROUP_POLICIES)
+def test_g12_the_row_group_arm_catches_a_second_policy(tmp_path, source):
+    assert arm_hits(_plant(tmp_path, "row_group_policy", source), "row_group_policy"), source
+
+
+@pytest.mark.parametrize("source", ROW_GROUP_OWNER_ANSWERS)
+def test_g12_the_row_group_arm_leaves_owner_answers_alone(tmp_path, source):
+    assert arm_hits(_plant(tmp_path, "row_group_policy", source), "row_group_policy") == [], source

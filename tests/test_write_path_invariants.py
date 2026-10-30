@@ -74,6 +74,11 @@ GEOMETRY_FREE = {"aggregate_h3_none"}
 #: the same file-level keys whichever geometry it is asked for (the lead's
 #: policy for #1367 T2c): the geometry-free output is held to the geometry
 #: branch's keys, not to the input's sidecar keys.
+#:
+#: A divergence guard, not a repro: this cell passes on the source before T2c
+#: too, because both branches already wrote the same keys. It pins that the
+#: geometry-free door (``write_plain_parquet_table``) keeps agreeing with the
+#: geometry branch from here on; it does not show the T2c change.
 SIDECAR_REFERENCE = {"aggregate_h3_none": "aggregate_h3_polygon"}
 
 _PASSTHROUGH = (
