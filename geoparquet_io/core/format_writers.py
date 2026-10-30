@@ -14,6 +14,7 @@ import json
 import math
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -548,7 +549,7 @@ def write_gdal_format(
             with atomic_write(
                 output_path,
                 suffix=str(config["extension"]),
-                sidecar_suffixes=config["sidecar_suffixes"],
+                sidecar_suffixes=cast("tuple[str, ...] | None", config["sidecar_suffixes"]),
             ) as target:
                 query = copy_query(target)
                 debug(f"Executing: {query}")
