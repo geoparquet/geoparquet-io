@@ -692,6 +692,15 @@ def get_preview_data(
             if col in geo_columns and col not in native_geo_columns:
                 # Convert serialized geometry to WKT for display
                 column_expressions.append(f"ST_AsText({quoted_col}) AS {quoted_col}")
+            elif "VARIANT" in col_types.get(col, "").upper():
+                # DuckDB 1.5 cannot export VARIANT over Arrow at all, and 2.0
+                # exports an opaque binary struct; JSON text reads right on
+                # both (#1352). The CASE keeps a SQL NULL a NULL: 1.5 renders
+                # CAST(NULL::VARIANT AS JSON) as the text 'null'.
+                column_expressions.append(
+                    f"CASE WHEN {quoted_col} IS NULL THEN NULL "
+                    f"ELSE CAST({quoted_col} AS JSON) END AS {quoted_col}"
+                )
             else:
                 column_expressions.append(quoted_col)
 

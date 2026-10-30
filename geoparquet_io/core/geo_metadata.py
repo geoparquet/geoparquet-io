@@ -1878,8 +1878,42 @@ def output_query_schema(con: duckdb.DuckDBPyConnection, query: str) -> pa.Schema
     three DuckDB write paths' :func:`strip_illegal_bbox_covering` gate (the 2.0
     fast path, duckdb-kv, disk-rewrite), which each need the same schema to ask
     the same question of a secondary column's covering.
+
+    DuckDB 1.5 cannot export a VARIANT column over the Arrow C interface
+    (``OSError: Not implemented Error: Unsupported Arrow type VARIANT``), so a
+    file DuckDB wrote with VARIANT properties used to kill every write path at
+    this probe (#1352). The probe only answers bbox-covering questions, which a
+    VARIANT column can never be, so on that one failure it is re-run with the
+    VARIANT columns left out. Any other Arrow export failure re-raises.
     """
-    return con.sql(f"SELECT * FROM ({query}) LIMIT 0").arrow().schema
+    try:
+        return con.sql(f"SELECT * FROM ({query}) LIMIT 0").arrow().schema
+    except OSError as exc:
+        if "Unsupported Arrow type VARIANT" not in str(exc):
+            raise
+        return _output_query_schema_without_variant(con, query)
+
+
+def _output_query_schema_without_variant(con: duckdb.DuckDBPyConnection, query: str) -> pa.Schema:
+    """The probe's schema with every VARIANT-typed column dropped.
+
+    ``DESCRIBE`` never crosses Arrow, so it names the columns safely; a type
+    string containing ``VARIANT`` (top-level, or nested in a STRUCT/LIST) is
+    exactly the set DuckDB 1.5 refuses to export. A false positive — a struct
+    *field* merely named VARIANT — only costs that column its bbox-covering
+    candidacy, and this path runs only after a real VARIANT broke the export.
+    """
+    import pyarrow as pa
+
+    described = con.sql(f"DESCRIBE SELECT * FROM ({query}) LIMIT 0").fetchall()
+    kept = [
+        quote_identifier(name)
+        for name, column_type, *_ in described
+        if "VARIANT" not in column_type.upper()
+    ]
+    if not kept:
+        return pa.schema([])
+    return con.sql(f"SELECT {', '.join(kept)} FROM ({query}) LIMIT 0").arrow().schema
 
 
 def declare_carried_bbox_column(
