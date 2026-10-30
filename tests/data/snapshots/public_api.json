@@ -149,6 +149,7 @@
     "PROCESS_ZSTD_LEVEL",
     "ResolvedCodec",
     "codec_from_footer",
+    "print_copy_dry_run",
     "resolve_codec",
     "resolve_process_compression_level"
   ],

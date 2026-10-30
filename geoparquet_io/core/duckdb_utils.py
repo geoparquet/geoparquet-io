@@ -966,22 +966,14 @@ def print_spatial_join_dry_run(
 ) -> None:
     """Print the dry run of a spatial-join ``COPY`` (``add admin-divisions``/``country-codes``).
 
-    The strategy note says which predicate runs (#538); the codec clauses and
-    description are the owner's (``core.compression``), so the display shows
-    the level the write uses. The output path goes through :func:`sql_path`:
-    the printed query has to be valid SQL the user can paste, and it is a raw
-    CLI argument that may contain an apostrophe (#718).
+    The strategy note says which predicate runs (#538); the COPY itself is
+    printed by the one display body, ``core.compression.print_copy_dry_run``.
     """
-    from geoparquet_io.core.compression import resolve_codec
-    from geoparquet_io.core.logging_config import info, progress
+    from geoparquet_io.core.compression import print_copy_dry_run
+    from geoparquet_io.core.logging_config import info
 
     info(_SPATIAL_JOIN_NOTES[strategy])
-    codec = resolve_codec(compression, compression_level, context="write")
-    progress(
-        f"COPY ({query.strip()})\nTO {sql_path(output_parquet)}\n"
-        f"(FORMAT PARQUET, {', '.join(codec.duckdb_copy_options())});"
-    )
-    info(f"\n-- Note: Using {codec.description} compression")
+    print_copy_dry_run(query, output_parquet, compression, compression_level)
     info("-- Original metadata would also be preserved in the output file")
 
 

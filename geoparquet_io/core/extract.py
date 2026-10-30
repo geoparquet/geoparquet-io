@@ -1113,16 +1113,10 @@ def _print_dry_run_output(
         info(f"-- Limit: {limit}")
     progress("")
 
-    from geoparquet_io.core.compression import resolve_codec
-
-    codec = resolve_codec(compression, compression_level, context="write")
-    display_query = f"""COPY ({query})
-TO {sql_path(output_parquet)}
-(FORMAT PARQUET, {", ".join(codec.duckdb_copy_options())});"""
+    from geoparquet_io.core.compression import print_copy_dry_run
 
     info("-- Main query:")
-    progress(display_query)
-    info(f"\n-- Note: Using {codec.description} compression")
+    print_copy_dry_run(query, output_parquet, compression, compression_level)
 
 
 def _advise_spatial_stats_on_merge(

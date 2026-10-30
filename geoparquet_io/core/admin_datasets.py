@@ -503,8 +503,14 @@ class AdminDataset(ABC):
                 # Write to cache, bounded like every other gpio write (#1156):
                 # the source is a multi-GB remote dataset and this COPY used to
                 # run at DuckDB's own 80%-of-RAM default.
+                # A download cache, not an output: DuckDB's fast ZSTD 3, named
+                # through the owner (#1335) rather than left to DuckDB's SNAPPY.
+                cache_codec = resolve_codec("ZSTD", 3, context="write")
                 with scoped_write_memory_limit(con, self.memory_limit, self.verbose):
-                    con.execute(f"COPY ({query}) TO {sql_path(cache_path)} (FORMAT PARQUET)")
+                    con.execute(
+                        f"COPY ({query}) TO {sql_path(cache_path)} "
+                        f"(FORMAT PARQUET, {', '.join(cache_codec.duckdb_copy_options())})"
+                    )
             finally:
                 con.close()
 

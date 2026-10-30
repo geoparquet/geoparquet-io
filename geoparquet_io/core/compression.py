@@ -117,6 +117,10 @@ def _check_level(codec: str, level) -> None:
         )
 
 
+#: ``(codec, level)`` pairs already warned about by :meth:`ResolvedCodec.duckdb_copy_options`.
+_WARNED_COPY_LEVELS: set[tuple[str, int | None]] = set()
+
+
 @dataclass(frozen=True)
 class ResolvedCodec:
     """A validated codec and the level one write uses with it.
@@ -149,6 +153,11 @@ class ResolvedCodec:
         """
         return DUCKDB_COPY_FIXED_LEVELS.get(self.name, self.level)
 
+    @property
+    def copy_description(self) -> str:
+        """:attr:`description` with the level a DuckDB ``COPY`` writes (``GZIP:6``)."""
+        return self.name if self.copy_level is None else f"{self.name}:{self.copy_level}"
+
     def duckdb_copy_options(self) -> list[str]:
         """The ``COMPRESSION`` (and ``COMPRESSION_LEVEL``) clauses of a ``COPY``.
 
@@ -161,7 +170,10 @@ class ResolvedCodec:
         options = [f"COMPRESSION {self.name}"]
         if self.name == "ZSTD":
             options.append(f"COMPRESSION_LEVEL {self.level}")
-        elif self.copy_level != self.level:
+        elif self.copy_level != self.level and (self.name, self.level) not in _WARNED_COPY_LEVELS:
+            # Once per codec and level per process: a per-partition write would
+            # otherwise repeat it for every file.
+            _WARNED_COPY_LEVELS.add((self.name, self.level))
             warn(
                 f"DuckDB writes {self.name} at level {self.copy_level} on this path, "
                 f"not {self.level}: its COPY takes a level for ZSTD only."
@@ -251,3 +263,27 @@ def resolve_process_compression_level(compression, compression_level):
     :func:`resolve_codec` themselves (T2f).
     """
     return resolve_codec(compression, compression_level, context="process").level
+
+
+def print_copy_dry_run(
+    query: str,
+    output_parquet: str,
+    compression: str | None,
+    compression_level: int | None,
+) -> None:
+    """Print the dry run of a ``COPY ... TO`` write: the one body every display uses.
+
+    The clauses and the level in the note are the ones that ``COPY`` writes
+    (:attr:`ResolvedCodec.copy_description`). The output path goes through
+    ``sql_path``: the printed query has to be valid SQL the user can paste, and
+    it is a raw CLI argument that may contain an apostrophe (#718).
+    """
+    from geoparquet_io.core.duckdb_utils import sql_path
+    from geoparquet_io.core.logging_config import info, progress
+
+    codec = resolve_codec(compression, compression_level, context="write")
+    progress(
+        f"COPY ({query.strip()})\nTO {sql_path(output_parquet)}\n"
+        f"(FORMAT PARQUET, {', '.join(codec.duckdb_copy_options())});"
+    )
+    info(f"\n-- Note: Using {codec.copy_description} compression")

@@ -648,17 +648,10 @@ def add_computed_column(
 
     # Handle dry-run display
     if dry_run:
-        # Show formatted query with COPY wrapper
-        from geoparquet_io.core.compression import resolve_codec
-
-        codec = resolve_codec(compression, compression_level, context="write")
-        display_query = f"""COPY ({query.strip()})
-TO {sql_path(output_parquet)}
-(FORMAT PARQUET, {", ".join(codec.duckdb_copy_options())});"""
+        from geoparquet_io.core.compression import print_copy_dry_run
 
         info("-- Main query:")
-        progress(display_query)
-        info(f"\n-- Note: Using {codec.description} compression")
+        print_copy_dry_run(query, output_parquet, compression, compression_level)
         info("-- This query creates a new parquet file with the computed column added")
         info("-- The covering metadata is updated only if the output has a bbox column")
         con.close()

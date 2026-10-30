@@ -343,6 +343,9 @@ def test_an_unset_level_is_the_same_on_copy_and_pyarrow(context, name, level):
 def test_a_copy_that_cannot_write_the_level_says_which_it_writes(caplog, codec, level, written):
     import logging
 
+    from geoparquet_io.core import compression
+
+    compression._WARNED_COPY_LEVELS.clear()
     resolved = resolve_codec(codec, level, context="write")
     with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
         assert resolved.duckdb_copy_options() == [f"COMPRESSION {codec}"]
@@ -783,17 +786,20 @@ SHAPES = {
 #: Docstring nodes of the tree being scanned: prose may name a clause.
 _DOCSTRINGS: set[int] = set()
 
-#: The per-call codec choices that are justified, with the reason. Each one is
-#: a codec picked for one internal file nobody reads back at gpio's level, so
-#: it is deliberately not the owner's default; it still goes through the owner.
+#: Literal codec or level choices outside the owner that are justified, each
+#: with its count and reason: internal files gpio writes for itself (a staging
+#: file, a download cache, PMTiles chunks) at a codec picked for speed; the
+#: benchmark baselines, fixed so runs compare across versions and tools; and a
+#: case fold of a *text*-encoding codec name, which is not compression. Every
+#: gpio write among them still resolves its codec through the owner.
 JUSTIFIED_CALL_SITES = {
     ("geoparquet_io/core/pmtiles_chunks.py", "level-literal-kwarg"): (
         1,
         "PMTiles chunk staging: a throwaway intermediate, ZSTD 3 for speed",
     ),
     ("geoparquet_io/core/admin_datasets.py", "codec-literal-arg"): (
-        1,
-        "admin-boundary cache: ZSTD 3, byte-identical to the cache DuckDB wrote before",
+        2,
+        "admin-boundary download caches (default and per-level Overture): ZSTD 3",
     ),
     ("geoparquet_io/core/partition/staging.py", "codec-literal-arg"): (
         1,
@@ -1184,3 +1190,93 @@ def test_one_spatial_join_dry_run_display(caplog, strategy, note):
         caplog.text
     )
     assert "Using BROTLI:11 compression" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# One COPY dry-run body, the admin cache codec, the COPY-context description
+# ---------------------------------------------------------------------------
+
+
+def test_the_gaul_cache_copy_names_its_codec(tmp_path, monkeypatch):
+    """The default cache COPY writes ZSTD 3, not DuckDB's unnamed SNAPPY (#1335)."""
+    from geoparquet_io.core.admin_datasets import GAULAdminDataset
+
+    dataset = GAULAdminDataset()
+    monkeypatch.setattr(dataset, "get_default_source", lambda: str(PLACES))
+    monkeypatch.setattr(dataset, "get_s3_config", lambda: {})
+    monkeypatch.setattr(dataset, "get_read_parquet_options", lambda: {})
+    cache = dataset._download_to_cache(tmp_path / "cache" / "gaul.parquet")
+    assert _codecs(cache) == {"ZSTD"}
+
+    import duckdb
+
+    from geoparquet_io.core.duckdb_utils import sql_path
+
+    ref = tmp_path / "ref.parquet"
+    duckdb.sql(
+        f"COPY (SELECT * FROM read_parquet({sql_path(str(PLACES))})) TO {sql_path(str(ref))} "
+        "(FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3)"
+    )
+    sizes = {
+        p: pq.ParquetFile(p).metadata.row_group(0).column(0).total_compressed_size
+        for p in (cache, ref)
+    }
+    assert sizes[cache] == sizes[ref]
+
+
+@pytest.mark.parametrize(
+    ("codec", "level", "clause", "note"),
+    [
+        (None, None, "COMPRESSION ZSTD, COMPRESSION_LEVEL 15", "ZSTD:15"),
+        ("GZIP", 9, "COMPRESSION GZIP", "GZIP:6"),
+        ("BROTLI", None, "COMPRESSION BROTLI", "BROTLI:11"),
+        ("snappy", None, "COMPRESSION SNAPPY", "SNAPPY"),
+    ],
+)
+def test_one_copy_dry_run_body(caplog, codec, level, clause, note):
+    """The one COPY display, with the level that COPY writes."""
+    import logging
+
+    from geoparquet_io.core.compression import print_copy_dry_run
+
+    with caplog.at_level(logging.INFO, logger="geoparquet_io"):
+        print_copy_dry_run(" SELECT 1 ", "o'brien.parquet", codec, level)
+    assert f"COPY (SELECT 1)\nTO 'o''brien.parquet'\n(FORMAT PARQUET, {clause});" in caplog.text
+    assert f"Using {note} compression" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "display",
+    [
+        "geoparquet_io.core.common.add_computed_column",
+        "geoparquet_io.core.extract._print_dry_run_output",
+        "geoparquet_io.core.duckdb_utils.print_spatial_join_dry_run",
+    ],
+)
+def test_every_copy_dry_run_display_calls_the_one_body(display):
+    import importlib
+    import inspect
+
+    module, name = display.rsplit(".", 1)
+    source = inspect.getsource(getattr(importlib.import_module(module), name))
+    assert "print_copy_dry_run(" in source
+    assert "duckdb_copy_options" not in source and "resolve_codec" not in source
+
+
+def test_copy_description_is_the_level_a_copy_writes():
+    assert resolve_codec("GZIP", 9, context="write").copy_description == "GZIP:6"
+    assert resolve_codec("ZSTD", 7, context="write").copy_description == "ZSTD:7"
+    assert resolve_codec("LZ4", None, context="write").copy_description == "LZ4"
+
+
+def test_the_copy_level_warning_is_given_once_per_codec_and_level(caplog):
+    import logging
+
+    from geoparquet_io.core import compression
+
+    compression._WARNED_COPY_LEVELS.clear()
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        for _ in range(3):
+            resolve_codec("GZIP", 8, context="write").duckdb_copy_options()
+        resolve_codec("GZIP", 7, context="write").duckdb_copy_options()
+    assert caplog.text.count("DuckDB writes GZIP at level 6") == 2
