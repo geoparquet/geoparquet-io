@@ -174,13 +174,24 @@ One ignore file gates quality over time:
 
 ## How the CI is set up (and why)
 
-Merging to `main` requires these status checks to pass: `lint`, `security`,
-`notebooks`, and the `test` matrix (Ubuntu on Python 3.10–3.13, macOS and
-Windows on 3.11–3.13). That list lives in code —
-`scripts/apply_branch_protection.sh` declares the required checks and review
-rules as GitHub rulesets, and an admin re-runs it whenever the list changes.
-If your PR is blocked on a check, that's the system working as intended:
-fix the check.
+Merging to `main` requires two status checks to pass:
+
+- `all-checks` — the last job in `.github/workflows/tests.yml`. It waits for
+  every other job in that workflow (`lint`, `security`, `embeddable-import`,
+  the `test` matrix, `test-duckdb-2`, `notebooks`, `docs-examples`,
+  `slow-tests`, `network-tests`) and fails if any of them failed, was
+  cancelled, or was skipped. Only `slow-tests` and `network-tests` may be
+  skipped, because they do not run on every pull request. A job added to
+  `tests.yml` must be added to its `needs:` list, and
+  `tests/test_ci_wiring.py` fails until it is.
+- `pr-title` — `.github/workflows/pr-title.yml` checks that the pull-request
+  title follows the commit convention. It is its own workflow so that editing
+  the title reruns it without rerunning the suite.
+
+That list lives in code — `scripts/apply_branch_protection.sh` declares the
+required checks and review rules as GitHub rulesets, and an admin re-runs it
+whenever the list changes. If your PR is blocked on a check, that's the system
+working as intended: fix the check.
 
 One heavier gate exists but doesn't run on every PR, so it won't slow down
 day-to-day contributions:

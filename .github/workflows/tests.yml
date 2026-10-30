@@ -388,11 +388,11 @@ jobs:
     # Windows -- named here rather than glossed, and cheap to close later by adding
     # an os matrix if it ever bites.
     #
-    # Deliberately NOT in the required-checks list yet. #894 was this lane reading
-    # as flaky; its network blocks are excluded here, but the ~234 that execute all
-    # spawn CLI subprocesses, the same shape as the known xdist flakes in
-    # test_pipe_integration / test_geojson_stream / e2e/test_journeys. Let it report
-    # for a couple of weeks before promoting it to a gate.
+    # A gate through `all-checks` (#1367). #894 was this lane reading as flaky;
+    # its network blocks are excluded here, but the ~234 that execute all spawn
+    # CLI subprocesses, the same shape as the known xdist flakes in
+    # test_pipe_integration / test_geojson_stream / e2e/test_journeys. A flake
+    # here is fixed, not ignored.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -588,8 +588,9 @@ jobs:
     # server's flakiness is not something a PR author can fix, so this job is
     # non-blocking: the failing STEP is continue-on-error (workflow stays
     # green) and failures open/update a single tracking issue instead —
-    # mirroring the security-audit.yml pattern. It is intentionally NOT in the
-    # required-checks list.
+    # mirroring the security-audit.yml pattern. `all-checks` needs it, but a
+    # live-service failure leaves this job green; only a broken job (setup,
+    # cancellation) fails the gate.
     if: >-
       github.event_name == 'push' ||
       github.event_name == 'schedule' ||
@@ -780,3 +781,71 @@ jobs:
                 body: '✅ Network tests passing again. Closing automatically.'
               });
             }
+
+  all-checks:
+    # The one context the branch ruleset requires from this workflow (with
+    # pr-title from its own). It needs every other job here, so a job added to
+    # this file is a merge gate the moment it lands, without anyone editing the
+    # ruleset; tests/test_ci_wiring.py fails if a job is left out of `needs`.
+    # Before this, the ruleset named 13 contexts one by one and every job added
+    # since (embeddable-import, test-duckdb-2, docs-examples) was advisory.
+    #
+    # `if: always()` is load-bearing: without it a failed dependency SKIPS this
+    # job, and GitHub counts a skipped required check as passed. The step then
+    # fails on any failure or cancellation, and on a skip from every job except
+    # the two that are conditional by design (slow-tests, network-tests).
+    if: always()
+    needs:
+      - lint
+      - security
+      - embeddable-import
+      - test
+      - test-duckdb-2
+      - notebooks
+      - docs-examples
+      - slow-tests
+      - network-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail unless every needed job passed
+        env:
+          LINT: ${{ needs.lint.result }}
+          SECURITY: ${{ needs.security.result }}
+          EMBEDDABLE_IMPORT: ${{ needs.embeddable-import.result }}
+          TEST: ${{ needs.test.result }}
+          TEST_DUCKDB_2: ${{ needs.test-duckdb-2.result }}
+          NOTEBOOKS: ${{ needs.notebooks.result }}
+          DOCS_EXAMPLES: ${{ needs.docs-examples.result }}
+          SLOW_TESTS: ${{ needs.slow-tests.result }}
+          NETWORK_TESTS: ${{ needs.network-tests.result }}
+        run: |
+          failed=0
+          # check <job> <result> <skip-ok|required>
+          check() {
+            local job="$1" result="$2" mode="$3"
+            case "$result" in
+              success) ;;
+              skipped)
+                if [ "$mode" != skip-ok ]; then
+                  echo "::error::$job was skipped but is required"
+                  failed=1
+                fi
+                ;;
+              *)
+                echo "::error::$job finished with result '$result'"
+                failed=1
+                ;;
+            esac
+            echo "$job: $result"
+          }
+          check lint "$LINT" required
+          check security "$SECURITY" required
+          check embeddable-import "$EMBEDDABLE_IMPORT" required
+          check test "$TEST" required
+          check test-duckdb-2 "$TEST_DUCKDB_2" required
+          check notebooks "$NOTEBOOKS" required
+          check docs-examples "$DOCS_EXAMPLES" required
+          check slow-tests "$SLOW_TESTS" skip-ok
+          check network-tests "$NETWORK_TESTS" skip-ok
+          exit "$failed"
