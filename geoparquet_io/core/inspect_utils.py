@@ -29,7 +29,6 @@ from geoparquet_io.core.duckdb_metadata import (
     detect_geometry_columns,
     get_compression_info,
     get_file_metadata,
-    get_geo_metadata,
     get_row_count,
 )
 from geoparquet_io.core.duckdb_utils import (
@@ -45,7 +44,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geo_metadata import sanitize_geo_metadata
+from geoparquet_io.core.geo_metadata import sanitized_carried_geo_of_file
 from geoparquet_io.core.json_output import dumps_json, to_jsonable
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.metadata_utils import (
@@ -304,14 +303,13 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
     from geoparquet_io.core.duckdb_metadata import (
         detect_geometry_columns,
         get_aggregated_native_geo_stats,
-        get_geo_metadata,
         get_schema_info,
         parse_geometry_logical_type,
         resolve_crs_reference,
     )
 
     # Get metadata using DuckDB
-    geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file, con=con))
+    geo_meta = sanitized_carried_geo_of_file(parquet_file, con=con)
     schema_info = get_schema_info(parquet_file, con=con)
     geo_columns = detect_geometry_columns(parquet_file, con=con)
 
@@ -411,7 +409,7 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
 
     return {
         "parquet_type": parquet_type,
-        "has_geo_metadata": geo_meta is not None,
+        "has_geo_metadata": bool(geo_meta),
         "version": geoparquet_info.get("version"),
         "crs": effective_crs,
         "bbox": effective_bbox,
@@ -677,7 +675,7 @@ def get_preview_data(
         geo_columns = set(detect_geometry_columns(parquet_file).keys())
 
         # Also detect geometry columns from GeoParquet metadata
-        geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file))
+        geo_meta = sanitized_carried_geo_of_file(parquet_file)
         columns_meta = {}
         if geo_meta:
             columns_meta = geo_meta.get("columns", {})

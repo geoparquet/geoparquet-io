@@ -226,6 +226,34 @@ def test_needs_metadata_rewrite_for_2_0_reads_through_the_owner(metadata, expect
     assert needs_metadata_rewrite("2.0", metadata) is expected
 
 
+@pytest.mark.parametrize(
+    "args",
+    [["--geo", "--json"], ["--json"], []],
+    ids=["geo-json", "all-json", "all-terminal"],
+)
+def test_inspect_meta_of_a_bad_json_block_warns_with_the_path_and_reads_absent(
+    tmp_path, caplog, args
+):
+    """``inspect meta`` reads the block through the file-level carried reader:
+    an undecodable ``geo`` value warns once, naming the file, and the display
+    treats the block as absent (approved change 6 of #1367)."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    path = _parquet_with_geo(tmp_path / "trunc.parquet", b'{"version": ')
+    with caplog.at_level(logging.WARNING):
+        result = CliRunner().invoke(cli, ["inspect", "meta", path, *args])
+    assert result.exit_code == 0, result.output
+    messages = _malformed(caplog.records)
+    assert len(messages) == 1, messages
+    assert path in messages[0]
+    if args == ["--geo", "--json"]:
+        assert json.loads(result.stdout) is None
+    elif args == ["--json"]:
+        assert json.loads(result.stdout)["geoparquet_metadata"] is None
+
+
 # ---------------------------------------------------------------------------
 # The G1.geo_parse arm (tests/test_owner_guards.py) sees every spelling
 # ---------------------------------------------------------------------------
