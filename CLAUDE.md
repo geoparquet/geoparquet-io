@@ -275,7 +275,7 @@ lane, and locally they time out and read as a flaky docs lane.
 
 | Stage | Hooks |
 |-------|-------|
-| commit | ruff, ruff-format, codespell, actionlint, zizmor, duckdb-antipatterns, no-click-echo, forbid-bespoke-schema-reconciliation, no-cwd-change-in-tests, check-api-for-cli, validate-claude-md, doc-sync, sync-dependencies (plus the stock whitespace/YAML/TOML/merge-conflict checks) |
+| commit | ruff, ruff-format, codespell, actionlint, zizmor, duckdb-antipatterns, no-click-echo, owner-only-defs, no-cwd-change-in-tests, check-api-for-cli, validate-claude-md, doc-sync, sync-dependencies (plus the stock whitespace/YAML/TOML/merge-conflict checks) |
 | commit-msg | commitizen |
 | pre-push | xenon (complexity), import-linter, deptry, vulture, mypy, menard-check, fast-tests |
 
