@@ -26,6 +26,10 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.duckdb_utils import (
     _DuckDBSchemaWrapper,
+    _get_query_column_type,
+    _get_query_columns,
+    _strip_trailing_order_by,
+    computed_column_query,
     fetch_one,
     get_duckdb_connection,
     load_community_extension,
@@ -145,7 +149,6 @@ def add_computed_column(
     *,
     from_clause: str | None = None,
     connection_setup=None,
-    dry_run_details=None,
     report_count: bool = True,
     progress_message: str | None = None,
 ):
@@ -163,7 +166,6 @@ def add_computed_column(
         replace_column: Existing column to exclude from the SELECT
         from_clause: Optional SQL source, including reader options
         connection_setup: Optional callable(con) loading computation dependencies
-        dry_run_details: Optional callable printing a specialized preview
         report_count: Report the input feature count before writing
         progress_message: Optional computation-specific progress message
         memory_limit: DuckDB write limit; None auto-detects available memory
@@ -188,9 +190,6 @@ def add_computed_column(
         info(f"-- New column: {column_name}")
         if dry_run_description:
             info(f"-- Description: {dry_run_description}")
-        if dry_run_details is not None:
-            dry_run_details()
-            return
         progress("")
 
     # Check if column already exists (skip in dry-run or when replacing)
@@ -229,24 +228,7 @@ def add_computed_column(
         total_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM {source}"))[0]
         progress(f"Processing {total_count:,} features...")
 
-    # Quote column name to handle special characters (e.g., colons in "metrics:area")
-    quoted_col = quote_identifier(column_name)
-
-    # Use EXCLUDE to drop existing column when replacing
-    if replace_column:
-        query = f"""
-        SELECT
-            * EXCLUDE ({quote_identifier(replace_column)}),
-            {sql_expression} AS {quoted_col}
-        FROM {source}
-    """
-    else:
-        query = f"""
-        SELECT
-            *,
-            {sql_expression} AS {quoted_col}
-        FROM {source}
-    """
+    query = computed_column_query(source, column_name, sql_expression, replace_column)
 
     # Handle dry-run display
     if dry_run:
@@ -257,7 +239,11 @@ def add_computed_column(
         info("-- Main query:")
         print_copy_dry_run(query, output_parquet, compression, compression_level, rows)
         info("-- This query creates a new parquet file with the computed column added")
-        info("-- The covering metadata is updated only if the output has a bbox column")
+        covering = (custom_metadata or {}).get("covering")
+        if covering:
+            info(f"-- The covering metadata is set to: {covering}")
+        else:
+            info("-- The covering metadata is updated only if the output has a bbox column")
         con.close()
         return
 

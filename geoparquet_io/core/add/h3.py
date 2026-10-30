@@ -54,6 +54,8 @@ SPEC = IndexSpec(
     longitude_first=False,
     default_resolution=9,
     label="H3",
+    # H3 string cell ids are 15 hex chars (e.g. "85283473fffffff").
+    cell_pattern=r"^[0-9a-fA-F]{15}$",
     column_option="--h3-name",
 )
 from geoparquet_io.core.write_funnels import collect_nonplanar_edges

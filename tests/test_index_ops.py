@@ -33,7 +33,7 @@ def test_index_workflows_have_one_owner():
             streaming_copy = node.name == "make_query" and any(
                 isinstance(child, ast.Name)
                 and (
-                    child.id == "make_index_query"
+                    child.id == "computed_column_query"
                     or child.id
                     in {f"_make_add_{name}_query" for name in ("h3", "a5", "s2", "quadkey")}
                 )

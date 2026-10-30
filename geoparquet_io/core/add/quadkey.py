@@ -153,7 +153,6 @@ SPEC = IndexSpec(
     coerce_resolution=True,
     display_unit="zoom level",
     multiple_files=True,
-    preview_sql=False,
     report_count=False,
 )
 

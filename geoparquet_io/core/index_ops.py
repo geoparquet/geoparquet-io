@@ -87,8 +87,11 @@ class IndexSpec:
     column_option: str = ""
     display_unit: str = ""
     multiple_files: bool = False
-    preview_sql: bool = True
     report_count: bool = True
+    # How a written cell id is stored: an integer type, or a string matching
+    # ``cell_pattern`` (a grid index's cell column, as overview detection reads it).
+    cell_integer: bool = False
+    cell_pattern: str = ""
 
     @property
     def bounds_text(self) -> str:
@@ -195,13 +198,6 @@ def add_index_table(spec, table, column_name, resolution, geometry_column=None, 
         con.close()
 
 
-def make_index_query(
-    spec, source, geometry_column, column_name, resolution, source_crs=None, bbox_col=None
-):
-    expression = index_expression(spec, geometry_column, resolution, source_crs, bbox_col)
-    return f"SELECT *, {expression} AS {quote_identifier(column_name)} FROM {source}"
-
-
 @uses_aws_profile
 def add_index_column(
     spec,
@@ -265,10 +261,10 @@ def add_index_column(
                 info(f"Tip: {suggestion}")
     from geoparquet_io.core.common import add_computed_column
 
-    def preview_details():
-        info(f"-- Resolution ({spec.display_unit or spec.unit}): {resolution}")
-        info(f"-- Calculation method: {'bbox midpoint' if bbox_col else 'geometry centroid'}")
-
+    description = f"{spec.label} cell ID at {spec.unit} {resolution} (~{spec.size(resolution)})"
+    if spec.bbox_midpoint:
+        method = "bbox midpoint" if bbox_col else "geometry centroid"
+        description += f"\n-- Calculation method: {method}"
     source = _index_from_clause(input_path, allow_schema_diff, hive_input)
     add_computed_column(
         input_parquet,
@@ -287,12 +283,7 @@ def add_index_column(
         custom_metadata={"covering": {spec.name: {"column": column_name, spec.unit: resolution}}},
         from_clause=source,
         connection_setup=lambda con: load_index(con, spec, verbose=verbose),
-        dry_run_description=(
-            f"{spec.label} cell ID at {spec.unit} {resolution} (~{spec.size(resolution)})"
-            if spec.preview_sql
-            else None
-        ),
-        dry_run_details=None if spec.preview_sql else preview_details,
+        dry_run_description=description,
         report_count=spec.report_count,
         progress_message=f"Adding {spec.label} column '{column_name}' ({spec.display_unit or spec.unit} {resolution})...",
     )
@@ -320,6 +311,7 @@ def add_index_streaming(
     use_centroid=False,
 ):
     """Build the index query through the shared streaming driver."""
+    from geoparquet_io.core.duckdb_utils import computed_column_query
     from geoparquet_io.core.stream_io import execute_transform
 
     validate_index_resolution(spec, resolution)
@@ -341,8 +333,10 @@ def add_index_streaming(
         )
         schema = schema.replace_schema_metadata(metadata)
         bbox_col = table_bbox_column(spec, schema, source_crs, use_centroid)
-        return make_index_query(
-            spec, source, geom_col, column_name, resolution, source_crs, bbox_col
+        return computed_column_query(
+            source,
+            column_name,
+            index_expression(spec, geom_col, resolution, source_crs, bbox_col),
         )
 
     execute_transform(

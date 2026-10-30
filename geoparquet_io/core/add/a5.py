@@ -69,6 +69,7 @@ SPEC = IndexSpec(
     longitude_first=True,
     default_resolution=15,
     label="A5",
+    cell_integer=True,
     column_option="--a5-name",
 )
 from geoparquet_io.core.write_funnels import collect_nonplanar_edges

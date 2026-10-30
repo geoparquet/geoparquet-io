@@ -57,8 +57,6 @@ _INTEGER_TYPES = {
     "UINTEGER",
     "UBIGINT",
 }
-# H3 string cell ids are 15 hex chars (e.g. "85283473fffffff").
-_H3_STRING_RE = re.compile(r"^[0-9a-fA-F]{15}$")
 
 
 @dataclass(frozen=True)
@@ -127,36 +125,48 @@ def _detect_scheme(
                 "cell_column", f"column '{cell_column}' not found in the input"
             )
         return cell_column, _scheme_for_column(con, relation, cell_column, columns[cell_column])
-    if "a5_cell" in columns and columns["a5_cell"] in _INTEGER_TYPES:
-        return "a5_cell", "a5"
-    if "h3_cell" in columns and columns["h3_cell"] == "VARCHAR":
-        return "h3_cell", "h3"
-    if "admin_code" in columns:
-        return "admin_code", ADMIN_SCHEME
+    for name, grid in GRID_SCHEMES.items():
+        dtype = columns.get(grid.default_column)
+        if dtype is not None and _stores_cells(grid.spec, dtype):
+            return grid.default_column, name
+    admin_column = DEFAULT_CELL_COLUMNS[ADMIN_SCHEME]
+    if admin_column in columns:
+        return admin_column, ADMIN_SCHEME
+    expected = ", ".join([*(g.default_column for g in GRID_SCHEMES.values()), admin_column])
+    expected = expected.replace(", " + admin_column, ", or " + admin_column)
     raise InvalidParameterError(
         "input",
-        "no aggregate cell column found (expected a5_cell, h3_cell, or admin_code). "
+        f"no aggregate cell column found (expected {expected}). "
         "Is this a `gpio process aggregate` output? Pass --cell-column to override.",
     )
+
+
+def _stores_cells(spec, dtype: str) -> bool:
+    """Whether a column of ``dtype`` can hold this grid index's cell ids."""
+    return dtype in _INTEGER_TYPES if spec.cell_integer else dtype == "VARCHAR"
 
 
 def _scheme_for_column(con, relation: str, name: str, dtype: str) -> str:
     """Infer the scheme for an explicitly named cell column."""
     if dtype in _INTEGER_TYPES:
-        if "a5" in name.lower():
-            return "a5"
+        for scheme_name, grid in GRID_SCHEMES.items():
+            if grid.spec.cell_integer and scheme_name in name.lower():
+                return scheme_name
         # a5 ids and packed H3 ids are both integers; guessing a5 here would
         # silently roll H3 data up the wrong hierarchy.
+        flags = " or ".join(f"--scheme {n}" for n in GRID_SCHEMES)
         raise InvalidParameterError(
             "cell_column",
             f"cannot infer a grid scheme for integer column '{name}' "
             "(a5 and packed H3 ids are both stored as integers). "
-            "Pass --scheme a5 or --scheme h3 to disambiguate.",
+            f"Pass {flags} to disambiguate.",
         )
     qcol = quote_identifier(name)
     row = fetch_row(con, f"SELECT {qcol} FROM {relation} WHERE {qcol} IS NOT NULL LIMIT 1")
-    if row and isinstance(row[0], str) and _H3_STRING_RE.match(row[0]):
-        return "h3"
+    if row and isinstance(row[0], str):
+        for scheme_name, grid in GRID_SCHEMES.items():
+            if grid.spec.cell_pattern and re.match(grid.spec.cell_pattern, row[0]):
+                return scheme_name
     return ADMIN_SCHEME
 
 

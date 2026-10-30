@@ -1298,3 +1298,56 @@ def test_table_overview_api(tmp_path):
     assert "sum_area" in result.column_names
     base_count = sum(pq.read_table(base).column("count").to_pylist())
     assert sum(result.to_arrow().column("count").to_pylist()) == base_count
+
+
+class TestGridDetectionThroughSpec:
+    """Auto-detection reads each grid scheme's column and storage from its spec (#1367)."""
+
+    def _renamed(self, monkeypatch):
+        import dataclasses
+
+        from geoparquet_io.core.process.overview import detect
+
+        renamed = {
+            name: dataclasses.replace(scheme, default_column=f"my_{name}_ids")
+            for name, scheme in detect.GRID_SCHEMES.items()
+        }
+        monkeypatch.setattr(detect, "GRID_SCHEMES", renamed)
+        monkeypatch.setattr(
+            detect,
+            "DEFAULT_CELL_COLUMNS",
+            {**detect.DEFAULT_CELL_COLUMNS} | {n: s.default_column for n, s in renamed.items()},
+        )
+
+    def test_h3_string_column_with_renamed_default(self, monkeypatch):
+        import duckdb as _duckdb
+
+        from geoparquet_io.core.process.overview.detect import _detect_scheme
+
+        self._renamed(monkeypatch)
+        con = _duckdb.connect()
+        columns = {"my_h3_ids": "VARCHAR", "count": "BIGINT"}
+        assert _detect_scheme(con, "t", columns, None) == ("my_h3_ids", "h3")
+        con.close()
+
+    def test_a5_integer_column_with_renamed_default(self, monkeypatch):
+        import duckdb as _duckdb
+
+        from geoparquet_io.core.process.overview.detect import _detect_scheme
+
+        self._renamed(monkeypatch)
+        con = _duckdb.connect()
+        columns = {"my_a5_ids": "UBIGINT", "count": "BIGINT"}
+        assert _detect_scheme(con, "t", columns, None) == ("my_a5_ids", "a5")
+        con.close()
+
+    def test_wrong_storage_is_not_detected(self, monkeypatch):
+        import duckdb as _duckdb
+
+        from geoparquet_io.core.process.overview.detect import _detect_scheme
+
+        self._renamed(monkeypatch)
+        con = _duckdb.connect()
+        with pytest.raises(InvalidParameterError, match="no aggregate cell column"):
+            _detect_scheme(con, "t", {"my_a5_ids": "VARCHAR", "my_h3_ids": "UBIGINT"}, None)
+        con.close()

@@ -2704,3 +2704,26 @@ def planar_view(table, name: str = "table", columns: Iterable[str] | None = None
     """
     view, fields = _planar_view(table, columns)
     return view, RegisteredArrow(name, fields)
+
+
+def computed_column_query(source, column_name, sql_expression, replace_column=None):
+    """The SELECT that adds (or replaces) one computed column on ``source``.
+
+    ``source`` is a SQL-ready relation. The column name is quoted here (it may
+    hold colons, as in ``metrics:area``), and ``replace_column`` is dropped with
+    EXCLUDE so the new column takes its place.
+    """
+    quoted_col = quote_identifier(column_name)
+    if replace_column:
+        return f"""
+        SELECT
+            * EXCLUDE ({quote_identifier(replace_column)}),
+            {sql_expression} AS {quoted_col}
+        FROM {source}
+    """
+    return f"""
+        SELECT
+            *,
+            {sql_expression} AS {quoted_col}
+        FROM {source}
+    """
