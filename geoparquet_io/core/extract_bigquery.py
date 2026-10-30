@@ -284,6 +284,23 @@ def _setup_bigquery_connection() -> duckdb.DuckDBPyConnection:
         raise
 
 
+def _googlesql_string(value: str) -> str:
+    """Quote a RAW value as a **GoogleSQL** single-quoted string literal.
+
+    The string-literal twin of :func:`_quote_bigquery_identifier`: GoogleSQL
+    backslash-escapes inside quotes, so a backslash and the delimiter are
+    escaped with a backslash (DuckDB's ``''`` doubling would end the string).
+    For SQL that BigQuery runs, never for DuckDB SQL.
+
+    Raises:
+        ValueError: If the value contains a NUL byte.
+    """
+    if "\x00" in value:
+        raise ValueError(f"GoogleSQL string contains a NUL byte: {value!r}")
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
 def _get_table_row_count(
     con: duckdb.DuckDBPyConnection,
     table_id: str,
@@ -313,20 +330,16 @@ def _get_table_row_count(
         else:
             return None
 
-        # Build metadata query using __TABLES__
-        if project:
-            metadata_table = f"`{project}.{dataset}.__TABLES__`"
-            query_project = project
-        else:
-            metadata_table = f"`{dataset}.__TABLES__`"
-            query_project = ""
-
-        query = f"""
-        SELECT * FROM bigquery_query(
-            '{query_project}',
-            'SELECT row_count FROM {metadata_table} WHERE table_id = "{table}"'
+        # Build metadata query using __TABLES__. The GoogleSQL quotes the
+        # dataset path as a backtick identifier and the table as a GoogleSQL
+        # string; _bigquery_query_relation then escapes the whole statement
+        # once into the DuckDB literal.
+        path = f"{project}.{dataset}.__TABLES__" if project else f"{dataset}.__TABLES__"
+        googlesql = (
+            f"SELECT row_count FROM {_quote_bigquery_identifier(path)} "
+            f"WHERE table_id = {_googlesql_string(table)}"
         )
-        """
+        query = f"SELECT * FROM {_bigquery_query_relation(project or '', googlesql)}"
         result = fetch_one(con.execute(query))
         return result[0] if result else None
     except Exception:

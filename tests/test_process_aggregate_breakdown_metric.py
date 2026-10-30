@@ -18,7 +18,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.duckdb_utils import fetch_one, sql_literal
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.process.aggregate import by_admin
 from geoparquet_io.core.process.aggregate.common import (
@@ -27,7 +27,6 @@ from geoparquet_io.core.process.aggregate.common import (
     build_breakdown_pivot,
     parse_breakdown_metric,
     parse_metrics,
-    sql_literal,
     validate_agg_columns,
     validate_breakdown_metric,
     validate_metric_nodata,

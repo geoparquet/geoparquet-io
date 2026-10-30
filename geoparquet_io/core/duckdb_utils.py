@@ -270,6 +270,30 @@ def _escape_sql_string(value: str) -> str:
     return value.replace("'", "''")
 
 
+def sql_literal(value: object) -> str:
+    """Render a Python value as a DuckDB SQL literal -- the one value-literal builder.
+
+    - ``bool`` -> ``TRUE``/``FALSE``; ``int`` -> its digits.
+    - ``float`` -> an explicit DOUBLE: a bare ``0.699999988079071`` is typed
+      DECIMAL by DuckDB and never equals the REAL column it came from, and
+      ``nan``/``inf`` need the cast to be literals at all.
+    - anything else -> ``str(value)`` as a single-quoted string, escaped by
+      :func:`_escape_sql_string`. A NUL byte is spliced in as ``chr(0)``:
+      DuckDB 1.5's lexer ends a quoted string at a NUL ("unterminated quoted
+      string"), while 2.0 accepts it; the splice reads the same on both.
+    """
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return f"CAST('{value!r}' AS DOUBLE)"
+    text = _escape_sql_string(str(value))
+    if "\x00" in text:
+        return " || chr(0) || ".join(f"'{piece}'" for piece in text.split("\x00"))
+    return f"'{text}'"
+
+
 _SETTING_KEY_RE = re.compile(r"[a-z_]+")
 
 

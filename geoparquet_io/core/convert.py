@@ -932,12 +932,11 @@ def _try_detect_wkt_column(con, csv_read, col_names_lower):
     for candidate in wkt_candidates:
         if candidate in col_names_lower:
             actual_col = col_names_lower[candidate]
+            q_col = quote_identifier(actual_col)
             try:
                 # Validate by trying to parse sample row
                 sample = fetch_one(
-                    con.execute(
-                        f"SELECT {actual_col} FROM {csv_read} WHERE {actual_col} IS NOT NULL LIMIT 1"
-                    )
+                    con.execute(f"SELECT {q_col} FROM {csv_read} WHERE {q_col} IS NOT NULL LIMIT 1")
                 )
                 if sample and sample[0]:
                     # Validate WKT by parsing it — no fetchone, which would hit
