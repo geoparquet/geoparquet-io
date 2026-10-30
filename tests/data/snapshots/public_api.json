@@ -87,6 +87,7 @@
     "DEFAULT_KDTREE_TARGET_ROWS",
     "ErrorBoundaryGroup",
     "GlobAwareCommand",
+    "ParquetInputCommand",
     "SingleFileCommand",
     "aggregate_memory_option",
     "allow_schema_diff_option",

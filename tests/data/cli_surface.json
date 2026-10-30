@@ -7752,7 +7752,7 @@
    "class": "_DefaultGroup",
    "commands": {
     "head": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -7928,7 +7928,7 @@
      ]
     },
     "meta": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -8064,7 +8064,7 @@
      ]
     },
     "stats": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -8136,7 +8136,7 @@
      ]
     },
     "summary": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -8224,7 +8224,7 @@
      ]
     },
     "tail": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
