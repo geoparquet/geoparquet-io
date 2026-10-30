@@ -28,6 +28,8 @@ REPORTERS = {"echo", "print", "ClickException", "BadParameter", "UsageError", "c
 #: Parameter names / annotations that mean "this function was handed an exception".
 EXCEPTION_PARAMS = {"e", "exc", "err", "error", "exception"}
 EXCEPTION_ANNOTATIONS = {"Exception", "BaseException"}
+#: Attributes of a gpio error that its constructor already cleaned.
+CLEAN_ATTRS = {"reason", "message"}
 OWNERS = {"core/exceptions.py", "cli/exception_handler.py"}
 # `type(e)` names a class, not text the exception carries.
 SANITIZERS = {
@@ -55,11 +57,20 @@ def _call_name(call: ast.Call) -> str | None:
 
 
 def _wrapped(arg: ast.AST) -> ast.AST:
-    """The argument with every ``sanitize_*`` call subtree removed."""
+    """The argument with every cleaned subtree removed.
+
+    Cleaned: a ``sanitize_*`` / ``clean_error_text`` call, and the ``.reason`` /
+    ``.message`` of a gpio error, which ``GeoParquetError`` cleans at construction.
+    """
 
     class _Strip(ast.NodeTransformer):
         def visit_Call(self, node):  # noqa: N802
             if _call_name(node) in SANITIZERS:
+                return ast.Constant(value="")
+            return self.generic_visit(node)
+
+        def visit_Attribute(self, node):  # noqa: N802
+            if node.attr in CLEAN_ATTRS:
                 return ast.Constant(value="")
             return self.generic_visit(node)
 
@@ -156,6 +167,13 @@ def test_the_detector_flags_a_click_error_built_from_an_exception_argument():
     assert unsanitized_reports(by_name) == [("to_click", 2)]
     assert unsanitized_reports(by_annotation) == [("to_click", 2)]
     assert unsanitized_reports(clean) == []
+
+
+def test_the_detector_trusts_a_gpio_errors_cleaned_attributes():
+    ok = "def f(exc):\n    return click.BadParameter(exc.reason)\n"
+    still_raw = "def f(exc):\n    return click.BadParameter(str(exc))\n"
+    assert unsanitized_reports(ok) == []
+    assert unsanitized_reports(still_raw) == [("f", 2)]
 
 
 def test_the_detector_flags_could_not_run_fed_a_raw_exception():
