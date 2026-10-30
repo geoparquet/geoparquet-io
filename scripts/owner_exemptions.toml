@@ -582,7 +582,7 @@ pair = "geoparquet_io/cli/commands/partition.py:partition_h3|geoparquet_io/cli/c
 reason = "partition h3/s2/a5 CLI commands, one per index; T5b shares one implementation"
 [[G3.pairs]]
 pair = "geoparquet_io/cli/commands/publish.py:_check_output_stac_collection|geoparquet_io/cli/commands/publish.py:_check_output_stac_item"
-reason = "STAC item/collection output checks, one per kind; T5c"
+reason = "STAC item/collection output-overwrite checks, one per kind; T2e (owner file_utils.handle_output_overwrite)"
 [[G3.pairs]]
 pair = "geoparquet_io/core/add/a5.py:_add_a5_streaming.make_query|geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query"
 reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
@@ -727,7 +727,7 @@ block = "core.add.admin_divisions:_execute_per_level_joins|core.str_order:_str_o
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
 block = "core.add.admin_divisions:_setup_duckdb_connection|core.partition.admin_hierarchical:_setup_admin_join_connection"
-reason = "two admin-join connections (cache spill dir, threads=1, preserve_insertion_order, memory policy); T1d"
+reason = "two admin-join connections (cache spill dir, threads=1, preserve_insertion_order, memory policy); T1d/T1e"
 [[G3.pylint]]
 block = "core.add.admin_divisions:add_admin_divisions_multi|core.add.country_codes:add_country_codes"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
