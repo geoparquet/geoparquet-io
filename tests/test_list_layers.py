@@ -381,9 +381,9 @@ class TestListLayersEdgeCases:
     def test_relative_path_normalized(self, multilayer_gpkg):
         """Relative paths should be handled correctly."""
         # Exercise relative-path handling WITHOUT changing the process CWD.
-        # Changing CWD breaks mutmut's stats-phase trampoline, which resolves
-        # the relative source_paths (geoparquet_io/) against the working
-        # directory on every instrumented call.
+        # xdist workers share one process CWD per worker, so a test that
+        # changes it leaks into every test that runs after it on that worker
+        # (see the no-cwd-change-in-tests hook in .pre-commit-config.yaml).
         relative_path = os.path.relpath(multilayer_gpkg)
         assert not os.path.isabs(relative_path)
         result = list_layers_core(relative_path)

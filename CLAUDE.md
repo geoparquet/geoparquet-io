@@ -243,11 +243,11 @@ echoes together (policy: ADR-0006). The diff-cover gate is passed
 `--branch-coverage`, so a partial branch on a changed line counts as
 uncovered there too.
 
-The `meta` lane (codespell, commitizen, doc-sync, mutmut, mypy,
-validate-claude-md, security tool checks) is excluded from the fast suite and
-runs in the slow/nightly job instead. Pre-commit covers most of it locally, but
-not all: commitizen is a `commit-msg`-stage hook and mutmut has no hook, so
-`uv run pytest -m meta` is the only local way to check those two.
+The `meta` lane (codespell, commitizen, doc-sync, mypy, validate-claude-md,
+security tool checks) is excluded from the fast suite and runs in the
+slow/nightly job instead. Pre-commit covers most of it locally, but not all:
+commitizen is a `commit-msg`-stage hook, so `uv run pytest -m meta` is the only
+local way to check it.
 
 <!-- BEGIN GENERATED: test-markers -->
 ### Test Markers

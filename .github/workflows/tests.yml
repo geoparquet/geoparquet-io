@@ -546,7 +546,7 @@ jobs:
             || '--no-cov' }}
         run: |
           # The selection is "(slow or meta) and not network". `meta` is the
-          # repo-tooling lane (codespell, commitizen, doc-sync, mutmut, mypy,
+          # repo-tooling lane (codespell, commitizen, doc-sync, mypy,
           # validate-claude-md, the security-tool availability checks). Those
           # are excluded from the fast suite -- they spawn subprocesses and
           # caused its only flakes -- so this job is where they still run.

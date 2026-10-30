@@ -97,12 +97,11 @@ CI runs four test tiers:
 - **Slow tests** (`(slow or meta) and not network`) — run after merge to main
   and nightly; opt in on a PR by adding the `run-slow-tests` label. This tier
   also carries the `meta` lane: repo-tooling checks (codespell, commitizen,
-  doc-sync, mutmut, mypy, validate-claude-md, security tool availability) that
-  shell out to subprocesses. Most re-check something the lint job already runs
-  via pre-commit, so `uv run pytest -m meta` is mainly for when you skip
+  doc-sync, mypy, validate-claude-md, security tool availability) that shell
+  out to subprocesses. Most re-check something the lint job already runs via
+  pre-commit, so `uv run pytest -m meta` is mainly for when you skip
   pre-commit — except commitizen (a `commit-msg`-stage hook, which
-  `pre-commit run --all-files` never runs) and mutmut (no hook at all), where
-  it is the only local check.
+  `pre-commit run --all-files` never runs), where it is the only local check.
 - **Network tests** (`network`) — hit live third-party services (ArcGIS, WFS,
   Carto, ...). They are **non-blocking**: failures open/update a tracking issue
   instead of failing CI, because a remote server's behavior is not something a
@@ -167,13 +166,11 @@ uv run pre-commit run --all-files --hook-stage pre-push  # deptry, vulture,
                                                          # import-linter, menard
 ```
 
-Two ratchet/ignore files gate quality over time:
+One ignore file gates quality over time:
 
 - `.pip-audit-ignores` — self-expiring CVE ignore list shared by the CI
   security job and the daily security audit. Each entry needs an expiry date
   and a reason; expired entries automatically re-fail CI.
-- `.mutation-baseline` — minimum mutation kill rate enforced by the nightly
-  mutation-testing run. Ratchet it up as test quality improves.
 
 ## How the CI is set up (and why)
 
@@ -185,13 +182,11 @@ rules as GitHub rulesets, and an admin re-runs it whenever the list changes.
 If your PR is blocked on a check, that's the system working as intended:
 fix the check.
 
-Two heavier gates exist but don't run on every PR, so they won't slow down
+One heavier gate exists but doesn't run on every PR, so it won't slow down
 day-to-day contributions:
 
 - **Benchmark regression** — label-triggered; fails if performance drops
   10% or more against the baseline.
-- **Mutation testing** — nightly; enforces the kill-rate floor in
-  `.mutation-baseline`.
 
 The repository also maintains itself where it can:
 
