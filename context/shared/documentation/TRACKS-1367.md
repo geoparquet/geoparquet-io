@@ -84,3 +84,4 @@ scope per the ticket (perf; the spatial-order heuristic #618/#755/#774).
 |---|---|
 | 2026-10-30 | Integration branch cut from origin/main @ 3185269f; eight worktrees created; hooks installed. |
 | 2026-10-30 | Draft PR #1372 opened. Launched T0a (Opus, t0), T0d (Opus, t0h: G7/G8/G9 + byte-identity harness), T1a (Opus, t1), T4a (Sonnet, t4), Codex Sol duplicate scan (read-only). |
+| 2026-10-30 | T0a merged (#1373). T4a PR #1374 open: verifier + consolidation auditor running (dedicated worktrees `verify`, `audit`). Launched T0b (Opus, t0 on `defrag/1367-t0b-guards`), T4b (Sonnet, t4 on `defrag/1367-t4b-errors`, stacked on T4a). Environment fix: geopandas/pyogrio installed in every venv; pytest runs with `env -u AWS_PROFILE -u AWS_REGION`. |
