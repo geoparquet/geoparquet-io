@@ -562,8 +562,8 @@ fields = ["type", "default"]
 reason = "permanent: per-index bounds and defaults (H3 0-15, A5 0-30, quadkey 0-23; partition/aggregate None = auto); T5b's index specs carry them"
 [[G13.options]]
 option = "--timeout"
-fields = ["type", "default"]
-reason = "T5c: one --timeout type (arcgis FloatRange, carto IntRange); the 60 s and 120 s defaults are per-service budgets the T4a audit accepted"
+fields = ["default"]
+reason = "permanent: one type since T5c (cli.decorators.timeout_option); the 60 s (arcgis) and 120 s (carto) defaults are per-service budgets the T4a audit accepted"
 [[G13.options]]
 option = "--where"
 fields = ["default"]

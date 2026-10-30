@@ -123,6 +123,7 @@
     "show_sql_option",
     "spatial_filter_options",
     "strict_option",
+    "timeout_option",
     "verbose_option",
     "where_option",
     "write_memory_option",

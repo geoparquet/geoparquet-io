@@ -30,6 +30,7 @@ from geoparquet_io.cli.decorators import (
     repair_geometry_option,
     row_group_options,
     show_sql_option,
+    timeout_option,
     verbose_option,
     write_strategy_option,
 )
@@ -331,9 +332,7 @@ def extract_geoparquet(
     default=None,
     help="Features per request. Default: server's maxRecordCount. A page the server refuses (a generic JSON error 500, an HTML error page or a persistent HTTP 500/502/504) is retried at the same offset with a smaller size, which then sticks. Start smaller for layers with complex geometries.",
 )
-@click.option(
-    "--timeout",
-    type=click.FloatRange(min=0, min_open=True),
+@timeout_option(
     default=DEFAULT_TIMEOUT,
     show_default=True,
     help="Per-request HTTP timeout in seconds. Increase for layers with very large or complex geometries that the server is slow to serialize.",
@@ -1153,9 +1152,7 @@ def extract_wfs_cmd(
     "--exclude-cols",
     help="Comma-separated columns to exclude",
 )
-@click.option(
-    "--timeout",
-    type=click.IntRange(1, 3600),
+@timeout_option(
     default=CARTO_REQUEST_TIMEOUT,
     help=f"Request timeout in seconds (default: {CARTO_REQUEST_TIMEOUT})",
 )

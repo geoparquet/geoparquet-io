@@ -449,6 +449,20 @@ def limit_option(*, help: str):
     return click.option("--limit", type=click.IntRange(0, None), help=help)
 
 
+def timeout_option(*, default: float, help: str, show_default: bool = False):
+    """``--timeout``: per-request seconds for a service extract, any positive number.
+
+    The default is the caller's: each service has its own budget (#1367 G13).
+    """
+    return click.option(
+        "--timeout",
+        type=click.FloatRange(min=0, min_open=True),
+        default=default,
+        show_default=show_default,
+        help=help,
+    )
+
+
 def strict_option(func):
     """
     Add --strict option to a ``check`` command.

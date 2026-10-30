@@ -6834,7 +6834,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "integer range[min=1,max=3600,min_open=False,max_open=False,clamp=False]"
+       "type": "float range[min=0,max=None,min_open=True,max_open=False,clamp=False]"
       },
       {
        "default": "<unset>",
