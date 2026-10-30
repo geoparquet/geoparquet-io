@@ -181,22 +181,10 @@ reason = "parses a geo key it fetched one or two assignments earlier, not via th
 path = "geoparquet_io/core/write_funnels.py"
 name = "_read_geo_key"
 reason = "parses a geo key it fetched one or two assignments earlier, not via the owner (T3a; T3e composes the caller)"
-[[G1.set_memory_limit]]
-path = "geoparquet_io/core/extract_bigquery.py"
-name = "_execute_bigquery_extraction"
-reason = "the BigQuery SET: a second memory ceiling beside memory_limits (T1)"
 [[G1.sql_escape]]
 path = "geoparquet_io/core/process/aggregate/common.py"
 name = "sql_literal"
 reason = "hand-rolled string-literal escape (#1101 class); use _escape_sql_string (T1)"
-[[G1.duckdb_version]]
-path = "geoparquet_io/core/benchmark.py"
-name = "get_environment_info"
-reason = "records the DuckDB version in a benchmark report; not a gate"
-[[G1.duckdb_version]]
-path = "geoparquet_io/core/geojson_stream.py"
-name = "_native_geojson_writer_available"
-reason = "private DuckDB-2.0 gate (#1357/#1358/#1360 class); removed by T1a"
 # HTTP retry policy: core/http_retry.py owns attempts, delay, timeout, statuses and Retry-After.
 [[G1.retry_param_defaults]]
 path = "geoparquet_io/api/table.py"
@@ -414,13 +402,21 @@ reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 "_align*schema" = ["geoparquet_io/core/arrow_types.py"]
 "_unify*schema" = ["geoparquet_io/core/arrow_types.py"]
 "_reconcile*schema" = ["geoparquet_io/core/arrow_types.py"]
+# Owners T1a/T1b (#1375) created: DuckDB capability and connection plumbing in
+# duckdb_utils, the memory-limit display in sizing.
+"duckdb_capabilities" = ["geoparquet_io/core/duckdb_utils.py"]
+"complete_without_fetch" = ["geoparquet_io/core/duckdb_utils.py"]
+"resolve_load_spatial" = ["geoparquet_io/core/duckdb_utils.py"]
+"_apply_memory_limit" = ["geoparquet_io/core/duckdb_utils.py"]
+"pin_duckdb_settings" = ["geoparquet_io/core/duckdb_utils.py"]
+"format_memory_limit" = ["geoparquet_io/core/sizing.py"]
+"nudged_size" = ["geoparquet_io/core/sizing.py"]
 
 # Renamed copies no glob sees, by the family they belong to (the #1367
 # Copies rows and the T0b audit). Each is also an exemption below.
 [G2.known_copies]
 "resolve_*version*" = ["_detect_version_from_table", "extract_version_from_metadata", "detect_version_for_output"]
 "*crs_equal*" = ["_crs_are_equivalent", "_crs_matches"]
-"format_size*" = ["_format_memory_limit"]
 "*unique_name*" = ["free_column_name", "_suffixed_to_unique"]
 "parse_bbox" = ["_normalize_bbox", "_validated_bbox"]
 
@@ -517,14 +513,6 @@ reason = "re-derives the DEFAULT_GEOPARQUET_VERSION fallback beside the owner ca
 path = "geoparquet_io/core/inspect_utils.py"
 name = "_crs_are_equivalent"
 reason = "CRS equality copy (approved change 9); T4c"
-[[G2.exemptions]]
-path = "geoparquet_io/core/memory_limits.py"
-name = "parse_size"
-reason = "size parser copy (approved change 5); T1b"
-[[G2.exemptions]]
-path = "geoparquet_io/core/memory_limits.py"
-name = "_format_memory_limit"
-reason = "size formatter copy (approved change 5); T1b deletes it (entry goes with it)"
 [[G2.exemptions]]
 path = "geoparquet_io/core/partition/by_a5.py"
 name = "_ensure_a5_column"

@@ -66,7 +66,6 @@ supports_remote  # unused variable (geoparquet_io/core/write_strategies/duckdb_k
 __dir__  # unused function (geoparquet_io/__init__.py:90) -- dynamic: PEP 562 module hook / module class swap
 reset_crs_disagreement_warnings  # unused function (geoparquet_io/core/crs_utils.py:1128) -- dynamic: test seam that resets module state between tests
 reset_malformed_geo_warnings  # unused function (geoparquet_io/core/geo_metadata.py:217) -- dynamic: test seam that resets module state between tests
-get_default_memory_limit  # unused function (geoparquet_io/core/memory_limits.py:214) -- dead: T1b deletes (no package caller; only tests)
 is_stdout  # unused function (geoparquet_io/core/streaming.py:63) -- dead: T0e deletes (no package caller; only tests)
 get_num_row_groups  # unused function (geoparquet_io/core/duckdb_metadata.py:708) -- dead: T0e deletes
 _clear_s3_cache  # unused function (geoparquet_io/core/duckdb_utils.py:247) -- dynamic: test seam that resets module state between tests
@@ -201,3 +200,4 @@ convert_to_geoparquet_cmd  # unused function (geoparquet_io/cli/commands/convert
 partition_quadkey  # unused function (geoparquet_io/cli/commands/partition.py:929) -- dynamic: Click command, registered by its decorator
 extract_bigquery_cmd  # unused function (geoparquet_io/cli/commands/extract.py:590) -- dynamic: Click command, registered by its decorator
 extract_wfs_cmd  # unused function (geoparquet_io/cli/commands/extract.py:851) -- dynamic: Click command, registered by its decorator
+a5_from_query_farm  # unused variable (geoparquet_io/core/duckdb_utils.py:415) -- dynamic: field of the frozen DuckDBCapabilities, no reader yet by design (#1360 reads it)

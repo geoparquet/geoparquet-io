@@ -64,10 +64,10 @@ CHECK_OWNER_DEFS = REPO / "scripts" / "check_owner_defs.py"
 EXPECTED_COUNTS = {
     "G1.tid251": 21,
     "G1.geo_parse": 17,
-    "G1.set_memory_limit": 1,
+    "G1.set_memory_limit": 0,
     "G1.sql_escape": 1,
     "G1.cgroup": 0,
-    "G1.duckdb_version": 2,
+    "G1.duckdb_version": 0,
     "G1.retry_loop": 0,
     "G1.retry_constants": 0,
     "G1.retry_param_defaults": 1,
@@ -75,9 +75,9 @@ EXPECTED_COUNTS = {
     "G1.retry_after": 0,
     "G1.retry_wrappers": 0,
     "G1.json_dumps": 40,
-    "G2.exemptions": 35,
+    "G2.exemptions": 33,
     "G4.whitelist": 186,
-    "G4.tests_whitelist": 97,
+    "G4.tests_whitelist": 99,
 }
 
 

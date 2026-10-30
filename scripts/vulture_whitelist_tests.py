@@ -112,3 +112,5 @@ restore_logging_state  # unused function (tests/test_library_state_leaks.py:38) 
 _poison_before_any_test_in_this_module  # unused function (tests/test_logging_state_isolation.py:170) -- dynamic: pytest fixture, requested by name
 fake_aws_files  # unused function (tests/test_aws_profile_no_env_leak.py:211) -- dynamic: pytest fixture, requested by name
 offline_wfs_probes  # unused function (tests/test_wfs.py:46) -- dynamic: pytest fixture, requested by name
+is_v2  # unused attribute (tests/test_duckdb_capabilities.py:146) -- dynamic: assigned to prove the dataclass is frozen
+native_writer_on  # unused function (tests/test_geojson_native_writer.py:104) -- dynamic: pytest fixture used via usefixtures
