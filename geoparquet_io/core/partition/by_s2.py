@@ -9,11 +9,12 @@ into separate files based on cell boundaries.
 
 from __future__ import annotations
 
-from geoparquet_io.core.add.s2 import SPEC
 from geoparquet_io.core.constants import (
     DEFAULT_S2_COLUMN_NAME,
 )
-from geoparquet_io.core.index_ops import partition_index
+from geoparquet_io.core.index_ops import get_index_spec, partition_index
+
+SPEC = get_index_spec("s2")
 
 
 def partition_by_s2(

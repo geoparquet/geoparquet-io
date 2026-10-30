@@ -8,14 +8,16 @@ from __future__ import annotations
 
 import pyarrow as pa
 
-from geoparquet_io.core.add.h3 import SPEC
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.constants import DEFAULT_H3_COLUMN_NAME
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.grid_common import (
     GridScheme,
     aggregate_grid_file,
     aggregate_grid_table,
 )
+
+SPEC = get_index_spec("h3")
 
 assert SPEC.extension is not None
 

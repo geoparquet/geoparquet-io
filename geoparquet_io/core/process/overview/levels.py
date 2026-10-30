@@ -177,9 +177,14 @@ def probe_worst_tile_counts(con, cells_sql: str, max_zoom: int = MAX_PROBE_ZOOM)
     ``z``, so one quadkey per cell at ``max_zoom`` covers every zoom via
     ``substr``. Latitudes are clamped to the WebMercator domain.
     """
+    from geoparquet_io.core.index_ops import get_index_spec
+
+    key = get_index_spec("quadkey").expression(
+        "lon", "LEAST(GREATEST(lat, -85.05), 85.05)", max_zoom
+    )
     con.execute(
         "CREATE OR REPLACE TEMP TABLE __overview_qk AS "
-        f"SELECT lat_lon_to_quadkey(lat, lon, {max_zoom}) AS qk "
+        f"SELECT {key} AS qk "
         f"FROM ({cells_sql}) WHERE lon IS NOT NULL AND lat IS NOT NULL"
     )
     counts: dict[int, int] = {}

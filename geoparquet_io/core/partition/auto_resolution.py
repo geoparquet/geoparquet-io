@@ -136,7 +136,8 @@ def _probe_distinct_cell_counts(
     centroid = representative_point_sql(geom_sql, edges)
     filtered = f"(SELECT {centroid} AS c FROM {sql_path(url)}{where_sql_fragment(where)})"
     sample_cte = f"SELECT ST_X(c) AS lon, ST_Y(c) AS lat FROM {filtered}{sample_clause}"
-    if index_type == "quadkey":
+    spec = get_index_spec(index_type)
+    if spec.prefix_partition:
         # A level-r quadkey is the length-r prefix of a finer one, so compute the
         # finest quadkey once per row and take substrings (avoids a UDF call per
         # resolution per row).
@@ -146,13 +147,13 @@ def _probe_distinct_cell_counts(
         )
         query = (
             f"WITH sample AS ({sample_cte}), "
-            f"keyed AS (SELECT lat_lon_to_quadkey(lat, lon, {max_res}) AS qk "
+            f"keyed AS (SELECT {spec.expression('lon', 'lat', max_res)} AS qk "
             f"FROM sample WHERE lon IS NOT NULL AND lat IS NOT NULL) "
             f"SELECT {cols} FROM keyed"
         )
     else:
         cols = ", ".join(
-            f"COUNT(DISTINCT {get_index_spec(index_type).expression('lon', 'lat', r)}) AS c{i}"
+            f"COUNT(DISTINCT {spec.expression('lon', 'lat', r)}) AS c{i}"
             for i, r in enumerate(resolutions)
         )
         query = (

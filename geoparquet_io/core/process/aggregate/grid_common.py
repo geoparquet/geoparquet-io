@@ -30,7 +30,6 @@ from geoparquet_io.core.duckdb_utils import (
     describe_query,
     fetch_one,
     get_duckdb_connection,
-    load_community_extension,
     quote_identifier,
     register_arrow,
     sql_literal,
@@ -44,6 +43,12 @@ from geoparquet_io.core.file_utils import has_glob_pattern, resolve_file_url
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
+from geoparquet_io.core.index_ops import (
+    get_index_spec,
+    load_index,
+    validate_index_resolution,
+    validate_partition_arguments,
+)
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success, warn
 from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.process.aggregate.common import (
@@ -695,12 +700,8 @@ def _resolve_resolution(
     """
     from geoparquet_io.core.partition import auto_resolution as _auto_resolution
 
-    if auto and resolution is not None:
-        raise InvalidParameterError("resolution", "Pass either --resolution or --auto, not both")
-    if not auto and resolution is None:
-        raise InvalidParameterError(
-            "resolution", f"{scheme.name.upper()} aggregation requires --resolution or --auto"
-        )
+    spec = get_index_spec(scheme.name)
+    validate_partition_arguments(spec, resolution, auto=auto)
     if auto:
         resolution = _auto_resolution.calculate_auto_resolution(
             input_parquet,
@@ -712,12 +713,7 @@ def _resolve_resolution(
         )
         if verbose:
             debug(f"Auto-selected {scheme.name} resolution {resolution}")
-    if not scheme.min_resolution <= resolution <= scheme.max_resolution:
-        raise InvalidParameterError(
-            "resolution",
-            f"{scheme.name.upper()} resolution must be "
-            f"{scheme.min_resolution}-{scheme.max_resolution}, got {resolution}",
-        )
+    validate_index_resolution(get_index_spec(scheme.name), resolution)
     return resolution
 
 
@@ -937,7 +933,7 @@ def aggregate_grid_file(
         load_spatial=True, load_httpfs=True, memory_limit=memory_limit, verbose=verbose
     )
     try:
-        load_community_extension(con, scheme.extension, feature=f"{scheme.name} aggregation")
+        load_index(con, get_index_spec(scheme.name), feature=f"{scheme.name} aggregation")
         con.execute("SET geometry_always_xy = true")
 
         # The columns a user may name in --metric/--breakdown: everything the
@@ -1040,17 +1036,12 @@ def aggregate_grid_table(
     _validate_bucket_point_args(bucket_point, bbox_column)
     if bucket_point == BUCKET_POINT_BBOX:
         bbox_column = _resolve_bbox_column_for_table(table, bbox_column)
-    if not scheme.min_resolution <= resolution <= scheme.max_resolution:
-        raise InvalidParameterError(
-            "resolution",
-            f"{scheme.name.upper()} resolution must be "
-            f"{scheme.min_resolution}-{scheme.max_resolution}, got {resolution}",
-        )
+    validate_index_resolution(get_index_spec(scheme.name), resolution)
 
     geom_col = geometry_column or "geometry"
     con = open_bounded_connection(load_spatial=True, load_httpfs=False, memory_limit=memory_limit)
     try:
-        load_community_extension(con, scheme.extension, feature=f"{scheme.name} aggregation")
+        load_index(con, get_index_spec(scheme.name), feature=f"{scheme.name} aggregation")
         con.execute("SET geometry_always_xy = true")
         if bucket_point == BUCKET_POINT_BBOX:
             warn_planar_math("aggregate", table, geom_col)

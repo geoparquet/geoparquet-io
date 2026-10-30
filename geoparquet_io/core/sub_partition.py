@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 
 from geoparquet_io.core.duckdb_metadata import get_row_count
-from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.index_ops import (
     get_index_spec,
     preflight_index,
@@ -134,46 +133,6 @@ def _assert_no_rows_lost(source_file: str, output_dir: str) -> None:
         )
 
 
-def quadkey_resolution_error(
-    resolution: int | None,
-    partition_resolution: int | None,
-    *,
-    auto: bool,
-    labels: tuple[str, str] = ("--resolution", "--partition-resolution"),
-    auto_label: str = "--auto",
-) -> str | None:
-    """Say what a quadkey run is missing, or None when it has what it needs.
-
-    Quadkey is the one index that takes two numbers: the cell column is built at
-    ``resolution`` and the directories are split on the first
-    ``partition_resolution`` characters of it. Directory mode used to forward
-    only the first, so every file tripped the single-file gate (#854); the check
-    now runs once, before the loop, through either front door.
-
-    Args:
-        resolution: Resolution the cell column would be built at
-        partition_resolution: Prefix length the partitions would be split on
-        auto: Whether both are to be calculated from the data instead
-        labels: How to spell the two arguments back at the caller
-        auto_label: How to spell the auto argument back at the caller
-
-    Returns:
-        The message to report, or None when the combination is usable.
-    """
-    try:
-        validate_partition_arguments(
-            get_index_spec("quadkey"), resolution, partition_resolution, auto
-        )
-    except InvalidParameterError as exc:
-        message = str(exc)
-        return (
-            message.replace("--partition-resolution", labels[1])
-            .replace("--resolution", labels[0])
-            .replace("--auto", auto_label)
-        )
-    return None
-
-
 def find_large_files(
     directory: str,
     min_size_bytes: int,
@@ -237,10 +196,10 @@ def sub_partition_directory(
         directory: Directory containing parquet files
         partition_type: Type of partition ("a5", "h3", "s2", "quadkey")
         min_size_bytes: Minimum file size to process
-        resolution: Resolution for A5/H3/quadkey (0-15 for H3, 0-30 for A5)
+        resolution: Resolution for A5/H3/quadkey within the index spec bounds
         level: Level for S2 (alias for resolution)
         partition_resolution: Quadkey only -- prefix length the partitions are
-            split on (0-23). Required alongside ``resolution`` unless ``auto``
+            split on. Required alongside ``resolution`` unless ``auto``
         use_centroid: Quadkey only -- use the geometry centroid when adding the
             quadkey column
         in_place: If True, delete original after successful sub-partition

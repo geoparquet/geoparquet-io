@@ -115,11 +115,12 @@ def table_bbox_column(spec, table, source_crs, use_centroid):
     return _detect_bbox_column_from_table(table)
 
 
-def load_index(con, spec, verbose=False):
+def load_index(con, spec, verbose=False, *, feature=None):
     if spec.extension:
         if verbose:
             debug(f"Loading DuckDB extension: {spec.extension}")
-        kwargs = {"feature": f"gpio add {spec.name}"} if spec.extension_preflight else {}
+        feature = feature or (f"gpio add {spec.name}" if spec.extension_preflight else None)
+        kwargs = {"feature": feature} if feature else {}
         load_community_extension(con, spec.extension, **kwargs)
     else:
         con.create_function(
@@ -440,6 +441,9 @@ def ensure_index_column(
     profile=None,
     *,
     reject_existing=False,
+    missing_error=None,
+    allow_schema_diff=False,
+    hive_input=None,
 ):
     """Return (working path, resolved column, temporary path), reusing existing cells."""
     columns = get_column_names(input_parquet)
@@ -455,11 +459,13 @@ def ensure_index_column(
         if verbose:
             debug(f"Using existing {spec.label} column '{resolved}'")
         return input_parquet, resolved, None
+    if missing_error is not None:
+        raise missing_error
     if verbose:
         debug(f"{spec.label} column '{column_name}' not found. Adding it now...")
     temp = os.path.join(
         tempfile.gettempdir(),
-        f"{spec.name}_enriched_{uuid.uuid4().hex}_{os.path.basename(input_parquet)}",
+        f"{spec.name}_enriched_{uuid.uuid4().hex}.parquet",
     )
     try:
         add_index_column(
@@ -473,6 +479,8 @@ def ensure_index_column(
             compression_level=None,
             use_centroid=use_centroid,
             profile=profile,
+            allow_schema_diff=allow_schema_diff,
+            hive_input=hive_input,
         )
         if verbose:
             debug(f"{spec.label} column added successfully at {spec.unit} {resolution}")
@@ -641,7 +649,7 @@ def partition_index(
             )
             if spec.prefix_partition:
                 partition_resolution = resolution
-                info(f"Auto-calculated quadkey zoom level: {resolution}")
+                info(f"Auto-calculated {spec.name} {spec.display_unit}: {resolution}")
             else:
                 info(f"Auto-calculated {spec.label} {spec.unit}: {resolution}")
         except Exception as e:
@@ -680,7 +688,7 @@ def partition_index(
 
         if spec.prefix_partition:
             progress(
-                f"Partitioning by quadkey at resolution {partition_resolution} (column: '{column_name}')"
+                f"Partitioning by {spec.name} at {spec.unit} {partition_resolution} (column: '{column_name}')"
             )
         else:
             progress(
@@ -743,9 +751,8 @@ def validate_partition_arguments(spec, resolution, partition_resolution=None, au
             raise InvalidParameterError(spec.unit, f"must specify either --{spec.unit} or --auto")
 
 
-def validate_partition_resolutions(resolution, partition_resolution, spec=None):
+def validate_partition_resolutions(resolution, partition_resolution, spec):
     """Validate the column and prefix resolutions using the index bounds."""
-    spec = spec or get_index_spec("quadkey")
     validate_index_resolution(spec, resolution)
     validate_index_resolution(spec, partition_resolution, parameter="partition_resolution")
     if partition_resolution > resolution:

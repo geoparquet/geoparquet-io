@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from geoparquet_io.core.add.a5 import SPEC
 from geoparquet_io.core.constants import DEFAULT_A5_COLUMN_NAME
-from geoparquet_io.core.index_ops import partition_index
+from geoparquet_io.core.index_ops import get_index_spec, partition_index
+
+SPEC = get_index_spec("a5")
 
 
 def partition_by_a5(

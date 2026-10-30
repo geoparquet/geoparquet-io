@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from geoparquet_io.core.add.quadkey import SPEC
 from geoparquet_io.core.constants import (
     DEFAULT_QUADKEY_COLUMN_NAME,
 )
-from geoparquet_io.core.index_ops import partition_index
+from geoparquet_io.core.index_ops import get_index_spec, partition_index
+
+SPEC = get_index_spec("quadkey")
 
 
 def partition_by_quadkey(
@@ -51,8 +52,8 @@ def partition_by_quadkey(
         auto: Automatically calculate optimal resolution (default: False)
         target_rows: Target rows per partition for auto mode (default: 100000)
         max_partitions: Maximum partitions for auto mode (default: 10000)
-        resolution: Quadkey resolution for column (0-23). If None and not auto, uses default.
-        partition_resolution: Zoom level for partitioning (0-23). If None, uses resolution value.
+        resolution: Quadkey resolution for column. Required unless auto is enabled.
+        partition_resolution: Prefix length for partitioning. Required unless auto is enabled.
     """
     return partition_index(
         SPEC,

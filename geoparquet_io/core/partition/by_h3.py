@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from geoparquet_io.core.add.h3 import SPEC
 from geoparquet_io.core.constants import DEFAULT_H3_COLUMN_NAME
-from geoparquet_io.core.index_ops import partition_index
+from geoparquet_io.core.index_ops import get_index_spec, partition_index
+
+SPEC = get_index_spec("h3")
 
 
 def partition_by_h3(

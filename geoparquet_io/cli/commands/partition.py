@@ -1035,9 +1035,10 @@ def _partition_cell_index(
     partition_resolution=None,
     use_centroid=False,
 ):
-    resolution_key = "level" if index_name == "s2" else "resolution"
+    spec = get_index_spec(index_name)
+    resolution_key = spec.unit
     index_options = {resolution_key: resolution}
-    if index_name == "quadkey":
+    if spec.prefix_partition:
         index_options.update(partition_resolution=partition_resolution, use_centroid=use_centroid)
     with _activate_s3(ctx):
         # Handle directory input with --min-size

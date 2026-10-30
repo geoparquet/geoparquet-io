@@ -677,7 +677,7 @@ def add_h3(
 @click.option(
     "--resolution",
     default=15,
-    type=click.IntRange(get_index_spec("s2").min_resolution, get_index_spec("s2").max_resolution),
+    type=click.IntRange(get_index_spec("a5").min_resolution, get_index_spec("a5").max_resolution),
     help="A5 resolution level (0-30). Res 10: ~41km², Res 15: ~39m², Res 20: ~39mm², Res 25: ~38μm². Default: 15",
 )
 @output_format_options
@@ -752,7 +752,7 @@ def add_a5(
 @click.option(
     "--level",
     default=13,
-    type=click.IntRange(get_index_spec("a5").min_resolution, get_index_spec("a5").max_resolution),
+    type=click.IntRange(get_index_spec("s2").min_resolution, get_index_spec("s2").max_resolution),
     help="S2 level (0-30). Level 8: ~1,250km², Level 13: ~1.2km², Level 18: ~1,200m². Default: 13",
 )
 @output_format_options

@@ -1452,8 +1452,6 @@ def partition_by_admin(
 # the CLI command each mirrors.
 # --------------------------------------------------------------------------
 
-_SUB_PARTITION_RESOLUTION_ARG = {"s2": "level"}
-
 
 def _parse_min_size(min_size: str | int) -> int:
     """Bytes from either the CLI's '100MB' spelling or a plain byte count."""
@@ -1547,25 +1545,20 @@ def _sub_partition(
             "errors": [],
         }
 
-    argument = _SUB_PARTITION_RESOLUTION_ARG.get(partition_type, "resolution")
-    if partition_type == "quadkey":
-        # Quadkey takes two resolutions; refuse once here rather than per file
-        # (#854), spelled as keyword arguments rather than CLI flags.
-        missing = core_sub_partition.quadkey_resolution_error(
-            resolution,
-            partition_resolution,
-            auto=auto,
-            labels=("resolution=<int>", "partition_resolution=<int>"),
-            auto_label="auto=True",
+    from geoparquet_io.core.index_ops import get_index_spec, validate_partition_arguments
+
+    spec = get_index_spec(partition_type)
+    try:
+        validate_partition_arguments(
+            spec, resolution if resolution is not None else level, partition_resolution, auto
         )
-        if missing:
-            raise InvalidParameterError(argument, missing)
-    elif not auto and (resolution if resolution is not None else level) is None:
-        raise InvalidParameterError(
-            argument,
-            f"pass {argument}=<int> or auto=True -- gpio does not guess a "
-            f"{partition_type} {argument}",
+    except InvalidParameterError as exc:
+        message = (
+            exc.reason.replace("--partition-resolution", "partition_resolution=<int>")
+            .replace(f"--{spec.unit}", f"{spec.unit}=<int>")
+            .replace("--auto", "auto=True")
         )
+        raise InvalidParameterError(exc.param_name, message) from exc
 
     candidates = core_sub_partition.plan_sub_partition(
         str(directory), partition_type, min_size_bytes
