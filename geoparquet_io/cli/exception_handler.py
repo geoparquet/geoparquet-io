@@ -113,53 +113,76 @@ def cli_error_for(exc: BaseException, *, path: str | None = None) -> click.Click
     return None
 
 
-def click_error_for(
-    exc: BaseException, *, path: str | None = None, hint: str | None = None
-) -> click.ClickException:
-    """:func:`cli_error_for`, but always an answer: any other exception is its sanitized text.
+def _answer(
+    exc: BaseException, *, path: str | None, hint: str | None, always: bool
+) -> click.ClickException | None:
+    """The one answering step: translate ``exc``, log its traceback once, return the answer.
 
-    The replacement for ``click.ClickException(str(e))`` at the sites that already
-    decided the failure is the user's to read. ``hint`` is guidance appended to a
-    DuckDB failure (e.g. the ``--where`` clause that probably caused a binder error).
+    ``cli_error_for`` decides; ``always`` turns "not mine" into the exception's
+    cleaned text. ``hint`` is guidance appended to a DuckDB failure whose input
+    could not be read as a file -- not to a disk shortage, an unpublished
+    extension or a non-Parquet file, which the taxonomy already explained. The
+    traceback is hidden, not discarded: ``--verbose`` prints it, because
+    ``verbose_option`` raises the package logger to DEBUG as the flag is parsed,
+    before the command body runs.
     """
     import duckdb
 
     from geoparquet_io.core.duckdb_utils import spill_space_hint
     from geoparquet_io.core.exceptions import unpublished_extension_hint
+    from geoparquet_io.core.logging_config import get_logger
 
-    error = cli_error_for(exc, path=path) or click.ClickException(error_text(exc))
-    # The hint says "the input could not be read as a file": it does not belong on
-    # a disk shortage, an unpublished extension or a file that is not Parquet.
+    error = cli_error_for(exc, path=path)
+    if error is None:
+        if not always:
+            return None
+        if isinstance(exc, click.ClickException):
+            return exc  # already final: not translated, not logged again
+        error = click.ClickException(error_text(exc))
     already_explained = (
         spill_space_hint(exc) is not None
         or unpublished_extension_hint(exc) is not None
         or classify_failure(exc).kind is FailureKind.NOT_PARQUET
     )
-    if hint and isinstance(exc, duckdb.Error) and not already_explained:
-        if type(error) is click.ClickException:
-            return click.ClickException(f"{error.message}\n\n{hint}")
+    if (
+        hint
+        and isinstance(exc, duckdb.Error)
+        and not already_explained
+        and type(error) is click.ClickException
+    ):
+        error = click.ClickException(f"{error.message}\n\n{hint}")
+    get_logger(__name__).debug("Converted a low-level failure to an error line", exc_info=exc)
     return error
 
 
+def click_error_for(
+    exc: BaseException, *, path: str | None = None, hint: str | None = None
+) -> click.ClickException:
+    """:func:`cli_error_for`, but always an answer: any other exception is its cleaned text.
+
+    The replacement for ``click.ClickException(str(e))`` at the sites that already
+    decided the failure is the user's to read; it logs the traceback like the
+    boundary does.
+    """
+    answer = _answer(exc, path=path, hint=hint, always=True)
+    assert answer is not None  # always=True
+    return answer
+
+
 @contextmanager
-def error_boundary() -> Iterator[None]:
+def error_boundary(*, path: str | None = None, hint: str | None = None) -> Iterator[None]:
     """The one boundary: translate a failure no gpio frame owned, or let it through.
 
-    ``cli_error_for`` decides what is answered; an unanswered exception (a genuine
-    gpio bug) is re-raised untouched, traceback intact. The traceback of an
-    answered one is hidden, not discarded: ``--verbose`` prints it, because
-    ``verbose_option`` raises the package logger to DEBUG as the flag is parsed --
-    before the command body runs. Both the root group and every command class
-    wrap their ``invoke`` in this, so a command run on its own answers exactly as
-    it does under the root.
+    An exception ``cli_error_for`` does not claim (a genuine gpio bug) is
+    re-raised untouched, traceback intact. Both the root group and every command
+    class wrap their ``invoke`` in this, so a command run on its own answers
+    exactly as it does under the root; a command that knows its input file wraps
+    its work in ``error_boundary(path=...)`` so a non-Parquet answer can name it.
     """
-    from geoparquet_io.core.logging_config import get_logger
-
     try:
         yield
     except Exception as exc:
-        error = cli_error_for(exc)
+        error = _answer(exc, path=path, hint=hint, always=False)
         if error is None:
             raise
-        get_logger(__name__).debug("Converted a low-level failure to an error line", exc_info=exc)
         raise error from exc

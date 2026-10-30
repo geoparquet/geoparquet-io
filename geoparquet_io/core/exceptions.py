@@ -579,7 +579,11 @@ FATAL_STATUS_MESSAGES: dict[int, str] = {
 
 
 def is_auth_status(status: int | None) -> TypeGuard[int]:
-    """Whether ``status`` means "this needs a credential" (401 or 403)."""
+    """Whether ``status`` means "this needs a credential" (401 or 403).
+
+    ``FailureClass.status`` is only ever set for an HTTP status, so a verdict's
+    status can be passed as is.
+    """
     return status in (401, 403)
 
 

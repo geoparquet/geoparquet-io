@@ -100,19 +100,19 @@ CASES = [
         "inspect-summary",
         ["inspect", "summary", "{src}"],
         f"{CMD}.inspect._inspect_summary_core",
-        RuntimeError(LEAK),
+        duckdb.IOException(LEAK),
     ),
     (
         "inspect-head",
         ["inspect", "head", "{src}"],
         f"{CMD}.inspect._inspect_preview_core",
-        RuntimeError(LEAK),
+        duckdb.IOException(LEAK),
     ),
     (
         "inspect-stats",
         ["inspect", "stats", "{src}"],
         f"{CMD}.inspect._inspect_stats_core",
-        RuntimeError(LEAK),
+        duckdb.IOException(LEAK),
     ),
     (
         "inspect-layers",

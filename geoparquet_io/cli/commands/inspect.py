@@ -11,8 +11,7 @@ import click
 
 from geoparquet_io.cli._shared import _activate_s3, create_default_group, init_group_context
 from geoparquet_io.cli.decorators import GlobAwareCommand, verbose_option
-from geoparquet_io.cli.exception_handler import click_error_for
-from geoparquet_io.core.exceptions import FailureKind, GeoParquetError, classify_failure
+from geoparquet_io.cli.exception_handler import click_error_for, error_boundary
 from geoparquet_io.core.inspect import (
     display_metadata,
     format_preview_output,
@@ -110,18 +109,6 @@ def _validate_parquet_input(file_path: str) -> None:
         )
 
 
-def _inspect_error(e: Exception, parquet_file: str):
-    """The CLI error for a failure while inspecting ``parquet_file``, or ``None`` to let it through.
-
-    A gpio error passes on to the error boundary (taxonomy, hints, the --verbose
-    traceback) -- except a file that is not Parquet, which is worded here because
-    only this command knows which file it was asked to read.
-    """
-    if isinstance(e, GeoParquetError) and classify_failure(e).kind is not FailureKind.NOT_PARQUET:
-        return None
-    return click_error_for(e, path=parquet_file)
-
-
 def _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_files):
     """CLI wrapper for inspect summary - delegates to core function."""
     if json_output and markdown_output:
@@ -129,25 +116,21 @@ def _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_
 
     _validate_parquet_input(parquet_file)
 
-    try:
-        result = _inspect_summary_core(parquet_file, check_all_files)
+    with error_boundary(path=parquet_file):
+        try:
+            result = _inspect_summary_core(parquet_file, check_all_files)
 
-        # Show partition notice if applicable
-        if result.get("partition_notice"):
-            click.echo(click.style(result["partition_notice"], fg="cyan"))
-            click.echo()
+            # Show partition notice if applicable
+            if result.get("partition_notice"):
+                click.echo(click.style(result["partition_notice"], fg="cyan"))
+                click.echo()
 
-        output = format_summary_output(result, json_output, markdown_output)
-        if output:
-            click.echo(output)
+            output = format_summary_output(result, json_output, markdown_output)
+            if output:
+                click.echo(output)
 
-    except ValueError as e:
-        raise click_error_for(e) from e
-    except Exception as e:
-        error = _inspect_error(e, parquet_file)
-        if error is None:
-            raise
-        raise error from e
+        except ValueError as e:
+            raise click_error_for(e) from e
 
 
 def _inspect_preview_impl(
@@ -162,7 +145,7 @@ def _inspect_preview_impl(
 
     _validate_parquet_input(parquet_file)
 
-    try:
+    with error_boundary(path=parquet_file):
         result = _inspect_preview_core(parquet_file, count, mode)
 
         # Show partition notice if applicable
@@ -176,12 +159,6 @@ def _inspect_preview_impl(
         if output:
             click.echo(output)
 
-    except Exception as e:
-        error = _inspect_error(e, parquet_file)
-        if error is None:
-            raise
-        raise error from e
-
 
 def _inspect_stats_impl(parquet_file, json_output, markdown_output):
     """CLI wrapper for inspect stats - delegates to core function."""
@@ -190,7 +167,7 @@ def _inspect_stats_impl(parquet_file, json_output, markdown_output):
 
     _validate_parquet_input(parquet_file)
 
-    try:
+    with error_boundary(path=parquet_file):
         result = _inspect_stats_core(parquet_file)
 
         # Show partition notice if applicable
@@ -201,12 +178,6 @@ def _inspect_stats_impl(parquet_file, json_output, markdown_output):
         output = format_stats_output(result, json_output, markdown_output)
         if output:
             click.echo(output)
-
-    except Exception as e:
-        error = _inspect_error(e, parquet_file)
-        if error is None:
-            raise
-        raise error from e
 
 
 # Meta command - delegates to core.inspect.display_metadata
@@ -396,7 +367,7 @@ def inspect_meta(
     _validate_parquet_input(parquet_file)
 
     with _activate_s3(ctx):
-        try:
+        with error_boundary(path=parquet_file):
             _handle_meta_display(
                 parquet_file,
                 meta_parquet,
@@ -406,11 +377,6 @@ def inspect_meta(
                 json_output,
                 meta_geo_stats,
             )
-        except Exception as e:
-            error = _inspect_error(e, parquet_file)
-            if error is None:
-                raise
-            raise error from e
 
 
 @inspect.command(name="layers", cls=GlobAwareCommand)

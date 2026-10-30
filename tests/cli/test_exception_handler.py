@@ -294,3 +294,67 @@ def test_a_gpio_error_from_a_real_subcommand_answers_like_a_plain_command(monkey
     assert error_lines(real) == error_lines(plain) != []
     assert "Usage:" not in real.output
     assert len(real_traces) == len(plain_traces) == 1
+
+
+@pytest.mark.parametrize(
+    ("argv", "target"),
+    [
+        (["inspect", "stats", "{src}"], "geoparquet_io.cli.commands.inspect._inspect_stats_core"),
+        (
+            ["process", "aggregate", "h3", "{src}", "{out}", "--resolution", "5"],
+            "geoparquet_io.cli.commands.process.aggregate_by_h3_impl",
+        ),
+        (
+            ["pmtiles", "create", "{src}", "{out}"],
+            "geoparquet_io.core.pmtiles.create_pmtiles_from_geoparquet",
+        ),
+    ],
+    ids=["inspect-stats", "process-aggregate-h3", "pmtiles-create"],
+)
+def test_every_answering_path_logs_exactly_one_traceback(monkeypatch, tmp_path, argv, target):
+    """boundary, `click_error_for` and the inspect boundary all go through one answering step."""
+    import importlib
+    import logging
+    import sys
+
+    import duckdb
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    src = tmp_path / "in.parquet"
+    pq.write_table(pa.table({"id": [1]}), src)
+    module_name, _, attr = target.rpartition(".")
+    importlib.import_module(module_name)
+
+    def boom(*_a, **_k):
+        raise duckdb.IOException("IO Error: Could not read the input")
+
+    monkeypatch.setattr(sys.modules[module_name], attr, boom)
+
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            if record.exc_info:
+                records.append(record)
+
+    root = logging.getLogger()
+    handler = _Capture(logging.DEBUG)
+    old = root.level
+    root.setLevel(logging.DEBUG)
+    root.addHandler(handler)
+    try:
+        result = CliRunner().invoke(
+            cli,
+            [a.format(src=src, out=tmp_path / "o.parquet") for a in argv] + ["--verbose"],
+        )
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(old)
+
+    assert result.exit_code == 1, result.output
+    assert "Could not read the input" in result.output
+    assert len(records) == 1, [r.getMessage() for r in records]

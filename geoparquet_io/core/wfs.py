@@ -333,7 +333,7 @@ def get_wfs_capabilities(service_url: str, version: str = "1.1.0"):
                 f"Invalid WFS response from: {clean_url}\n"
                 f"The server may not be a valid WFS service. Error: {e}"
             ) from e
-        if verdict.kind is FailureKind.HTTP_STATUS and is_auth_status(verdict.status):
+        if is_auth_status(verdict.status):
             raise WFSAuthenticationError(
                 clean_url,
                 verdict.status,
