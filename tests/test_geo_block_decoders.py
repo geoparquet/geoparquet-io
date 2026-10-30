@@ -158,6 +158,75 @@ def test_undecodable_warning_names_its_source(caplog):
 
 
 # ---------------------------------------------------------------------------
+# Callers that read a carried block through the owner (T3a second audit)
+# ---------------------------------------------------------------------------
+
+
+def _parquet_with_geo(path, raw):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    table = pa.table({"geometry": pa.array([b"\x01"], pa.binary())})
+    pq.write_table(table.replace_schema_metadata({b"geo": raw}), path)
+    return str(path)
+
+
+def test_geoparquet_crs_is_null_warns_with_the_path(tmp_path, caplog):
+    """``crs_utils.geoparquet_crs_is_null`` names the file it could not decode (#957)."""
+    from geoparquet_io.core.crs_utils import geoparquet_crs_is_null
+
+    path = _parquet_with_geo(tmp_path / "trunc.parquet", b'{"version": ')
+    with caplog.at_level(logging.WARNING):
+        assert geoparquet_crs_is_null(path) is False
+    messages = _malformed(caplog.records)
+    assert len(messages) == 1, messages
+    assert path in messages[0]
+
+
+def test_rewrite_helpers_warn_on_an_undecodable_carried_block(caplog):
+    """The prune runs on a carried input block, so bad JSON warns there and the
+    value is left as found rather than rewritten."""
+    from geoparquet_io.core.geo_metadata import prune_geo_metadata_to_columns
+
+    metadata = {b"geo": b"{", b"other": b"x"}
+    with caplog.at_level(logging.WARNING):
+        assert prune_geo_metadata_to_columns(metadata, ["geometry"]) == metadata
+    assert any("not valid JSON" in m for m in _malformed(caplog.records))
+
+
+def test_read_geo_key_is_the_object_or_none(tmp_path):
+    """``write_funnels._read_geo_key`` returns what its type says: a dict or None."""
+    from geoparquet_io.core.write_funnels import _read_geo_key
+
+    assert _read_geo_key(_parquet_with_geo(tmp_path / "list.parquet", b"[1]")) is None
+    good = _parquet_with_geo(tmp_path / "good.parquet", json.dumps(GOOD).encode())
+    assert _read_geo_key(good) == GOOD
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        (None, False),
+        ({b"other": b"x"}, False),
+        ({b"geo": b"{"}, True),
+        ({b"geo": json.dumps({**GOOD, "version": "2.0.0"}).encode()}, False),
+        ({"geo": json.dumps({**GOOD, "version": "2.0.0"})}, False),
+        ({b"geo": json.dumps(GOOD).encode()}, True),
+        # The owner's precedence: the bytes key wins over the str one.
+        (
+            {b"geo": json.dumps(GOOD).encode(), "geo": json.dumps({**GOOD, "version": "2.0.0"})},
+            True,
+        ),
+    ],
+    ids=["none", "no-geo", "bad-json", "bytes-2.0", "str-2.0", "1.1", "bytes-wins"],
+)
+def test_needs_metadata_rewrite_for_2_0_reads_through_the_owner(metadata, expected):
+    from geoparquet_io.core.write_strategies.base import needs_metadata_rewrite
+
+    assert needs_metadata_rewrite("2.0", metadata) is expected
+
+
+# ---------------------------------------------------------------------------
 # The G1.geo_parse arm (tests/test_owner_guards.py) sees every spelling
 # ---------------------------------------------------------------------------
 

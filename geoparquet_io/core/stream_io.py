@@ -51,8 +51,6 @@ from geoparquet_io.core.streaming import (
     apply_geoarrow_extension_type,
     apply_metadata_to_table,
     detect_version_for_output,
-    find_geometry_column_from_metadata,
-    find_geometry_column_from_table,
     is_stdin,
     read_arrow_stream,
     should_stream_output,
@@ -171,9 +169,7 @@ def _open_stdin_input(
         register_arrow(con, "input_stream", table)
 
         # Find geometry column and create view with proper geometry type
-        geom_col = find_geometry_column_from_metadata(metadata) or find_geometry_column_from_table(
-            table
-        )
+        geom_col = carried_geometry_column(sanitized_carried_geo(metadata), table.column_names)
         source_ref = _create_view_with_geometry(con, "input_stream", geom_col)
 
         yield source_ref, metadata, True, con
@@ -409,8 +405,9 @@ def _write_stream_output(
     - Automatic native Parquet geometry when written to file
     """
     # Auto-detect geometry column if not provided
+    carried = sanitized_carried_geo(original_metadata)
     if geometry_column is None:
-        geometry_column = find_geometry_column_from_metadata(original_metadata)
+        geometry_column = carried.get("primary_column")
 
     # Convert geometry to WKB (DuckDB's Arrow export uses native format)
     native_columns = native_geometry_types_from_query(con, query)
@@ -421,7 +418,7 @@ def _write_stream_output(
 
     # Convert WKB binary to geoarrow extension type for streaming
     # This enables native geometry performance in downstream operations
-    columns = sanitized_carried_geo(original_metadata).get("columns", {})
+    columns = carried.get("columns", {})
     geometry_columns = dict.fromkeys([*native_columns, *columns, geometry_column])
     for name in geometry_columns:
         if name is None or name not in table.column_names:

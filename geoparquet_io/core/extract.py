@@ -57,12 +57,13 @@ from geoparquet_io.core.file_utils import (
 )
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
+    carried_geometry_column,
     prune_geo_metadata_to_columns,
+    sanitized_carried_geo,
     strip_derived_stats,
     strip_orientation,
 )
 from geoparquet_io.core.geometry_detection import (
-    STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
 from geoparquet_io.core.geometry_repair import (
@@ -82,7 +83,6 @@ from geoparquet_io.core.remote import (
 )
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
-    find_geometry_column_from_metadata,
     find_geometry_column_from_table,
     is_stdin,
     should_stream_output,
@@ -984,14 +984,9 @@ def _extract_streaming(
         all_columns = [name for name, _ in describe_query(con, f"SELECT * FROM {source}")]
 
         # Find geometry column
-        geom_col = find_geometry_column_from_metadata(metadata)
-        if not geom_col:
-            for name in STANDARD_GEOMETRY_NAMES:
-                if name in all_columns:
-                    geom_col = name
-                    break
-        if not geom_col:
-            geom_col = "geometry"
+        geom_col = (
+            carried_geometry_column(sanitized_carried_geo(metadata), all_columns) or "geometry"
+        )
 
         # Check for bbox column
         bbox_col = None

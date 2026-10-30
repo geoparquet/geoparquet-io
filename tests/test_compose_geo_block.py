@@ -149,6 +149,36 @@ def test_carried_source_skips_the_absent_gate_and_can_defer_the_bboxless_one():
     assert "covering" not in gated["columns"]["geometry"]
 
 
+def test_bboxless_gate_runs_again_after_the_absent_gate():
+    """Step 5: dropping the absent bbox member leaves an h3-only covering, which
+    the second :func:`strip_bboxless_covering` must drop (#954)."""
+    carried = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {
+                "encoding": "WKB",
+                "covering": {
+                    **CARRIED["columns"]["geometry"]["covering"],
+                    "h3": {"column": "h3", "resolution": 9},
+                },
+            }
+        },
+    }
+    table = pa.table(
+        {"geometry": pa.array([b"\x01"], pa.binary()), "h3": pa.array(["8a"], pa.string())}
+    ).replace_schema_metadata({b"geo": json.dumps(carried).encode()})
+    for source in _sources(table):
+        block = compose_geo_block(source, GeoBlockOptions(geometry_column="geometry"))
+        assert "covering" not in block["columns"]["geometry"], type(source).__name__
+        deferred = compose_geo_block(
+            source, GeoBlockOptions(geometry_column="geometry", defer_bboxless_gate=True)
+        )
+        assert deferred["columns"]["geometry"]["covering"] == {
+            "h3": {"column": "h3", "resolution": 9}
+        }, type(source).__name__
+
+
 def test_encoding_applies_only_when_the_carried_block_names_none():
     fresh = compose_geo_block(
         CarriedSource(None), GeoBlockOptions(geometry_column="geometry", encoding="point")

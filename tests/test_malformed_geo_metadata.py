@@ -1894,7 +1894,8 @@ def test_check_bbox_still_reads_the_version_of_a_well_formed_file(tmp_path):
 # The metadata-only column-name reader
 # =============================================================================
 #
-# `find_geometry_column_from_metadata` returned `primary_column` with no type
+# `find_geometry_column_from_metadata` (since deleted for `carried_geometry_column`,
+# #1367) returned `primary_column` with no type
 # check, so `123` travelled through `extract` into `quote_identifier` and failed
 # there with `TypeError: argument of type 'int' is not iterable`, four frames
 # from anything a user can act on (#968). It is a column-name reader shared with
@@ -1908,24 +1909,20 @@ def test_check_bbox_still_reads_the_version_of_a_well_formed_file(tmp_path):
 
 
 @pytest.mark.parametrize("bad", [123, ["geometry"], {"name": "geometry"}, None, ""])
-def test_find_geometry_column_from_metadata_never_returns_a_non_name(bad):
-    """It reads through the sanitized carried decoder (#1367), so a malformed
-    `primary_column` is dropped and, with one column declared, repaired to it
-    (`_repair_primary_column`); with two it says nothing and the schema decides."""
-    from geoparquet_io.core.streaming import find_geometry_column_from_metadata
+def test_carried_geometry_column_never_returns_a_non_name(bad):
+    """The column-name readers go through the sanitized carried decoder (#1367),
+    so a malformed `primary_column` is dropped and, with one column declared,
+    repaired to it (`_repair_primary_column`); with two the schema decides."""
+    from geoparquet_io.core.geo_metadata import carried_geometry_column, sanitized_carried_geo
 
     reset_malformed_geo_warnings()
     block = {"version": "1.1.0", "primary_column": bad, "columns": {"geom": {"encoding": "WKB"}}}
-    assert find_geometry_column_from_metadata({b"geo": json.dumps(block).encode("utf-8")}) == "geom"
+    geo = sanitized_carried_geo({b"geo": json.dumps(block).encode("utf-8")})
+    assert carried_geometry_column(geo, []) == "geom"
     block["columns"]["other"] = {"encoding": "WKB"}
-    assert find_geometry_column_from_metadata({b"geo": json.dumps(block).encode("utf-8")}) is None
-
-
-def test_find_geometry_column_from_metadata_still_reads_a_real_name():
-    from geoparquet_io.core.streaming import find_geometry_column_from_metadata
-
-    block = {"version": "1.1.0", "primary_column": "geom", "columns": {"geom": {}}}
-    assert find_geometry_column_from_metadata({b"geo": json.dumps(block).encode("utf-8")}) == "geom"
+    geo = sanitized_carried_geo({b"geo": json.dumps(block).encode("utf-8")})
+    assert carried_geometry_column(geo, []) is None
+    assert carried_geometry_column(geo, ["id", "the_geom"]) == "the_geom"
 
 
 @pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)

@@ -346,8 +346,8 @@ def _read_geo_key(output_file: str) -> dict | None:
     """The output's ``geo`` block, or None when it has none."""
     # Closed before the patch replaces the file (Windows requires it).
     with pq.ParquetFile(output_file) as pf:
-        raw = (pf.metadata.metadata or {}).get(b"geo")
-    return read_raw_geo({b"geo": raw}).value if raw else None
+        metadata = pf.metadata.metadata
+    return read_raw_geo(metadata).block
 
 
 def _block_bbox_targets(

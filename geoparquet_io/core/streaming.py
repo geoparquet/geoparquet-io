@@ -28,14 +28,13 @@ from geoparquet_io.core.crs_utils import _crs_from_geoarrow_field, geoarrow_crs_
 from geoparquet_io.core.geo_metadata import (
     GEOGRAPHY_EDGE_ALGORITHMS,
     backfill_derived_stats,
-    carried_column_name,
     carried_geometry_column,
     carried_version,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
 )
 from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
-from geoparquet_io.core.geometry_detection import STANDARD_GEOMETRY_NAMES
+from geoparquet_io.core.geometry_detection import detect_geometry_column_from_names
 from geoparquet_io.core.logging_config import debug
 
 # Marker for stdin/stdout in CLI arguments
@@ -199,33 +198,6 @@ def apply_metadata_to_table(table: pa.Table, metadata: dict | None) -> pa.Table:
     return table.replace_schema_metadata(metadata)
 
 
-def find_geometry_column_from_metadata(metadata: dict | None) -> str | None:
-    """
-    Find the primary geometry column name from metadata.
-
-    A column-name reader shared with read-only callers (``Table.geometry_column``),
-    so it takes the line #945 drew: it guards rather than sanitizes, and refuses
-    to hand back the one thing that cannot be a column name. A carried
-    ``primary_column: 123`` used to travel from here through ``extract`` into
-    ``quote_identifier`` and fail with ``TypeError: argument of type 'int' is
-    not iterable``, four frames from anything a user can act on (#968).
-
-    It also no longer falls back to the literal ``"geometry"``: on a file whose
-    column is called ``geom`` that default names a column that does not exist,
-    which is the silently-wrong-coordinates bug #945's review identified. Every
-    caller asks the file's schema when this reader says nothing, which is the
-    answer a block-less file already gets.
-
-    Args:
-        metadata: Schema metadata dict (with bytes keys)
-
-    Returns:
-        Geometry column name or None if the block does not name a usable one
-    """
-
-    return carried_column_name(sanitized_carried_geo(metadata).get("primary_column"))
-
-
 def find_geometry_column_from_table(table: pa.Table) -> str | None:
     """
     Find the geometry column name from table metadata or common names.
@@ -236,20 +208,12 @@ def find_geometry_column_from_table(table: pa.Table) -> str | None:
     Returns:
         Geometry column name or None if not found
     """
-    metadata = dict(table.schema.metadata) if table.schema.metadata else {}
-
-    # Try to find from geo metadata
-    geom_col = find_geometry_column_from_metadata(metadata)
-    if geom_col and geom_col in table.column_names:
+    names = table.column_names
+    geom_col = carried_geometry_column(sanitized_carried_geo(table.schema.metadata), names)
+    if geom_col in names:
         return geom_col
-
-    # Fall back to common names
-
-    for name in STANDARD_GEOMETRY_NAMES:
-        if name in table.column_names:
-            return name
-
-    return None
+    # The block named a column this table does not have: ask the schema.
+    return detect_geometry_column_from_names(names)
 
 
 def read_stdin_to_temp_file(verbose: bool = False) -> str:

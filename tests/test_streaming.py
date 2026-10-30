@@ -29,7 +29,6 @@ from geoparquet_io.core.streaming import (
     apply_geoarrow_extension_type,
     apply_metadata_to_table,
     extract_crs_from_table,
-    find_geometry_column_from_metadata,
     find_geometry_column_from_table,
     is_stdin,
     is_stdout,
@@ -276,28 +275,12 @@ class TestMetadataHandling:
 class TestGeometryColumnDetection:
     """Tests for geometry column detection."""
 
-    def test_find_geometry_column_from_metadata(self):
-        """Test finding geometry column from metadata."""
-        metadata = {b"geo": json.dumps({"primary_column": "geom"}).encode("utf-8")}
-        assert find_geometry_column_from_metadata(metadata) == "geom"
-
-    def test_find_geometry_column_from_metadata_names_nothing_it_cannot_read(self):
-        """A block that names no usable primary column names none (#968).
-
-        This used to answer with the literal ``"geometry"``, which is a guess:
-        on a file whose column is ``geom`` it names a column that does not
-        exist, and #945's review traced silently-wrong coordinates to exactly
-        that default. Every caller asks the file's schema when this reader says
-        nothing -- see ``test_find_geometry_column_from_table_common_names``.
-        """
-        assert find_geometry_column_from_metadata({b"geo": json.dumps({}).encode("utf-8")}) is None
-        malformed = {b"geo": json.dumps({"primary_column": 123}).encode("utf-8")}
-        assert find_geometry_column_from_metadata(malformed) is None
-
-    def test_find_geometry_column_from_metadata_missing(self):
-        """Test None when no geo metadata."""
-        assert find_geometry_column_from_metadata(None) is None
-        assert find_geometry_column_from_metadata({}) is None
+    def test_find_geometry_column_from_table_prefers_a_present_primary(self):
+        """A declared primary the table lacks does not win over the schema."""
+        table = pa.table({"id": [1], "geom": [b"wkb"]}).replace_schema_metadata(
+            {b"geo": json.dumps({"primary_column": "gone"}).encode("utf-8")}
+        )
+        assert find_geometry_column_from_table(table) == "geom"
 
     def test_find_geometry_column_from_table_with_metadata(self):
         """Test finding geometry from table with metadata."""

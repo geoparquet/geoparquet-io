@@ -537,8 +537,8 @@ def crs_is_explicitly_null(col_meta: dict) -> bool:
 def geoparquet_crs_is_null(parquet_file) -> bool:
     """Return True if the primary geometry column has an explicit ``crs: null``.
 
-    ``parquet_file`` must be a *raw* path/URL — ``get_geo_metadata`` SQL-escapes
-    it internally, so passing an already-escaped URL double-escapes it.
+    ``parquet_file`` must be a *raw* path/URL — the footer read SQL-escapes it
+    internally, so passing an already-escaped URL double-escapes it.
     """
     # The reproject paths that ask this question act on the answer, so the
     # block is read through the sanitized carried decoder (#887).
@@ -844,12 +844,7 @@ def extract_crs_from_table(table, geometry_column: str | None = None):
     treated the way an absent one is (#887).
     """
 
-    metadata = table.schema.metadata
-    geo_meta = None
-    if metadata and b"geo" in metadata:
-        geo_meta = sanitized_carried_geo(metadata)
-    if not isinstance(geo_meta, dict):
-        geo_meta = {}
+    geo_meta = sanitized_carried_geo(table.schema.metadata)
     columns = geo_meta.get("columns", {})
     col = geometry_column or geo_meta.get("primary_column")
     if not isinstance(col, str):

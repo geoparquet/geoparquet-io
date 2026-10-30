@@ -39,6 +39,7 @@ from geoparquet_io.core.geo_metadata import (
     CarriedSource,
     GeoBlockOptions,
     compose_geo_block,
+    read_raw_geo,
     sanitized_carried_geo,
     strip_unsupported_covering,
 )
@@ -510,29 +511,18 @@ def needs_metadata_rewrite(
     if geoparquet_version == "parquet-geo-only":
         # For parquet-geo-only, we need to strip any existing geo metadata
         # Check if input has geo metadata that needs to be stripped
-        if original_metadata:
-            has_geo = "geo" in original_metadata or b"geo" in original_metadata
-            if has_geo:
-                return True  # Need rewrite to strip the metadata
-        return False
+        return read_raw_geo(original_metadata).present
 
     if geoparquet_version == "2.0":
         if operation in ("columns_only", "sort"):
             return False
         # For 2.0 output, check if input has different version that needs updating
-        if original_metadata:
-            geo_data = original_metadata.get("geo") or original_metadata.get(b"geo")
-            if geo_data:
-                # Undecodable or non-object carried metadata cannot vouch for a
-                # 2.x version, so it needs the rewrite (which builds fresh
-                # metadata); a raw json.loads here aborted the write instead.
-                geo_meta = sanitized_carried_geo({b"geo": geo_data})
-                if not isinstance(geo_meta, dict):
-                    return True
-                input_version = geo_meta.get("version", "")
-                # Need rewrite if input version is not 2.x
-                if not isinstance(input_version, str) or not input_version.startswith("2."):
-                    return True
-        return False
+        # A carried block needs the rewrite unless it already vouches for a 2.x
+        # version. An undecodable or non-object one reads as `{}` and so cannot
+        # vouch (a raw json.loads here once aborted the write instead).
+        input_version = sanitized_carried_geo(original_metadata).get("version")
+        if isinstance(input_version, str) and input_version.startswith("2."):
+            return False
+        return read_raw_geo(original_metadata).present
 
     return version_config.get("rewrite_metadata", True)

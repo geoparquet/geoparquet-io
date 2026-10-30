@@ -1002,11 +1002,15 @@ _DROP_GEO = object()
 def _decode_geo_value(raw):
     """Decode a KV ``geo`` value (bytes/str/dict) to a dict, or ``None``.
 
-    Silent on purpose: :func:`_rewrite_geo_metadata` leaves a value it cannot
-    decode exactly as it found it, and the write path that carried it has
-    already warned through :func:`sanitized_carried_geo`.
+    The rewrite helpers below run on carried *input* blocks (a projection's
+    prune, the stream's covering gates), so the value goes through the carried
+    decoder's value step, :func:`_decode_carried_geo`: bad UTF-8 or bad JSON
+    warns once (approved change 6 of #1367). :func:`_rewrite_geo_metadata` then
+    leaves a value it cannot decode, or one that is not an object, as it found
+    it; the write rebuilds fresh metadata from the output instead.
     """
-    return read_raw_geo({b"geo": raw}).block
+    value = _decode_carried_geo(raw)
+    return value if isinstance(value, dict) else None
 
 
 def _encode_geo_value(geo_dict: dict, like):
@@ -1275,11 +1279,11 @@ def _prune_geo_dict_to_columns(geo_dict: dict, columns: set[str], repoint_primar
     """
     # Sanitizing drops a non-string `primary_column` and repairs it from a lone
     # surviving column, which is the recovery this function needs and #883/#945
-    # already shared out. `_rewrite_geo_metadata` only calls this with a decoded
-    # object -- a block that is not one never gets here -- so sanitizing a dict
-    # hands back a dict.
+    # already shared out. `_rewrite_geo_metadata` hands over the decoded object,
+    # so the sanitized carried decoder takes it as the value of a `geo` key; the
+    # raw key is read first because sanitizing drops a malformed one.
     declared_primary = "primary_column" in geo_dict
-    geo_dict = sanitize_geo_metadata(geo_dict)
+    geo_dict = sanitized_carried_geo({b"geo": geo_dict})
 
     col_entries = geo_dict.get("columns")
     if not isinstance(col_entries, dict):
@@ -1528,7 +1532,7 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
         "bbox_column_name": options.bbox_column,
     }
     edges = edges_for_version(options.edges, options.version) if options.edges else None
-    # Steps 1 and 2 (and 4 unless deferred).
+    # Steps 1 and 2, and 3 unless deferred.
     geo_meta = create_geo_metadata(
         dict(metadata) if metadata else None,
         options.geometry_column,
@@ -1542,8 +1546,8 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
     )
     if columns is None:
         return geo_meta
-    # Step 3, then 4 again: dropping an absent column's entry can leave a
-    # covering with no bbox member.
+    # Step 4, then 5 unless deferred: dropping an absent column's entry can
+    # leave a covering with no bbox member.
     geo_meta = strip_absent_covering(geo_meta, columns)
     if options.defer_bboxless_gate:
         return geo_meta
