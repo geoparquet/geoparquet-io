@@ -149,6 +149,11 @@ Convert GeoParquet to other formats with automatic format detection:
 
 ### Format-Specific Options
 
+GeoPackage, FlatGeobuf and Shapefile layers cannot hold nested columns, so
+STRUCT, LIST and MAP columns are written as JSON text (as CSV does) rather than
+dropped. GeoPackage layers are named after the output file unless
+`--layer-name` is given.
+
 **GeoPackage:**
 
 ```bash

@@ -12,11 +12,7 @@ Writers handle local file output only; remote uploads are handled by the upload 
 
 import json
 import math
-import os
-import shutil
-import tempfile
 from collections.abc import Sequence
-from contextlib import contextmanager
 from pathlib import Path
 
 import pyarrow as pa
@@ -93,36 +89,36 @@ def _reject_stdin_input(input_path: str, description: str, command: str, output:
         )
 
 
+#: Every file a Shapefile can own beside its ``.shp``.
+SHAPEFILE_SIDECARS = (".shx", ".dbf", ".prj", ".cpg", ".sbn", ".sbx", ".qix", ".fix", ".shp.xml")
+
 # Format configuration for GDAL-based writers
 GDAL_FORMATS = {
     "geopackage": {
         "cli_command": "geopackage",
-        "sample_output": "out.gpkg",
         "driver": "GPKG",
         "description": "GeoPackage",
         "check_overwrite": True,
         "layer_option": "LAYER_NAME",
-        "sidecars": False,
+        "sidecar_suffixes": None,
         "extension": ".gpkg",
     },
     "flatgeobuf": {
         "cli_command": "flatgeobuf",
-        "sample_output": "out.fgb",
         "driver": "FlatGeobuf",
         "description": "FlatGeobuf",
         "check_overwrite": True,
         "layer_option": "LAYER_NAME",
-        "sidecars": False,
+        "sidecar_suffixes": None,
         "extension": ".fgb",
     },
     "shapefile": {
         "cli_command": "shapefile",
-        "sample_output": "out.shp",
         "driver": "ESRI Shapefile",
         "description": "Shapefile",
         "check_overwrite": True,
         "layer_option": None,
-        "sidecars": True,
+        "sidecar_suffixes": SHAPEFILE_SIDECARS,
         "extension": ".shp",
         "encoding_option": "ENCODING",
     },
@@ -315,38 +311,6 @@ def _gdal_select_exprs(
     return exprs
 
 
-@contextmanager
-def _staged_output(output_path: str, sidecars: bool, suffix: str):
-    """Yield a path to write ``output_path`` to; publish it only if the write succeeds.
-
-    A failed write never leaves a partial file, and a file that existed before
-    the write is only replaced by a finished one, never deleted. One file goes
-    through :func:`atomic_write`. A Shapefile is a set of sidecars named after
-    the layer, so the set is staged in a temp directory beside the output under
-    the output's own name and moved over on success. ``suffix`` is the driver's
-    own extension for the staged file: GDAL's FlatGeobuf driver makes a directory
-    of a path that does not end in ``.fgb``.
-    """
-    if not sidecars:
-        with atomic_write(output_path, suffix=suffix) as staged:
-            try:
-                yield staged
-            except BaseException:
-                # DuckDB's GDAL COPY writes through a ``tmp_<name>`` sibling and
-                # leaves it behind when the write fails.
-                (Path(staged).parent / f"tmp_{Path(staged).name}").unlink(missing_ok=True)
-                raise
-        return
-    final = Path(output_path)
-    stage_dir = Path(tempfile.mkdtemp(dir=final.parent, prefix=".gpio-stage-"))
-    try:
-        yield str(stage_dir / final.name)
-        for part in stage_dir.iterdir():
-            os.replace(part, final.parent / part.name)
-    finally:
-        shutil.rmtree(stage_dir, ignore_errors=True)
-
-
 def _gpkg_collision_options(column_names: list[str], geometry_col: str | None) -> list[str]:
     """``FID=``/``GEOMETRY_NAME=`` creation options that step around a source column.
 
@@ -454,7 +418,7 @@ def write_gdal_format(
         input_path,
         str(config["description"]),
         str(config["cli_command"]),
-        str(config["sample_output"]),
+        f"out{config['extension']}",
     )
 
     # Validate inputs
@@ -581,8 +545,10 @@ def write_gdal_format(
         with scoped_write_memory_limit(con, None, verbose):
             debug(f"Executing: {staging}")
             con.execute(staging)
-            with _staged_output(
-                output_path, bool(config["sidecars"]), str(config["extension"])
+            with atomic_write(
+                output_path,
+                suffix=str(config["extension"]),
+                sidecar_suffixes=config["sidecar_suffixes"],
             ) as target:
                 query = copy_query(target)
                 debug(f"Executing: {query}")

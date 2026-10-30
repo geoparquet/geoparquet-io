@@ -160,3 +160,27 @@ def test_shapefile_converts_through_staging_and_leaves_no_stage_dir(with_geo, tm
     assert result.exit_code == 0, result.output
     assert out.exists() and (tmp_path / "out.dbf").exists()
     assert not [p for p in tmp_path.iterdir() if p.name.startswith(".gpio")]
+
+
+def test_overwrite_removes_a_stale_shapefile_sidecar(with_geo, tmp_path):
+    out = tmp_path / "out.shp"
+    assert _run("shapefile", with_geo, out).exit_code == 0
+    stale = tmp_path / "out.sbn"
+    stale.write_bytes(b"old index")
+    unrelated = tmp_path / "out.txt"
+    unrelated.write_text("keep")
+    assert _run("shapefile", with_geo, out, "--overwrite").exit_code == 0
+    assert not stale.exists()
+    assert unrelated.read_text() == "keep"
+    assert out.exists()
+
+
+def test_interrupted_write_leaves_no_staging_directory(tmp_path):
+    from geoparquet_io.core.write_strategies.base import atomic_write
+
+    out = tmp_path / "out.fgb"
+    with pytest.raises(KeyboardInterrupt):
+        with atomic_write(str(out), suffix=".fgb") as staged:
+            Path(staged).write_bytes(b"partial")
+            raise KeyboardInterrupt
+    assert list(tmp_path.iterdir()) == []
