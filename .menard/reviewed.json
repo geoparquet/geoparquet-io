@@ -155,20 +155,6 @@
       "reviewed_by": "Claude"
     },
     {
-      "code_file": "geoparquet_io/cli/decorators.py",
-      "doc_target": "CLAUDE.md#Key Patterns",
-      "reviewed_at": "2026-09-26T15:14:20.279687+00:00",
-      "code_commit_at_review": "86621e4",
-      "reviewed_by": "claude"
-    },
-    {
-      "code_file": "geoparquet_io/cli/decorators.py",
-      "doc_target": "geoparquet_io/skills/geoparquet.md#Compression Options",
-      "reviewed_at": "2026-09-26T15:14:20.377200+00:00",
-      "code_commit_at_review": "86621e4",
-      "reviewed_by": "claude"
-    },
-    {
       "code_file": "geoparquet_io/api/table.py",
       "doc_target": "docs/api/python-api.md#Table Class",
       "reviewed_at": "2026-10-29T23:46:27.839388+00:00",
@@ -209,6 +195,20 @@
       "reviewed_at": "2026-10-29T23:46:28.378693+00:00",
       "code_commit_at_review": "f326bfc",
       "reviewed_by": "claude-code (DuckDB 2.0 call-site migration, no doc-visible change)"
+    },
+    {
+      "code_file": "geoparquet_io/cli/decorators.py",
+      "doc_target": "geoparquet_io/skills/geoparquet.md#Compression Options",
+      "reviewed_at": "2026-10-30T19:29:47.614633+00:00",
+      "code_commit_at_review": "166debd",
+      "reviewed_by": "claude"
+    },
+    {
+      "code_file": "geoparquet_io/cli/decorators.py",
+      "doc_target": "CLAUDE.md#Key Patterns",
+      "reviewed_at": "2026-10-30T19:29:47.741803+00:00",
+      "code_commit_at_review": "166debd",
+      "reviewed_by": "claude"
     }
   ]
 }
