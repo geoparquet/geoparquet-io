@@ -492,20 +492,23 @@ class TestSortPartitionInput:
         filename character on Windows.
         """
         parts_dir, _ = places_parts_dir
-        seen = []
-        real_add = sort_quadkey_module.add_quadkey_column
+        from geoparquet_io.core.index_ops import ensure_index_column, get_index_spec
 
-        def spy(**kwargs):
-            seen.append(kwargs["output_parquet"])
-            return real_add(**kwargs)
-
-        with mock.patch.object(sort_quadkey_module, "add_quadkey_column", spy):
-            result = CliRunner().invoke(
-                sort, ["quadkey", str(parts_dir / "*.parquet"), temp_output_file]
-            )
-        assert result.exit_code == 0, result.output
-        assert seen, "expected the quadkey column to be auto-added"
-        assert not any(c in os.path.basename(seen[0]) for c in '*?"<>|'), seen[0]
+        working, column, temp_file = ensure_index_column(
+            get_index_spec("quadkey"), str(parts_dir / "*.parquet"), "quadkey", 13
+        )
+        try:
+            assert temp_file is not None
+            assert not any(c in os.path.basename(temp_file) for c in '*?"<>|'), temp_file
+            assert column in pq.read_schema(working).names
+            result = CliRunner().invoke(sort, ["quadkey", working, temp_output_file])
+            assert result.exit_code == 0, result.output
+            quadkeys = pq.read_table(temp_output_file)[column].to_pylist()
+            assert quadkeys == sorted(quadkeys)
+            assert len(quadkeys) == 766
+        finally:
+            if temp_file:
+                os.unlink(temp_file)
 
     @pytest.mark.parametrize("subcommand", ["hilbert", "str"])
     def test_spatial_sorts_still_reject_a_directory_with_guidance(

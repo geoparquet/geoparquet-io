@@ -143,3 +143,83 @@ def test_partition_reuses_case_different_index(index, tmp_path):
     assert result.exit_code == 0, result.output
     assert {p.stem for p in output.glob("*.parquet")} == set(cells)
     assert sum(pq.read_metadata(p).num_rows for p in output.glob("*.parquet")) == 2
+
+
+@pytest.mark.parametrize("group_name", ["add", "partition"])
+@pytest.mark.parametrize("index_name", INDICES)
+def test_cli_resolution_bounds_belong_to_index(group_name, index_name):
+    """Walk the Click tree and pin each option to its own registry entry."""
+    import inspect
+
+    import click
+
+    group = cli.commands[group_name]
+    command = group.commands[index_name]
+    spec = get_index_spec(index_name)
+    ranges = [param for param in command.params if isinstance(param.type, click.IntRange)]
+    resolution_ranges = [
+        param for param in ranges if param.name in {"resolution", "level", "partition_resolution"}
+    ]
+    assert resolution_ranges
+    for param in resolution_ranges:
+        assert (param.type.min, param.type.max) == (spec.min_resolution, spec.max_resolution)
+    # A5 and S2 currently share bounds: also catch a lookup of the wrong spec.
+    source = inspect.getsource(command.callback)
+    lookups = [
+        node.args[0].value
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "get_index_spec"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+    ]
+    assert lookups and set(lookups) == {index_name}
+
+
+@pytest.mark.parametrize("index_name", INDICES)
+def test_sub_partition_conflict_uses_api_argument_names(tmp_path, index_name):
+    from geoparquet_io.core.exceptions import InvalidParameterError
+
+    spec = get_index_spec(index_name)
+    with pytest.raises(InvalidParameterError) as caught:
+        getattr(ops, f"sub_partition_by_{index_name}")(
+            tmp_path, min_size="1B", auto=True, **{spec.unit: 6}
+        )
+    assert "auto=True" in caught.value.reason
+    assert f"{spec.unit}=<int>" in caught.value.reason
+    assert "--" not in caught.value.reason
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_sort_reuses_case_insensitive_quadkey_column(tmp_path, streaming):
+    import subprocess
+    import sys
+
+    table = golden_fixture()
+    table = table.append_column("QUADKEY", pa.array(["3", "1", "2"] + ["0"] * (table.num_rows - 3)))
+    source = tmp_path / "source.parquet"
+    output = tmp_path / "sorted.parquet"
+    pq.write_table(table, source)
+    args = ["sort", "quadkey", str(source), str(output)]
+    if streaming:
+        import pyarrow.ipc as ipc
+
+        with pa.BufferOutputStream() as sink:
+            with ipc.new_stream(sink, table.schema) as writer:
+                writer.write_table(table)
+            payload = sink.getvalue().to_pybytes()
+        args[2] = "-"
+        result = subprocess.run(
+            [sys.executable, "-c", "from geoparquet_io.cli.main import cli; cli()", *args],
+            input=payload,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr.decode()
+    else:
+        result = CliRunner().invoke(cli, args)
+        assert result.exit_code == 0, result.output
+    sorted_table = pq.read_table(output)
+    assert sorted_table["QUADKEY"].to_pylist() == sorted(table["QUADKEY"].to_pylist())
+    assert sorted_table.column_names == table.column_names

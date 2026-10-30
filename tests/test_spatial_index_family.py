@@ -1301,24 +1301,24 @@ class TestValidateResolutions:
     def test_valid_resolutions(self):
         """Test with valid resolutions."""
         # Should not raise
-        validate_partition_resolutions(13, 9)
-        validate_partition_resolutions(23, 23)
-        validate_partition_resolutions(0, 0)
+        validate_partition_resolutions(13, 9, get_index_spec("quadkey"))
+        validate_partition_resolutions(23, 23, get_index_spec("quadkey"))
+        validate_partition_resolutions(0, 0, get_index_spec("quadkey"))
 
     def test_resolution_out_of_range(self):
         """Test with resolution out of range."""
         with pytest.raises(InvalidParameterError):
-            validate_partition_resolutions(25, 9)
+            validate_partition_resolutions(25, 9, get_index_spec("quadkey"))
 
     def test_partition_resolution_out_of_range(self):
         """Test with partition resolution out of range."""
         with pytest.raises(InvalidParameterError):
-            validate_partition_resolutions(13, 25)
+            validate_partition_resolutions(13, 25, get_index_spec("quadkey"))
 
     def test_partition_resolution_exceeds_resolution(self):
         """Test with partition resolution exceeding column resolution."""
         with pytest.raises(InvalidParameterError):
-            validate_partition_resolutions(5, 10)
+            validate_partition_resolutions(5, 10, get_index_spec("quadkey"))
 
 
 class TestCalculatePartitionStats:
