@@ -360,7 +360,7 @@ separate processes and are not bounded by it.
 
 === "CLI"
 
-    <!-- doctest: skip="needs cells.parquet, which the harness does not seed" -->
+    <!-- doctest: needs-tippecanoe, setup="gpio process aggregate h3 input.parquet cells.parquet --resolution 5" -->
     ```bash
     gpio pmtiles pyramid cells.parquet cells.pmtiles --write-memory 8GB
     ```
