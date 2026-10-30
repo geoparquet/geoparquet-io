@@ -564,6 +564,280 @@ name = "_crs_matches"
 reason = "CRS equality copy (approved change 9); T4c"
 
 # ---------------------------------------------------------------------------
+# G3: near-duplicate functions (scripts/check_duplicates.py; pylint R0801)
+# ---------------------------------------------------------------------------
+# [[G3.pairs]] gives the reason for each line of scripts/duplicate_pairs_baseline.txt;
+# tests/test_owner_guards.py fails when the two lists differ.
+[G3]
+baseline = "scripts/duplicate_pairs_baseline.txt"
+
+[[G3.pairs]]
+pair = "geoparquet_io/cli/commands/partition.py:partition_a5|geoparquet_io/cli/commands/partition.py:partition_h3"
+reason = "partition h3/s2/a5 CLI commands, one per index; T5b shares one implementation"
+[[G3.pairs]]
+pair = "geoparquet_io/cli/commands/partition.py:partition_a5|geoparquet_io/cli/commands/partition.py:partition_s2"
+reason = "partition h3/s2/a5 CLI commands, one per index; T5b shares one implementation"
+[[G3.pairs]]
+pair = "geoparquet_io/cli/commands/partition.py:partition_h3|geoparquet_io/cli/commands/partition.py:partition_s2"
+reason = "partition h3/s2/a5 CLI commands, one per index; T5b shares one implementation"
+[[G3.pairs]]
+pair = "geoparquet_io/core/add/a5.py:_add_a5_streaming.make_query|geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query"
+reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
+[[G3.pairs]]
+pair = "geoparquet_io/core/add/a5.py:_add_a5_streaming.make_query|geoparquet_io/core/add/s2.py:_add_s2_streaming.make_query"
+reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
+[[G3.pairs]]
+pair = "geoparquet_io/core/add/a5.py:_add_a5_streaming|geoparquet_io/core/add/h3.py:_add_h3_streaming"
+reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
+[[G3.pairs]]
+pair = "geoparquet_io/core/add/a5.py:_add_a5_streaming|geoparquet_io/core/add/s2.py:_add_s2_streaming"
+reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
+[[G3.pairs]]
+pair = "geoparquet_io/core/add/a5.py:add_a5_column|geoparquet_io/core/add/h3.py:add_h3_column"
+reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
+[[G3.pairs]]
+pair = "geoparquet_io/core/add/a5.py:add_a5_table|geoparquet_io/core/add/h3.py:add_h3_table"
+reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
+[[G3.pairs]]
+pair = "geoparquet_io/core/add/admin_divisions.py:_print_dry_run_header|geoparquet_io/core/add/country_codes.py:_print_dry_run_header"
+reason = "permanent: each adder's dry-run banner words its own dataset; T1d (spatial join) left them as caller output"
+[[G3.pairs]]
+pair = "geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query|geoparquet_io/core/add/s2.py:_add_s2_streaming.make_query"
+reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
+[[G3.pairs]]
+pair = "geoparquet_io/core/add/h3.py:_add_h3_streaming|geoparquet_io/core/add/s2.py:_add_s2_streaming"
+reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
+[[G3.pairs]]
+pair = "geoparquet_io/core/benchmark.py:benchmark_geopandas_fiona|geoparquet_io/core/benchmark.py:benchmark_geopandas_pyogrio"
+reason = "permanent: fiona and pyogrio engines benchmarked as separate named entries (they differ in the engine literal); benchmark-only, not a gpio write path"
+[[G3.pairs]]
+pair = "geoparquet_io/core/geo_metadata.py:_initialize_geo_metadata|geoparquet_io/core/write_strategies/base.py:_initialize_geo_metadata"
+reason = "geo block initialisation copy (write_strategies/base vs geo_metadata); T3e composes the geo block once"
+[[G3.pairs]]
+pair = "geoparquet_io/core/partition/auto_resolution.py:_calculate_h3_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_quadkey_resolution"
+reason = "auto-resolution per index; T5b's one resolution calculator"
+[[G3.pairs]]
+pair = "geoparquet_io/core/partition/by_a5.py:_ensure_a5_column|geoparquet_io/core/partition/by_h3.py:_ensure_h3_column"
+reason = "_ensure_*_column, one copy per index; T5b's ensure_index_column"
+[[G3.pairs]]
+pair = "geoparquet_io/core/partition/by_a5.py:partition_by_a5|geoparquet_io/core/partition/by_h3.py:partition_by_h3"
+reason = "partition workflow, one copy per index; T5b's index_ops driver"
+
+# pylint R0801 (scripts/check_pylint_duplicates.py, the pylint-duplicates hook).
+# One entry per pair of modules pylint reports similar lines between, keyed by the
+# two module names (geoparquet_io. dropped) and counted by report; the wrapper fails
+# when the tree differs. Most are keyword-argument lists forwarded to one callee:
+# R0801 counts lines, not logic, so those are permanent.
+[[G3.pylint]]
+modules = "api.ops|api.table"
+count = 4
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "api.ops|cli.commands.pmtiles"
+count = 2
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "api.ops|cli.decorators"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "api.ops|core.arcgis"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "api.ops|core.carto"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "api.ops|core.process.raster.contour"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "api.table|cli.commands.extract"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "api.table|core.arcgis"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "api.table|core.process.raster.contour"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "cli.commands.add|cli.commands.sort"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "cli.commands.process|core.process.aggregate.by_a5"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "cli.commands.process|core.process.aggregate.by_h3"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.add.a5|core.add.bbox"
+reason = "geometry-column lookup from standard names, copied per adder; T5b's one case-insensitive rule"
+[[G3.pylint]]
+modules = "core.add.a5|core.add.h3"
+count = 3
+reason = "index add workflow per index; T5b's index_ops driver"
+[[G3.pylint]]
+modules = "core.add.a5|core.sort_by_column"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.add.admin_divisions|core.add.country_codes"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.add.admin_divisions|core.partition.admin_hierarchical"
+reason = "permanent: both admin-dataset callers open the cached spatial connection the same way; T1d left it as caller setup"
+[[G3.pylint]]
+modules = "core.add.admin_divisions|core.str_order"
+count = 2
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.add.bbox|core.stream_io"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.add.geometry_metrics|core.add.s2"
+reason = "geometry-column lookup from standard names, copied per adder; T5b's one case-insensitive rule"
+[[G3.pylint]]
+modules = "core.add.geometry_metrics|core.sort_by_column"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.add.h3|core.add.quadkey"
+count = 2
+reason = "index add workflow per index; T5b's index_ops driver"
+[[G3.pylint]]
+modules = "core.add.h3|core.sort_by_column"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.add.h3|core.sort_quadkey"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.add.kdtree|core.str_order"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.add.quadkey|core.extract"
+reason = "is-geographic CRS copy (approved change 8); T4c"
+[[G3.pylint]]
+modules = "core.arrow_geo_metadata|core.geo_metadata"
+reason = "geometry stats twins; T3b"
+[[G3.pylint]]
+modules = "core.arrow_geo_metadata|core.streaming"
+reason = "version read from the geo key, copied; T2b"
+[[G3.pylint]]
+modules = "core.common|core.str_order"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.convert|core.process.aggregate.common"
+reason = "DuckDB integer type-name list copied; T1c's type owner"
+[[G3.pylint]]
+modules = "core.crs_utils|core.duckdb_metadata"
+reason = "GeoArrow extension-name list copied; T3a's decoder owner"
+[[G3.pylint]]
+modules = "core.duckdb_metadata|core.validate"
+reason = "geo_types display formatter copied into validate; T3b"
+[[G3.pylint]]
+modules = "core.extract|core.str_order"
+count = 2
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.hilbert_order|core.str_order"
+count = 2
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.partition.admin_hierarchical|core.partition.common"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.partition.by_a5|core.partition.by_h3"
+count = 2
+reason = "partition workflow per index; T5b's index_ops driver"
+[[G3.pylint]]
+modules = "core.partition.by_h3|core.partition.by_kdtree"
+reason = "partition analysis and write options per index; T5b's index_ops driver"
+[[G3.pylint]]
+modules = "core.partition.by_h3|core.partition.by_s2"
+reason = "partition workflow per index; T5b's index_ops driver"
+[[G3.pylint]]
+modules = "core.partition.by_quadkey|core.sort_quadkey"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.partition.by_s2|core.partition.by_string"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.process.aggregate.by_a5|core.process.aggregate.by_h3"
+count = 2
+reason = "permanent: aggregate-by-a5/h3 public entry points forward the same parameters to one grid driver (grid_common)"
+[[G3.pylint]]
+modules = "core.process.aggregate.by_admin|core.process.aggregate.grid_common"
+reason = "geometry-free aggregate raw write (approved change 2); T2c"
+[[G3.pylint]]
+modules = "core.process.raster.contour|core.process.raster.polygonize"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.sort_by_column|core.sort_quadkey"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+modules = "core.sort_quadkey|core.str_order"
+reason = "sort result read back with the input's schema metadata carried, copied per sort; T2c"
+[[G3.pylint]]
+modules = "core.write_funnels|core.write_strategies.disk_rewrite"
+reason = "codec name map copied; T2a (compression owner)"
+
+# ---------------------------------------------------------------------------
+# G13: shared-option consistency (tests/test_cli_shared_options.py)
+# ---------------------------------------------------------------------------
+# Option names declared on more than one command whose type, default, callback,
+# multiple or is_flag differ, with the fields that differ. The set is exact: a
+# new difference fails, and a unified option must leave the list.
+# Not here: --bbox (its parsing differs in the command bodies, not in the Click
+# declaration; T5c) and --json/--markdown (declared repeatedly but identically).
+[[G13.options]]
+option = "--auto"
+fields = ["type", "is_flag"]
+reason = "permanent: two meanings, kdtree's --auto N (target partition count) and a bool switch on the index commands"
+[[G13.options]]
+option = "--bbox-name"
+fields = ["default"]
+reason = "permanent: add bbox names the new column ('bbox'); add bbox-metadata detects the existing one when not given"
+[[G13.options]]
+option = "--encoding"
+fields = ["default"]
+reason = "permanent: convert geoparquet auto-detects (None); shapefile DBF text defaults to UTF-8"
+[[G13.options]]
+option = "--geometry"
+fields = ["type", "is_flag"]
+reason = "T5c: extract carto's --geometry is a bool flag where every other command takes a column name"
+[[G13.options]]
+option = "--geometry-column"
+fields = ["default", "callback"]
+reason = "T5c: process simplify declares its own --geometry-column without the 'geometry' default or the _validate_column_name callback the sort commands share"
+[[G13.options]]
+option = "--geoparquet-version"
+fields = ["type"]
+reason = "permanent: check spec validates against spec versions, and 1.1-geoarrow is a write encoding, not a spec version"
+[[G13.options]]
+option = "--level"
+fields = ["type", "default"]
+reason = "permanent: S2 level (add 13; partition None = auto-resolve) vs aggregate admin's country/region level"
+[[G13.options]]
+option = "--limit"
+fields = ["type"]
+reason = "T5c: extract geoparquet/arcgis take a plain int where bigquery/wfs/carto reject negatives (IntRange min=0)"
+[[G13.options]]
+option = "--precision"
+fields = ["default"]
+reason = "permanent: each format's documented coordinate precision (GeoJSON 7, PMTiles 6)"
+[[G13.options]]
+option = "--profile"
+fields = ["type", "is_flag"]
+reason = "permanent: two meanings, benchmark suite's profiling switch and check's 'web' rule profile"
+[[G13.options]]
+option = "--resolution"
+fields = ["type", "default"]
+reason = "permanent: per-index bounds and defaults (H3 0-15, A5 0-30, quadkey 0-23; partition/aggregate None = auto); T5b's index specs carry them"
+[[G13.options]]
+option = "--timeout"
+fields = ["type", "default"]
+reason = "T5c: one --timeout type (arcgis FloatRange, carto IntRange); the 60 s and 120 s defaults are per-service budgets the T4a audit accepted"
+[[G13.options]]
+option = "--where"
+fields = ["default"]
+reason = "permanent: ArcGIS REST requires a where clause, so extract arcgis defaults to its select-all '1=1'"
+
+# ---------------------------------------------------------------------------
 # G4: dead code (vulture at min_confidence = 60)
 # ---------------------------------------------------------------------------
 [G4]

@@ -281,6 +281,20 @@ retries, ...) has one owner module, and these checks fail a new copy of it (#136
   `parse_size*`, `atomic_write`, ... (a leading underscore does not matter, and
   `[G2.known_copies]` names renamed copies) lives only in its owner, per the
   `[G2.owners]` table.
+- **G3, near-duplicate functions** — `scripts/check_duplicates.py` (the `check-duplicates`
+  hook) renames identifiers by first occurrence and fails a new pair of functions with 8 or
+  more statements at 0.90 similarity or above; the pairs that exist are in
+  `scripts/duplicate_pairs_baseline.txt`, which only falls (`--update` drops a gone pair).
+  pylint `R0801` (8 similar lines) runs at pre-push through
+  `scripts/check_pylint_duplicates.py`, held to the module pairs pinned under `[G3.pylint]`.
+- **G6, public-API snapshot** — `tests/data/snapshots/public_api.json` pins the public names
+  of `api`, `api.ops`, `api.table` and every owner module. A rename, move or deletion is a
+  diff to it: re-record with `GPIO_UPDATE_SNAPSHOT=1 uv run pytest tests/test_api.py -k
+  public_api_matches` and review the diff.
+- **G13, shared options** — `tests/test_cli_shared_options.py` walks the Click tree: an
+  option name on several commands has one type, default, callback and `multiple`/`is_flag`.
+  Declare a shared option once in `cli/decorators.py`; the differences that exist are
+  pinned under `[G13]`.
 - **G4, dead code** — vulture at `min_confidence = 60`, the package on its own (a test
   calling a name is not a use; baseline `scripts/vulture_whitelist.py`) and the tests on
   their own (the `vulture-tests` hook; `scripts/vulture_whitelist_tests.py`). Each
