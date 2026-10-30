@@ -2276,7 +2276,7 @@ def convert_to_geopackage(
     table: pa.Table,
     output_path: str,
     overwrite: bool = False,
-    layer_name: str = "features",
+    layer_name: str | None = None,
     bbox: str | tuple[float, float, float, float] | None = None,
     geometry: str | None = None,
     where: str | None = None,
@@ -2291,7 +2291,7 @@ def convert_to_geopackage(
         table: Input PyArrow Table with geometry column
         output_path: Output file path (must be local, not cloud URL)
         overwrite: Overwrite existing file (default: False)
-        layer_name: Layer name in GeoPackage (default: 'features')
+        layer_name: Layer name in GeoPackage (default: the output file stem)
         bbox: Bounding box filter, (xmin, ymin, xmax, ymax) or
             "xmin,ymin,xmax,ymax"; prunes on the bbox covering column when
             the table has one

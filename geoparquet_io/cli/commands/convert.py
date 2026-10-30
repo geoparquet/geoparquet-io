@@ -708,9 +708,8 @@ def convert_geojson(
 @overwrite_option
 @click.option(
     "--layer-name",
-    default="features",
-    show_default=True,
-    help="Layer name in GeoPackage",
+    default=None,
+    help="Layer name in GeoPackage (default: the output file name without extension)",
 )
 @spatial_filter_options
 @where_option

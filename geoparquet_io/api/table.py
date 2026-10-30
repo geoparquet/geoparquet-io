@@ -1230,7 +1230,7 @@ class Table:
         verbose: bool = False,
         # Format-specific options
         overwrite: bool = False,
-        layer_name: str = "features",
+        layer_name: str | None = None,
         include_wkt: bool = True,
         include_bbox: bool = True,
         encoding: str = "UTF-8",
@@ -1271,7 +1271,7 @@ class Table:
                            'duckdb-kv', 'disk-rewrite'). Default: 'duckdb-kv'
             profile: AWS profile for S3 operations
             overwrite: Overwrite existing file (GeoPackage, Shapefile)
-            layer_name: Layer name for GeoPackage (default: 'features')
+            layer_name: Layer name for GeoPackage (default: the output file stem)
             include_wkt: Include WKT geometry column for CSV (default: True)
             include_bbox: Include bbox column for CSV (default: True)
             encoding: Character encoding for Shapefile (default: 'UTF-8')
@@ -1668,7 +1668,7 @@ class Table:
                     str(temp_parquet),
                     str(output_path),
                     overwrite=format_options.get("overwrite", False),
-                    layer_name=format_options.get("layer_name", "features"),
+                    layer_name=format_options.get("layer_name"),
                     verbose=False,
                     profile=profile,
                     **filter_options,

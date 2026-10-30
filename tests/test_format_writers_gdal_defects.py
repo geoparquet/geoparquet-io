@@ -118,3 +118,10 @@ def test_issue_1333_nested_columns_are_json_encoded(with_geo, tmp_path, fmt, suf
     assert json.loads(row[0]) == {"a": 0, "b": "x"}
     assert json.loads(row[1]) == [0, 1]
     assert json.loads(row[2]) == {"k": "v"}
+
+
+def test_issue_1320_no_flag_keeps_file_stem(with_geo, tmp_path):
+    out = tmp_path / "stem.gpkg"
+    result = _run("geopackage", with_geo, out)
+    assert result.exit_code == 0, result.output
+    assert _gpkg(out)[0] == ["stem"]

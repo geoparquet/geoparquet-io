@@ -345,7 +345,7 @@ def write_gdal_format(
     output_path: str,
     format_name: str,
     overwrite: bool = False,
-    layer_name: str = "features",
+    layer_name: str | None = None,
     encoding: str = "UTF-8",
     verbose: bool = False,
     profile: str | None = None,
@@ -364,7 +364,7 @@ def write_gdal_format(
         output_path: Path to output file (must be local)
         format_name: Format key: 'geopackage', 'flatgeobuf', or 'shapefile'
         overwrite: Overwrite existing file if True
-        layer_name: Layer name (for formats that support it)
+        layer_name: GeoPackage layer name; None keeps GDAL's default, the output file stem
         encoding: Character encoding (for Shapefile)
         verbose: Print verbose output
         profile: AWS profile for S3 input files
@@ -488,7 +488,7 @@ def write_gdal_format(
         lco_clause = f", LAYER_CREATION_OPTIONS ({lco_options})" if lco_parts else ""
         # LAYER_NAME is a COPY option of DuckDB's GDAL writer; as a layer
         # creation option GDAL ignores it and names the layer after the file (#1320).
-        if config.get("layer_option"):
+        if config.get("layer_option") and layer_name is not None:
             lco_clause = f", LAYER_NAME '{_escape_sql_string(layer_name)}'{lco_clause}"
 
         geometry_is_native = True
