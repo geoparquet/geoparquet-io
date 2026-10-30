@@ -241,7 +241,7 @@ nothing is deleted, even when `--in-place` is also passed.
         preview=True,
     )
     for candidate in plan['candidates']:
-        size_mb = candidate['size_bytes'] / (1024 * 1024)
+        size_mb = candidate['size_bytes'] / 1_000_000
         print(f"{candidate['path']} ({size_mb:.1f}MB) -> {candidate['output_dir']}/")
     ```
 

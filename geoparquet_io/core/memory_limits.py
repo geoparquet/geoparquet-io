@@ -29,6 +29,7 @@ from geoparquet_io.core.duckdb_utils import (
     _apply_memory_limit,
     _current_setting,
     get_duckdb_connection,
+    pin_duckdb_settings,
     restore_duckdb_settings,
 )
 from geoparquet_io.core.logging_config import debug
@@ -186,6 +187,11 @@ def default_memory_limit() -> str | None:
 _BYTES_PER_THREAD = 512 * 1024**2
 
 
+def _thread_cap(limit_bytes: int) -> int:
+    """The most threads a memory limit supports, each keeping ``_BYTES_PER_THREAD``."""
+    return max(1, limit_bytes // _BYTES_PER_THREAD)
+
+
 def _connection_limit(memory_limit: str | None) -> tuple[str | None, int | None]:
     """The ``memory_limit`` and thread cap a freshly opened connection should carry.
 
@@ -205,7 +211,7 @@ def _connection_limit(memory_limit: str | None) -> tuple[str | None, int | None]
     limit_bytes = parse_size_string(limit)
     if not limit_bytes:  # pragma: no cover - validate_memory_limit accepts only sizes
         return limit, None
-    threads = max(1, limit_bytes // _BYTES_PER_THREAD)
+    threads = _thread_cap(limit_bytes)
     default_threads = os.cpu_count() or threads
     return limit, (threads if threads < default_threads else None)
 
@@ -323,10 +329,8 @@ def scoped_write_memory_limit(
             # stricter one the caller had -- as DuckDB reports it.
             limit_bytes = parse_size_string(str(_current_setting(con, "memory_limit")))
             if limit_bytes:
-                _apply_memory_limit(con, None, max(1, limit_bytes // _BYTES_PER_THREAD), verbose)
-        for key, value in pinned.items():
-            rendered = str(value).lower() if isinstance(value, bool) else int(value)
-            con.execute(f"SET {key} = {rendered}")
+                _apply_memory_limit(con, None, _thread_cap(limit_bytes), verbose)
+        pin_duckdb_settings(con, pinned)
         yield
     finally:
         restore_duckdb_settings(con, saved, verbose)

@@ -10,6 +10,7 @@ and a bare number means MB. Before this, ``--row-group-size-mb 1GB`` and
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -333,6 +334,13 @@ def test_guard_catches_both_patterns(tmp_path):
 # --- guard: one place applies a memory limit and its thread cap -------------------
 
 LIMIT_APPLIER = "core/duckdb_utils.py:_apply_memory_limit"
+# Where the setting name is a variable on purpose: the SET primitive and the
+# save/restore/pin trio that move any setting a write overrides.
+SETTING_PRIMITIVES = {
+    "core/duckdb_utils.py:_set_setting",
+    "core/duckdb_utils.py:restore_duckdb_settings",
+    "core/duckdb_utils.py:pin_duckdb_settings",
+}
 
 
 def _limit_setters(path: Path, root: Path) -> set[str]:
@@ -345,6 +353,16 @@ def _limit_setters(path: Path, root: Path) -> set[str]:
     }
 
     def sets_a_limit(node: ast.AST) -> bool:
+        if isinstance(node, ast.JoinedStr):
+            # f"SET {name} = ..." -- a setting named by a variable can be either limit.
+            parts = node.values
+            return any(
+                isinstance(a, ast.Constant)
+                and isinstance(a.value, str)
+                and re.search(r"(?<![A-Za-z_])SET\s+$", a.value, re.IGNORECASE) is not None
+                and isinstance(b, ast.FormattedValue)
+                for a, b in zip(parts, parts[1:], strict=False)
+            )
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             text = node.value.lower()
             return id(node) not in docstrings and (
@@ -354,8 +372,10 @@ def _limit_setters(path: Path, root: Path) -> set[str]:
             isinstance(node, ast.Call)
             and getattr(node.func, "id", getattr(node.func, "attr", None)) == "_set_setting"
             and len(node.args) >= 2
-            and isinstance(node.args[1], ast.Constant)
-            and node.args[1].value in ("memory_limit", "threads")
+            and (
+                not isinstance(node.args[1], ast.Constant)
+                or node.args[1].value in ("memory_limit", "threads")
+            )
         )
 
     rel = path.relative_to(root).as_posix()
@@ -373,7 +393,7 @@ def _all_limit_setters(root: Path = PACKAGE) -> set[str]:
 
 def test_memory_limit_and_thread_cap_are_applied_in_one_place():
     """The connection default, a scoped write and an open connection share one apply step."""
-    assert _all_limit_setters() == {LIMIT_APPLIER}
+    assert _all_limit_setters() == {LIMIT_APPLIER, *SETTING_PRIMITIVES}
 
 
 def test_limit_setter_guard_sees_each_spelling(tmp_path):
@@ -383,8 +403,17 @@ def test_limit_setter_guard_sees_each_spelling(tmp_path):
         "def b(con, n):\n    con.execute(f'SET threads = {n}')\n"
         "def c(con, n):\n    _set_setting(con, 'threads', n)\n"
         "def d(con):\n    con.execute('SET preserve_insertion_order = false')\n"
+        'def e(con, key, v):\n    con.execute(f"SET {key} = {v}")\n'
+        "def f(con, key, v):\n    _set_setting(con, key, v)\n"
+        "def g(con, v):\n    _set_setting(con, 'preserve_insertion_order', v)\n"
     )
-    assert _all_limit_setters(tmp_path) == {"rogue.py:a", "rogue.py:b", "rogue.py:c"}
+    assert _all_limit_setters(tmp_path) == {
+        "rogue.py:a",
+        "rogue.py:b",
+        "rogue.py:c",
+        "rogue.py:e",
+        "rogue.py:f",
+    }
 
 
 @pytest.mark.parametrize(

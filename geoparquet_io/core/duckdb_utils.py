@@ -435,9 +435,11 @@ def duckdb_capabilities() -> DuckDBCapabilities:
     """The installed DuckDB's :class:`DuckDBCapabilities`, computed once per process.
 
     The one reader of ``duckdb.__version__`` in gpio (``tests/
-    test_duckdb_capabilities.py`` fails on any other). Test hook: a test that
-    monkeypatches ``duckdb.__version__`` calls ``duckdb_capabilities.cache_clear()``
-    after patching and again after restoring, so the next call re-reads it.
+    test_duckdb_capabilities.py`` fails on any other). Test hook: a test uses
+    ``pretend_duckdb_capabilities`` / ``pretend_duckdb_version`` from
+    ``tests/test_duckdb_capabilities.py``, which patch ``_capabilities_for`` and
+    call ``duckdb_capabilities.cache_clear()`` around the patch; it never
+    patches ``duckdb.__version__``.
     """
     import duckdb
 
@@ -510,6 +512,18 @@ def _set_setting(con: duckdb.DuckDBPyConnection, key: str, value: object) -> Non
         con.execute(f"SET {key} = '{_escape_sql_string(value)}'")
     else:
         con.execute(f"SET {key} = {value}")
+
+
+def pin_duckdb_settings(con: duckdb.DuckDBPyConnection, settings: Mapping[str, int | bool]) -> None:
+    """SET settings a write needs for its duration; the caller restores them.
+
+    The pair of :func:`restore_duckdb_settings`: ``settings`` keys are names from
+    gpio's own code, never user input.
+    """
+    for key, value in settings.items():
+        if not _SETTING_KEY_RE.fullmatch(key):
+            raise ValueError(f"Not a DuckDB setting name: {key!r}")
+        _set_setting(con, key, str(value).lower() if isinstance(value, bool) else int(value))
 
 
 def sql_path(path: str | os.PathLike[str]) -> str:
