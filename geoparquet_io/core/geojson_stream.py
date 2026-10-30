@@ -36,7 +36,6 @@ if TYPE_CHECKING:
 from geoparquet_io.core.crs_utils import (
     crs_is_explicitly_null,
     crs_string_from_table,
-    parse_geo_metadata_from_schema,
     source_crs_string,
     transform_source_label,
     warn_null_crs_once,
@@ -60,7 +59,7 @@ from geoparquet_io.core.file_utils import (
     has_glob_pattern,
     resolve_file_url,
 )
-from geoparquet_io.core.geo_metadata import GEOGRAPHY_EDGE_ALGORITHMS
+from geoparquet_io.core.geo_metadata import GEOGRAPHY_EDGE_ALGORITHMS, sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
@@ -867,7 +866,7 @@ def convert_to_geojson_stream(
 def _warn_on_explicit_null_crs(table, geometry_column: str) -> None:
     """Warn once per stream ``geo`` block whose column says ``"crs": null`` (unknown)."""
     metadata = table.schema.metadata or {}
-    geo_meta = parse_geo_metadata_from_schema(metadata)
+    geo_meta = sanitized_carried_geo(metadata)
     columns = geo_meta.get("columns") if isinstance(geo_meta, dict) else None
     col_meta = columns.get(geometry_column) if isinstance(columns, dict) else None
     if col_meta is None or not crs_is_explicitly_null(col_meta):

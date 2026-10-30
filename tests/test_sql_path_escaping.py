@@ -54,7 +54,6 @@ from geoparquet_io.core.duckdb_metadata import (
     get_column_names,
     get_compression_info,
     get_file_metadata,
-    get_geo_metadata,
     get_per_row_group_bbox_stats,
     get_schema_info,
 )
@@ -66,6 +65,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import FileNotFoundGeoParquetError
 from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEST_DATA_DIR = Path(__file__).parent / "data"
@@ -130,7 +130,7 @@ class TestEscapingIsAppliedOnce:
         [
             get_file_metadata,
             get_schema_info,
-            get_geo_metadata,
+            raw_geo_of_file,
             get_column_names,
             detect_geometry_columns,
             check_bbox_structure,

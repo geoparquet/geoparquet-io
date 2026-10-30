@@ -17,7 +17,7 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
 )
 from geoparquet_io.core.file_utils import get_all_parquet_files
-from geoparquet_io.core.geo_metadata import parse_geo_metadata, sanitize_geo_metadata
+from geoparquet_io.core.geo_metadata import sanitize_geo_metadata, sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.remote import is_remote_url
@@ -213,9 +213,9 @@ def _add_projection_properties(item: pystac.Item, geo_meta: dict | None, parquet
     A write-path reader despite reading nothing but metadata: the CRS and
     geometry types it lifts out leave gpio inside a *published* STAC Item, so
     the block goes through the shared shape check rather than being copied out
-    of somebody else's file as-is (#947). ``parse_geo_metadata``, which the two
-    callers read with, is the read-only reader and stays untouched -- ``gpio
-    check`` needs it to show the file as it really is.
+    of somebody else's file as-is (#947). The two callers read it with
+    ``sanitized_carried_geo`` already; sanitizing again here keeps a caller
+    that hands over a raw block safe.
 
     Before the check, a ``columns: null`` block aborted ``gpio publish stac``
     with ``argument of type 'NoneType' is not iterable``, and a list- or
@@ -334,7 +334,7 @@ def generate_stac_item(
 
     Uses existing metadata extraction:
     - get_dataset_bounds() for bbox
-    - parse_geo_metadata() for CRS/geometry info
+    - sanitized_carried_geo() for CRS/geometry info
     - file mtime or current time for datetime
 
     Args:
@@ -373,7 +373,7 @@ def generate_stac_item(
 
     # Get metadata
     metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
-    geo_meta = parse_geo_metadata(metadata, verbose=False)
+    geo_meta = sanitized_carried_geo(metadata, source=parquet_file)
 
     # Get bounds and geometry
     bounds = get_dataset_bounds(parquet_file, verbose=False)
@@ -445,7 +445,7 @@ def _generate_stac_item_no_warning(
     """
     # Get metadata
     metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
-    geo_meta = parse_geo_metadata(metadata, verbose=False)
+    geo_meta = sanitized_carried_geo(metadata, source=parquet_file)
 
     # Get bounds and geometry
     bounds = get_dataset_bounds(parquet_file, verbose=False)

@@ -11,7 +11,7 @@ The five paths, one class each:
 * **remote, glob and directory inputs** -- the derivation read the input with
   ``pq.ParquetFile``, so ``https://``, ``s3://``, ``dir/*.parquet`` and hive
   directories derived nothing. It now reads through ``get_schema_info`` /
-  ``get_geo_metadata``, the pair ``collect_nonplanar_edges`` already asks the
+  ``sanitized_carried_geo_of_file``, the pair ``collect_nonplanar_edges`` already asks the
   same question of, which resolve all four spellings.
 * **the 2.0 fast path** -- ``_geo_block_to_carry_on_fast_path`` writes the
   input's own block verbatim, so a 2.0 input whose block omits a native
@@ -27,7 +27,7 @@ The five paths, one class each:
   derive nothing; the secondaries now come off the table's own schema.
 
 Remote spellings: ``https://`` and ``s3://`` are covered *by construction* --
-they go through the same ``get_schema_info``/``get_geo_metadata`` pair as the
+they go through the same ``get_schema_info``/``sanitized_carried_geo_of_file`` pair as the
 glob and directory cases, which these tests do exercise -- not by a test, since
 the suite does not reach the network.
 """

@@ -11,7 +11,6 @@ from geoparquet_io.core.duckdb_metadata import (
     get_bbox_from_row_group_stats,
     get_column_names,
     get_compression_info,
-    get_geo_metadata,
     get_kv_metadata,
     get_per_row_group_bbox_stats,
     get_row_count,
@@ -21,6 +20,7 @@ from geoparquet_io.core.duckdb_metadata import (
     parse_geometry_logical_type,
     resolve_crs_reference,
 )
+from geoparquet_io.core.geo_metadata import raw_geo_of_file
 from tests.conftest import safe_unlink
 
 
@@ -38,18 +38,18 @@ class TestGetKvMetadata:
         assert b"geo" in result
 
 
-class TestGetGeoMetadata:
-    """Tests for get_geo_metadata function."""
+class TestRawGeoOfFile:
+    """Tests for raw_geo_of_file (the file-level raw geo reader)."""
 
     def test_returns_dict_for_geoparquet(self, places_test_file):
-        """Test that get_geo_metadata returns parsed dict for GeoParquet."""
-        result = get_geo_metadata(places_test_file)
+        """raw_geo_of_file returns the parsed dict for GeoParquet."""
+        result = raw_geo_of_file(places_test_file).value
         assert isinstance(result, dict)
         assert "version" in result or "columns" in result
 
     def test_returns_dict_for_buildings_file(self, buildings_test_file):
-        """Test get_geo_metadata with buildings test file."""
-        result = get_geo_metadata(buildings_test_file)
+        """raw_geo_of_file with the buildings test file."""
+        result = raw_geo_of_file(buildings_test_file).value
         # Buildings file has geo metadata
         assert isinstance(result, dict)
         assert "version" in result or "columns" in result
@@ -323,7 +323,7 @@ class TestGeoParquetErrorExceptions:
     """Tests for GeoParquetError exception behavior."""
 
     def test_raises_geoparquet_error_for_invalid_parquet(self):
-        """Test that get_geo_metadata raises GeoParquetError for invalid files."""
+        """raw_geo_of_file raises GeoParquetError for invalid files."""
         # Create a temporary non-parquet file
         with tempfile.NamedTemporaryFile(mode="w", suffix=".parquet", delete=False) as f:
             f.write("This is not a parquet file")
@@ -331,7 +331,7 @@ class TestGeoParquetErrorExceptions:
 
         try:
             with pytest.raises(GeoParquetError) as exc_info:
-                get_geo_metadata(temp_path)
+                raw_geo_of_file(temp_path)
 
             # Verify error message is informative
             error_msg = str(exc_info.value)
@@ -346,7 +346,7 @@ class TestGeoParquetErrorExceptions:
             safe_unlink(temp_path)
 
     def test_raises_geoparquet_error_for_io_error(self):
-        """Test that get_geo_metadata raises GeoParquetError for I/O errors."""
+        """raw_geo_of_file raises GeoParquetError for I/O errors."""
         # Create an empty parquet file that will cause I/O issues when reading metadata
         with tempfile.NamedTemporaryFile(mode="wb", suffix=".parquet", delete=False) as f:
             # Write just a few bytes - not a complete parquet file structure
@@ -355,7 +355,7 @@ class TestGeoParquetErrorExceptions:
 
         try:
             with pytest.raises(GeoParquetError) as exc_info:
-                get_geo_metadata(temp_path)
+                raw_geo_of_file(temp_path)
 
             # Verify error message mentions read issue
             error_msg = str(exc_info.value)

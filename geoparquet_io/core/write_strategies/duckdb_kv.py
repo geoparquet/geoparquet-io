@@ -25,7 +25,6 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.arrow_geo_metadata import (
     _canonicalize_wkb_columns,
     _detect_version_from_table,
-    _parse_geo_metadata_quietly,
     table_geometry_info,
 )
 from geoparquet_io.core.compression import ResolvedCodec, resolve_codec
@@ -46,6 +45,7 @@ from geoparquet_io.core.geo_metadata import (
     compute_geo_stats_via_sql,
     declare_carried_bbox_column,
     gate_illegal_bbox_covering,
+    sanitized_carried_geo,
     strip_bboxless_covering,
 )
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
@@ -118,7 +118,7 @@ def _plain_wkb_for_secondary_columns(
     it through a binary cast PyArrow cannot perform.
     """
 
-    carried_geo = _parse_geo_metadata_quietly(table.schema.metadata)
+    carried_geo = sanitized_carried_geo(table.schema.metadata)
     secondaries = resolve_geometry_columns(geometry_column, geometry_info, carried_geo) - {
         geometry_column
     }
@@ -586,7 +586,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         # before the 1.x strip below, which needs their names, and threaded into
         # `write_from_query` so the output's `geo` block describes them too.
         geometry_info = table_geometry_info(
-            table, geometry_column, _parse_geo_metadata_quietly(table.schema.metadata)
+            table, geometry_column, sanitized_carried_geo(table.schema.metadata)
         )
 
         if effective_version in ("1.0", "1.1"):

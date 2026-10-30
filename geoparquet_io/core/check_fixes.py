@@ -30,7 +30,7 @@ from geoparquet_io.core.geo_metadata import (
     bboxless_covering_columns,
     build_bbox_covering,
     covering_lacks_bbox,
-    parse_geo_metadata,
+    sanitized_carried_geo,
     strip_bboxless_covering,
 )
 from geoparquet_io.core.hilbert_order import hilbert_order
@@ -318,7 +318,7 @@ def fix_bboxless_covering(parquet_file, output_file, verbose=False, profile=None
         touched, and the caller keeps using its input.
     """
     original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
-    geo_meta = parse_geo_metadata(original_metadata, verbose)
+    geo_meta = sanitized_carried_geo(original_metadata, source=parquet_file)
     columns = bboxless_covering_columns(geo_meta)
     if geo_meta is None or not columns:
         if verbose:

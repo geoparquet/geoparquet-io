@@ -39,7 +39,7 @@ from geoparquet_io.core.convert import (
     convert_to_geoparquet,
 )
 from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
-from geoparquet_io.core.geo_metadata import parse_geo_metadata
+from geoparquet_io.core.geo_metadata import read_raw_geo
 from geoparquet_io.core.geometry_detection import (
     detect_parquet_geometry_column,
     find_primary_geometry_column,
@@ -331,7 +331,7 @@ class TestConvertBestPractices:
     def test_geoparquet_version(self, best_practices_file):
         """Verify GeoParquet 1.1.0+ metadata is created."""
         metadata, _ = get_parquet_metadata(best_practices_file, verbose=False)
-        geo_meta = parse_geo_metadata(metadata, verbose=False)
+        geo_meta = read_raw_geo(metadata).value
 
         assert geo_meta is not None, "Expected GeoParquet metadata to exist"
         version = geo_meta.get("version")
@@ -1235,7 +1235,7 @@ class TestConvertNoGeometry:
 
         # Verify no geo metadata
         metadata, _ = get_parquet_metadata(temp_output_file, verbose=False)
-        geo_meta = parse_geo_metadata(metadata, verbose=False)
+        geo_meta = read_raw_geo(metadata).value
         assert geo_meta is None, "Expected no GeoParquet metadata for plain file"
 
     def test_convert_csv_no_geometry(self, plain_csv_input, temp_output_file):
@@ -1261,7 +1261,7 @@ class TestConvertNoGeometry:
 
         # Verify no geo metadata
         metadata, _ = get_parquet_metadata(temp_output_file, verbose=False)
-        geo_meta = parse_geo_metadata(metadata, verbose=False)
+        geo_meta = read_raw_geo(metadata).value
         assert geo_meta is None
 
     def test_convert_no_geometry_cli_warns(self, plain_parquet_input, temp_output_file):
@@ -1304,7 +1304,7 @@ class TestConvertNoGeometry:
         convert_to_geoparquet(shapefile_input, temp_output_file)
 
         metadata, _ = get_parquet_metadata(temp_output_file, verbose=False)
-        geo_meta = parse_geo_metadata(metadata, verbose=False)
+        geo_meta = read_raw_geo(metadata).value
         assert geo_meta is not None, "Expected GeoParquet metadata for geo file"
 
     def test_build_plain_select_query_uses_correct_reader(self):
@@ -1388,7 +1388,7 @@ class TestCustomGeometryColumnName:
         assert os.path.exists(temp_output_file)
 
         metadata, _ = get_parquet_metadata(temp_output_file, verbose=False)
-        geo_meta = parse_geo_metadata(metadata, verbose=False)
+        geo_meta = read_raw_geo(metadata).value
         assert geo_meta is not None, "Expected GeoParquet metadata in output"
         # Convert preserves original geometry column name (not renamed to 'geometry')
         assert "my_custom_geom" in geo_meta.get("columns", {})

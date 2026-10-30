@@ -29,7 +29,7 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
 from geoparquet_io.core.bbox_structure import check_bbox_structure
-from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadata
+from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.duckdb_utils import (
     _DuckDBSchemaWrapper,
     _get_query_column_type,
@@ -86,8 +86,7 @@ def should_skip_bbox(geoparquet_version):
 
 
 def get_parquet_metadata(parquet_file, verbose=False):
-    """
-    Get Parquet file metadata using DuckDB for kv_metadata and PyArrow for schema.
+    """Get Parquet file metadata using DuckDB for kv_metadata and PyArrow for schema.
 
     For partitioned datasets (directories or glob patterns), reads metadata
     from the first file.
@@ -362,8 +361,7 @@ def _resolve_auto_version(detected: str | None) -> str | None:
 
 
 def resolve_geoparquet_version_from_file(parquet_file: str, verbose: bool = False) -> str | None:
-    """
-    Resolve the auto-mode GeoParquet write version from a parquet input file.
+    """Resolve the auto-mode GeoParquet write version from a parquet input file.
 
     Implements the documented --geoparquet-version default: preserve the input
     version (1.x normalizes to 1.1, matching extract_version_from_metadata),
@@ -395,8 +393,10 @@ def resolve_geoparquet_version_from_file(parquet_file: str, verbose: bool = Fals
 
 def _declares_geoarrow_encoding(parquet_file: str) -> bool:
     """Whether the file's ``geo`` block declares native GeoArrow for its primary column."""
+    from geoparquet_io.core.geo_metadata import sanitized_carried_geo_of_file
+
     try:
-        return geoarrow_primary_encoding(get_geo_metadata(parquet_file)) is not None
+        return geoarrow_primary_encoding(sanitized_carried_geo_of_file(parquet_file)) is not None
     except Exception as e:  # unreadable footer: the version decision stands as made
         debug(f"GeoArrow encoding check failed for {parquet_file}: {e}")
         return False

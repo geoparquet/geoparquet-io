@@ -1,31 +1,24 @@
 """Characterization suite: the geo-metadata readers must agree (#664, suite 2).
 
-`gpio` parses the GeoParquet ``geo`` key-value metadata in five places. This
-suite pins the *current* behavior so the planned metadata dedup is verifiable:
-if consolidating them changes what any caller sees, a test here fails and names
-the contract that broke.
+`gpio` parsed the GeoParquet ``geo`` key-value metadata in five places when
+#664 inventoried them. #1367 (concept 3) consolidated them: the raw decoder is
+``core/geo_metadata.py::read_raw_geo`` (bytes or str keys, never raises), and
+``crs_utils.parse_geo_metadata_from_schema`` and its ``add/quadkey.py`` alias are
+gone. The readers left, which must agree:
 
-The five readers, as inventoried in #664:
+1. ``core/geo_metadata.py::read_raw_geo`` — the raw diagnostic decoder
+2. ``core/geo_metadata.py::raw_geo_of_file`` — pyarrow fast path / DuckDB remote
+   (decodes through reader 1)
+3. ``core/common.py::get_parquet_metadata`` — the kv leg of the returned tuple,
+   decoded here with reader 1
 
-1. ``core/geo_metadata.py::parse_geo_metadata`` — bytes keys only
-2. ``core/crs_utils.py::parse_geo_metadata_from_schema`` — bytes or str keys
-3. ``core/duckdb_metadata.py::get_geo_metadata`` — pyarrow fast path / DuckDB remote
-4. ``core/common.py::get_parquet_metadata`` — the kv leg of the returned tuple
-5. ``core/add/quadkey.py::_parse_geo_metadata_from_schema`` — private duplicate
+Reader 1 takes an Arrow schema metadata dict; readers 2 and 3 take a path.
+``READERS`` adapts both families to one ``(path, schema_metadata)`` signature so
+a single parametrized test can compare them.
 
-Drift since #664 was written: reader 5 is no longer an independent
-implementation — it is a one-line delegation to reader 2. It is still exercised
-here (callers reach the parse through it, and the consolidation may delete it),
-and ``test_quadkey_reader_delegates_to_crs_utils`` pins that alias relationship
-so the inventory above stays honest.
-
-Readers 1, 2 and 5 take an Arrow schema metadata dict; readers 3 and 4 take a
-path. ``READERS`` adapts both families to one ``(path, schema_metadata)``
-signature so a single parametrized test can compare all five.
-
-One thing is deliberately *not* asserted equal: the edge-case matrix
-(``test_edge_case_reader_divergence``). The readers legitimately disagree there
-today; each verdict is pinned individually.
+The edge-case matrix (``test_edge_case_verdicts``) pins reader 1's verdict on
+the shapes the five used to disagree about; the divergence #664 recorded
+(str keys invisible to one reader) is resolved by adopting reader-2 semantics.
 
 The CRS-equality trio (``_crs_equals`` / ``_is_crs84_equivalent`` /
 ``_crs_are_equivalent``) used to be the other exception. #699 fixed it: the
@@ -43,22 +36,13 @@ so any fresh divergence fails loudly instead of accumulating silently.
 import json
 from itertools import product
 from pathlib import Path
-from unittest import mock
 
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.add import quadkey as quadkey_module
-from geoparquet_io.core.add.quadkey import (
-    _parse_geo_metadata_from_schema as read_quadkey,
-)
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.crs_utils import CRS_ABSENT, crs_from_column_meta
-from geoparquet_io.core.crs_utils import (
-    parse_geo_metadata_from_schema as read_crs_utils,
-)
-from geoparquet_io.core.duckdb_metadata import get_geo_metadata as read_duckdb
-from geoparquet_io.core.geo_metadata import parse_geo_metadata as read_geo_metadata
+from geoparquet_io.core.geo_metadata import raw_geo_of_file, read_raw_geo
 from geoparquet_io.core.inspect_utils import _crs_are_equivalent
 from geoparquet_io.core.validate import (
     CheckStatus,
@@ -85,18 +69,13 @@ def _read_common_kv(path: Path, _metadata: dict | None) -> dict | None:
     decode is part of what the consolidation would absorb.
     """
     kv, _schema = get_parquet_metadata(str(path))
-    raw = (kv or {}).get(b"geo")
-    if raw is None:
-        return None
-    return json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    return read_raw_geo(kv).value
 
 
 READERS = {
-    "geo_metadata.parse_geo_metadata": lambda path, md: read_geo_metadata(md),
-    "crs_utils.parse_geo_metadata_from_schema": lambda path, md: read_crs_utils(md),
-    "duckdb_metadata.get_geo_metadata": lambda path, md: read_duckdb(str(path)),
+    "geo_metadata.read_raw_geo": lambda path, md: read_raw_geo(md).value,
+    "geo_metadata.raw_geo_of_file": lambda path, md: raw_geo_of_file(str(path)).value,
     "common.get_parquet_metadata[kv]": _read_common_kv,
-    "add.quadkey._parse_geo_metadata_from_schema": lambda path, md: read_quadkey(md),
 }
 
 
@@ -264,138 +243,36 @@ def test_readers_agree_on_corpus_files(relative_path):
     _assert_readers_agree(path)
 
 
-def test_quadkey_reader_delegates_to_crs_utils():
-    """Reader 5 is an alias of reader 2, not a fifth implementation.
-
-    #664 inventoried it as a "private duplicate"; it has since been reduced to a
-    one-line delegation. Pinned so the consolidation's inventory stays accurate
-    and so a future re-divergence is caught.
-
-    Asserting ``read_quadkey(md) == read_crs_utils(md)`` would be ``f(x) == f(x)``
-    while the delegation holds — it can never fail, so it would not detect the
-    re-divergence it claims to guard. Patching the name that reader 5 delegates
-    *through* does: if someone reimplements the parse inline, the patched
-    delegate is not called and this fails.
-    """
-    assert read_quadkey.__module__ == "geoparquet_io.core.add.quadkey"
-    metadata = {"geo": '{"version": "1.1.0", "columns": {}}'}
-    sentinel = {"version": "sentinel-not-a-real-parse"}
-
-    # patch.object, never a dotted string target: geoparquet_io/__init__.py
-    # rebinds geoparquet_io.cli to a Click Group, and dotted-string patching
-    # under that package breaks on Python 3.10 only. Use the idiom everywhere.
-    with mock.patch.object(
-        quadkey_module, "parse_geo_metadata_from_schema", return_value=sentinel
-    ) as delegate:
-        result = read_quadkey(metadata)
-
-    delegate.assert_called_once_with(metadata)
-    assert result is sentinel, "reader 5 must return reader 2's result unmodified"
-
-
 # =============================================================================
 # 2. Edge cases — the readers legitimately DIVERGE here
 # =============================================================================
 
-# Each cell is this reader's CURRENT behavior, pinned individually. Readers 3 and
-# 4 are path-based and cannot accept a raw dict, so only the three dict readers
-# appear. ``None`` means "returned None"; a dict means "parsed to that dict".
-#
-# CONSOLIDATION DECISION (from #664): the consolidated reader should adopt
-# reader-2 semantics — accept str keys and str values. Reader 1's bytes-only
-# strictness is the pre-fix state recorded here, not a contract to preserve.
+# Reader 1's verdict on each shape the five readers of #664 handled differently.
+# ``None`` means "no value" (absent or undecodable); a dict means "parsed to that
+# dict". Readers 2 and 3 are path-based and decode through reader 1.
 STR_KEY_META = {"geo": '{"version": "1.1.0", "columns": {}}'}
 PARSED_STR_KEY = {"version": "1.1.0", "columns": {}}
 
 EDGE_CASES = {
-    # name: (metadata_in, {reader_key: expected_out})
-    "str_key_str_value": (
-        STR_KEY_META,
-        {
-            # Reader 1 checks ``b"geo" not in metadata`` and bails: str keys are
-            # invisible to it. Divergence to be resolved by adopting reader 2.
-            "geo_metadata.parse_geo_metadata": None,
-            "crs_utils.parse_geo_metadata_from_schema": PARSED_STR_KEY,
-            "add.quadkey._parse_geo_metadata_from_schema": PARSED_STR_KEY,
-        },
-    ),
-    "bytes_key_invalid_json": (
-        {b"geo": b"{not valid json"},
-        {
-            "geo_metadata.parse_geo_metadata": None,
-            "crs_utils.parse_geo_metadata_from_schema": None,
-            "add.quadkey._parse_geo_metadata_from_schema": None,
-        },
-    ),
-    "str_key_invalid_json": (
-        {"geo": "{not valid json"},
-        {
-            "geo_metadata.parse_geo_metadata": None,
-            "crs_utils.parse_geo_metadata_from_schema": None,
-            "add.quadkey._parse_geo_metadata_from_schema": None,
-        },
-    ),
-    "absent_geo_key": (
-        {b"other": b"value"},
-        {
-            "geo_metadata.parse_geo_metadata": None,
-            "crs_utils.parse_geo_metadata_from_schema": None,
-            "add.quadkey._parse_geo_metadata_from_schema": None,
-        },
-    ),
-    "empty_dict": (
-        {},
-        {
-            "geo_metadata.parse_geo_metadata": None,
-            "crs_utils.parse_geo_metadata_from_schema": None,
-            "add.quadkey._parse_geo_metadata_from_schema": None,
-        },
-    ),
-    "none_metadata": (
-        None,
-        {
-            "geo_metadata.parse_geo_metadata": None,
-            "crs_utils.parse_geo_metadata_from_schema": None,
-            "add.quadkey._parse_geo_metadata_from_schema": None,
-        },
-    ),
-    "empty_geo_value": (
-        {b"geo": b""},
-        {
-            # Reader 1 finds the key and fails the JSON decode; reader 2 treats
-            # the falsy value as absent. Same answer today, different route.
-            "geo_metadata.parse_geo_metadata": None,
-            "crs_utils.parse_geo_metadata_from_schema": None,
-            "add.quadkey._parse_geo_metadata_from_schema": None,
-        },
-    ),
-}
-
-DICT_READERS = {
-    "geo_metadata.parse_geo_metadata": read_geo_metadata,
-    "crs_utils.parse_geo_metadata_from_schema": read_crs_utils,
-    "add.quadkey._parse_geo_metadata_from_schema": read_quadkey,
+    # name: (metadata_in, expected value)
+    # #664's headline divergence, resolved: str keys are read like bytes keys.
+    "str_key_str_value": (STR_KEY_META, PARSED_STR_KEY),
+    "bytes_key_invalid_json": ({b"geo": b"{not valid json"}, None),
+    "str_key_invalid_json": ({"geo": "{not valid json"}, None),
+    "bytes_key_invalid_utf8": ({b"geo": b"\xff\xfe{}"}, None),
+    "absent_geo_key": ({b"other": b"value"}, None),
+    "empty_dict": ({}, None),
+    "none_metadata": (None, None),
+    "empty_geo_value": ({b"geo": b""}, None),
 }
 
 
 @pytest.mark.parametrize("case_name", sorted(EDGE_CASES))
-def test_edge_case_reader_divergence(case_name):
-    """Pin each dict reader's CURRENT edge-case verdict. Do NOT force equality."""
-    metadata, expected = EDGE_CASES[case_name]
-    for reader_name, want in expected.items():
-        got = DICT_READERS[reader_name](metadata)
-        assert got == want, f"{case_name}: {reader_name} returned {got!r}, pinned {want!r}"
-
-
-def test_str_key_divergence_is_still_present():
-    """The headline divergence from #664, asserted directly rather than by table.
-
-    Reader 1 rejects str-keyed metadata; reader 2 parses it. When the
-    consolidation lands and reader 1 adopts reader-2 semantics, this test fails
-    and is the signal to delete it along with the ``str_key_str_value`` row.
-    """
-    assert read_geo_metadata(STR_KEY_META) is None
-    assert read_crs_utils(STR_KEY_META) == PARSED_STR_KEY
+def test_edge_case_verdicts(case_name):
+    """Pin the raw decoder's verdict; it never raises."""
+    metadata, want = EDGE_CASES[case_name]
+    got = read_raw_geo(metadata).value
+    assert got == want, f"{case_name}: read_raw_geo returned {got!r}, pinned {want!r}"
 
 
 # =============================================================================

@@ -12,7 +12,7 @@ from geoparquet_io.core.bbox_structure import (
     resolve_bbox_name,
 )
 from geoparquet_io.core.common import add_computed_column
-from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadata, get_schema_info
+from geoparquet_io.core.duckdb_metadata import get_column_names, get_schema_info
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, query_schema, quote_identifier
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
@@ -21,6 +21,8 @@ from geoparquet_io.core.geo_metadata import (
     bbox_struct_child_names_match,
     build_bbox_covering,
     covering_supported,
+    sanitized_carried_geo,
+    sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
@@ -50,7 +52,7 @@ def _bbox_metadata_advice(parquet_file: str, declare_by_name: str | None = None)
     sending the user to a command that would report no bbox column at all.
     """
 
-    geo_meta = get_geo_metadata(parquet_file) or {}
+    geo_meta = sanitized_carried_geo_of_file(parquet_file)
     version = geo_meta.get("version", "")
     if covering_supported(version):
         if check_bbox_structure(parquet_file).get("covering_problem"):
@@ -82,7 +84,9 @@ def _explicitly_named_bbox_struct(input_parquet: str, bbox_column_name: str) -> 
     """
     if bbox_column_name not in bbox_shaped_struct_columns(get_schema_info(input_parquet)):
         return False
-    return not _bbox_claimed_by_another_column(get_geo_metadata(input_parquet), bbox_column_name)
+    return not _bbox_claimed_by_another_column(
+        sanitized_carried_geo_of_file(input_parquet), bbox_column_name
+    )
 
 
 def _note_bbox_structs_computed_beside(
@@ -231,11 +235,8 @@ def _declare_computed_bbox(metadata, geometry_column: str, bbox_column_name: str
     """
     if not metadata or b"geo" not in metadata:
         return metadata
-    try:
-        geo = json.loads(metadata[b"geo"])
-    except ValueError:
-        return metadata
-    columns = geo.get("columns") if isinstance(geo, dict) else None
+    geo = sanitized_carried_geo(metadata)
+    columns = geo.get("columns")
     col_meta = columns.get(geometry_column) if isinstance(columns, dict) else None
     if not isinstance(col_meta, dict):
         return metadata
@@ -302,15 +303,7 @@ def _passthrough_version(metadata: dict | None, geoparquet_version: str | None) 
     if not metadata or b"geo" not in metadata:
         return None
 
-    import json
-
-    try:
-        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    if not isinstance(geo_meta, dict):
-        return None
-    version = geo_meta.get("version")
+    version = sanitized_carried_geo(metadata).get("version")
     if not isinstance(version, str):
         return None
     parts = version.split(".")

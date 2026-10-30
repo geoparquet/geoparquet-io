@@ -192,9 +192,9 @@ def _covering_bbox_column(parquet_file: str, geometry_column: str | None) -> str
     if geometry_column is None or geometry_column == _primary_geometry_column(parquet_file):
         return check_bbox_structure(parquet_file).get("bbox_column_name")
 
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+    from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
-    return bbox_covering_column_for(get_geo_metadata(parquet_file), geometry_column)
+    return bbox_covering_column_for(raw_geo_of_file(parquet_file).block, geometry_column)
 
 
 def _primary_geometry_column(parquet_file: str) -> str | None:

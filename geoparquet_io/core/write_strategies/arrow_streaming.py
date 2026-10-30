@@ -23,7 +23,6 @@ from geoparquet_io.core.arrow_geo_metadata import (
     _canonicalize_wkb_columns,
     _compute_geometry_types,
     _detect_version_from_table,
-    _parse_geo_metadata_quietly,
     table_geometry_info,
 )
 from geoparquet_io.core.compression import ResolvedCodec, resolve_codec
@@ -39,6 +38,7 @@ from geoparquet_io.core.geo_metadata import (
     bbox_column_to_declare,
     compute_geo_stats_via_sql,
     create_geo_metadata,
+    sanitized_carried_geo,
     strip_bboxless_covering,
     strip_illegal_bbox_covering,
 )
@@ -57,7 +57,6 @@ from geoparquet_io.core.parquet_writer import (
 )
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
-    _parse_existing_geo_metadata,
     merge_secondary_geometry_metadata,
     native_geometry_crs,
 )
@@ -248,7 +247,7 @@ def _has_carried_bbox(original_metadata: dict | None, geometry_column: str) -> b
     signal that this write must compute a fresh one.
     """
 
-    geo_meta = _parse_existing_geo_metadata(original_metadata)
+    geo_meta = sanitized_carried_geo(original_metadata)
     if not isinstance(geo_meta, dict):
         return False
     col_meta = (geo_meta.get("columns") or {}).get(geometry_column)
@@ -258,7 +257,7 @@ def _has_carried_bbox(original_metadata: dict | None, geometry_column: str) -> b
 def _detect_bbox_column(schema: pa.Schema, original_metadata: dict | None) -> dict:
     """The bbox column this write may declare, through the shared gate (#1035)."""
 
-    name = bbox_column_to_declare(schema, _parse_existing_geo_metadata(original_metadata))
+    name = bbox_column_to_declare(schema, sanitized_carried_geo(original_metadata))
     return {"has_bbox_column": name is not None, "bbox_column_name": name}
 
 
@@ -737,7 +736,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         # Read before the facade below, which drops `geo` under parquet-geo-only.
         # It is still the witness for which columns are geometry, and without it
         # a secondary lost its native type and kept its dictionary (#1122).
-        carried_geo = _parse_geo_metadata_quietly(table.schema.metadata)
+        carried_geo = sanitized_carried_geo(table.schema.metadata)
         table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
 
         codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)

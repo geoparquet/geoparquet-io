@@ -85,76 +85,6 @@ path = "geoparquet_io/core/overture.py"
 name = "urllib.request"
 count = 2
 reason = "latest-release lookup via urllib.request with its own 5 s timeout, outside http_retry; T4c"
-# json.loads of the geo key: parse through core/geo_metadata.py (#982, #913, #1120, #1169).
-[[G1.geo_parse]]
-path = "geoparquet_io/api/table.py"
-name = "Table.metadata"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
-[[G1.geo_parse]]
-path = "geoparquet_io/core/add/bbox.py"
-name = "_declare_computed_bbox"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
-[[G1.geo_parse]]
-path = "geoparquet_io/core/add/bbox.py"
-name = "_passthrough_version"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
-[[G1.geo_parse]]
-path = "geoparquet_io/core/arrow_geo_metadata.py"
-name = "_detect_version_from_table"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
-[[G1.geo_parse]]
-path = "geoparquet_io/core/crs_utils.py"
-name = "parse_geo_metadata_from_schema"
-count = 2
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
-[[G1.geo_parse]]
-path = "geoparquet_io/core/derive_geo_from_file.py"
-name = "_with_primary_column"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
-[[G1.geo_parse]]
-path = "geoparquet_io/core/duckdb_metadata.py"
-name = "_pyarrow_get_geo_metadata"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
-[[G1.geo_parse]]
-path = "geoparquet_io/core/process/overview/overview_file.py"
-name = "_output_schema"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
-[[G1.geo_parse]]
-path = "geoparquet_io/core/reproject.py"
-name = "_sanitize_null_crs_file"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
-[[G1.geo_parse]]
-path = "geoparquet_io/core/streaming.py"
-name = "extract_version_from_metadata"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
-[[G1.geo_parse]]
-path = "geoparquet_io/core/streaming.py"
-name = "extract_geo_metadata"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
-[[G1.geo_parse]]
-path = "geoparquet_io/core/streaming.py"
-name = "extract_crs_from_table"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
-[[G1.geo_parse]]
-path = "geoparquet_io/core/write_funnels.py"
-name = "_block_edges"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
-[[G1.geo_parse]]
-path = "geoparquet_io/core/write_funnels.py"
-name = "apply_nonplanar_edges"
-reason = "reads the geo key itself instead of the owner's parse-and-sanitize (T3a)"
-[[G1.geo_parse]]
-path = "geoparquet_io/core/arrow_geo_metadata.py"
-name = "_parse_geo_metadata_quietly"
-reason = "parses a geo key it fetched one or two assignments earlier, not via the owner (T3a; T3e composes the caller)"
-[[G1.geo_parse]]
-path = "geoparquet_io/core/duckdb_metadata.py"
-name = "get_geo_metadata"
-reason = "parses a geo key it fetched one or two assignments earlier, not via the owner (T3a; T3e composes the caller)"
-[[G1.geo_parse]]
-path = "geoparquet_io/core/write_funnels.py"
-name = "_read_geo_key"
-reason = "parses a geo key it fetched one or two assignments earlier, not via the owner (T3a; T3e composes the caller)"
 [[G1.sql_escape]]
 path = "geoparquet_io/core/process/aggregate/common.py"
 name = "sql_literal"
@@ -604,9 +534,6 @@ reason = "geometry stats twin (concept 5); T3b"
 pair = "geoparquet_io/core/benchmark.py:benchmark_geopandas_fiona|geoparquet_io/core/benchmark.py:benchmark_geopandas_pyogrio"
 reason = "geopandas benchmark harness differing only in the engine= literal; T5c (one function, engine parameter, two registry entries)"
 [[G3.pairs]]
-pair = "geoparquet_io/core/geo_metadata.py:_initialize_geo_metadata|geoparquet_io/core/write_strategies/base.py:_initialize_geo_metadata"
-reason = "geo block initialisation copy (write_strategies/base vs geo_metadata); T3e composes the geo block once"
-[[G3.pairs]]
 pair = "geoparquet_io/core/partition/auto_resolution.py:_calculate_a5_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_h3_resolution"
 reason = "auto-resolution per index; T5b's one resolution calculator"
 [[G3.pairs]]
@@ -744,9 +671,6 @@ reason = "is-geographic CRS copy (approved change 8); T4c"
 [[G3.pylint]]
 block = "core.arrow_geo_metadata:_compute_geometry_types|core.geo_metadata:_compute_geometry_types"
 reason = "geometry stats twins; T3b"
-[[G3.pylint]]
-block = "core.arrow_geo_metadata:_detect_version_from_table|core.streaming:extract_version_from_metadata"
-reason = "version read from the geo key, copied; T2b"
 [[G3.pylint]]
 block = "core.crs_utils:<module>|core.duckdb_metadata:_get_pyarrow_logical_type"
 reason = "GeoArrow extension-name list copied; T3a's decoder owner"

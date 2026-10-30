@@ -444,14 +444,14 @@ class TestCheckAllReadsTheGeoBlockOnce:
     def test_the_block_is_read_once(self, places_test_file, monkeypatch):
         from geoparquet_io.core import check_parquet_structure as cps
 
-        real = cps.get_geo_metadata
+        real = cps.raw_geo_of_file
         reads = []
 
         def counting(parquet_file, *args, **kwargs):
             reads.append(str(parquet_file))
             return real(parquet_file, *args, **kwargs)
 
-        monkeypatch.setattr(cps, "get_geo_metadata", counting)
+        monkeypatch.setattr(cps, "raw_geo_of_file", counting)
 
         cps.check_all(places_test_file, return_results=True, quiet=True)
 

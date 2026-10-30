@@ -37,6 +37,7 @@ from geoparquet_io.core.file_utils import (
     is_partition_path,
     resolve_file_url,
 )
+from geoparquet_io.core.geo_metadata import raw_geo_of_file
 from geoparquet_io.core.geoarrow_compat import srid_crs_as_text
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.remote import is_remote_url, is_s3_url, needs_httpfs
@@ -66,7 +67,10 @@ def _resolve_local_path(parquet_file: str) -> str:
 
 
 def _pyarrow_get_kv_metadata(parquet_file: str) -> dict[bytes, bytes]:
-    """Get key-value metadata using PyArrow (fast path for local files)."""
+    """Get key-value metadata using PyArrow (fast path for local files).
+
+    The one footer read for both the KV and the ``geo`` readers.
+    """
     try:
         # Closed on exit, not left to the collector: an in-place `check --fix`
         # renames over this file next, and Windows refuses while a reader holds
@@ -74,25 +78,6 @@ def _pyarrow_get_kv_metadata(parquet_file: str) -> dict[bytes, bytes]:
         with pq.ParquetFile(parquet_file) as pf:
             metadata = pf.metadata.metadata
         return dict(metadata) if metadata else {}
-    except Exception as e:
-        error_msg = str(e)
-        if classify_failure(e).kind is FailureKind.NOT_PARQUET:
-            raise not_parquet_file_error(parquet_file) from e
-        raise GeoParquetError(f"Cannot read file: {parquet_file}\n{error_msg}") from e
-
-
-def _pyarrow_get_geo_metadata(parquet_file: str) -> dict | None:
-    """Get and parse 'geo' metadata using PyArrow (fast path for local files)."""
-    try:
-        with pq.ParquetFile(parquet_file) as pf:
-            metadata = pf.metadata.metadata
-        if metadata and b"geo" in metadata:
-            return json.loads(metadata[b"geo"].decode("utf-8"))
-        return None
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        # Unparsable 'geo' bytes mean "no usable geo metadata", the same answer
-        # invalid JSON already got -- not an unreadable file.
-        return None
     except Exception as e:
         error_msg = str(e)
         if classify_failure(e).kind is FailureKind.NOT_PARQUET:
@@ -469,59 +454,6 @@ def _read_kv_entries(parquet_file: str, con=None) -> list[tuple[bytes | None, by
     except duckdb.IOException as e:
         # File not found, permission denied, or other I/O error
         raise GeoParquetError(f"Cannot read file: {parquet_file}\n{str(e)}") from e
-    finally:
-        if should_close:
-            connection.close()
-
-
-def get_geo_metadata(parquet_file: str, con=None) -> dict | None:
-    """
-    Extract and parse 'geo' metadata key.
-
-    Returns parsed GeoParquet metadata dict or None if not present.
-
-    For local files, uses PyArrow for ~300x faster reads.
-    For remote files (S3, HTTP), uses DuckDB with httpfs.
-    """
-    # Fast path: use PyArrow for local files
-    resolved_path = _resolve_local_path(parquet_file)
-    if _is_local_file(resolved_path) and con is None:
-        return _pyarrow_get_geo_metadata(resolved_path)
-
-    # Slow path: use DuckDB for remote files or when connection is provided
-    import duckdb
-
-    metadata_path = _metadata_path(parquet_file)
-    connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
-
-    try:
-        # Get raw bytes and decode manually to avoid DuckDB's VARCHAR escaping
-        result = fetch_one(
-            connection.execute(f"""
-            SELECT value
-            FROM parquet_kv_metadata({sql_path(metadata_path)})
-            WHERE key::VARCHAR = 'geo'
-        """)
-        )
-
-        if result and result[0]:
-            # Decode raw bytes to string and parse JSON
-            if isinstance(result[0], bytes):
-                json_str = result[0].decode("utf-8")
-            else:
-                json_str = str(result[0])
-            return json.loads(json_str)
-        return None
-    except duckdb.InvalidInputException as e:
-        if classify_failure(e).kind is FailureKind.NOT_PARQUET:
-            raise not_parquet_file_error(parquet_file) from e
-        raise GeoParquetError(f"Invalid Parquet file: {parquet_file}\n{e}") from e
-    except duckdb.IOException as e:
-        # File not found, permission denied, or other I/O error
-        raise GeoParquetError(f"Cannot read file: {parquet_file}\n{str(e)}") from e
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        # Same answer as the PyArrow fast path: unparsable bytes = no metadata.
-        return None
     finally:
         if should_close:
             connection.close()
@@ -1287,7 +1219,7 @@ def find_primary_geometry_column_duckdb(parquet_file: str, con=None) -> str:
 
     Falls back to 'geometry' if no metadata found.
     """
-    geo_meta = get_geo_metadata(parquet_file, con)
+    geo_meta = raw_geo_of_file(parquet_file, con).value
 
     if not geo_meta:
         return "geometry"

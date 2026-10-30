@@ -31,7 +31,7 @@ from geoparquet_io.core.crs_utils import (
     unknown_crs_error,
     unknown_crs_reason,
 )
-from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
+from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     fetch_one,
@@ -46,6 +46,7 @@ from geoparquet_io.core.geo_metadata import (
     _bbox_claimed_by_another_column,
     carried_geometry_column,
     sanitized_carried_geo,
+    sanitized_carried_geo_of_file,
     strip_derived_stats,
 )
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
@@ -75,20 +76,6 @@ class ReprojectResult:
     feature_count: int
 
 
-def _carried_geo(metadata) -> dict:
-    """The carried ``geo`` block on ``metadata``, sanitized, or ``{}``.
-
-    ``reproject`` is a write path: the column name it reads is quoted into SQL
-    and the CRS it reads decides the transform, so the block it indexes goes
-    through the same shape check every other write-path reader uses (#887).
-    Without it a ``primary_column: 123`` reached ``quote_identifier`` as a bare
-    ``TypeError`` and a string-, list- or null-shaped block crashed the CRS
-    lookups with a bare ``AttributeError``.
-    """
-
-    return sanitized_carried_geo(metadata)
-
-
 def _detect_geometry_column_from_table(table: pa.Table) -> str:
     """Detect geometry column from table metadata.
 
@@ -104,7 +91,7 @@ def _detect_geometry_column_from_table(table: pa.Table) -> str:
     # able to repair it from a single column; `carried_geometry_column` then
     # asks the schema, because falling back to the literal "geometry" would
     # name a column the table may not have (#887 review).
-    geo_meta = _carried_geo(table.schema.metadata)
+    geo_meta = sanitized_carried_geo(table.schema.metadata)
     return carried_geometry_column(geo_meta, table.schema.names) or "geometry"
 
 
@@ -125,7 +112,7 @@ def _detect_crs_from_table(table: pa.Table, geom_col: str) -> str:
 
 def _table_geo_column_meta(table: pa.Table, geom_col: str) -> dict:
     """Return the geo-metadata dict for ``geom_col``, or ``{}`` if unavailable."""
-    columns = _carried_geo(table.schema.metadata).get("columns", {})
+    columns = sanitized_carried_geo(table.schema.metadata).get("columns", {})
     entry = columns.get(geom_col) if isinstance(columns, dict) else None
     return entry if isinstance(entry, dict) else {}
 
@@ -195,7 +182,7 @@ def _retarget_carried_geo(metadata: dict, geom_col: str, target_crs: str, con) -
     cleaned one, and ``apply_target_crs_to_geo_meta`` -- which indexes
     ``columns`` -- is never handed a list-, string- or null-shaped block (#887).
     """
-    geo_meta = _carried_geo(metadata)
+    geo_meta = sanitized_carried_geo(metadata)
     if not geo_meta:
         debug("Could not update CRS in geo metadata, leaving as-is")
         return False
@@ -384,7 +371,7 @@ def _warn_carried_bbox_structs(input_path: str, bbox_col: str | None) -> None:
     candidates = [name for name in bbox_shaped_struct_columns(schema_info) if name != bbox_col]
     if not candidates:
         return
-    geo_meta = get_geo_metadata(input_path)
+    geo_meta = sanitized_carried_geo_of_file(input_path)
     for name in candidates:
         if _bbox_claimed_by_another_column(geo_meta, name):
             continue
@@ -431,8 +418,14 @@ def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, 
         return raw_path, None
 
     parquet_file = pq.ParquetFile(raw_path)
+    # The footer wins over the Arrow schema's view of it: a `geo` key appended
+    # after the writer opened is in the footer only, and the guard above read
+    # the footer to decide this file needs the rewrite (#913).
     metadata = dict(parquet_file.schema_arrow.metadata or {})
-    geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+    metadata.update(
+        (k, v) for k, v in (parquet_file.metadata.metadata or {}).items() if k != b"ARROW:schema"
+    )
+    geo_meta = sanitized_carried_geo(metadata, source=str(raw_path))
     for col in geo_meta.get("columns", {}).values():
         if entry_crs_is_unknown(col):
             col.pop("crs", None)

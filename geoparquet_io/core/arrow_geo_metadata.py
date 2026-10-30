@@ -25,7 +25,6 @@ from geoparquet_io.core.crs_utils import (
     field_type_crs_is_unknown,
     is_default_crs,
     is_empty_crs_value,
-    parse_geo_metadata_from_schema,
 )
 from geoparquet_io.core.duckdb_utils import geoarrow_field_edges, planar_view
 from geoparquet_io.core.geo_metadata import (
@@ -39,7 +38,6 @@ from geoparquet_io.core.geo_metadata import (
     carried_version,
     create_geo_metadata,
     geoarrow_wkb_codes,
-    sanitize_geo_metadata,
     sanitized_carried_geo,
     strip_absent_covering,
     strip_bboxless_covering,
@@ -79,7 +77,6 @@ def _detect_version_from_table(table, verbose: bool = False) -> str | None:
     Returns:
         Version string (e.g., "1.1", "2.0", "parquet-geo-only") or None if not detected
     """
-    import json
 
     # Check for native geoarrow extension types (indicates v2.0 or parquet-geo-only).
     # `is_geoarrow_extension_field` reads the field, not just the type, so a
@@ -106,29 +103,23 @@ def _detect_version_from_table(table, verbose: bool = False) -> str | None:
             return "parquet-geo-only"
         return None
 
-    try:
-        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-        if isinstance(geo_meta, dict):
-            # Guarded, not truthiness-checked: a non-string version crashed
-            # `.split` here on the write path too -- `write_geoparquet_table`
-            # resolves auto-mode through this function (#979).
-            version = carried_version(geo_meta.get("version"))
-            if version:
-                parts = version.split(".")
-                if len(parts) >= 2:
-                    major = parts[0]
-                    if major == "2":
-                        if verbose:
-                            debug("Detected GeoParquet version 2.0 from table metadata")
-                        return "2.0"
-                    # Upgrade all 1.x versions to 1.1 (backwards compatible)
-                    if major == "1":
-                        if verbose:
-                            debug("Detected GeoParquet version 1.x from table metadata")
-                        return "1.1"
+    # Guarded, not truthiness-checked: a non-string version crashed `.split`
+    # here on the write path too -- `write_geoparquet_table` resolves auto-mode
+    # through this function (#979).
+    version = carried_version(sanitized_carried_geo(metadata).get("version"))
+    parts = version.split(".") if version else []
+    if len(parts) < 2:
         return None
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
+    if parts[0] == "2":
+        if verbose:
+            debug("Detected GeoParquet version 2.0 from table metadata")
+        return "2.0"
+    # Upgrade all 1.x versions to 1.1 (backwards compatible)
+    if parts[0] == "1":
+        if verbose:
+            debug("Detected GeoParquet version 1.x from table metadata")
+        return "1.1"
+    return None
 
 
 def _table_bbox_struct_ok(table, column_name: str) -> bool:
@@ -173,7 +164,7 @@ def _detect_bbox_column_from_table(table, verbose: bool = False) -> str | None:
     Returns:
         str: Name of the primary's bbox column if found, None otherwise
     """
-    geo_meta = parse_geo_metadata_from_schema(table.schema.metadata)
+    geo_meta = sanitized_carried_geo(table.schema.metadata)
     covering_column = _bbox_column_from_covering(geo_meta)
     if covering_column and _table_bbox_struct_ok(table, covering_column):
         if verbose:
@@ -203,7 +194,7 @@ def _bbox_column_to_declare(
     built from a query carries no schema metadata at all, so reading only that
     would forget which column the primary declared (#953).
     """
-    geo_meta = sanitized_carried_geo(original_metadata) or parse_geo_metadata_from_schema(
+    geo_meta = sanitized_carried_geo(original_metadata) or sanitized_carried_geo(
         table.schema.metadata
     )
     return bbox_column_to_declare(table.schema, geo_meta, verbose=verbose)
@@ -776,28 +767,6 @@ def _canonicalize_wkb_columns(table, geometry_columns, verbose: bool = False, na
     return table
 
 
-def _parse_geo_metadata_quietly(original_metadata) -> dict:
-    """Best-effort parse of a carried ``geo`` key; ``{}`` when absent or unreadable."""
-    if not original_metadata:
-        return {}
-    raw = original_metadata.get(b"geo") or original_metadata.get("geo")
-    if not raw:
-        return {}
-    try:
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8")
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
-        return {}
-    # Callers read ``columns`` as a mapping of column name to a dict of that
-    # column's metadata. A carried block is arbitrary JSON from the input file,
-    # so anything else is dropped rather than allowed to raise a TypeError three
-    # frames away, in the middle of a write. The check lives in one place --
-    # ``sanitize_geo_metadata`` -- that every write-path reader goes through
-    # (#771); this function is one of them.
-    return sanitize_geo_metadata(parsed) or {}
-
-
 def _apply_geoparquet_metadata(
     table,
     geometry_column: str,
@@ -891,7 +860,7 @@ def _apply_geoparquet_metadata(
     # `original_metadata` is deliberately None on the table entry points (passing
     # it there would smuggle the input's stale geo block into the output), so the
     # secondary names come from the table's own carried key instead.
-    carried_geo = _parse_geo_metadata_quietly(original_metadata) or _parse_geo_metadata_quietly(
+    carried_geo = sanitized_carried_geo(original_metadata) or sanitized_carried_geo(
         table.schema.metadata
     )
 

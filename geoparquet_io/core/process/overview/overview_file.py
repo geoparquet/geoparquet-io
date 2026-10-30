@@ -273,7 +273,7 @@ def _output_schema(
     level_field = pa.field(OVERVIEW_LEVEL_COLUMN, pa.int32(), nullable=False)
     empty = _empty(data_schema.append(level_field))
 
-    geo_meta = sanitized_carried_geo(base_meta)
+    geo_meta = sanitized_carried_geo(base_meta, source=str(base_path))
     geometry_column = carried_geometry_column(geo_meta, data_schema.names)
     if geometry_column is not None:
         col_meta = geo_meta.get("columns", {}).get(geometry_column, {})
@@ -289,7 +289,7 @@ def _output_schema(
         )
         meta = dict(empty.schema.metadata or {})
         if b"geo" in meta and types:
-            geo = json.loads(meta[b"geo"])
+            geo = sanitized_carried_geo(meta)
             geo["columns"][geometry_column]["geometry_types"] = types
             empty = empty.replace_schema_metadata({**meta, b"geo": json.dumps(geo).encode()})
     else:

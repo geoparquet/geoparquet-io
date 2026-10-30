@@ -269,9 +269,9 @@ def _should_promote_to_multi(input_path: str, geometry_col: str) -> bool:
     portolan-registry-qgis core/geoparquet.py, Apache-2.0). Mixed families, one
     declared type, or no metadata leave the geometry alone.
     """
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+    from geoparquet_io.core.geo_metadata import sanitized_carried_geo_of_file
 
-    geo = get_geo_metadata(input_path) or {}
+    geo = sanitized_carried_geo_of_file(input_path)
     columns = geo.get("columns") or {}
     info = columns.get(geometry_col) or {}
     types = info.get("geometry_types") or []

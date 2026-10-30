@@ -29,8 +29,6 @@ from geoparquet_io.core.geo_metadata import (
     _bbox_claimed_by_another_column,
     arrow_bbox_covering_problem,
     covering_supported,
-    parse_geo_metadata,
-    sanitize_geo_metadata,
     sanitized_carried_geo,
 )
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
@@ -284,12 +282,12 @@ def add_bbox_metadata(
     # The schema is read before the detection gates below, because an explicit
     # ``bbox_column`` is checked against it instead of against detection.
     metadata, schema = get_parquet_metadata(parquet_file)
-    # `parse_geo_metadata` is the read-only reader and hands the block back as
-    # the file holds it; this command rewrites the file from it, so the
-    # malformed parts are dropped here the way every other write path drops
-    # them (#947). A `columns` entry that is not an object used to fail with
-    # `'str' object does not support item assignment` at the assignment below.
-    geo_meta = sanitize_geo_metadata(parse_geo_metadata(metadata, False))
+    # This command rewrites the file from the block, so it is read through the
+    # sanitized carried decoder and the malformed parts are dropped the way
+    # every other write path drops them (#947). A `columns` entry that is not
+    # an object used to fail with `'str' object does not support item
+    # assignment` at the assignment below.
+    geo_meta = sanitized_carried_geo(metadata, source=parquet_file)
 
     # Check current bbox structure
     bbox_info = check_bbox_structure(parquet_file, verbose)

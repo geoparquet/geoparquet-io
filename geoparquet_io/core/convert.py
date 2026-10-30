@@ -23,7 +23,6 @@ from geoparquet_io.core.crs_utils import (
     note_default_crs_normalized,
     parse_crs_string_to_projjson,
 )
-from geoparquet_io.core.duckdb_metadata import get_geo_metadata
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     _geoarrow_coord_exprs,
@@ -55,7 +54,7 @@ from geoparquet_io.core.file_utils import (
 )
 from geoparquet_io.core.geo_metadata import (
     build_bbox_covering,
-    sanitize_geo_metadata,
+    sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.geojson_datetimes import DatetimeRead, plan_datetime_read
 from geoparquet_io.core.geometry_detection import (
@@ -645,7 +644,7 @@ def detect_all_geometry_columns(input_file: str, verbose: bool = False) -> dict:
     # Without it `columns: null` crashed on `.items()`, a non-string
     # `primary_column` reached `quote_identifier`, and a non-string `encoding`
     # reached `_calculate_bounds`'s `encoding.lower()`.
-    geo_meta = sanitize_geo_metadata(get_geo_metadata(input_file))
+    geo_meta = sanitized_carried_geo_of_file(input_file)
 
     if not geo_meta or not geo_meta.get("columns"):
         # No GeoParquet metadata -- or nothing left of it once the malformed

@@ -7,9 +7,13 @@ metadata to Arrow tables and Parquet files. It handles both GeoParquet 1.x and
 
 Usage in core modules:
     from geoparquet_io.core.geo_metadata import (
-        parse_geo_metadata,
+        read_raw_geo,           # what a file literally holds (check, inspect)
+        sanitized_carried_geo,  # what a write/transform path may carry
         create_geo_metadata,
     )
+
+Those two are the only ``geo`` decoders (#1367 concept 3): nothing outside this
+module calls ``json.loads`` on a ``geo`` value (``tests/test_geo_block_decoders.py``).
 
 Note: This module uses lazy imports for functions from other core modules
 to avoid circular dependencies.
@@ -19,7 +23,8 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
 from functools import cache, lru_cache
 from typing import TYPE_CHECKING
 
@@ -35,8 +40,6 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.logging_config import debug, warn
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
-
     import duckdb
     import pyarrow as pa
 
@@ -211,8 +214,7 @@ def _emit_malformed_geo_warning(detail: str, source: str | None = None) -> None:
     malformed inputs in one process (a Python API loop, a shell ``for``) share
     one cache entry and the second file is ignored in silence.
     """
-    where = f" of {source}" if source else ""
-    warn(f"Ignoring malformed 'geo' metadata on the input{where}: {detail}")
+    warn(f"Ignoring malformed 'geo' metadata on {source or 'the input'}: {detail}")
 
 
 def reset_malformed_geo_warnings() -> None:
@@ -280,29 +282,46 @@ def carried_version(value, source: str | None = None) -> str | None:
     return None
 
 
-def decode_carried_geo(raw):
-    """Decode a raw carried ``geo`` value (bytes or str) to JSON, or None.
+def _decode_geo_json(raw) -> tuple[object, str | None, str]:
+    """Decode a raw ``geo`` value: ``(value, None, "")``, or ``(None, why, detail)``.
 
-    The decode step can fail one call before :func:`sanitize_geo_metadata` ever
-    sees a shape: bytes that are not UTF-8 crash ``.decode`` and a truncated
-    payload crashes ``json.loads``. Both get the malformed-block treatment --
-    the value is dropped so fresh metadata gets built, and one warning names
-    the cause -- instead of aborting the write with a raw decoder traceback.
-
-    Already-decoded values (a dict handed over directly) pass through untouched.
+    The one ``json.loads`` of a ``geo`` value in the package; both decoders,
+    :func:`read_raw_geo` and :func:`sanitized_carried_geo`, come through it, so
+    they cannot disagree about which bytes are decodable. Bytes are UTF-8;
+    a ``str`` is JSON text; anything else (a dict handed over already decoded)
+    passes through untouched. ``why`` is the phrase the warning uses, ``detail``
+    the decoder's own message. Never raises, never warns.
     """
     try:
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
         if isinstance(raw, str):
-            return json.loads(raw)
-    except UnicodeDecodeError:
-        _emit_malformed_geo_warning("the value is not valid UTF-8; fresh metadata will be written")
-        return None
-    except json.JSONDecodeError:
-        _emit_malformed_geo_warning("the value is not valid JSON; fresh metadata will be written")
-        return None
-    return raw
+            return json.loads(raw), None, ""
+    except UnicodeDecodeError as exc:
+        return None, "the value is not valid UTF-8", str(exc)
+    except json.JSONDecodeError as exc:
+        return None, "the value is not valid JSON", str(exc)
+    return raw, None, ""
+
+
+def _decode_carried_geo(raw, source: str | None = None):
+    """Decode a raw carried ``geo`` value (bytes or str) to JSON, or None.
+
+    The value-level first step of :func:`sanitized_carried_geo`, for a write
+    path that holds the value rather than the metadata mapping. The decode step
+    can fail one call before :func:`sanitize_geo_metadata` ever sees a shape:
+    bytes that are not UTF-8 crash ``.decode`` and a truncated payload crashes
+    ``json.loads``. Both get the malformed-block treatment -- the value is
+    dropped so fresh metadata gets built, and one warning names the cause and,
+    when the caller knows it, the file (#957) -- instead of aborting the write
+    with a raw decoder traceback (approved change 6 of #1367).
+
+    Already-decoded values (a dict handed over directly) pass through untouched.
+    """
+    value, problem, _detail = _decode_geo_json(raw)
+    if problem is not None:
+        _emit_malformed_geo_warning(problem, source)
+    return value
 
 
 def _is_json_number(value) -> bool:
@@ -399,7 +418,7 @@ def _sanitize_columns(columns: dict) -> tuple[dict, list[str]]:
     return (kept if changed else columns), problems
 
 
-def sanitize_geo_metadata(geo_meta):
+def sanitize_geo_metadata(geo_meta, source: str | None = None):
     """Drop the parts of a carried ``geo`` block that readers cannot accept.
 
     The ``geo`` key on an input file is arbitrary JSON written by some other
@@ -418,13 +437,15 @@ def sanitize_geo_metadata(geo_meta):
     This is the single shape check every reader of the raw block that *assumes a
     dict* goes through: the write paths, and the ``inspect`` displays
     (``inspect_utils.extract_geo_info`` / ``get_preview_data``,
-    ``metadata_utils``). The raw readers (``parse_geo_metadata``,
-    ``crs_utils.parse_geo_metadata_from_schema``,
-    ``duckdb_metadata.get_geo_metadata``) deliberately do *not* sanitize:
-    ``gpio check`` has to see the file as it really is.
+    ``metadata_utils``). The read-only readers (:func:`read_raw_geo` and
+    :func:`raw_geo_of_file`, its file-level form) deliberately do *not*
+    sanitize: ``gpio check`` has to see the file as it really is.
 
     Args:
         geo_meta: A decoded ``geo`` block, or None.
+        source: The file the block came from, when the caller knows it. It goes
+            into every warning and its warn-once key, so a loop over several
+            malformed files names each of them (#957).
 
     Returns:
         ``geo_meta`` itself when it is already well-shaped, a repaired shallow
@@ -435,7 +456,7 @@ def sanitize_geo_metadata(geo_meta):
 
     if not isinstance(geo_meta, dict):
         _emit_malformed_geo_warning(
-            f"the block is {_article(_json_type_name(geo_meta))}, expected an object"
+            f"the block is {_article(_json_type_name(geo_meta))}, expected an object", source
         )
         return None
 
@@ -478,7 +499,7 @@ def sanitize_geo_metadata(geo_meta):
         _repair_primary_column(cleaned)
 
     for problem in problems:
-        _emit_malformed_geo_warning(problem)
+        _emit_malformed_geo_warning(problem, source)
     return cleaned
 
 
@@ -503,26 +524,117 @@ def _repair_primary_column(cleaned: dict) -> None:
         cleaned["primary_column"] = next(iter(columns))
 
 
-def sanitized_carried_geo(metadata) -> dict:
+def _geo_key_value(metadata):
+    """``(True, value)`` for the ``geo`` key of a metadata mapping, else ``(False, None)``.
+
+    Both key spellings are accepted: PyArrow hands back ``bytes`` keys and
+    DuckDB's KV metadata ``str`` ones, and several callers see both. ``b"geo"``
+    wins when both are present, as it did for every reader this replaced.
+    """
+    if not metadata:
+        return False, None
+    for key in (b"geo", "geo"):
+        if key in metadata:
+            return True, metadata[key]
+    return False, None
+
+
+def sanitized_carried_geo(metadata, source: str | None = None) -> dict:
     """The ``geo`` block on a Parquet/Arrow metadata mapping, sanitized, or ``{}``.
 
-    The three steps every write-path reader of a carried block repeats -- find
-    the key, decode it, check its shape -- in one place, so a reader is one call
-    away from the rule rather than three lines of its own (#947). Both key
-    spellings are accepted: PyArrow hands back ``bytes`` keys and DuckDB's KV
-    metadata ``str`` ones, and several callers see both.
+    The sanitized carried decoder: one of the two ``geo`` decoders (the other is
+    :func:`read_raw_geo`), and the one every write and transform path reads a
+    carried block through. The three steps every such reader used to repeat --
+    find the key, decode it, check its shape -- in one place, so a reader is one
+    call away from the rule rather than three lines of its own (#947). Bytes or
+    str keys; bad UTF-8 or bad JSON warns once and reads as absent (approved
+    change 6 of #1367); a non-object block, a non-object ``columns`` and
+    non-object entries are sanitized by :func:`sanitize_geo_metadata`.
+
+    ``source`` names the file for the warning (#957).
 
     Returns ``{}``, never ``None``, so callers can index the result directly;
     a block that sanitizing leaves unusable is indistinguishable from an absent
     one, which is exactly how #883 decided a malformed block should read.
     """
-    if not metadata:
+    present, raw = _geo_key_value(metadata)
+    if not present:
         return {}
-    for key in (b"geo", "geo"):
-        if key in metadata:
-            cleaned = sanitize_geo_metadata(decode_carried_geo(metadata[key]))
-            return cleaned if isinstance(cleaned, dict) else {}
-    return {}
+    cleaned = sanitize_geo_metadata(_decode_carried_geo(raw, source), source)
+    return cleaned if isinstance(cleaned, dict) else {}
+
+
+def sanitized_carried_geo_of_file(parquet_file, con=None) -> dict:
+    """:func:`sanitized_carried_geo` of a Parquet file's footer, warning with its path.
+
+    The file-level form of the sanitized carried decoder, for the write paths
+    that start from a path: the footer's KV metadata (PyArrow locally, DuckDB
+    remotely or on ``con``) decoded and sanitized in one call, so a truncated
+    or non-UTF-8 ``geo`` value warns and reads as absent here too (approved
+    change 6 of #1367) and the warning names the file (#957). ``parquet_file``
+    is a RAW path/URL (#718).
+    """
+    from geoparquet_io.core.duckdb_metadata import get_kv_metadata
+
+    return sanitized_carried_geo(get_kv_metadata(str(parquet_file), con), source=str(parquet_file))
+
+
+def raw_geo_of_file(parquet_file, con=None) -> RawGeo:
+    """:func:`read_raw_geo` of a Parquet file's footer, for the check paths.
+
+    The file-level form of the raw diagnostic decoder: what the file's ``geo``
+    key literally holds, never sanitized and never warned about. A check that
+    wants the object uses ``.block`` (a dict, or None for an absent, undecodable
+    or non-object value). ``parquet_file`` is a RAW path/URL (#718).
+    """
+    from geoparquet_io.core.duckdb_metadata import get_kv_metadata
+
+    return read_raw_geo(get_kv_metadata(str(parquet_file), con))
+
+
+@dataclass(frozen=True)
+class RawGeo:
+    """What a ``geo`` key literally holds, as :func:`read_raw_geo` reports it.
+
+    ``present`` is whether the key exists at all. ``value`` is the decoded JSON
+    exactly as the file holds it -- any JSON type, never sanitized -- or ``None``
+    when the key is absent or undecodable. ``error`` says why an undecodable
+    value could not be decoded ("the value is not valid UTF-8: ...", "the value
+    is not valid JSON: ..."), and is ``None`` otherwise.
+    """
+
+    present: bool
+    value: object = None
+    error: str | None = None
+
+    @property
+    def block(self) -> dict | None:
+        """``value`` when it is a JSON object, else ``None``."""
+        return self.value if isinstance(self.value, dict) else None
+
+
+def read_raw_geo(metadata) -> RawGeo:
+    """The raw diagnostic ``geo`` decoder: what a metadata mapping's ``geo`` key holds.
+
+    One of the two ``geo`` decoders (the other is :func:`sanitized_carried_geo`),
+    for the readers that must report what is literally there -- the ``gpio
+    check`` paths and the raw ``Table.metadata`` view -- and so neither sanitize
+    nor warn (:func:`raw_geo_of_file` is its file-level form). Bytes
+    or str keys. Never raises: an undecodable value (bad UTF-8, bad JSON) comes
+    back with ``error`` set instead of a decoder traceback.
+
+    A write path must not read a carried *input* block's contents through it --
+    it would carry a malformed block forward; that is
+    :func:`sanitized_carried_geo`'s job. Two uses are allowed there: asking only
+    whether a ``geo`` key is present (``.present``, as
+    ``write_strategies.base.needs_metadata_rewrite`` does), and re-reading the
+    block gpio itself just wrote (the footer patch in ``write_funnels``).
+    """
+    present, raw = _geo_key_value(metadata)
+    if not present:
+        return RawGeo(present=False)
+    value, problem, detail = _decode_geo_json(raw)
+    return RawGeo(present=True, value=value, error=problem and f"{problem}: {detail}")
 
 
 def carried_geometry_column(geo_meta, column_names) -> str | None:
@@ -552,57 +664,6 @@ def _article(type_name: str) -> str:
 
 # =============================================================================
 # Metadata Parsing Functions
-# =============================================================================
-
-
-def parse_geo_metadata(metadata: dict | None, verbose: bool = False) -> dict | None:
-    """
-    Parse GeoParquet metadata from Parquet file metadata.
-
-    Extracts and decodes the 'geo' key from Parquet metadata bytes.
-
-    Args:
-        metadata: Parquet file metadata dict with bytes keys
-        verbose: Print verbose output
-
-    Returns:
-        Parsed geo metadata dict, or None if not present or invalid
-    """
-    if not metadata or b"geo" not in metadata:
-        return None
-
-    try:
-        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-        if verbose:
-            debug("\nParsed geo metadata:")
-            debug(json.dumps(geo_meta, indent=2))
-        return geo_meta
-    except json.JSONDecodeError:
-        if verbose:
-            warn("Failed to parse geo metadata as JSON")
-        return None
-
-
-def _parse_existing_geo_metadata(original_metadata: dict | None) -> dict | None:
-    """
-    Parse existing geo metadata from original parquet metadata.
-
-    This is a write-path reader: what it returns is indexed into while building
-    the output block, so it goes through :func:`sanitize_geo_metadata` (#771).
-
-    Args:
-        original_metadata: Original parquet file metadata dict
-
-    Returns:
-        Parsed geo metadata dict, or None if not present or not usable
-    """
-    if not original_metadata or b"geo" not in original_metadata:
-        return None
-    return sanitize_geo_metadata(decode_carried_geo(original_metadata[b"geo"]))
-
-
-# =============================================================================
-# Metadata Initialization and Building
 # =============================================================================
 
 
@@ -954,15 +1015,17 @@ _DROP_GEO = object()
 
 
 def _decode_geo_value(raw):
-    """Decode a KV ``geo`` value (bytes/str/dict) to a dict, or ``None``."""
-    try:
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8")
-        if isinstance(raw, str):
-            raw = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    return raw if isinstance(raw, dict) else None
+    """Decode a KV ``geo`` value (bytes/str/dict) to a dict, or ``None``.
+
+    The rewrite helpers below run on carried *input* blocks (a projection's
+    prune, the stream's covering gates), so the value goes through the carried
+    decoder's value step, :func:`_decode_carried_geo`: bad UTF-8 or bad JSON
+    warns once (approved change 6 of #1367). :func:`_rewrite_geo_metadata` then
+    leaves a value it cannot decode, or one that is not an object, as it found
+    it; the write rebuilds fresh metadata from the output instead.
+    """
+    value = _decode_carried_geo(raw)
+    return value if isinstance(value, dict) else None
 
 
 def _encode_geo_value(geo_dict: dict, like):
@@ -1231,11 +1294,11 @@ def _prune_geo_dict_to_columns(geo_dict: dict, columns: set[str], repoint_primar
     """
     # Sanitizing drops a non-string `primary_column` and repairs it from a lone
     # surviving column, which is the recovery this function needs and #883/#945
-    # already shared out. `_rewrite_geo_metadata` only calls this with a decoded
-    # object -- a block that is not one never gets here -- so sanitizing a dict
-    # hands back a dict.
+    # already shared out. `_rewrite_geo_metadata` hands over the decoded object,
+    # so the sanitized carried decoder takes it as the value of a `geo` key; the
+    # raw key is read first because sanitizing drops a malformed one.
     declared_primary = "primary_column" in geo_dict
-    geo_dict = sanitize_geo_metadata(geo_dict)
+    geo_dict = sanitized_carried_geo({b"geo": geo_dict})
 
     col_entries = geo_dict.get("columns")
     if not isinstance(col_entries, dict):
@@ -1293,8 +1356,10 @@ def create_geo_metadata(
     bbox_info: dict | None,
     custom_metadata: dict | None = None,
     verbose: bool = False,
-    version: str = "1.1.0",
+    version: str | None = "1.1.0",
     edges: str | None = None,
+    encoding: str = "WKB",
+    strip_bboxless: bool = True,
 ) -> dict:
     """
     Create or update GeoParquet metadata with spatial index covering information.
@@ -1311,16 +1376,19 @@ def create_geo_metadata(
         version: GeoParquet version string (e.g., "1.0.0", "1.1.0", "2.0.0")
         edges: Edge interpretation, "spherical" or "planar" (default None = planar).
                Use "spherical" for data from BigQuery or other S2-based sources.
+        encoding: The primary's ``encoding`` when the carried block names none.
+        strip_bboxless: Run :func:`strip_bboxless_covering` here. ``False`` for
+               a caller that declares a bbox column afterwards and gates then.
 
     Returns:
         Updated geo metadata dict
     """
-    geo_meta = _parse_existing_geo_metadata(original_metadata)
+    geo_meta = sanitized_carried_geo(original_metadata)
     geo_meta = _initialize_geo_metadata(geo_meta, geom_col, version=version)
 
     # Add encoding if not present (required by GeoParquet spec)
     if "encoding" not in geo_meta["columns"][geom_col]:
-        geo_meta["columns"][geom_col]["encoding"] = "WKB"
+        geo_meta["columns"][geom_col]["encoding"] = encoding
 
     # Add edges if specified (for spherical geometry from BigQuery, etc.)
     if edges:
@@ -1343,7 +1411,162 @@ def create_geo_metadata(
 
     # Applied after _add_bbox_covering, so a covering is only dropped when no
     # bbox column exists to give it the one member the spec defines (#954).
-    return strip_bboxless_covering(strip_unsupported_covering(geo_meta, version, verbose), verbose)
+    geo_meta = strip_unsupported_covering(geo_meta, version, verbose)
+    return strip_bboxless_covering(geo_meta, verbose) if strip_bboxless else geo_meta
+
+
+def edges_for_version(edges: str, geo_version: str) -> str:
+    """Map an edges value to one representable in the output's spec version.
+
+    GeoParquet 1.x only allows {"planar", "spherical"}; ellipsoidal algorithms
+    (vincenty/karney/andoyer/thomas) from 2.0/native inputs degrade to
+    "spherical" with a warning. 2.0 outputs keep the algorithm verbatim.
+    """
+    if not str(geo_version).startswith("1."):
+        return edges
+    if edges in ("planar", "spherical"):
+        return edges
+    warn(f"edges algorithm '{edges}' is not representable in GeoParquet 1.x; writing 'spherical'")
+    return "spherical"
+
+
+@dataclass(frozen=True)
+class ArrowTableSource:
+    """:func:`compose_geo_block` source: an Arrow table (its schema and metadata)."""
+
+    table: pa.Table
+
+
+@dataclass(frozen=True)
+class SchemaSource:
+    """:func:`compose_geo_block` source: an output schema plus the carried KV metadata."""
+
+    schema: pa.Schema
+    metadata: Mapping | None = None
+
+
+@dataclass(frozen=True)
+class QuerySource:
+    """:func:`compose_geo_block` source: a DuckDB query (its output columns) plus carried metadata."""
+
+    con: duckdb.DuckDBPyConnection
+    query: str
+    metadata: Mapping | None = None
+
+
+@dataclass(frozen=True)
+class CarriedSource:
+    """:func:`compose_geo_block` source: carried KV metadata, output columns not known.
+
+    For a write path whose funnel already pruned the carried block to the
+    output's columns (``write_parquet_with_metadata`` runs
+    :func:`prune_geo_metadata_to_columns` before any strategy sees it), so the
+    absent-covering gate has nothing to ask and is skipped.
+    """
+
+    metadata: Mapping | None = None
+
+
+GeoBlockSource = ArrowTableSource | SchemaSource | QuerySource | CarriedSource
+
+
+@dataclass(frozen=True)
+class GeoBlockOptions:
+    """What a write asks :func:`compose_geo_block` to declare.
+
+    ``bbox_column`` is the covering request: the bbox struct column to declare
+    as the primary's ``covering.bbox`` (``None``: declare none; a carried one
+    still passes the gates). ``custom_metadata`` holds a ``covering`` mapping
+    (h3/s2/a5/quadkey entries) and/or top-level keys. ``version`` is the
+    metadata form ("1.0.0", "1.1.0", "2.0.0"; ``None`` for a block that is
+    never written, parquet-geo-only); ``edges`` the primary's edges, made
+    representable in ``version``; ``encoding`` the primary's encoding when the
+    carried block names none.
+
+    ``defer_bboxless_gate`` leaves :func:`strip_bboxless_covering` to the
+    caller, for the DuckDB paths that declare a conventional bbox column after
+    composing (``declare_carried_bbox_column``) and gate after that, so an
+    index entry beside a real bbox column is not dropped first (#954).
+    """
+
+    geometry_column: str
+    bbox_column: str | None = None
+    custom_metadata: dict | None = None
+    version: str | None = "1.1.0"
+    edges: str | None = None
+    encoding: str = "WKB"
+    defer_bboxless_gate: bool = False
+    verbose: bool = False
+
+
+def _source_metadata_and_columns(
+    source: GeoBlockSource,
+) -> tuple[Mapping | None, list[str] | None]:
+    """The carried metadata and the output's column names (``None``: not known)."""
+    if isinstance(source, ArrowTableSource):
+        return source.table.schema.metadata, list(source.table.column_names)
+    if isinstance(source, SchemaSource):
+        return source.metadata, list(source.schema.names)
+    if isinstance(source, QuerySource):
+        return source.metadata, list(query_schema(source.con, source.query).names)
+    if isinstance(source, CarriedSource):
+        return source.metadata, None
+    raise TypeError(f"compose_geo_block: unsupported source {type(source).__name__}")
+
+
+def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
+    """Compose the ``geo`` block a write declares, running every gate in one order.
+
+    The single composer agreed for #1367 (concept 4). Its first caller is
+    ``write_strategies.base.build_geo_metadata``; T3e moves the remaining
+    hand-built blocks and gate compositions onto it and folds
+    :func:`create_geo_metadata` in, so each gate then runs once. For now it
+    wraps :func:`create_geo_metadata`, and the gates actually run in this order:
+
+    1. covering build (the carried block, sanitized; ``bbox_column``; custom
+       coverings; ``edges`` mapped by :func:`edges_for_version`), inside
+       :func:`create_geo_metadata`;
+    2. :func:`strip_unsupported_covering` (no ``covering`` before 1.1), inside
+       :func:`create_geo_metadata`;
+    3. :func:`strip_bboxless_covering` (no covering without a ``bbox`` member),
+       inside :func:`create_geo_metadata` unless ``defer_bboxless_gate``;
+    4. :func:`strip_absent_covering` (no covering entry naming a column the
+       source does not have; skipped for a :class:`CarriedSource`);
+    5. :func:`strip_bboxless_covering` again, since step 4 can leave a covering
+       with no ``bbox`` member (skipped with ``defer_bboxless_gate``: the
+       caller gates after its bbox declare).
+
+    ``source`` supplies the carried KV metadata and the output's column names:
+    an Arrow table, a schema plus metadata, a DuckDB connection and query
+    (probed with :func:`~geoparquet_io.core.duckdb_utils.query_schema`), or the
+    carried metadata alone. Never mutates the source's metadata.
+    """
+    metadata, columns = _source_metadata_and_columns(source)
+    bbox_info = {
+        "has_bbox_column": options.bbox_column is not None,
+        "bbox_column_name": options.bbox_column,
+    }
+    edges = edges_for_version(options.edges, options.version) if options.edges else None
+    # Steps 1 and 2, and 3 unless deferred.
+    geo_meta = create_geo_metadata(
+        dict(metadata) if metadata else None,
+        options.geometry_column,
+        bbox_info,
+        options.custom_metadata,
+        options.verbose,
+        version=options.version,
+        edges=edges,
+        encoding=options.encoding,
+        strip_bboxless=not options.defer_bboxless_gate,
+    )
+    if columns is None:
+        return geo_meta
+    # Step 4, then 5 unless deferred: dropping an absent column's entry can
+    # leave a covering with no bbox member.
+    geo_meta = strip_absent_covering(geo_meta, columns)
+    if options.defer_bboxless_gate:
+        return geo_meta
+    return strip_bboxless_covering(geo_meta, options.verbose)
 
 
 # =============================================================================

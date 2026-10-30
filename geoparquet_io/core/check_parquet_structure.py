@@ -13,13 +13,14 @@ from geoparquet_io.core.check_verdict import (
     severity,
 )
 from geoparquet_io.core.duckdb_metadata import get_compression_info as duckdb_get_compression_info
-from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_row_group_stats_summary
+from geoparquet_io.core.duckdb_metadata import get_row_group_stats_summary
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.geo_metadata import (
     BBOX_REWRITE_HINT,
     bboxless_covering_columns,
     carried_version,
     covering_supported,
+    raw_geo_of_file,
 )
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, error, info, progress, success, warn
@@ -561,7 +562,7 @@ def _geo_block(parquet_file, geo_meta):
     ``geo`` key reads as None either way, which is why None can double as "not
     supplied" without changing any verdict.
     """
-    return get_geo_metadata(parquet_file) if geo_meta is None else geo_meta
+    return raw_geo_of_file(parquet_file).block if geo_meta is None else geo_meta
 
 
 def _check_geoparquet_v1(
@@ -570,12 +571,11 @@ def _check_geoparquet_v1(
     """Check GeoParquet 1.x file (existing logic, bbox IS recommended)."""
 
     geo_meta = _geo_block(parquet_file, geo_meta)
-    # `get_geo_metadata` is a read-only reader: it hands the block back exactly
-    # as the file holds it, so a block that is not a JSON object arrives here
-    # verbatim and used to crash with `'list' object has no attribute 'get'`
-    # (#968). A validation reader guards and reports the truth rather than
-    # sanitizing: a block that declares no version has none, which is what
-    # "0.0.0" says and what the outdated-version issue below reports.
+    # The raw reader's `.block` is the object or None: a block that is not a
+    # JSON object used to arrive here verbatim and crash with `'list' object has
+    # no attribute 'get'` (#968). A validation reader guards and reports the
+    # truth rather than sanitizing: a block that declares no version has none,
+    # which is what "0.0.0" says and what the outdated-version issue below reports.
     #
     # A version that is not a *string* is the same answer, and has to be: the
     # comparison two lines down is `version < "1.1.0"`, which a number cannot
@@ -583,7 +583,7 @@ def _check_geoparquet_v1(
     # `check bbox` hit a frame earlier, so it only becomes reachable once that
     # is guarded -- fix one without the other and the traceback just moves.
     version = carried_version(
-        geo_meta.get("version") if isinstance(geo_meta, dict) else None,
+        geo_meta.get("version") if geo_meta else None,
         source=str(parquet_file),
     )
     version = version or "0.0.0"
@@ -867,7 +867,7 @@ def check_bbox(
         verify_rows: Rows whose bbox is compared with their geometry; 0 skips it
         all_rows: Compare every row rather than ``verify_rows`` of them
     """
-    geo_meta = get_geo_metadata(parquet_file)
+    geo_meta = raw_geo_of_file(parquet_file).block
     bbox = check_metadata_and_bbox(
         parquet_file, verbose, return_results=True, quiet=quiet, geo_meta=geo_meta
     )
@@ -1090,10 +1090,10 @@ def check_all(
         parquet_file, verbose, return_results=True, quiet=quiet, profile=profile
     )
     # Read once, judge twice: both checks below ask the same file for the same
-    # `geo` block. Not cached on `get_geo_metadata` itself -- `check all --fix`
+    # `geo` block. Not cached on `raw_geo_of_file` itself -- `check all --fix`
     # rewrites files in place, so a path-keyed cache would answer from the
     # version before the repair.
-    geo_meta = get_geo_metadata(parquet_file)
+    geo_meta = raw_geo_of_file(parquet_file).block
     bbox_result = check_metadata_and_bbox(
         parquet_file, verbose, return_results=True, quiet=quiet, geo_meta=geo_meta
     )

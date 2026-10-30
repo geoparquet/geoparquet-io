@@ -28,6 +28,7 @@ from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.geo_metadata import (
     reset_malformed_geo_warnings,
     sanitize_geo_metadata,
+    sanitized_carried_geo,
 )
 
 # One WKB point (1.0, 2.0), little-endian.
@@ -281,20 +282,21 @@ def test_strategy_base_reader_sanitizes(case, columns, _hint):
     ids=["bytes_key_bytes", "bytes_key_str", "bytes_key_dict", "str_key_str", "str_key_dict"],
 )
 def test_strategy_base_reader_sanitizes_every_key_shape(metadata):
-    """The shape check applies whichever way the ``geo`` key was handed over."""
-    from geoparquet_io.core.write_strategies.base import _parse_existing_geo_metadata
+    """The shape check applies whichever way the ``geo`` key was handed over.
 
+    The strategies' reader (``write_strategies.base._parse_existing_geo_metadata``)
+    was a second copy; it is ``sanitized_carried_geo`` now (#1367).
+    """
     reset_malformed_geo_warnings()
-    assert _parse_existing_geo_metadata(metadata) == {}
+    assert sanitized_carried_geo(metadata) == {}
 
 
-def test_parse_geo_metadata_quietly_delegates_to_the_shared_check():
-    """``common._parse_geo_metadata_quietly`` must not keep a second copy of the check."""
-    from geoparquet_io.core.arrow_geo_metadata import _parse_geo_metadata_quietly
-
+def test_sanitized_carried_geo_drops_an_unusable_block():
+    """The carried decoder the write strategies read through (it replaced
+    ``arrow_geo_metadata._parse_geo_metadata_quietly``, #1367) keeps no copy of the check."""
     reset_malformed_geo_warnings()
     raw = json.dumps({"primary_column": 1, "columns": ["geometry"]}).encode("utf-8")
-    assert _parse_geo_metadata_quietly({b"geo": raw}) == {}
+    assert sanitized_carried_geo({b"geo": raw}) == {}
 
 
 def test_extract_crs_from_table_survives_a_malformed_block():
@@ -774,15 +776,15 @@ def _corrupt_geo_file(tmp_path, cause: str):
 
 
 @pytest.mark.parametrize("cause", ["JSON", "UTF-8"])
-def test_get_geo_metadata_tolerates_undecodable_bytes_on_both_paths(cause, tmp_path):
+def test_raw_geo_of_file_tolerates_undecodable_bytes_on_both_paths(cause, tmp_path):
     """Both readers give the answer invalid JSON already got: no usable metadata."""
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
     src = _corrupt_geo_file(tmp_path, cause)
-    assert get_geo_metadata(str(src)) is None  # PyArrow fast path
+    assert raw_geo_of_file(str(src)).value is None  # PyArrow fast path
     con = get_duckdb_connection()
-    assert get_geo_metadata(str(src), con=con) is None  # DuckDB path (remote files)
+    assert raw_geo_of_file(str(src), con=con).value is None  # DuckDB path (remote files)
 
 
 @pytest.mark.parametrize("version", ["1.1", "2.0"])
@@ -1472,8 +1474,8 @@ def test_add_bbox_metadata_table_survives_a_malformed_block(col, case, block):
 def test_add_bbox_metadata_file_survives_a_malformed_block(col, case, block, tmp_path):
     """The file path crashed with ``'str' object does not support item assignment``."""
     from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
     from geoparquet_io.core.exceptions import GeoParquetError
+    from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
     reset_malformed_geo_warnings()
     path = tmp_path / f"addbboxmeta_{col}_{case}.parquet"
@@ -1486,7 +1488,7 @@ def test_add_bbox_metadata_file_survives_a_malformed_block(col, case, block, tmp
         # Read the Parquet key-value block, not the Arrow schema: a fixture
         # written by pyarrow also carries an `ARROW:schema` key holding the
         # *original* metadata, and pyarrow prefers it on the way back in.
-        columns = get_geo_metadata(str(path))["columns"]
+        columns = raw_geo_of_file(str(path)).value["columns"]
         assert isinstance(columns, dict)
         assert columns[col]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
 
@@ -1892,7 +1894,8 @@ def test_check_bbox_still_reads_the_version_of_a_well_formed_file(tmp_path):
 # The metadata-only column-name reader
 # =============================================================================
 #
-# `find_geometry_column_from_metadata` returned `primary_column` with no type
+# `find_geometry_column_from_metadata` (since deleted for `carried_geometry_column`,
+# #1367) returned `primary_column` with no type
 # check, so `123` travelled through `extract` into `quote_identifier` and failed
 # there with `TypeError: argument of type 'int' is not iterable`, four frames
 # from anything a user can act on (#968). It is a column-name reader shared with
@@ -1906,19 +1909,20 @@ def test_check_bbox_still_reads_the_version_of_a_well_formed_file(tmp_path):
 
 
 @pytest.mark.parametrize("bad", [123, ["geometry"], {"name": "geometry"}, None, ""])
-def test_find_geometry_column_from_metadata_never_returns_a_non_name(bad):
-    from geoparquet_io.core.streaming import find_geometry_column_from_metadata
+def test_carried_geometry_column_never_returns_a_non_name(bad):
+    """The column-name readers go through the sanitized carried decoder (#1367),
+    so a malformed `primary_column` is dropped and, with one column declared,
+    repaired to it (`_repair_primary_column`); with two the schema decides."""
+    from geoparquet_io.core.geo_metadata import carried_geometry_column, sanitized_carried_geo
 
     reset_malformed_geo_warnings()
     block = {"version": "1.1.0", "primary_column": bad, "columns": {"geom": {"encoding": "WKB"}}}
-    assert find_geometry_column_from_metadata({b"geo": json.dumps(block).encode("utf-8")}) is None
-
-
-def test_find_geometry_column_from_metadata_still_reads_a_real_name():
-    from geoparquet_io.core.streaming import find_geometry_column_from_metadata
-
-    block = {"version": "1.1.0", "primary_column": "geom", "columns": {"geom": {}}}
-    assert find_geometry_column_from_metadata({b"geo": json.dumps(block).encode("utf-8")}) == "geom"
+    geo = sanitized_carried_geo({b"geo": json.dumps(block).encode("utf-8")})
+    assert carried_geometry_column(geo, []) == "geom"
+    block["columns"]["other"] = {"encoding": "WKB"}
+    geo = sanitized_carried_geo({b"geo": json.dumps(block).encode("utf-8")})
+    assert carried_geometry_column(geo, []) is None
+    assert carried_geometry_column(geo, ["id", "the_geom"]) == "the_geom"
 
 
 @pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
@@ -2207,18 +2211,7 @@ SWEEP_COMMANDS: list[tuple[str, list[str]]] = [
 #: Readers that still die on a raw block, with the issue that owns each. Not a
 #: waiver: the sweep fails if one of these stops crashing and the entry is left
 #: behind, so a fix cannot land without this list being updated.
-KNOWN_UNGUARDED: dict[str, set[str]] = {
-    # #982: `add quadkey._validate_crs_from_geo_metadata` reads
-    # `geo_meta.get("columns", {})[col].get("crs")` with no shape check at all.
-    # A write path, so the fix is `sanitized_carried_geo`, not another guard --
-    # a different batch from #979's, and out of its scope.
-    "columns_null": {"add quadkey"},
-    "columns_list": {"add quadkey"},
-    "columns_string": {"add quadkey"},
-    "entry_not_an_object": {"add quadkey"},
-    "block_is_a_list": {"add quadkey"},
-    "block_is_a_string": {"add quadkey"},
-}
+KNOWN_UNGUARDED: dict[str, set[str]] = {}
 
 #: One column name only: the sweep's job is breadth across *commands*, and the
 #: `geometry`-versus-`geom` axis is covered per reader above.

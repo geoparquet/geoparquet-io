@@ -36,8 +36,11 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     NATIVE_GEOMETRY_VERSIONS,
-    decode_carried_geo,
-    sanitize_geo_metadata,
+    CarriedSource,
+    GeoBlockOptions,
+    compose_geo_block,
+    read_raw_geo,
+    sanitized_carried_geo,
     strip_unsupported_covering,
 )
 
@@ -237,24 +240,29 @@ def build_geo_metadata(
     version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
     metadata_version = version_config.get("metadata_version", "1.1.0")
 
-    # Parse existing geo metadata if provided
-    geo_meta = _parse_existing_geo_metadata(original_metadata)
-
-    # Initialize or update structure
-    geo_meta = _initialize_geo_metadata(geo_meta, geometry_column, metadata_version)
+    # Encoding (required by GeoParquet spec), when the carried block names none:
+    # for 1.1-geoarrow, preserve the input encoding (native type) from
+    # geometry_info; every other v1.x version converts geometry to a WKB blob.
+    input_encoding = (
+        geometry_info.get("metadata", {}).get(geometry_column, {}).get("encoding")
+        if geometry_info and geoparquet_version == "1.1-geoarrow"
+        else None
+    )
+    # The carried block, sanitized, initialized for this version, with its
+    # unsupported coverings gated. The bboxless gate is the callers': they
+    # declare a conventional bbox column first (#954). The DuckDB funnel has
+    # already pruned the carried block to the output's columns.
+    geo_meta = compose_geo_block(
+        CarriedSource(original_metadata),
+        GeoBlockOptions(
+            geometry_column=geometry_column,
+            version=metadata_version,
+            encoding=input_encoding or "WKB",
+            defer_bboxless_gate=True,
+        ),
+    )
 
     col_meta = geo_meta["columns"][geometry_column]
-
-    # Encoding (required by GeoParquet spec)
-    if "encoding" not in col_meta:
-        # For 1.1-geoarrow, preserve the input encoding (native type) from geometry_info.
-        # For all other v1.x versions, geometry is converted to WKB blob before writing.
-        input_encoding = (
-            geometry_info.get("metadata", {}).get(geometry_column, {}).get("encoding")
-            if geometry_info and geoparquet_version == "1.1-geoarrow"
-            else None
-        )
-        col_meta["encoding"] = input_encoding or "WKB"
 
     # Geometry types
     if geometry_types is not None:
@@ -290,60 +298,6 @@ def build_geo_metadata(
 
     # 'covering' is 1.1-only: drop whatever the source file or custom_metadata carried
     return strip_unsupported_covering(geo_meta, geoparquet_version)
-
-
-def _parse_existing_geo_metadata(original_metadata: dict | None) -> dict | None:
-    """Parse existing geo metadata from file metadata.
-
-    A write-path reader: the result is indexed into while the output block is
-    built, so it goes through ``sanitize_geo_metadata`` -- a carried block whose
-    ``columns`` is not an object per column would otherwise abort the write with
-    a bare ``TypeError`` (#771).
-    """
-
-    return sanitize_geo_metadata(_decode_geo_key(original_metadata))
-
-
-def _decode_geo_key(original_metadata: dict | None):
-    """Decode the raw ``geo`` key, accepting bytes or str keys and values.
-
-    Bytes that are not UTF-8 and JSON that does not parse are treated like a
-    malformed block -- dropped with a warning, so fresh metadata gets built --
-    via :func:`geo_metadata.decode_carried_geo` (#771 follow-up).
-    """
-
-    if not isinstance(original_metadata, dict) or not original_metadata:
-        return None
-
-    if "geo" in original_metadata:
-        return decode_carried_geo(original_metadata["geo"])
-    if b"geo" in original_metadata:
-        return decode_carried_geo(original_metadata[b"geo"])
-
-    return None
-
-
-def _initialize_geo_metadata(geo_meta: dict | None, geometry_column: str, version: str) -> dict:
-    """Initialize geo metadata structure with column entry."""
-    if geo_meta is None:
-        return {
-            "version": version,
-            "primary_column": geometry_column,
-            "columns": {geometry_column: {}},
-        }
-
-    # Work with a copy to avoid mutation
-    geo_meta = dict(geo_meta)
-    # Always use the target version, not the original
-    geo_meta["version"] = version
-    if "primary_column" not in geo_meta:
-        geo_meta["primary_column"] = geometry_column
-    if "columns" not in geo_meta:
-        geo_meta["columns"] = {}
-    if geometry_column not in geo_meta["columns"]:
-        geo_meta["columns"][geometry_column] = {}
-
-    return geo_meta
 
 
 class WriteStrategy(str, Enum):
@@ -557,29 +511,18 @@ def needs_metadata_rewrite(
     if geoparquet_version == "parquet-geo-only":
         # For parquet-geo-only, we need to strip any existing geo metadata
         # Check if input has geo metadata that needs to be stripped
-        if original_metadata:
-            has_geo = "geo" in original_metadata or b"geo" in original_metadata
-            if has_geo:
-                return True  # Need rewrite to strip the metadata
-        return False
+        return read_raw_geo(original_metadata).present
 
     if geoparquet_version == "2.0":
         if operation in ("columns_only", "sort"):
             return False
         # For 2.0 output, check if input has different version that needs updating
-        if original_metadata:
-            geo_data = original_metadata.get("geo") or original_metadata.get(b"geo")
-            if geo_data:
-                # Undecodable or non-object carried metadata cannot vouch for a
-                # 2.x version, so it needs the rewrite (which builds fresh
-                # metadata); a raw json.loads here aborted the write instead.
-                geo_meta = decode_carried_geo(geo_data)
-                if not isinstance(geo_meta, dict):
-                    return True
-                input_version = geo_meta.get("version", "")
-                # Need rewrite if input version is not 2.x
-                if not isinstance(input_version, str) or not input_version.startswith("2."):
-                    return True
-        return False
+        # A carried block needs the rewrite unless it already vouches for a 2.x
+        # version. An undecodable or non-object one reads as `{}` and so cannot
+        # vouch (a raw json.loads here once aborted the write instead).
+        input_version = sanitized_carried_geo(original_metadata).get("version")
+        if isinstance(input_version, str) and input_version.startswith("2."):
+            return False
+        return read_raw_geo(original_metadata).present
 
     return version_config.get("rewrite_metadata", True)

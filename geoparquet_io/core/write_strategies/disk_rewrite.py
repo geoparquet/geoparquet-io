@@ -21,7 +21,6 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import (
     _detect_version_from_table,
-    _parse_geo_metadata_quietly,
     table_geometry_info,
 )
 from geoparquet_io.core.common import compute_geometry_types_via_sql
@@ -37,6 +36,7 @@ from geoparquet_io.core.geo_metadata import (
     compute_bbox_via_sql,
     declare_carried_bbox_column,
     gate_illegal_bbox_covering,
+    sanitized_carried_geo,
     strip_bboxless_covering,
 )
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name, native_wkb_type
@@ -306,7 +306,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         # Read before the facade below, which drops `geo` under parquet-geo-only.
         # It is still the witness for which columns are geometry, and without it
         # a secondary lost its native type and kept its dictionary (#1122).
-        carried_geo = _parse_geo_metadata_quietly(table.schema.metadata)
+        carried_geo = sanitized_carried_geo(table.schema.metadata)
         table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
 
         # Handle non-geo tables: write plain Parquet without geo metadata,

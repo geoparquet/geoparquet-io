@@ -15,11 +15,11 @@ from geoparquet_io.core.geo_metadata import (
     _add_bbox_covering,
     _add_custom_covering,
     _initialize_geo_metadata,
-    _parse_existing_geo_metadata,
     compute_bbox_via_sql,
     compute_geometry_types_via_sql,
     create_geo_metadata,
-    parse_geo_metadata,
+    read_raw_geo,
+    sanitized_carried_geo,
 )
 
 # =============================================================================
@@ -59,11 +59,11 @@ class TestGeoParquetVersions:
 
 
 # =============================================================================
-# Tests for parse_geo_metadata()
+# Tests for read_raw_geo() (the raw diagnostic decoder)
 # =============================================================================
 
 
-class TestParseGeoMetadata:
+class TestReadRawGeo:
     """Test parsing geo metadata from Parquet file metadata."""
 
     def test_parses_valid_metadata(self):
@@ -75,7 +75,7 @@ class TestParseGeoMetadata:
         }
         metadata = {b"geo": json.dumps(geo_dict).encode("utf-8")}
 
-        result = parse_geo_metadata(metadata)
+        result = read_raw_geo(metadata).value
 
         assert result is not None
         assert result["version"] == "1.1.0"
@@ -83,41 +83,38 @@ class TestParseGeoMetadata:
 
     def test_returns_none_for_none_metadata(self):
         """Returns None for None input."""
-        assert parse_geo_metadata(None) is None
+        assert read_raw_geo(None).value is None
 
     def test_returns_none_for_missing_geo_key(self):
         """Returns None when 'geo' key is missing."""
         metadata = {b"other": b"data"}
-        assert parse_geo_metadata(metadata) is None
+        assert read_raw_geo(metadata).value is None
 
     def test_returns_none_for_invalid_json(self):
         """Returns None for invalid JSON in geo key."""
         metadata = {b"geo": b"not valid json"}
-        assert parse_geo_metadata(metadata) is None
+        assert read_raw_geo(metadata).value is None
 
-    def test_verbose_mode(self, capsys):
-        """Verbose mode logs parsing info."""
-        geo_dict = {"version": "1.1.0", "primary_column": "geometry", "columns": {}}
-        metadata = {b"geo": json.dumps(geo_dict).encode("utf-8")}
-
-        result = parse_geo_metadata(metadata, verbose=True)
-
-        assert result is not None
+    def test_invalid_json_carries_the_error(self):
+        """An undecodable value says why instead of raising."""
+        result = read_raw_geo({b"geo": b"not valid json"})
+        assert result.present and result.value is None
+        assert "not valid JSON" in result.error
 
     def test_handles_empty_geo_dict(self):
         """Handles empty geo dict."""
         metadata = {b"geo": b"{}"}
-        result = parse_geo_metadata(metadata)
+        result = read_raw_geo(metadata).value
 
         assert result == {}
 
 
 # =============================================================================
-# Tests for _parse_existing_geo_metadata()
+# Tests for sanitized_carried_geo() (the carried decoder create_geo_metadata reads with)
 # =============================================================================
 
 
-class TestParseExistingGeoMetadata:
+class TestSanitizedCarriedGeo:
     """Test parsing existing geo metadata from original metadata."""
 
     def test_parses_valid_metadata(self):
@@ -125,22 +122,22 @@ class TestParseExistingGeoMetadata:
         geo_dict = {"version": "1.0.0", "primary_column": "geom"}
         metadata = {b"geo": json.dumps(geo_dict).encode("utf-8")}
 
-        result = _parse_existing_geo_metadata(metadata)
+        result = sanitized_carried_geo(metadata)
 
         assert result is not None
         assert result["version"] == "1.0.0"
 
     def test_returns_none_for_none(self):
-        """Returns None for None input."""
-        assert _parse_existing_geo_metadata(None) is None
+        """Reads as absent for None input."""
+        assert sanitized_carried_geo(None) == {}
 
     def test_returns_none_for_missing_key(self):
         """Returns None for missing geo key."""
-        assert _parse_existing_geo_metadata({b"other": b"data"}) is None
+        assert sanitized_carried_geo({b"other": b"data"}) == {}
 
     def test_returns_none_for_invalid_json(self):
         """Returns None for invalid JSON."""
-        assert _parse_existing_geo_metadata({b"geo": b"invalid"}) is None
+        assert sanitized_carried_geo({b"geo": b"invalid"}) == {}
 
 
 # =============================================================================
@@ -513,7 +510,7 @@ class TestGeoMetadataIntegration:
         metadata = pf.schema_arrow.metadata
 
         if metadata:
-            result = parse_geo_metadata(metadata)
+            result = read_raw_geo(metadata).value
             if result:
                 assert "version" in result
                 assert "primary_column" in result

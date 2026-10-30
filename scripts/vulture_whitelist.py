@@ -80,7 +80,6 @@ _.sort_hilbert  # unused method (geoparquet_io/api/table.py:1903) -- dynamic: pu
 apply_geo_metadata  # unused function (geoparquet_io/core/streaming.py:189) -- dead: T0e deletes (no package caller; only tests)
 verbose_logging  # unused function (geoparquet_io/core/logging_config.py:194) -- dead: T0e deletes (no package caller; only tests)
 __getattr__  # unused function (geoparquet_io/__init__.py:72) -- dynamic: PEP 562 module hook / module class swap
-extract_geo_metadata  # unused function (geoparquet_io/core/streaming.py:171) -- dead: T0e deletes (no package caller; only tests)
 sort_hilbert  # unused function (geoparquet_io/api/ops.py:293) -- dynamic: public Python API (docs/api/python-api.md)
 sort_column  # unused function (geoparquet_io/api/ops.py:888) -- dynamic: public Python API (docs/api/python-api.md)
 extract_columns_info  # unused function (geoparquet_io/core/inspect_utils.py:423) -- dead: T0e deletes (no package caller; only tests)

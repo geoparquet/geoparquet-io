@@ -25,7 +25,6 @@ from geoparquet_io.core.column_selection import (
 from geoparquet_io.core.common import get_parquet_metadata, should_skip_bbox
 from geoparquet_io.core.crs_utils import get_crs_display_name
 from geoparquet_io.core.duckdb_metadata import (
-    get_geo_metadata,
     get_row_count,
     get_schema_info,
     native_geo_type,
@@ -57,12 +56,14 @@ from geoparquet_io.core.file_utils import (
 )
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
+    carried_geometry_column,
     prune_geo_metadata_to_columns,
+    sanitized_carried_geo,
+    sanitized_carried_geo_of_file,
     strip_derived_stats,
     strip_orientation,
 )
 from geoparquet_io.core.geometry_detection import (
-    STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
 from geoparquet_io.core.geometry_repair import (
@@ -82,7 +83,6 @@ from geoparquet_io.core.remote import (
 )
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
-    find_geometry_column_from_metadata,
     find_geometry_column_from_table,
     is_stdin,
     should_stream_output,
@@ -152,7 +152,7 @@ def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | No
 
     # First try GeoParquet file-level metadata
     try:
-        geo_meta = get_geo_metadata(input_parquet)
+        geo_meta = sanitized_carried_geo_of_file(input_parquet)
         if geo_meta:
             columns_meta = geo_meta.get("columns", {})
             if geometry_col in columns_meta:
@@ -984,14 +984,9 @@ def _extract_streaming(
         all_columns = [name for name, _ in describe_query(con, f"SELECT * FROM {source}")]
 
         # Find geometry column
-        geom_col = find_geometry_column_from_metadata(metadata)
-        if not geom_col:
-            for name in STANDARD_GEOMETRY_NAMES:
-                if name in all_columns:
-                    geom_col = name
-                    break
-        if not geom_col:
-            geom_col = "geometry"
+        geom_col = (
+            carried_geometry_column(sanitized_carried_geo(metadata), all_columns) or "geometry"
+        )
 
         # Check for bbox column
         bbox_col = None
