@@ -19,7 +19,8 @@ The copies that exist today are listed one by one under ``[[G2.exemptions]]``
 definition is stale and fails the check too, so the list can only shrink as the
 copies are deleted.
 
-This grew out of the ``forbid-bespoke-schema-reconciliation`` hook, which was a
+This grew out of the ``forbid-bespoke-schema-reconciliation`` hook (now
+``owner-only-defs``, which runs this script), which was a
 ``grep`` for ``def _(align|unify|reconcile)*schema`` in ``core/``. That rule is
 the three ``_align*schema`` / ``_unify*schema`` / ``_reconcile*schema`` rows of
 the table. It is an AST walk rather than a grep so that a comment, a string or

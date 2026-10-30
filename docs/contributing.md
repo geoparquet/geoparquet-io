@@ -273,7 +273,7 @@ retries, ...) has one owner module, and these checks fail a new copy of it (#136
   wrappers, `functools.partial` or policy literals around an owner function) and bare
   `json.dumps` in `cli/`.
 - **G2, owner-only definitions** — `scripts/check_owner_defs.py` (the
-  `forbid-bespoke-schema-reconciliation` hook): a `def` named like `is_geographic*`,
+  `owner-only-defs` hook): a `def` named like `is_geographic*`,
   `resolve_*version*`, `parse_size*`, `atomic_write`, ... lives only in its owner, per the
   `[G2.owners]` table.
 - **G4, dead code** — vulture at `min_confidence = 60`, baseline in
@@ -291,7 +291,7 @@ in the same commit. Never add an entry to make new code pass.
 Extractors that page through a remote service (`wfs`, `arcgis`, `carto`, `bigquery`) keep
 re-discovering the same edge cases. Reuse the shared schema helpers in `core/arrow_types.py`
 (`_compute_unified_schema`, `_cast_table_to_schema`, `_promote_numeric_type`) rather than
-hand-rolling schema reconciliation — the `forbid-bespoke-schema-reconciliation` pre-commit hook
+hand-rolling schema reconciliation — the `owner-only-defs` pre-commit hook
 enforces this. Known edge cases to handle:
 
 - **Pagination**: detect server `startIndex`/page-size limits; supply a stable sort

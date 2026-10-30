@@ -59,7 +59,7 @@ from tests._precommit_hook import (
 )
 
 CLICK_ECHO_HOOK = "no-click-echo"
-SCHEMA_HOOK = "forbid-bespoke-schema-reconciliation"
+SCHEMA_HOOK = "owner-only-defs"  # was forbid-bespoke-schema-reconciliation
 
 #: The one module each guard may exempt, as a full path from the repo root.
 CLICK_ECHO_EXEMPT = "geoparquet_io/core/logging_config.py"

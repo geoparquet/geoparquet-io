@@ -214,15 +214,15 @@ repos:
       # of the table: no def _(align|unify|reconcile)*schema outside
       # core/arrow_types.py. WFS and ArcGIS each grew separate, separately-buggy
       # schema-alignment code (18 + 8 fix commits); the canonical helpers are
-      # _compute_unified_schema and _cast_table_to_schema (#1007). The id is
-      # kept so CLAUDE.md and docs/contributing.md stay true.
+      # _compute_unified_schema and _cast_table_to_schema (#1007). It was the
+      # forbid-bespoke-schema-reconciliation hook until #1367.
       #
       # An AST walk, not a grep: a comment or a string naming a function is not
       # a definition of it (the #970 comment bypass cannot happen), and an
       # exemption is a (path, name) pair, never a path substring (#970's
       # common.py matching four modules). always_run, because editing the
       # exemptions file alone must re-run it.
-      - id: forbid-bespoke-schema-reconciliation
+      - id: owner-only-defs
         name: owner-only-defs
         description: Owner-only definitions (G2); table in scripts/owner_exemptions.toml
         entry: uv run python scripts/check_owner_defs.py
