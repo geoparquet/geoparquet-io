@@ -23,14 +23,14 @@ REPO = Path(__file__).resolve().parents[1]
 COMMON = REPO / "geoparquet_io" / "core" / "common.py"
 
 
-def _common_tree() -> ast.Module:
-    return ast.parse(COMMON.read_text(encoding="utf-8"))
+def _common_tree(common: Path = COMMON) -> ast.Module:
+    return ast.parse(common.read_text(encoding="utf-8"))
 
 
-def _names_common_defines() -> set[str]:
+def _names_common_defines(common: Path = COMMON) -> set[str]:
     """Names common.py binds itself: functions, classes and module constants."""
     defined: set[str] = set()
-    for node in _common_tree().body:
+    for node in _common_tree(common).body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             defined.add(node.name)
         elif isinstance(node, ast.Assign):
@@ -157,3 +157,70 @@ def test_the_residue_is_the_named_stage_c_list():
         "split_zm_suffix",
         "zm_suffix_sql",
     }
+
+
+#: The private names common.py binds today (#1367, G5). The public pin above
+#: let #1211 add ``_declares_geoarrow_encoding`` here unseen. This is a ceiling,
+#: not an exact pin: a name may leave (T2b is emptying the file) but none may
+#: arrive. When one leaves, drop it here too so it cannot come back.
+PRIVATE_NAMES_CEILING = frozenset(
+    {
+        "_DUCKDB_TO_SPEC_TYPE",
+        "_DUCKDB_ZMFLAG_TO_GEOARROW_DIM",
+        "_build_bounds_query",
+        "_declares_geoarrow_encoding",
+        "_resolve_auto_version",
+    }
+)
+
+#: Size ceilings measured on the tree G5 landed on: 789 lines, 15 module-level
+#: functions and classes. Growth fails; shrinking needs no edit here (lower the
+#: numbers when you can, so the slack does not become a budget).
+LINE_CEILING = 789
+DEF_CEILING = 15
+
+
+def new_private_names(common: Path = COMMON) -> set[str]:
+    return {n for n in _names_common_defines(common) if n.startswith("_")} - PRIVATE_NAMES_CEILING
+
+
+def size_overruns(common: Path = COMMON) -> list[str]:
+    lines = len(common.read_text(encoding="utf-8").splitlines())
+    defs = sum(
+        isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        for n in _common_tree(common).body
+    )
+    overruns = []
+    if lines > LINE_CEILING:
+        overruns.append(f"{lines} lines > ceiling {LINE_CEILING}")
+    if defs > DEF_CEILING:
+        overruns.append(f"{defs} module-level defs > ceiling {DEF_CEILING}")
+    return overruns
+
+
+def test_no_new_private_helper_lands_in_common():
+    """#1211's ``_declares_geoarrow_encoding`` is the regrowth this catches: a
+    private helper is still the grab-bag starting again. Put it in the module
+    that owns its question."""
+    assert new_private_names() == set()
+
+
+def test_common_does_not_grow():
+    assert size_overruns() == []
+
+
+def test_g12_the_private_name_guard_fails_on_a_new_helper(tmp_path):
+    planted = tmp_path / "common.py"
+    planted.write_text(
+        COMMON.read_text(encoding="utf-8") + "\n\ndef _new_helper():\n    return 1\n",
+        encoding="utf-8",
+    )
+    assert new_private_names(planted) == {"_new_helper"}
+
+
+def test_g12_the_size_ceilings_fail_on_growth(tmp_path):
+    planted = tmp_path / "common.py"
+    extra = "".join(f"\n\ndef _pad_{i}():\n    return {i}\n" for i in range(DEF_CEILING))
+    planted.write_text(COMMON.read_text(encoding="utf-8") + extra, encoding="utf-8")
+    overruns = size_overruns(planted)
+    assert len(overruns) == 2, overruns

@@ -257,6 +257,32 @@ New CLI commands need corresponding Python API:
 
 See `CLAUDE.md` for full architecture details.
 
+### Owner guards
+
+Each concept (writing a file, the memory ceiling, the `geo` block, CRS checks, HTTP
+retries, ...) has one owner module, and these checks fail a new copy of it (#1367):
+
+- **G1, banned calls** — ruff `TID251` bans `pyarrow.parquet.write_table`/`ParquetWriter`,
+  `psutil`, `os.sysconf`, `requests` and `httpx` outside their owners (the message names
+  the owner); `tests/test_owner_guards.py` walks the AST for a `json.loads` of the `geo`
+  key, `SET memory_limit`, hand-rolled SQL escapes, `/sys/fs/cgroup`, `duckdb.__version__`,
+  private HTTP retry policy (loops with `time.sleep`, `DEFAULT_MAX_RETRIES`-style
+  constants, `max_retries=`/`retry_delay=` defaults, retryable-status sets, `Retry-After`
+  reads) and bare `json.dumps` in `cli/`.
+- **G2, owner-only definitions** — `scripts/check_owner_defs.py` (the
+  `forbid-bespoke-schema-reconciliation` hook): a `def` named like `is_geographic*`,
+  `resolve_*version*`, `parse_size*`, `atomic_write`, ... lives only in its owner, per the
+  `[G2.owners]` table.
+- **G4, dead code** — vulture at `min_confidence = 60`, baseline in
+  `scripts/vulture_whitelist.py`.
+- **G5, `core/common.py`** — `tests/test_common_split_guards.py` pins its public and
+  private names and caps its size.
+
+Every exemption lives in `scripts/owner_exemptions.toml` with a reason, and
+`tests/test_owner_guards.py` pins how many each check has and fails on a stale one. A
+failure means: call the owner. When you delete a copy, delete its entry and lower the count
+in the same commit. Never add an entry to make new code pass.
+
 ### External extractors
 
 Extractors that page through a remote service (`wfs`, `arcgis`, `carto`, `bigquery`) keep
