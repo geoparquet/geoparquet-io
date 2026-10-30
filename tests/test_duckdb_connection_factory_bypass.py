@@ -177,8 +177,11 @@ class TestWkbToWktPreview:
         wkt = inspect_utils.wkb_to_wkt_preview(WKB_POINT)
 
         assert "POINT" in wkt
-        # Converts bytes already in memory; no file, so no httpfs.
-        assert captured == [{"load_httpfs": False}]
+        # Converts bytes already in memory; no file, so no httpfs. The call
+        # site passes the auto sentinel (None): the factory loads spatial only
+        # when DuckDB's core lacks the GEOMETRY functions (#1353) -- and the
+        # WKT above proves the resolved connection can render either way.
+        assert captured == [{"load_spatial": None, "load_httpfs": False}]
 
 
 class TestGetColumnStatistics:

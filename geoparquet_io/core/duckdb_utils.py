@@ -1388,6 +1388,44 @@ class ProfiledConnection:
         return self._con.__exit__(*exc_info)
 
 
+def has_core_geometry() -> bool:
+    """Whether DuckDB's own core covers gpio's read-only geometry needs.
+
+    DuckDB 2.0 ships the ``GEOMETRY`` type, GeoParquet/native-geo conversion in
+    the Parquet scan, and the serialize/deserialize functions (``ST_AsText``,
+    ``ST_GeomFromWKB``, ``ST_AsWKB``, ``ST_CRS``, ...) without the spatial
+    extension. Read-only paths that touch nothing beyond that set (the
+    ``gpio inspect`` preview and metadata paths) pass ``load_spatial=None``,
+    which :func:`get_duckdb_connection` resolves through this gate, so they
+    start faster and keep working where extensions cannot be downloaded
+    (#1353). There are no core
+    bounds or measure functions (``ST_Extent``, ``ST_Area``, ...), so
+    everything else still loads spatial.
+
+    Gated on the installed major version: on DuckDB 1.x this is False and
+    those paths load spatial exactly as before.
+    """
+    import duckdb
+
+    return int(duckdb.__version__.split(".", 1)[0]) >= 2
+
+
+def load_spatial_extension(con) -> None:
+    """INSTALL and LOAD spatial on ``con``, with gpio's session settings.
+
+    The one place that knows loading spatial also means setting
+    ``geometry_always_xy`` (the setting is registered by the extension, so it
+    cannot be set before the LOAD). Used by :func:`get_duckdb_connection` and
+    by paths that opened without spatial (``load_spatial=False`` under
+    :func:`has_core_geometry`) but then hit a function outside DuckDB's core
+    set and load it on demand.
+    """
+    _install_and_load_extension(con, "spatial")
+    # DuckDB 1.5+: ensure lon/lat = x/y axis order globally.
+    # Replaces per-call always_xy := true in ST_Transform.
+    con.execute("SET geometry_always_xy = true;")
+
+
 def get_duckdb_connection(
     load_spatial=True,
     load_httpfs=None,
@@ -1409,7 +1447,12 @@ def get_duckdb_connection(
     discovery for private S3 buckets.
 
     Args:
-        load_spatial: Whether to load spatial extension (default: True)
+        load_spatial: Whether to load spatial extension (default: True).
+                    If None, loads it only when DuckDB's core lacks the
+                    GEOMETRY type (``not has_core_geometry()``, #1353): the
+                    auto mode for read-only paths that need nothing beyond
+                    DuckDB core's serialize/deserialize set, mirroring
+                    load_httpfs's None-means-auto convention.
         load_httpfs: Whether to load httpfs extension for S3/Azure/GCS.
                     If None (default), auto-detects based on usage.
         use_s3_auth: Whether to configure AWS credential chain for S3 (default: False).
@@ -1484,12 +1527,12 @@ def get_duckdb_connection(
     con.execute(f"SET temp_directory = '{safe_temp_dir}';")
     _apply_connection_limits(con, memory_limit, threads)
 
-    # Always load spatial extension by default (core use case)
+    # Always load spatial extension by default (core use case). None is the
+    # auto mode: spatial only where DuckDB's own core lacks GEOMETRY (#1353).
+    if load_spatial is None:
+        load_spatial = not has_core_geometry()
     if load_spatial:
-        _install_and_load_extension(con, "spatial")
-        # DuckDB 1.5+: ensure lon/lat = x/y axis order globally.
-        # Replaces per-call always_xy := true in ST_Transform.
-        con.execute("SET geometry_always_xy = true;")
+        load_spatial_extension(con)
 
     # S3 config, resolved once (explicit kwargs over the ambient scope). The
     # SET statements and the secret below are both built from it.
@@ -1600,7 +1643,7 @@ def require_community_extension(name: str, feature: str | None = None) -> None:
 
 def get_duckdb_connection_for_s3(
     path: str,
-    load_spatial: bool = True,
+    load_spatial: bool | None = True,
     s3_endpoint: str | None = None,
     s3_region: str | None = None,
     s3_use_ssl: bool | None = None,
@@ -1614,7 +1657,9 @@ def get_duckdb_connection_for_s3(
 
     Args:
         path: S3 path to access (used to determine bucket and access mode)
-        load_spatial: Whether to load spatial extension (default: True)
+        load_spatial: Whether to load spatial extension (default: True; None
+            means only when DuckDB's core lacks GEOMETRY, resolved by
+            :func:`get_duckdb_connection`)
         s3_endpoint: Custom S3 endpoint (e.g., 'minio.local:9000')
         s3_region: S3 region for custom endpoints
         s3_use_ssl: Whether to use SSL for the S3 endpoint

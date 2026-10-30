@@ -338,14 +338,22 @@ def _get_pyarrow_logical_type(field) -> str | None:
 # =============================================================================
 
 
-def _get_connection_for_file(parquet_file: str, existing_con=None, load_spatial=True):
+def _get_connection_for_file(
+    parquet_file: str, existing_con=None, load_spatial: bool | None = None
+):
     """Get or create DuckDB connection appropriate for file location.
 
     Args:
         parquet_file: Path or URL to the parquet file
         existing_con: Existing connection to reuse
-        load_spatial: Whether to load spatial extension (default: True)
-                     Set to False for metadata-only operations to save ~100ms
+        load_spatial: Whether to load spatial extension. Set to False for
+                     metadata-only operations to save ~100ms. The default
+                     (None) is the factory's auto mode, resolved by
+                     :func:`get_duckdb_connection` itself: spatial only when
+                     DuckDB's core lacks the GEOMETRY type (#1353); every
+                     caller that leaves it unset runs nothing beyond
+                     ``parquet_metadata()``/``parquet_schema()``/``DESCRIBE``,
+                     which DuckDB >= 2.0 covers without spatial.
 
     Returns:
         Tuple of (connection, should_close)
