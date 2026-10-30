@@ -693,7 +693,21 @@ wide file with one metric costs about what a narrow one does — and
 DuckDB runs inside a memory limit of half the process's memory ceiling: physical
 RAM, or the container or Slurm job cap when that is lower. The cap is what
 matters on a shared node — without it DuckDB sizes itself for the whole machine
-and the job's cgroup kills it first. `--write-memory` overrides the default:
+and the job's cgroup kills it first.
+
+The limit is a working bound, not a size requirement: an aggregation whose
+grouped state outgrows it spills that state to a scratch directory and
+completes, on DuckDB 1.5 and 2.0 alike (verified at a 1GB limit against
+several GB of aggregate state on both versions —
+[#1354](https://github.com/geoparquet/geoparquet-io/issues/1354) has the
+measurements). What the limit does not cover is the result once it leaves
+DuckDB: the cells are materialized in Arrow and written from there, so peak
+*process* memory also scales with the number of output cells. A very
+fine-grained aggregate — millions of cells — can run well past
+`--write-memory` for that reason alone; `--out-geometry none` keeps the
+output, and that overshoot, as small as it gets.
+
+`--write-memory` overrides the default:
 
 === "CLI"
 
