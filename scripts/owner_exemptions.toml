@@ -110,27 +110,6 @@ reason = "permanent: ArcGIS JSON error-body code 500 marks page pressure (halve 
 # PROJJSON, GeoJSON data), not a report; a new report in one of them is not
 # caught, which is the price of not listing 60 serializer lines one by one.
 [[G1.json_dumps]]
-path = "geoparquet_io/cli/commands/benchmark.py"
-name = "benchmark_report"
-reason = "benchmark report JSON; dumps_json (T5c)"
-[[G1.json_dumps]]
-path = "geoparquet_io/cli/commands/inspect.py"
-name = "inspect_layers"
-count = 2
-reason = "inspect layers --json; dumps_json (T5c)"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/benchmark.py"
-name = "format_json_output"
-reason = "benchmark --json report; dumps_json (T5c)"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/benchmark.py"
-name = "format_explain_output"
-reason = "benchmark explain --json report; dumps_json (T5c)"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/benchmark_suite.py"
-name = "SuiteResult.to_json"
-reason = "benchmark suite report; dumps_json (T5c)"
-[[G1.json_dumps]]
 path = "geoparquet_io/core/add/bbox.py"
 count = "*"
 reason = "metadata serialization, not a report: geo block"

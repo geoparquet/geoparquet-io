@@ -33,6 +33,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import FileNotFoundGeoParquetError, GeoParquetError
 from geoparquet_io.core.geometry_detection import STANDARD_GEOMETRY_NAMES
+from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.logging_config import progress
 from geoparquet_io.core.remote import needs_httpfs
 
@@ -511,7 +512,7 @@ def format_json_output(
         "raw_results": raw_results,
         "config": config,
     }
-    return json.dumps(output, indent=2)
+    return dumps_json(output, indent=2)
 
 
 def _check_invalid_converters(requested: list[str]) -> None:
@@ -873,7 +874,7 @@ def format_explain_output(parsed: dict, output_format: str = "table") -> str:
         Formatted string.
     """
     if output_format == "json":
-        return json.dumps(parsed, indent=2)
+        return dumps_json(parsed, indent=2)
     return _format_explain_table(parsed)
 
 

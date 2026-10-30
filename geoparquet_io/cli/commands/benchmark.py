@@ -5,9 +5,12 @@ Registered on the root ``gpio`` group by ``cli/main.py`` via
 dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 """
 
+from dataclasses import asdict
+
 import click
 
 from geoparquet_io.cli.decorators import verbose_option
+from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.logging_config import configure_verbose
 
 
@@ -360,6 +363,6 @@ def benchmark_report(
                 )
 
     if output_format == "json":
-        click.echo(json.dumps([r.__dict__ for r in all_results], indent=2, default=str))
+        click.echo(dumps_json([asdict(r) for r in all_results], indent=2))
     else:
         progress(format_table(all_results))

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import cProfile
 import gc
-import json
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
@@ -19,6 +18,7 @@ from geoparquet_io.benchmarks.config import DEFAULT_THRESHOLDS, RegressionThresh
 from geoparquet_io.benchmarks.operations import get_operation
 from geoparquet_io.benchmarks.profile_report import save_profile_data
 from geoparquet_io.core.benchmark import get_environment_info
+from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.logging_config import debug, progress
 
 
@@ -194,7 +194,7 @@ class SuiteResult:
             "config": self.config,
             "results": [asdict(r) for r in self.results],
         }
-        return json.dumps(data, indent=indent)
+        return dumps_json(data, indent=indent)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""

@@ -27,6 +27,7 @@ from geoparquet_io.core.inspect import (
 from geoparquet_io.core.inspect import (
     inspect_summary as _inspect_summary_core,
 )
+from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.remote import is_remote_url
 
 # InspectDefaultGroup: defaults to 'summary' when no subcommand is provided
@@ -394,7 +395,6 @@ def inspect_layers(ctx, input_file, json_output, verbose):
         gpio inspect layers data.gdb            # List layers in FileGDB
         gpio inspect layers multi.gpkg --json   # JSON output for scripting
     """
-    import json
 
     from geoparquet_io.core.layers import list_layers
 
@@ -410,13 +410,13 @@ def inspect_layers(ctx, input_file, json_output, verbose):
 
     if layers is None:
         if json_output:
-            click.echo(json.dumps({"layers": None, "count": 0}))
+            click.echo(dumps_json({"layers": None, "count": 0}))
         else:
             click.echo("No layers found (single-layer format or file with 0-1 layers)")
         return
 
     if json_output:
-        click.echo(json.dumps({"layers": layers, "count": len(layers)}))
+        click.echo(dumps_json({"layers": layers, "count": len(layers)}))
     else:
         click.echo(f"Found {len(layers)} layers:")
         for layer in layers:
