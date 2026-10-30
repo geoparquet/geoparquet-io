@@ -388,10 +388,9 @@ reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 "parse_bbox" = ["_normalize_bbox", "_validated_bbox"]
 
 # Owners named above that do not exist yet. bbox_parse.py is a placeholder
-# (T5c decides parse_bbox's home); index_ops.py arrives with T5b.
+# (T5c decides parse_bbox's home).
 [G2.pending_owners]
 "geoparquet_io/core/bbox_parse.py" = "placeholder home for parse_bbox; T5c decides"
-"geoparquet_io/core/index_ops.py" = "created by T5b for the _ensure_*_column family"
 
 # The definitions outside their owner today, each with the track that deletes
 # it. count = how many defs of that name the file holds (default 1); the check
@@ -436,22 +435,6 @@ reason = "parse_bbox copy; T5c"
 path = "geoparquet_io/core/inspect_utils.py"
 name = "_crs_are_equivalent"
 reason = "CRS equality copy (approved change 9); T4c"
-[[G2.exemptions]]
-path = "geoparquet_io/core/partition/by_a5.py"
-name = "_ensure_a5_column"
-reason = "_ensure_*_column family; moves to index_ops (T5b)"
-[[G2.exemptions]]
-path = "geoparquet_io/core/partition/by_h3.py"
-name = "_ensure_h3_column"
-reason = "_ensure_*_column family; moves to index_ops (T5b)"
-[[G2.exemptions]]
-path = "geoparquet_io/core/partition/by_quadkey.py"
-name = "_ensure_quadkey_column"
-reason = "_ensure_*_column family; moves to index_ops (T5b)"
-[[G2.exemptions]]
-path = "geoparquet_io/core/partition/by_s2.py"
-name = "_ensure_s2_column"
-reason = "_ensure_*_column family; moves to index_ops (T5b)"
 [[G2.exemptions]]
 path = "geoparquet_io/core/preview.py"
 name = "_validated_bbox"
