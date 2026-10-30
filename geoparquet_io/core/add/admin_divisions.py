@@ -9,9 +9,10 @@ multiple admin datasets with hierarchical level support.
 
 from geoparquet_io.core.admin_datasets import (
     AdminDatasetFactory,
-    admin_match_order,
+    build_admin_join_query,
     build_admin_subquery,
     get_or_cache_dataset,
+    open_admin_join_connection,
 )
 from geoparquet_io.core.bbox_structure import check_bbox_structure, get_bbox_advice
 from geoparquet_io.core.common import get_parquet_metadata
@@ -22,8 +23,6 @@ from geoparquet_io.core.crs_utils import (
 from geoparquet_io.core.duckdb_utils import (
     SPATIAL_JOIN_BBOX_PREFILTER,
     SPATIAL_JOIN_NATIVE,
-    build_spatial_join_condition,
-    build_spatial_join_query,
     fetch_one,
     print_spatial_join_dry_run,
     quote_identifier,
@@ -94,7 +93,7 @@ def _format_input_ref(input_source, is_table_ref=False):
     return sql_path(input_source)
 
 
-def _build_spatial_join_query(
+def _build_level_join_query(
     input_source,
     admin_subquery,
     admin_select_clause,
@@ -133,19 +132,16 @@ def _build_spatial_join_query(
     if source_crs and not _admin_reprojected(source_crs, admin_bbox_col):
         input_geom_sql = transform_geom_sql(f"a.{quote_identifier(input_geom_col)}", source_crs)
 
-    return build_spatial_join_query(
+    return build_admin_join_query(
         input_relation=input_ref,
-        target_relation=admin_subquery,
-        target_select=admin_select_clause,
-        condition=build_spatial_join_condition(
-            input_geom_col,
-            admin_geom_col,
-            input_bbox_col,
-            admin_bbox_col,
-            input_geom_sql=input_geom_sql,
-        ),
-        one_match_per_input=True,
-        match_order=admin_match_order(boundary_columns),
+        admin_relation=admin_subquery,
+        admin_select_clause=admin_select_clause,
+        input_geom_col=input_geom_col,
+        admin_geom_col=admin_geom_col,
+        input_bbox_col=input_bbox_col,
+        admin_bbox_col=admin_bbox_col,
+        boundary_columns=boundary_columns,
+        input_geom_sql=input_geom_sql,
     )
 
 
@@ -379,45 +375,6 @@ def _setup_dataset_and_columns(
     )
 
 
-def _setup_duckdb_connection():
-    """Create and configure DuckDB connection for memory-bounded admin joins.
-
-    Large admin spatial joins (e.g. a multi-million-feature input against
-    Overture) are run under the same memory discipline DuckDB needs to reliably
-    spill rather than OOM (see todo 013):
-
-    - ``temp_directory`` enables spill-to-disk, onto the admin cache volume
-      (which already holds the multi-GB cached dataset, so it has the room) in a
-      private leaf per connection -- DuckDB's spill filenames carry no
-      connection identity, so two runs sharing the cache dir itself would
-      overwrite each other's blocks.
-    - ``threads = 1`` is required for memory control: parallel spatial-join /
-      window operators each grab memory and cannot coordinate spilling, so they
-      OOM even with a temp directory set (DuckDB #8270). Single-threaded
-      execution spills predictably. This applies to every per-level
-      ``CREATE TEMP TABLE`` join, not just the final write.
-    - ``preserve_insertion_order = false`` lets operators stream/flush to disk
-      instead of buffering the whole result to preserve order. Safe here:
-      threads=1 keeps order within the single pipeline, and admin output order
-      is not contractual anyway.
-    """
-    from geoparquet_io.core.admin_datasets import get_cache_dir
-    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, spill_directory
-
-    temp_dir = get_cache_dir()
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    con = get_duckdb_connection(
-        load_spatial=True,
-        load_httpfs=True,
-        temp_directory=spill_directory(temp_dir),
-        threads=1,
-    )
-    con.execute("SET preserve_insertion_order = false")
-    # Reproject (CRS-aware admin join, #525) emits lon/lat order to match CRS84.
-    con.execute("SET geometry_always_xy = true")
-    return con
-
-
 def _build_admin_where_clauses_list(
     con,
     dataset,
@@ -554,7 +511,7 @@ def _build_query_components(
             input_geom_rewritten=input_geom_rewritten,
         )
 
-    query = _build_spatial_join_query(
+    query = _build_level_join_query(
         input_source,
         admin_subquery,
         admin_select_clause,
@@ -827,7 +784,7 @@ def add_admin_divisions_multi(
     # Create DuckDB connection with ambient S3 config from dataset
 
     with s3_config_scope(dataset.get_s3_config()):
-        con = _setup_duckdb_connection()
+        con = open_admin_join_connection(spill_to_cache=True)
         try:
             # Get total input count (skip in dry-run)
             if not dry_run:

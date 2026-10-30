@@ -17,8 +17,9 @@ import duckdb
 
 from geoparquet_io.core.admin_datasets import (
     AdminDatasetFactory,
-    admin_match_order,
+    build_admin_join_query,
     build_admin_subquery,
+    open_admin_join_connection,
 )
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.common import get_parquet_metadata
@@ -27,8 +28,6 @@ from geoparquet_io.core.crs_utils import (
     transform_geom_sql,
 )
 from geoparquet_io.core.duckdb_utils import (
-    build_spatial_join_condition,
-    build_spatial_join_query,
     fetch_one,
     fetch_rows,
     query_schema,
@@ -101,21 +100,16 @@ def _build_enrichment_query(
     if source_crs and not reproject_admin:
         input_geom_sql = transform_geom_sql(f"a.{quote_identifier(input_geom_col)}", source_crs)
 
-    # The owner quotes every identifier in the ON clause (#926, #942) and keeps
-    # one admin assignment per input feature, to the smallest admin code (#543).
-    join = build_spatial_join_query(
+    join = build_admin_join_query(
         input_relation=input_ref,
-        target_relation=admin_relation,
-        target_select=admin_select_clause,
-        condition=build_spatial_join_condition(
-            input_geom_col,
-            admin_geom_col,
-            input_bbox_col,
-            admin_bbox_col,
-            input_geom_sql=input_geom_sql,
-        ),
-        one_match_per_input=True,
-        match_order=admin_match_order(boundary_columns),
+        admin_relation=admin_relation,
+        admin_select_clause=admin_select_clause,
+        input_geom_col=input_geom_col,
+        admin_geom_col=admin_geom_col,
+        input_bbox_col=input_bbox_col,
+        admin_bbox_col=admin_bbox_col,
+        boundary_columns=boundary_columns,
+        input_geom_sql=input_geom_sql,
     )
     return f"CREATE TEMP TABLE {enriched_table} AS\n{join}"
 
@@ -231,42 +225,6 @@ def _get_input_file_info(input_parquet, verbose):
     input_bbox_col = input_bbox_info["bbox_column_name"]
 
     return input_path, input_geom_col, input_bbox_col
-
-
-def _setup_admin_join_connection(dataset, get_duckdb_connection):
-    """Create the DuckDB connection for the enrichment join.
-
-    Per-level datasets (Overture) can join multi-million-feature inputs and need
-    the same memory discipline as ``gpio add admin-divisions`` to spill rather
-    than OOM (see add_divisions todo 013): spill onto the admin cache volume,
-    single-threaded execution (parallel spatial-join operators each grab memory
-    and cannot coordinate spilling, so they OOM even with a temp dir), and no
-    insertion-order buffering. Other datasets keep the simple default connection,
-    which spills under the OS temp directory.
-
-    The spill goes in a private leaf of the cache dir, never the cache dir
-    itself: DuckDB's spill filenames carry no connection identity, so two runs
-    sharing that well-known path would overwrite each other's blocks.
-    """
-    if dataset.supports_per_level_sources():
-        from geoparquet_io.core.admin_datasets import get_cache_dir
-        from geoparquet_io.core.duckdb_utils import spill_directory
-
-        temp_dir = get_cache_dir()
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        con = get_duckdb_connection(
-            load_spatial=True,
-            load_httpfs=True,
-            temp_directory=spill_directory(temp_dir),
-            threads=1,
-        )
-        con.execute("SET preserve_insertion_order = false")
-        # Reproject (CRS-aware admin join, #525) emits lon/lat order to match CRS84.
-        con.execute("SET geometry_always_xy = true")
-        return con
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=True)
-    con.execute("SET geometry_always_xy = true")
-    return con
 
 
 def _build_admin_select_for_partitioning(levels, boundary_columns, dataset=None, vecorel=False):
@@ -736,10 +694,10 @@ def partition_by_admin_hierarchical(
         admin_bbox_col = dataset.get_bbox_column()
 
         # Use ambient S3 config from dataset, applied via get_duckdb_connection
-        from geoparquet_io.core.duckdb_utils import get_duckdb_connection, s3_config_scope
+        from geoparquet_io.core.duckdb_utils import s3_config_scope
 
         with s3_config_scope(dataset.get_s3_config()):
-            con = _setup_admin_join_connection(dataset, get_duckdb_connection)
+            con = open_admin_join_connection(spill_to_cache=dataset.supports_per_level_sources())
 
             # STEP 1: Spatial join to create enriched data with admin columns
             progress("\n📍 Step 1/2: Performing spatial join with admin boundaries...")

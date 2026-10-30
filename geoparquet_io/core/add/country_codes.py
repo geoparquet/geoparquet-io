@@ -8,6 +8,7 @@ from geoparquet_io.core.duckdb_utils import (
     SPATIAL_JOIN_BBOX_PREFILTER,
     SPATIAL_JOIN_NATIVE,
     build_spatial_join_condition,
+    build_spatial_join_query,
     fetch_one,
     get_duckdb_connection,
     print_spatial_join_dry_run,
@@ -158,36 +159,6 @@ def _build_select_clause(country_code_col, subdivision_code_col, using_default):
         )
 
     return country_select + subdivision_select
-
-
-def _build_spatial_join_query(
-    input_path,
-    countries_source,
-    select_clause,
-    input_geom_col,
-    countries_geom_col,
-    input_bbox_col,
-    countries_bbox_col,
-):
-    """Build the spatial join query based on bbox availability.
-
-    Identifiers are quoted via the shared :func:`build_spatial_join_condition`
-    helper, so a maliciously-named geometry/bbox column from an untrusted input
-    or ``--countries-parquet`` cannot inject SQL. ``input_path`` is RAW and is
-    quoted and escaped here by :func:`sql_path` (#802); ``countries_source`` is
-    already a SQL reference (a table name or a ``sql_path`` literal).
-    """
-    join_condition = build_spatial_join_condition(
-        input_geom_col, countries_geom_col, input_bbox_col, countries_bbox_col
-    )
-    return f"""
-    SELECT
-        a.*,
-        {select_clause}
-    FROM {sql_path(input_path)} a
-    LEFT JOIN {countries_source} b
-    ON {join_condition}
-"""
 
 
 def _build_filter_table_sql(table_name, source_path, bbox_col, bounds):
@@ -677,14 +648,18 @@ def add_country_codes(
             input_bbox_col, countries_bbox_col, verbose, dry_run, has_native_geometry
         )
 
-        query = _build_spatial_join_query(
-            input_path,
-            countries_source,
-            select_clause,
-            input_geom_col,
-            countries_geom_col,
-            input_bbox_col,
-            countries_bbox_col,
+        # Every match is kept: a feature on a border gets one row per country it
+        # meets (the admin commands keep one, #543). The owner quotes the ON
+        # clause's identifiers; ``input_path`` is RAW and escaped once by
+        # sql_path (#802), ``countries_source`` is already a SQL reference.
+        query = build_spatial_join_query(
+            input_relation=sql_path(input_path),
+            target_relation=countries_source,
+            target_select=select_clause,
+            condition=build_spatial_join_condition(
+                input_geom_col, countries_geom_col, input_bbox_col, countries_bbox_col
+            ),
+            one_match_per_input=False,
         )
 
         if dry_run:

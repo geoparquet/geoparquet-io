@@ -8,7 +8,7 @@ ambiguous and DuckDB raises `BinderException: Ambiguous reference ... "region"`.
 
 from geoparquet_io.core.add.admin_divisions import (
     _build_admin_select_clause,
-    _build_spatial_join_query,
+    _build_level_join_query,
 )
 from geoparquet_io.core.admin_datasets import AdminDatasetFactory
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
@@ -52,7 +52,7 @@ def test_admin_divisions_handles_input_with_region_column():
             """
         )
 
-        query = _build_spatial_join_query(
+        query = _build_level_join_query(
             input_source="_gpio_test_input",
             admin_subquery="(SELECT geometry, region FROM _admin)",
             admin_select_clause=select_clause,

@@ -16,12 +16,16 @@ from pathlib import Path
 
 import duckdb
 
+from geoparquet_io.core import duckdb_utils
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import reproject_to_source_sql
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
+    build_spatial_join_condition,
+    build_spatial_join_query,
     get_duckdb_connection,
     orphaned_spill_dirs,
+    pin_duckdb_settings,
     quote_identifier,
     s3_config_scope,
     spill_directory,
@@ -1319,3 +1323,87 @@ def admin_match_order(boundary_columns: list[str], alias: str = "b") -> list[str
     feature meeting two admin polygons keeps the one with the smallest codes.
     """
     return [f"{alias}.{_boundary_column_ref(i, c)[1]}" for i, c in enumerate(boundary_columns)]
+
+
+def build_admin_join_query(
+    *,
+    input_relation: str,
+    admin_relation: str,
+    admin_select_clause: str,
+    input_geom_col: str,
+    admin_geom_col: str,
+    input_bbox_col: str | None,
+    admin_bbox_col: str | None,
+    boundary_columns: list[str],
+    input_geom_sql: str | None = None,
+) -> str:
+    """The admin spatial join of ``gpio add admin-divisions`` and ``gpio partition admin``.
+
+    A ``LEFT JOIN`` of every input feature (alias ``a``) to the admin polygons
+    of ``admin_relation`` (alias ``b``, normally :func:`build_admin_subquery`)
+    it intersects, on the owner's quoted ON clause (#926, #942). A feature that
+    meets two admin polygons is kept once, assigned to the one whose
+    ``boundary_columns`` sort first (#543); see
+    :func:`~geoparquet_io.core.duckdb_utils.build_spatial_join_query` for the
+    spill-safe dedup and the tiebreak. ``input_geom_sql`` replaces the input
+    geometry in the predicate (an inline reprojection, #525). Each caller keeps
+    its own reprojection policy; the join itself is decided here.
+    """
+    return build_spatial_join_query(
+        input_relation=input_relation,
+        target_relation=admin_relation,
+        target_select=admin_select_clause,
+        condition=build_spatial_join_condition(
+            input_geom_col,
+            admin_geom_col,
+            input_bbox_col,
+            admin_bbox_col,
+            input_geom_sql=input_geom_sql,
+        ),
+        one_match_per_input=True,
+        match_order=admin_match_order(boundary_columns),
+    )
+
+
+def open_admin_join_connection(*, spill_to_cache: bool) -> duckdb.DuckDBPyConnection:
+    """Open the DuckDB connection an admin spatial join runs on.
+
+    ``spill_to_cache=True`` is the memory discipline a large join against the
+    per-level Overture caches needs to spill rather than OOM (todo 013). The
+    memory ceiling and DuckDB's share of it are ``memory_limits``' default,
+    applied by :func:`~geoparquet_io.core.duckdb_utils.get_duckdb_connection`;
+    this adds the join's own settings:
+
+    - ``temp_directory`` on the admin cache volume (which already holds the
+      multi-GB cached dataset, so it has the room), in a private leaf per
+      connection -- DuckDB's spill filenames carry no connection identity, so
+      two runs sharing the cache dir itself would overwrite each other's blocks.
+    - ``threads = 1``: parallel spatial-join / window operators each grab
+      memory and cannot coordinate spilling, so they OOM even with a temp
+      directory set (DuckDB #8270). Single-threaded execution spills
+      predictably, for every per-level ``CREATE TEMP TABLE`` join, not just the
+      final write.
+    - ``preserve_insertion_order = false`` lets operators stream/flush to disk
+      instead of buffering the result to keep order. The one-match join orders
+      its output by input row itself (#543).
+
+    ``spill_to_cache=False`` is the default connection, which spills under the
+    OS temp directory. Both set ``geometry_always_xy``: the CRS-aware join
+    (#525) reprojects into lon/lat order to match the CRS84 admin side.
+    """
+    # Looked up on the module, as the callers' call-time imports did, so a spy
+    # patched onto duckdb_utils.get_duckdb_connection sees these connections.
+    if not spill_to_cache:
+        con = duckdb_utils.get_duckdb_connection(load_spatial=True, load_httpfs=True)
+        pin_duckdb_settings(con, {"geometry_always_xy": True})
+        return con
+    temp_dir = get_cache_dir()
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    con = duckdb_utils.get_duckdb_connection(
+        load_spatial=True,
+        load_httpfs=True,
+        temp_directory=spill_directory(temp_dir),
+        threads=1,
+    )
+    pin_duckdb_settings(con, {"preserve_insertion_order": False, "geometry_always_xy": True})
+    return con

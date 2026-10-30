@@ -370,3 +370,94 @@ def test_admin_subquery_is_built_only_in_admin_datasets():
         if count:
             found[rel] = count
     assert found == {}
+
+
+# --- one admin join: the query and the connection it runs on ----------------------
+
+
+def _calls_named(source: str, name: str) -> list[ast.Call]:
+    return [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", getattr(node.func, "attr", None)) == name
+    ]
+
+
+def test_admin_join_query_is_built_only_in_admin_datasets():
+    """``add admin-divisions`` and ``partition admin`` join the full geometry
+    through ``admin_datasets.build_admin_join_query``; only the two joins with a
+    different shape call the generic owner directly: aggregate admin joins a
+    POINT under its own alias, add country-codes keeps every match."""
+    found = {}
+    for path in sorted(PACKAGE.rglob("*.py")):
+        rel = path.relative_to(PACKAGE).as_posix()
+        if rel in (OWNER, "core/admin_datasets.py"):
+            continue
+        count = len(_calls_named(path.read_text(), "build_spatial_join_query"))
+        if count:
+            found[rel] = count
+    assert found == {"core/add/country_codes.py": 1, "core/process/aggregate/by_admin.py": 1}
+
+
+def test_admin_join_query_keeps_one_match_per_feature():
+    sql = admin_datasets.build_admin_join_query(
+        input_relation="read_parquet('in.parquet')",
+        admin_relation="(SELECT * FROM admin)",
+        admin_select_clause='b."country" AS country',
+        input_geom_col="geometry",
+        admin_geom_col="geometry",
+        input_bbox_col="bbox",
+        admin_bbox_col="bbox",
+        boundary_columns=["country"],
+    )
+    assert "DISTINCT ON" in sql
+    assert '"country" AS __gpio_match_0' in sql
+    assert 'a."bbox".xmin <= b."bbox".xmax' in sql
+
+
+def test_admin_join_connections_are_opened_only_in_admin_datasets():
+    """The memory-disciplined admin-join connection (spill onto the admin cache,
+    ``threads=1``, no insertion-order buffering) is opened in one place."""
+    found = {}
+    for path in sorted(PACKAGE.rglob("*.py")):
+        rel = path.relative_to(PACKAGE).as_posix()
+        if rel in (OWNER, "core/admin_datasets.py"):
+            continue
+        text = path.read_text()
+        count = sum(
+            1
+            for call in _calls_named(text, "get_duckdb_connection")
+            if any(kw.arg == "threads" for kw in call.keywords)
+        ) + _literals_containing(text, "preserve_insertion_order = false")
+        if count and ("/admin" in rel or "admin_" in rel):
+            found[rel] = count
+    assert found == {}
+
+
+def _setting(con, name):
+    return du.fetch_one(con.execute(f"SELECT current_setting('{name}')"))[0]
+
+
+def test_admin_join_connection_spills_single_threaded(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path / "cache")
+    con = admin_datasets.open_admin_join_connection(spill_to_cache=True)
+    try:
+        assert _setting(con, "threads") == 1
+        assert _setting(con, "preserve_insertion_order") is False
+        assert _setting(con, "geometry_always_xy") is True
+        assert str(tmp_path / "cache") in _setting(con, "temp_directory")
+    finally:
+        con.close()
+
+
+def test_admin_join_connection_default_keeps_duckdb_threads(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path / "cache")
+    con = admin_datasets.open_admin_join_connection(spill_to_cache=False)
+    try:
+        assert _setting(con, "preserve_insertion_order") is True
+        assert _setting(con, "geometry_always_xy") is True
+        assert str(tmp_path / "cache") not in _setting(con, "temp_directory")
+        assert not (tmp_path / "cache").exists()
+    finally:
+        con.close()

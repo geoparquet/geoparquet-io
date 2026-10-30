@@ -430,7 +430,7 @@ class TestAdminJoinIsCrsAware:
     """
 
     def test_admin_divisions_join_assigns_with_reprojection(self, fields_5070_file):
-        from geoparquet_io.core.add.admin_divisions import _build_spatial_join_query
+        from geoparquet_io.core.add.admin_divisions import _build_level_join_query
 
         con = _con_with_admin()
         try:
@@ -444,8 +444,8 @@ class TestAdminJoinIsCrsAware:
                 "admin_geom_col": "geom",
                 "boundary_columns": ["region"],
             }
-            with_crs = _build_spatial_join_query(source_crs="EPSG:5070", **kwargs)
-            without = _build_spatial_join_query(source_crs=None, **kwargs)
+            with_crs = _build_level_join_query(source_crs="EPSG:5070", **kwargs)
+            without = _build_level_join_query(source_crs=None, **kwargs)
             assigned = fetch_one(
                 con.execute(f"SELECT COUNT(*) FROM ({with_crs}) WHERE region IS NOT NULL")
             )[0]
@@ -494,9 +494,9 @@ class TestAdminReprojectsAdminSideWithBbox:
     """
 
     def test_join_query_keeps_bbox_prefilter_and_leaves_input_untransformed(self):
-        from geoparquet_io.core.add.admin_divisions import _build_spatial_join_query
+        from geoparquet_io.core.add.admin_divisions import _build_level_join_query
 
-        sql = _build_spatial_join_query(
+        sql = _build_level_join_query(
             input_source="x.parquet",
             admin_subquery="(SELECT geom, bbox, region FROM admin)",
             admin_select_clause='b."region" AS region',

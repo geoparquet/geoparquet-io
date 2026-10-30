@@ -181,7 +181,7 @@ class TestDryRunCommands:
         ``source_crs`` alone (ignoring admin_bbox_col) would misreport this join as
         SPATIAL_JOIN_NO_BBOX while the emitted SQL still runs the bbox pre-filter.
         The reported strategy must mirror the ``input_geom_sql is not None`` decision
-        in _build_spatial_join_query, i.e. ``source_crs and not _admin_reprojected``.
+        in _build_level_join_query, i.e. ``source_crs and not _admin_reprojected``.
         """
         runner = CliRunner()
         result = runner.invoke(

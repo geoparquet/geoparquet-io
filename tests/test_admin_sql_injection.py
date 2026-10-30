@@ -85,32 +85,36 @@ def test_admin_divisions_quotes_malicious_geom_column(malicious_geom_column_file
     assert 'geom"") AS pwn' in result.output
 
 
-def test_country_codes_join_query_quotes_identifiers():
-    """country_codes spatial-join builder quotes hostile geom/bbox column names.
+def test_country_codes_join_quotes_a_malicious_geom_column(malicious_geom_column_file, tmp_path):
+    """country_codes joins a hostile geometry column name without injecting.
 
     The country_codes module is exercised by benchmarks/legacy paths rather than
-    a CLI command, so we guard its query builder directly. Both the input geometry
-    column (from `geo.primary_column`) and a `--countries-parquet` geometry column
-    are untrusted; neither may break out of the generated SQL.
+    a CLI command, so it is driven through its core function, against a local
+    countries file covering the input. Its ON clause comes from
+    ``build_spatial_join_condition``; a breakout would add a ``pwn`` column or
+    fail to parse.
     """
-    from geoparquet_io.core.add.country_codes import _build_spatial_join_query
+    from geoparquet_io.core.add.country_codes import add_country_codes
 
-    query = _build_spatial_join_query(
-        input_path="input.parquet",
-        countries_source="'countries.parquet'",
-        select_clause="b.iso_a2 as country",
-        input_geom_col=MALICIOUS_GEOM_NAME,
-        countries_geom_col="geometry",
-        input_bbox_col='bb") AS pwn, (',
-        countries_bbox_col="geometry_bbox",
-    )
+    countries = tmp_path / "countries.parquet"
+    con = duckdb.connect()
+    try:
+        con.execute("INSTALL spatial; LOAD spatial")
+        con.execute(
+            "COPY (SELECT 'ZZ' AS country, "
+            "ST_GeomFromText('POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))') "
+            f"AS geometry) TO '{countries}' (FORMAT PARQUET)"
+        )
+    finally:
+        con.close()
+    out = tmp_path / "out.parquet"
 
-    # Embedded double-quotes are doubled inside quoted identifiers; the raw
-    # breakout text must never appear unquoted/executable.
-    assert 'geom"") AS pwn' in query
-    assert 'bb"") AS pwn' in query
-    # ST_Intersects references the quoted geometry identifiers, not bare names.
-    assert 'a."' + MALICIOUS_GEOM_NAME.replace('"', '""') + '"' in query
+    add_country_codes(malicious_geom_column_file, str(countries), str(out), False, False, False)
+
+    table = pq.read_table(out)
+    assert "pwn" not in table.column_names
+    assert table.num_rows == pq.read_metadata(malicious_geom_column_file).num_rows
+    assert set(table.column("admin:country_code").to_pylist()) == {"ZZ"}
 
 
 # --------------------------------------------------------------------------- #
