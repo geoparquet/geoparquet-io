@@ -114,12 +114,11 @@ def cli_error_for(exc: BaseException, *, path: str | None = None) -> click.Click
 
 
 def _answer(
-    exc: BaseException, *, path: str | None, hint: str | None, always: bool
-) -> click.ClickException | None:
-    """The one answering step: translate ``exc``, log its traceback once, return the answer.
+    exc: BaseException, error: click.ClickException, hint: str | None
+) -> click.ClickException:
+    """The one answering step: finish ``error`` (the answer to ``exc``) and log the traceback once.
 
-    ``cli_error_for`` decides; ``always`` turns "not mine" into the exception's
-    cleaned text. ``hint`` is guidance appended to a DuckDB failure whose input
+    ``hint`` is guidance appended to a DuckDB failure whose input
     could not be read as a file -- not to a disk shortage, an unpublished
     extension or a non-Parquet file, which the taxonomy already explained. The
     traceback is hidden, not discarded: ``--verbose`` prints it, because
@@ -132,13 +131,6 @@ def _answer(
     from geoparquet_io.core.exceptions import unpublished_extension_hint
     from geoparquet_io.core.logging_config import get_logger
 
-    error = cli_error_for(exc, path=path)
-    if error is None:
-        if not always:
-            return None
-        if isinstance(exc, click.ClickException):
-            return exc  # already final: not translated, not logged again
-        error = click.ClickException(error_text(exc))
     already_explained = (
         spill_space_hint(exc) is not None
         or unpublished_extension_hint(exc) is not None
@@ -164,15 +156,16 @@ def click_error_for(
     decided the failure is the user's to read; it logs the traceback like the
     boundary does.
     """
-    answer = _answer(exc, path=path, hint=hint, always=True)
-    assert answer is not None  # always=True
-    return answer
+    error = cli_error_for(exc, path=path)
+    if error is None:
+        if isinstance(exc, click.ClickException):
+            return exc  # already final: not translated, not logged again
+        error = click.ClickException(error_text(exc))
+    return _answer(exc, error, hint)
 
 
 @contextmanager
-def error_boundary(
-    *, path: str | None = None, hint: str | None = None, always: bool = False
-) -> Iterator[None]:
+def error_boundary(*, path: str | None = None, hint: str | None = None) -> Iterator[None]:
     """The one boundary: translate a failure no gpio frame owned, or let it through.
 
     An exception ``cli_error_for`` does not claim (a genuine gpio bug) is
@@ -180,14 +173,11 @@ def error_boundary(
     class wrap their ``invoke`` in this, so a command run on its own answers
     exactly as it does under the root; a command that knows its input file wraps
     its work in ``error_boundary(path=...)`` so a non-Parquet answer can name it.
-    ``always=True`` is for a command that has always shown any failure on its input
-    as a plain error line (``inspect``): an unclaimed exception becomes its cleaned
-    text instead of a traceback.
     """
     try:
         yield
     except Exception as exc:
-        error = _answer(exc, path=path, hint=hint, always=always)
+        error = cli_error_for(exc, path=path)
         if error is None:
             raise
-        raise error from exc
+        raise _answer(exc, error, hint) from exc

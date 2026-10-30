@@ -23,7 +23,7 @@ from geoparquet_io.core.duckdb_metadata import (
     get_schema_info,
     parse_geometry_logical_type,
 )
-from geoparquet_io.core.geo_metadata import is_covering_path
+from geoparquet_io.core.geo_metadata import is_covering_path, sanitize_geo_metadata
 from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.sizing import format_size
@@ -622,7 +622,7 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
         json_output: Whether to output as JSON
     """
 
-    geo_meta = get_geo_metadata(parquet_file)
+    geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file))
 
     if not geo_meta:
         if json_output:
@@ -784,7 +784,7 @@ def format_all_metadata(
 
     if json_output:
         # For JSON, combine all metadata into one object
-        geo_meta = get_geo_metadata(parquet_file)
+        geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file))
         primary_col = geo_meta.get("primary_column") if geo_meta else None
 
         # We need to manually construct the combined JSON output
@@ -797,7 +797,7 @@ def format_all_metadata(
         print(dumps_json(output, indent=2))
     else:
         # Terminal output - show all three sections
-        geo_meta = get_geo_metadata(parquet_file)
+        geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file))
         primary_col = geo_meta.get("primary_column") if geo_meta else None
 
         # Section 1: Parquet File Metadata
