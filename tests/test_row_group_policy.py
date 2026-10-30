@@ -112,8 +112,7 @@ def _expected(source: Path, option: str) -> int:
     return math.ceil(table.num_rows / rows)
 
 
-@pytest.fixture
-def local_admin(tmp_path, monkeypatch):
+def _use_local_admin(tmp_path: Path, monkeypatch) -> None:
     """One Overture-shaped country polygon over the fixture, instead of the download."""
     from geoparquet_io.core.admin_datasets import OvertureAdminDataset
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
@@ -132,7 +131,7 @@ def local_admin(tmp_path, monkeypatch):
     finally:
         con.close()
 
-    def create(dataset_name, source_path=None, verbose=False):
+    def create(*_args, verbose=False, **_kwargs):
         return OvertureAdminDataset(source_path=str(admin_file), verbose=verbose)
 
     monkeypatch.setattr(
@@ -166,15 +165,23 @@ def _write(path_name: str, src: Path, out_dir: Path, flags: tuple[str, ...]) -> 
     return out
 
 
-@pytest.mark.parametrize("option", sorted(OPTIONS))
-@pytest.mark.parametrize("path_name", SIZED_PATHS)
-def test_every_sized_path_lands_on_the_owners_count(path_name, option, source, tmp_path, request):
-    if path_name == "partition_admin":
-        request.getfixturevalue("local_admin")
+def _assert_owners_count(path_name: str, option: str, source: Path, tmp_path: Path) -> None:
     out = _write(path_name, source, tmp_path, OPTIONS[option])
     sizes = _group_sizes(out)
     assert sum(sizes) == pq.read_metadata(str(source)).num_rows
     assert len(sizes) == _expected(source, option), f"{path_name} {option}: {sizes}"
+
+
+@pytest.mark.parametrize("option", sorted(OPTIONS))
+@pytest.mark.parametrize("path_name", [p for p in SIZED_PATHS if p != "partition_admin"])
+def test_every_sized_path_lands_on_the_owners_count(path_name, option, source, tmp_path):
+    _assert_owners_count(path_name, option, source, tmp_path)
+
+
+@pytest.mark.parametrize("option", sorted(OPTIONS))
+def test_partition_admin_lands_on_the_owners_count(option, source, tmp_path, monkeypatch):
+    _use_local_admin(tmp_path, monkeypatch)
+    _assert_owners_count("partition_admin", option, source, tmp_path)
 
 
 @pytest.mark.parametrize("path_name", DEFAULT_ONLY_PATHS)
