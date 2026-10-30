@@ -151,6 +151,29 @@ marked `network`, each of which downloads hundreds of megabytes of
 administrative boundaries from a live service; they belong to the network CI
 lane, and locally they mostly just time out.
 
+### Proving a refactor is byte-identical
+
+A change that moves write-path code without meaning to change output proves it
+with `scripts/byte_identity.py`. It runs one command matrix (every `convert`,
+`sort`, `extract`, `add`, `check bbox --fix`, `process` and `partition` write
+path, plus `Table.write` with each strategy, over the fixtures in `tests/data/`)
+in two checkouts, each through its own `.venv`, and compares the outputs byte
+for byte. Check out the base in a second worktree with its own environment, then:
+
+```bash
+uv run python scripts/byte_identity.py --base ../base --branch . --out report.md
+uv run python scripts/byte_identity.py --base ../base --branch . --out report.md --only sort_hilbert,extract_where
+uv run python scripts/byte_identity.py --list   # the case names
+```
+
+The report has a summary table (identical, differs, same-error or skipped per
+case) and, for every Parquet output that differs, a footer-level diff: codec and
+compressed size per column, row groups, the KV key set, the `geo` block as a
+JSON diff, the schema, and whether the data tables are equal. An intended
+change should be the only line in that diff. The script exits 1 when any case
+differs. Run a checkout against itself (`--base . --branch .`) to confirm a
+clean run is all-identical on your machine before reading a difference as real.
+
 ## Code Quality
 
 `.pre-commit-config.yaml` is the **single source of truth** for every quality
