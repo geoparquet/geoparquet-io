@@ -311,6 +311,17 @@ class TestFastPathPlumbing:
         yield con
         con.close()
 
+    @pytest.fixture
+    def null_write_scope(self, monkeypatch):
+        """Neutralize the write-memory scope so fake connections see only the COPY."""
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _null(con, memory_limit, verbose, **kwargs):
+            yield
+
+        monkeypatch.setattr(geojson_stream, "scoped_write_memory_limit", _null)
+
     def test_geometry_typed_property_columns(self, con):
         found = geojson_stream._geometry_typed_property_columns(con, "t", ["id", "name", "geom2"])
         assert found == ["geom2"]
@@ -328,8 +339,9 @@ class TestFastPathPlumbing:
             precision,
             source_crs,
             repair_geometry,
+            verbose=False,
         ):
-            recorded["args"] = (source_ref, geometry_column, property_columns, precision)
+            recorded["args"] = (source_ref, geometry_column, property_columns, precision, verbose)
             return 42
 
         monkeypatch.setattr(geojson_stream, "_native_feature_collection_to_file", _fake_native)
@@ -346,10 +358,12 @@ class TestFastPathPlumbing:
             pretty=False,
             source_crs=None,
             repair_geometry=True,
+            verbose=True,
         )
         assert count == 42
-        # The free-form Python API precision is coerced before interpolation.
-        assert recorded["args"] == ("t", "geometry", ["id", "name"], 7)
+        # The free-form Python API precision is coerced before interpolation,
+        # and the caller's verbose flag reaches the write scope.
+        assert recorded["args"] == ("t", "geometry", ["id", "name"], 7, True)
 
     def test_maybe_declines_geometry_typed_property(self, con, tmp_path, monkeypatch):
         monkeypatch.setattr(geojson_stream, "_native_geojson_writer_available", lambda: True)
@@ -369,6 +383,7 @@ class TestFastPathPlumbing:
         )
         assert count is None
 
+    @pytest.mark.usefixtures("null_write_scope")
     def test_native_copy_statement_shape(self, tmp_path):
         """The COPY statement pins the semantics the equivalence tests prove."""
         executed = []
@@ -406,6 +421,7 @@ class TestFastPathPlumbing:
         # The output path is escaped exactly once, by sql_path.
         assert "o''brien.geojson" in query
 
+    @pytest.mark.usefixtures("null_write_scope")
     def test_native_copy_statement_reprojects(self, tmp_path):
         executed = []
 
@@ -432,6 +448,114 @@ class TestFastPathPlumbing:
         (query,) = executed
         assert "ST_Transform" in query
         assert "EPSG:5070" in query
+
+    def test_native_copy_runs_inside_write_memory_scope(self, tmp_path, monkeypatch):
+        """The COPY is a DuckDB write, so it runs inside scoped_write_memory_limit.
+
+        Without the scope the COPY runs at the connection's default ceiling but
+        full host threads -- the under-250MB-per-thread regime where DuckDB
+        raises instead of spilling on cgroup-limited hosts (#1174, like the
+        GDAL and CSV export COPY sites in format_writers).
+        """
+        from contextlib import contextmanager
+
+        scopes = []
+        state = {"active": False}
+
+        @contextmanager
+        def _recording(con, memory_limit, verbose, **kwargs):
+            state["active"] = True
+            try:
+                yield
+            finally:
+                state["active"] = False
+                scopes.append((memory_limit, verbose))
+
+        monkeypatch.setattr(geojson_stream, "scoped_write_memory_limit", _recording)
+        copies = []
+
+        class _Result:
+            def fetchone(self):
+                return (1,)
+
+        class _Con:
+            def execute(self, query):
+                assert state["active"], (
+                    "the native GeoJSON COPY ran outside scoped_write_memory_limit"
+                )
+                copies.append(query)
+                return _Result()
+
+        count = geojson_stream._native_feature_collection_to_file(
+            _Con(),
+            "t",
+            "geometry",
+            [],
+            str(tmp_path / "o.geojson"),
+            7,
+            None,
+            True,
+            verbose=True,
+        )
+        assert count == 1
+        assert len(copies) == 1
+        assert copies[0].startswith("COPY (")
+        # No --write-memory reaches this path, so the ceiling-based default
+        # applies, under the caller's verbose flag.
+        assert scopes == [(None, True)]
+
+    @pytest.mark.parametrize("exc_name", ["CatalogException", "BinderException"])
+    @pytest.mark.usefixtures("null_write_scope")
+    def test_unknown_format_refusal_returns_none(self, tmp_path, exc_name):
+        """A bind-time refusal of FORMAT GEOJSON signals "not taken", not failure.
+
+        The version gate proves the library is 2.x, not that this build ships
+        the copy format; an engine without it must leave the conversion on the
+        hand-built writer.
+        """
+
+        class _Con:
+            def execute(self, query):
+                raise getattr(duckdb, exc_name)("Copy Function with name geojson does not exist!")
+
+        count = geojson_stream._native_feature_collection_to_file(
+            _Con(),
+            "t",
+            "geometry",
+            [],
+            str(tmp_path / "o.geojson"),
+            7,
+            None,
+            True,
+        )
+        assert count is None
+
+    @pytest.mark.parametrize("exc_name", ["IOException", "InterruptException"])
+    @pytest.mark.usefixtures("null_write_scope")
+    def test_mid_write_errors_propagate(self, tmp_path, exc_name):
+        """Only the unknown-format refusal falls back; a mid-write IO error or
+        an interrupt must surface, never be masked by a silent rewrite."""
+        # The two caught types must not swallow an interrupt by inheritance.
+        assert not issubclass(
+            duckdb.InterruptException, (duckdb.CatalogException, duckdb.BinderException)
+        )
+        exc_type = getattr(duckdb, exc_name)
+
+        class _Con:
+            def execute(self, query):
+                raise exc_type("boom")
+
+        with pytest.raises(exc_type):
+            geojson_stream._native_feature_collection_to_file(
+                _Con(),
+                "t",
+                "geometry",
+                [],
+                str(tmp_path / "o.geojson"),
+                7,
+                None,
+                True,
+            )
 
     def test_file_call_site_returns_native_count(self, tmp_path, monkeypatch):
         """convert_to_geojson returns the fast path's count from both entry points."""
@@ -524,6 +648,41 @@ class TestFallbacks:
         feature = json.loads(out.read_text(encoding="utf-8"))["features"][0]
         assert isinstance(feature["properties"]["geom2"], str)
         assert feature["properties"]["geom2"].startswith("POINT")
+
+    def test_missing_copy_format_falls_back_to_hand_built(self, parquet, tmp_path, monkeypatch):
+        """A 2.x library whose engine lacks FORMAT GEOJSON converts via fallback.
+
+        The gate trusts the major version; if the COPY itself comes back as an
+        unknown copy function, the conversion must land on the hand-built
+        writer instead of hard-failing where DuckDB 1.5 worked.
+        """
+        monkeypatch.setattr(geojson_stream, "_native_geojson_writer_available", lambda: True)
+        real = geojson_stream._native_feature_collection_to_file
+
+        class _CopyRefusingCon:
+            """Delegate everything, but refuse the COPY the way a formatless engine does."""
+
+            def __init__(self, con):
+                self._con = con
+
+            def execute(self, query, *args, **kwargs):
+                if query.lstrip().upper().startswith("COPY"):
+                    raise duckdb.CatalogException("Copy Function with name geojson does not exist!")
+                return self._con.execute(query, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._con, name)
+
+        def _refusing(con, *args, **kwargs):
+            return real(_CopyRefusingCon(con), *args, **kwargs)
+
+        monkeypatch.setattr(geojson_stream, "_native_feature_collection_to_file", _refusing)
+        out = tmp_path / "out.geojson"
+        count = convert_to_geojson(str(parquet), str(out))
+        assert count == 2
+        fc = json.loads(out.read_text(encoding="utf-8"))
+        assert fc["type"] == "FeatureCollection"
+        assert len(fc["features"]) == 2
 
     @pytest.mark.usefixtures("forbid_native")
     def test_stdout_streaming_never_uses_native_writer(self, parquet, capsys):

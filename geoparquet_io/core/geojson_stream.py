@@ -58,6 +58,7 @@ from geoparquet_io.core.geometry_detection import (
 )
 from geoparquet_io.core.geometry_repair import repair_geometry_sql
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.stream_io import _create_view_with_geometry
 from geoparquet_io.core.streaming import is_stdin
@@ -442,15 +443,19 @@ def _native_feature_collection_to_file(
     precision: int,
     source_crs: str | None,
     repair_geometry: bool,
-) -> int:
+    *,
+    verbose: bool = False,
+) -> int | None:
     """Write a FeatureCollection file with DuckDB 2.0's native GeoJSON writer.
 
     Semantic equivalence with the hand-built writer is the contract
     (tests/test_geojson_native_writer.py compares both parsed outputs):
 
     - The geometry chain (reprojection subquery, repair, ST_ReducePrecision)
-      is the same SQL both writers run, and the native serializer formats the
-      resulting doubles exactly as ST_AsGeoJSON does.
+      is the same SQL both writers run, and the doubles both serializers emit
+      parse back to equal values. Parsed equality, not byte equality, is the
+      enforced contract: the hand-built output passes through a Python ``json``
+      re-serialization, so the two files need not match byte for byte.
     - ``ID_COLUMN ''`` disables the writer's default promotion of a column
       named ``id``, keeping it in ``properties`` like the hand-built writer.
     - The same ``WHERE geometry IS NOT NULL`` filter drops NULL-geometry rows.
@@ -460,9 +465,21 @@ def _native_feature_collection_to_file(
     never reach this function. ``ST_ReducePrecision`` is a GEOS topology
     operation, so precision was already coerced to int by the caller.
 
+    The COPY is a DuckDB write, so it runs inside
+    :func:`scoped_write_memory_limit` like the GDAL and CSV export COPY sites
+    (#1174): no ``--write-memory`` reaches this path, so the ceiling-based
+    default applies and threads are capped to keep headroom per thread.
+
     Returns:
-        Number of features written (the COPY row count after the NULL filter).
+        Number of features written (the COPY row count after the NULL filter),
+        or ``None`` when the engine refuses ``FORMAT GEOJSON`` as unknown at
+        bind time. The version gate only proves the library is 2.x, not that
+        this build ships the copy format, so that refusal sends the caller to
+        the hand-built writer. A mid-write IO, conversion or interrupt error
+        still propagates.
     """
+    import duckdb
+
     quoted_geom = quote_identifier(geometry_column)
     if source_crs:
         source_ref = _reprojected_source_ref(source_ref, quoted_geom, source_crs)
@@ -477,7 +494,14 @@ def _native_feature_collection_to_file(
         f"GEOMETRY_COLUMN '{_escape_sql_string(geometry_column)}')"
     )
     debug(f"Native GeoJSON COPY: {copy_query}")
-    row = fetch_one(con.execute(copy_query))
+    with scoped_write_memory_limit(con, None, verbose):
+        try:
+            row = fetch_one(con.execute(copy_query))
+        except (duckdb.CatalogException, duckdb.BinderException) as exc:
+            # A bind-time refusal: this engine has no GEOJSON copy format, so
+            # nothing was written and the hand-built writer still can.
+            debug(f"Native GeoJSON COPY not taken ({exc}); using the hand-built writer")
+            return None
     return int(row[0]) if row else 0
 
 
@@ -495,6 +519,7 @@ def _maybe_native_feature_collection(
     pretty: bool,
     source_crs: str | None,
     repair_geometry: bool,
+    verbose: bool = False,
 ) -> int | None:
     """Take the native fast path when its output would be semantically identical.
 
@@ -511,7 +536,9 @@ def _maybe_native_feature_collection(
       precision-reduced geometry and omits it for EMPTY, where gpio rounds the
       pre-reduction extent;
     - a GEOMETRY-typed property column (WKT string vs nested GeoJSON);
-    - DuckDB 1.x, which has no native GeoJSON writer.
+    - DuckDB 1.x, which has no native GeoJSON writer;
+    - a 2.x engine that refuses ``FORMAT GEOJSON`` as unknown at bind time,
+      which :func:`_native_feature_collection_to_file` reports as ``None``.
     """
     if not output_path or pretty or description or id_field or write_bbox:
         return None
@@ -528,6 +555,7 @@ def _maybe_native_feature_collection(
         int(precision),
         source_crs,
         repair_geometry,
+        verbose=verbose,
     )
 
 
@@ -816,6 +844,7 @@ def convert_to_geojson_stream(
             pretty=pretty,
             source_crs=source_crs if needs_reproject else None,
             repair_geometry=repair_geometry,
+            verbose=verbose,
         )
         if count is not None:
             success(f"Wrote {count:,} features to {output_path}")
@@ -962,6 +991,7 @@ def _convert_from_stream(
             pretty=pretty,
             source_crs=source_crs if needs_reproject else None,
             repair_geometry=repair_geometry,
+            verbose=verbose,
         )
         if count is not None:
             success(f"Wrote {count:,} features to {output_path}")
