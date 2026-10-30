@@ -63,12 +63,12 @@ def offline_wfs_probes():
     fetcher. It swallows ``httpx.HTTPError`` the same way.
 
     Stubbing both probes to ``None`` reproduces exactly what the failed requests
-    already returned, so no assertion changes meaning. ``_make_request`` is
+    already returned, so no assertion changes meaning. ``make_request_with_retry`` is
     additionally replaced with a tripwire, and the recorded calls are asserted
     on teardown so a *future* unmocked network path fails loudly instead of
     silently sleeping.
 
-    Scope note: the tripwire covers only ``_make_request``-mediated traffic.
+    Scope note: the tripwire covers only ``make_request_with_retry``-mediated traffic.
     ``_fetch_wfs_page`` and ``_probe_startindex_limit`` drive httpx directly and
     bypass it; they are covered by the explicit stubs above, not by the
     tripwire. A new httpx-driven helper would therefore escape silently -- add
@@ -76,14 +76,14 @@ def offline_wfs_probes():
     """
     escaped_requests: list[str] = []
 
-    def _blocked_request(url, *args, **kwargs):
+    def _blocked_request(method, url, *args, **kwargs):
         escaped_requests.append(url)
         raise AssertionError(f"unmocked WFS HTTP request to {url}")
 
     with (
         patch.object(wfs_module, "_get_feature_count", return_value=None),
         patch.object(wfs_module, "_probe_startindex_limit", return_value=None),
-        patch.object(wfs_module, "_make_request", side_effect=_blocked_request),
+        patch.object(wfs_module, "make_request_with_retry", side_effect=_blocked_request),
     ):
         yield
 
@@ -5159,7 +5159,7 @@ class TestGetFeatureCountErrorVisibility:
 
         with (
             patch(
-                "geoparquet_io.core.wfs._make_request",
+                "geoparquet_io.core.wfs.make_request_with_retry",
                 side_effect=WFSError("Request failed after 3 attempts: connection refused"),
             ),
             caplog.at_level(logging.WARNING, logger="geoparquet_io"),
@@ -5179,7 +5179,7 @@ class TestGetFeatureCountErrorVisibility:
 
         with (
             patch(
-                "geoparquet_io.core.wfs._make_request",
+                "geoparquet_io.core.wfs.make_request_with_retry",
                 side_effect=httpx.ConnectError("nodename nor servname provided"),
             ),
             caplog.at_level(logging.WARNING, logger="geoparquet_io"),
@@ -5196,8 +5196,10 @@ class TestGetFeatureCountErrorVisibility:
 
         with (
             patch(
-                "geoparquet_io.core.wfs._make_request",
-                side_effect=TypeError("_make_request() got an unexpected keyword argument"),
+                "geoparquet_io.core.wfs.make_request_with_retry",
+                side_effect=TypeError(
+                    "make_request_with_retry() got an unexpected keyword argument"
+                ),
             ),
             pytest.raises(TypeError),
         ):
@@ -5208,7 +5210,9 @@ class TestGetFeatureCountErrorVisibility:
         from geoparquet_io.core.wfs import _get_feature_count
 
         with (
-            patch("geoparquet_io.core.wfs._make_request", return_value=b'numberMatched="7"'),
+            patch(
+                "geoparquet_io.core.wfs.make_request_with_retry", return_value=b'numberMatched="7"'
+            ),
             caplog.at_level(logging.WARNING, logger="geoparquet_io"),
         ):
             result = _get_feature_count("http://mock/wfs", "layer", "2.0.0")
@@ -5221,7 +5225,10 @@ class TestGetFeatureCountErrorVisibility:
         from geoparquet_io.core.wfs import _get_feature_count
 
         with (
-            patch("geoparquet_io.core.wfs._make_request", return_value=b"<wfs:FeatureCollection/>"),
+            patch(
+                "geoparquet_io.core.wfs.make_request_with_retry",
+                return_value=b"<wfs:FeatureCollection/>",
+            ),
             caplog.at_level(logging.WARNING, logger="geoparquet_io"),
         ):
             result = _get_feature_count("http://mock/wfs", "layer", "1.1.0")
@@ -5235,7 +5242,7 @@ class TestGetFeatureCountErrorVisibility:
 
         seen = []
 
-        def fake_request(url, params=None, **kwargs):
+        def fake_request(method, url, params=None, **kwargs):
             from urllib.parse import parse_qs, urlparse
 
             # Root tile is over the limit; every quadrant is under it. The
@@ -5245,7 +5252,7 @@ class TestGetFeatureCountErrorVisibility:
             n = 500 if len(seen) == 1 else 10
             return f'numberOfFeatures="{n}"'.encode()
 
-        with patch("geoparquet_io.core.wfs._make_request", side_effect=fake_request):
+        with patch("geoparquet_io.core.wfs.make_request_with_retry", side_effect=fake_request):
             tiles = _refine_tiles_adaptive(
                 [(0.0, 0.0, 4.0, 4.0)],
                 "http://mock/wfs",
@@ -5264,7 +5271,7 @@ class TestGetFeatureCountErrorVisibility:
 
         with (
             patch(
-                "geoparquet_io.core.wfs._make_request",
+                "geoparquet_io.core.wfs.make_request_with_retry",
                 side_effect=WFSError("HTTP error 400: version not supported"),
             ),
             patch("geoparquet_io.core.wfs.warn") as mock_warn,
@@ -5305,7 +5312,7 @@ class TestSpeculativeCountProbeIsQuiet:
         )
 
         with (
-            patch("geoparquet_io.core.wfs._make_request", side_effect=fake_request),
+            patch("geoparquet_io.core.wfs.make_request_with_retry", side_effect=fake_request),
             patch(
                 "geoparquet_io.core.wfs.negotiate_wfs_version", return_value=("1.1.0", MagicMock())
             ),
@@ -5325,7 +5332,7 @@ class TestSpeculativeCountProbeIsQuiet:
     def test_healthy_2_0_0_fallback_does_not_warn(self, caplog):
         """2.0.0 rejected, negotiated 1.1.0 answers: no probe warning at all."""
 
-        def fake_request(url, params=None, **kwargs):
+        def fake_request(method, url, params=None, **kwargs):
             from urllib.parse import parse_qs, urlparse
 
             # The probe pre-merges its params into the URL (issue #828).
@@ -5340,7 +5347,7 @@ class TestSpeculativeCountProbeIsQuiet:
         """When the negotiated-version probe fails too, the count is genuinely
         lost — that one must still be loud."""
 
-        def fake_request(url, params=None, **kwargs):
+        def fake_request(method, url, params=None, **kwargs):
             raise WFSError("Request failed after 3 attempts: connection refused")
 
         warnings = self._run_wfs_to_table(fake_request, caplog)

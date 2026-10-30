@@ -60,6 +60,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import (
     FailureKind,
     GeoParquetError,
+    RemoteAccessError,
     classify_failure,
     fatal_status_message,
     sanitize_error_message,
@@ -68,9 +69,9 @@ from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_RETRY_DELAY,
-    DEFAULT_TIMEOUT,
     RetryExhaustedError,
     get_shared_http_client,
+    make_request_with_retry,
     run_with_retry,
 )
 from geoparquet_io.core.logging_config import (
@@ -198,79 +199,6 @@ class WFSLayerInfo:
 # client, which keeps the timeout of whichever caller built it (#1184).
 _PAGE_TIMEOUT = 600.0
 _PROBE_TIMEOUT = 30.0
-
-
-def _make_request(
-    url: str,
-    params: dict | None = None,
-    max_retries: int = DEFAULT_MAX_RETRIES,
-    retry_delay: float = DEFAULT_RETRY_DELAY,
-    accept: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
-) -> bytes:
-    """
-    Make HTTP GET request with retry logic.
-
-    Returns raw bytes to handle both JSON and XML responses.
-
-    Args:
-        url: Request URL
-        params: Query parameters
-        max_retries: Number of retry attempts
-        retry_delay: Base delay between retries (exponential backoff)
-        accept: Accept header value (e.g., "application/json")
-        timeout: Request timeout in seconds
-
-    Returns:
-        Response content as bytes
-    """
-    import httpx
-
-    headers = {
-        "Accept-Encoding": "gzip, deflate",
-    }
-    if accept:
-        headers["Accept"] = accept
-
-    # Build full URL for logging
-    request_desc = url
-    if params:
-        param_summary = ", ".join(f"{k}={v}" for k, v in list(params.items())[:5])
-        if len(params) > 5:
-            param_summary += f", ... ({len(params)} params)"
-        request_desc = f"{url}?{param_summary}"
-
-    def attempt() -> bytes:
-        debug(f"HTTP GET: {request_desc[:100]}{'...' if len(request_desc) > 100 else ''}")
-        start_time = time.time()
-        client = get_shared_http_client(timeout=timeout)
-        # The timeout rides on the request, not just the client: the shared
-        # client keeps the timeout of whichever caller built it first, so a
-        # client-level timeout alone would cap every later caller (#1184).
-        response = client.get(url, params=params, headers=headers, timeout=timeout)
-        elapsed = time.time() - start_time
-        response.raise_for_status()
-        content = bytes(response.content)
-        debug(f"HTTP OK: {len(content):,} bytes in {elapsed:.1f}s")
-        return content
-
-    try:
-        return bytes(run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay))
-    except httpx.HTTPStatusError as e:
-        status = e.response.status_code
-        message = fatal_status_message(
-            status, subject="the WFS service", credentials="Check the credentials in the URL."
-        )
-        if status in (401, 403):
-            raise WFSAuthenticationError(url, status, message) from e
-        if message is not None:
-            raise WFSError(f"{message} URL: {url}") from e
-        raise WFSError(f"HTTP error {status}: {e}") from e
-    except RetryExhaustedError as e:
-        last = e.last_exception
-        if isinstance(last, httpx.HTTPStatusError):
-            raise WFSError(f"HTTP error {last.response.status_code}: {last}") from last
-        raise WFSError(f"Request failed after {max_retries} attempts: {last}") from e
 
 
 def _clean_service_url(url: str) -> str:
@@ -1730,8 +1658,10 @@ def _get_feature_count(
     url = _merge_query_params(clean_url, params)
 
     try:
-        content = _make_request(url)
-    except (WFSError, httpx.HTTPError, OSError) as e:
+        # The one HTTP owner: gzip, shared client, retry policy and the
+        # 401/403/404 wording all live in `http_retry`.
+        content = make_request_with_retry("GET", url, parse_json=False)
+    except (WFSError, RemoteAccessError, httpx.HTTPError, OSError) as e:
         # Expected failure modes: the service is down, unreachable, rejecting us,
         # or timing out. Degrade to "count unknown" rather than aborting the
         # extraction, but say so — a silent None disables auto-tiling and

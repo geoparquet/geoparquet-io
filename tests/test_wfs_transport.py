@@ -13,15 +13,14 @@ from __future__ import annotations
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.http_retry import MAX_RETRY_AFTER
+from geoparquet_io.core.exceptions import RemoteAccessError
+from geoparquet_io.core.http_retry import MAX_RETRY_AFTER, make_request_with_retry
 from geoparquet_io.core.wfs import (
     LayerNotFoundError,
-    WFSAuthenticationError,
     WFSError,
     _fetch_wfs_page,
     _fetch_with_spatial_tiles,
     _get_feature_count,
-    _make_request,
     _probe_startindex_limit,
     convert_wfs_to_geoparquet,
     fetch_all_features_duckdb,
@@ -117,8 +116,21 @@ def stub_service(http, *, total, page_size=100_000, startindex_limit=None):
 
 
 # ---------------------------------------------------------------------------
-# _make_request - 70 lines of retry logic the fast suite never reached
+# the WFS GET through the one HTTP owner (http_retry)
 # ---------------------------------------------------------------------------
+
+
+def _make_request(url, params=None, accept=None, timeout=60.0, retry_delay=1.0):
+    """How wfs issues a GET: the shared owner, raw bytes, optional Accept."""
+    return make_request_with_retry(
+        "GET",
+        url,
+        params=params,
+        headers={"Accept": accept} if accept else None,
+        timeout=timeout,
+        retry_delay=retry_delay,
+        parse_json=False,
+    )
 
 
 def test_a_request_carries_gzip_and_the_accept_header(monkeypatch):
@@ -166,7 +178,7 @@ def test_a_timeout_backs_off_then_gives_up(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, timeout_error())
 
-    with pytest.raises(WFSError, match="Request failed after 3 attempts"):
+    with pytest.raises(RemoteAccessError, match="Request failed after 3 attempts"):
         _make_request(SERVICE, timeout=9.0)
 
     assert len(http.requests) == 3
@@ -245,21 +257,20 @@ def test_a_5xx_that_never_clears_reports_the_status(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, error_reply(502))
 
-    with pytest.raises(WFSError, match="HTTP error 502"):
+    with pytest.raises(RemoteAccessError, match="HTTP error 502"):
         _make_request(SERVICE)
     assert len(http.requests) == 3
     assert http.sleeps == [1.0, 2.0]
 
 
 @pytest.mark.parametrize("status", [401, 403])
-def test_an_auth_status_raises_the_typed_error_without_retrying(monkeypatch, status):
+def test_an_auth_status_raises_the_shared_message_without_retrying(monkeypatch, status):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, error_reply(status))
 
-    with pytest.raises(WFSAuthenticationError) as excinfo:
+    with pytest.raises(RemoteAccessError, match="Authentication required|Access denied"):
         _make_request(SERVICE)
 
-    assert excinfo.value.status_code == status
     assert len(http.requests) == 1
     assert http.sleeps == []
 
@@ -268,7 +279,7 @@ def test_a_404_names_the_url(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, error_reply(404))
 
-    with pytest.raises(WFSError, match=r"not found \(404\)"):
+    with pytest.raises(RemoteAccessError, match=r"not found \(404\)"):
         _make_request(SERVICE)
     assert len(http.requests) == 1
 
@@ -277,7 +288,7 @@ def test_an_unclassified_status_is_not_retried(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, error_reply(418))
 
-    with pytest.raises(WFSError, match="HTTP error 418"):
+    with pytest.raises(RemoteAccessError, match="HTTP error 418"):
         _make_request(SERVICE)
     assert len(http.requests) == 1
 
