@@ -32,6 +32,7 @@ from geoparquet_io.core.process.aggregate.by_admin import (
 )
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3 as aggregate_by_h3_impl
 from geoparquet_io.core.process.overview import create_overviews as create_overviews_impl
+from geoparquet_io.core.process.overview.detect import VALID_SCHEMES
 from geoparquet_io.core.process.overview.run import create_overview_file
 from geoparquet_io.core.process.simplify import simplify_file as simplify_file_impl
 
@@ -86,7 +87,7 @@ def process(ctx):
 )
 @click.option(
     "--scheme",
-    type=click.Choice(["a5", "h3", "admin"]),
+    type=click.Choice(list(VALID_SCHEMES)),
     default=None,
     help=(
         "Bucketing scheme of the cell column when inference is ambiguous "
@@ -227,7 +228,7 @@ def process_aggregate(ctx):
     "--resolution",
     type=click.IntRange(get_index_spec("a5").min_resolution, get_index_spec("a5").max_resolution),
     default=None,
-    help="A5 resolution (0-30). Required unless --auto.",
+    help=f"A5 resolution ({get_index_spec('a5').bounds_text}). Required unless --auto.",
 )
 @grid_aggregate_options
 @process_compression_options
@@ -311,7 +312,7 @@ def process_aggregate_a5(
     "--resolution",
     type=click.IntRange(get_index_spec("h3").min_resolution, get_index_spec("h3").max_resolution),
     default=None,
-    help="H3 resolution (0-15). Required unless --auto.",
+    help=f"H3 resolution ({get_index_spec('h3').bounds_text}). Required unless --auto.",
 )
 @grid_aggregate_options
 @process_compression_options

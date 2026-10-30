@@ -254,3 +254,12 @@ def test_index_drivers_use_shared_funnels():
         }
         assert funnel in calls
         assert not calls.intersection({"open_input", "write_output", "write_parquet_with_metadata"})
+
+
+def test_add_computed_column_has_no_query_override():
+    """The funnel builds its own query; a caller hands it an expression (#1367)."""
+    import inspect
+
+    from geoparquet_io.core.common import add_computed_column
+
+    assert "query_builder" not in inspect.signature(add_computed_column).parameters

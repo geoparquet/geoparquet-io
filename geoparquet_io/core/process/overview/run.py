@@ -30,6 +30,7 @@ from geoparquet_io.core.process.aggregate.common import (
 )
 from geoparquet_io.core.process.overview.detect import (
     ADMIN_SCHEME,
+    GRID_SCHEMES,
     AggregateInfo,
     aggregate_connection,
     detect_aggregate_info,
@@ -43,7 +44,6 @@ from geoparquet_io.core.process.overview.levels import (
     select_bands,
 )
 from geoparquet_io.core.process.overview.rollup import (
-    GRID_SCHEMES,
     admin_parent_expr,
     build_level_sql,
     validate_level,

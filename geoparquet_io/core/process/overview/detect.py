@@ -33,15 +33,18 @@ from geoparquet_io.core.process.aggregate.common import (
     VALID_METRIC_FUNCS,
     geometry_to_geom_expr,
 )
+from geoparquet_io.core.process.aggregate.grid_common import GridScheme
 
 ADMIN_SCHEME = "admin"
-VALID_SCHEMES = ("a5", "h3", ADMIN_SCHEME)
-# Default cell column per scheme, single-sourced from the aggregate engine's
-# GridScheme descriptors so the two stay in lockstep.
+# The grid schemes, keyed by index name: the one list the aggregate engine's
+# GridScheme descriptors define, in the order the CLI offers them.
+GRID_SCHEMES: dict[str, GridScheme] = {s.spec.name: s for s in (A5_SCHEME, H3_SCHEME)}
+VALID_SCHEMES = (*GRID_SCHEMES, ADMIN_SCHEME)
+# Default cell column per scheme, single-sourced from the GridScheme
+# descriptors so the two stay in lockstep.
 DEFAULT_CELL_COLUMNS = {
-    "a5": A5_SCHEME.default_column,
-    "h3": H3_SCHEME.default_column,
-    "admin": "admin_code",
+    **{name: scheme.default_column for name, scheme in GRID_SCHEMES.items()},
+    ADMIN_SCHEME: "admin_code",
 }
 
 _INTEGER_TYPES = {
@@ -129,7 +132,7 @@ def _detect_scheme(
     if "h3_cell" in columns and columns["h3_cell"] == "VARCHAR":
         return "h3_cell", "h3"
     if "admin_code" in columns:
-        return "admin_code", "admin"
+        return "admin_code", ADMIN_SCHEME
     raise InvalidParameterError(
         "input",
         "no aggregate cell column found (expected a5_cell, h3_cell, or admin_code). "
@@ -154,7 +157,7 @@ def _scheme_for_column(con, relation: str, name: str, dtype: str) -> str:
     row = fetch_row(con, f"SELECT {qcol} FROM {relation} WHERE {qcol} IS NOT NULL LIMIT 1")
     if row and isinstance(row[0], str) and _H3_STRING_RE.match(row[0]):
         return "h3"
-    return "admin"
+    return ADMIN_SCHEME
 
 
 def _classify_columns(columns: list[tuple[str, str]], cell_column: str, scheme: str):

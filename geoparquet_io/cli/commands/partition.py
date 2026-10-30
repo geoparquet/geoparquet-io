@@ -291,7 +291,7 @@ def partition_string(
     "--resolution",
     type=click.IntRange(get_index_spec("h3").min_resolution, get_index_spec("h3").max_resolution),
     default=None,
-    help="H3 resolution for partitioning (0-15). Required unless --auto is used.",
+    help=f"H3 resolution for partitioning ({get_index_spec('h3').bounds_text}). Required unless --auto is used.",
 )
 @click.option(
     "--auto",
@@ -431,7 +431,7 @@ def partition_h3(
     "--level",
     type=click.IntRange(get_index_spec("s2").min_resolution, get_index_spec("s2").max_resolution),
     default=None,
-    help="S2 level for partitioning (0-30). Required unless --auto is used.",
+    help=f"S2 level for partitioning ({get_index_spec('s2').bounds_text}). Required unless --auto is used.",
 )
 @click.option(
     "--auto",
@@ -575,7 +575,7 @@ def partition_s2(
     "--resolution",
     type=click.IntRange(get_index_spec("a5").min_resolution, get_index_spec("a5").max_resolution),
     default=None,
-    help="A5 resolution for partitioning (0-30). Required unless --auto is used.",
+    help=f"A5 resolution for partitioning ({get_index_spec('a5').bounds_text}). Required unless --auto is used.",
 )
 @click.option(
     "--auto",
@@ -853,7 +853,7 @@ def partition_kdtree(
         get_index_spec("quadkey").min_resolution, get_index_spec("quadkey").max_resolution
     ),
     default=None,
-    help="Resolution for auto-adding quadkey column (0-23). Required unless --auto is used.",
+    help=f"Resolution for auto-adding quadkey column ({get_index_spec('quadkey').bounds_text}). Required unless --auto is used.",
 )
 @click.option(
     "--partition-resolution",
@@ -861,7 +861,7 @@ def partition_kdtree(
         get_index_spec("quadkey").min_resolution, get_index_spec("quadkey").max_resolution
     ),
     default=None,
-    help="Resolution for partitioning as prefix length (0-23). Required unless --auto is used.",
+    help=f"Resolution for partitioning as prefix length ({get_index_spec('quadkey').bounds_text}). Required unless --auto is used.",
 )
 @click.option(
     "--auto",

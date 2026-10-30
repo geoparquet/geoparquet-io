@@ -144,7 +144,6 @@ def add_computed_column(
     memory_limit: str | None = None,
     *,
     from_clause: str | None = None,
-    query_builder=None,
     connection_setup=None,
     dry_run_details=None,
     report_count: bool = True,
@@ -163,7 +162,6 @@ def add_computed_column(
         custom_metadata: Additional metadata (for example index covering)
         replace_column: Existing column to exclude from the SELECT
         from_clause: Optional SQL source, including reader options
-        query_builder: Optional callable(source) returning the complete SELECT
         connection_setup: Optional callable(con) loading computation dependencies
         dry_run_details: Optional callable printing a specialized preview
         report_count: Report the input feature count before writing
@@ -249,9 +247,6 @@ def add_computed_column(
             {sql_expression} AS {quoted_col}
         FROM {source}
     """
-
-    if query_builder is not None:
-        query = query_builder(source)
 
     # Handle dry-run display
     if dry_run:

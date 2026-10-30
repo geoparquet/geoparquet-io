@@ -15,7 +15,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from geoparquet_io.core.bbox_structure import get_bbox_advice
-from geoparquet_io.core.compression import print_copy_dry_run
 from geoparquet_io.core.crs_utils import (
     crs_string_from_table,
     source_crs_string,
@@ -90,6 +89,11 @@ class IndexSpec:
     multiple_files: bool = False
     preview_sql: bool = True
     report_count: bool = True
+
+    @property
+    def bounds_text(self) -> str:
+        """The valid range as help text, for example ``0-15``."""
+        return f"{self.min_resolution}-{self.max_resolution}"
 
 
 def preflight_index(spec, command, *, directory=False):
@@ -262,27 +266,8 @@ def add_index_column(
     from geoparquet_io.core.common import add_computed_column
 
     def preview_details():
-        if spec.preview_sql:
-            info(
-                f"-- Description: {spec.label} cell ID at {spec.unit} {resolution} (~{spec.size(resolution)})"
-            )
-            from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_query
-
-            query = build_query(source)
-            with get_duckdb_connection(load_spatial=True, load_httpfs=False) as con:
-                rows = resolve_row_group_rows_for_query(
-                    con, query, row_group_rows, row_group_size_mb
-                )
-            info("-- Main query:")
-            print_copy_dry_run(query, output_parquet, compression, compression_level, rows)
-        else:
-            info(f"-- Resolution ({spec.display_unit or spec.unit}): {resolution}")
-            info(f"-- Calculation method: {'bbox midpoint' if bbox_col else 'geometry centroid'}")
-
-    def build_query(source):
-        return make_index_query(
-            spec, source, geom_col, column_name, resolution, source_crs, bbox_col
-        )
+        info(f"-- Resolution ({spec.display_unit or spec.unit}): {resolution}")
+        info(f"-- Calculation method: {'bbox midpoint' if bbox_col else 'geometry centroid'}")
 
     source = _index_from_clause(input_path, allow_schema_diff, hive_input)
     add_computed_column(
@@ -301,9 +286,13 @@ def add_index_column(
         memory_limit=memory_limit,
         custom_metadata={"covering": {spec.name: {"column": column_name, spec.unit: resolution}}},
         from_clause=source,
-        query_builder=build_query,
         connection_setup=lambda con: load_index(con, spec, verbose=verbose),
-        dry_run_details=preview_details,
+        dry_run_description=(
+            f"{spec.label} cell ID at {spec.unit} {resolution} (~{spec.size(resolution)})"
+            if spec.preview_sql
+            else None
+        ),
+        dry_run_details=None if spec.preview_sql else preview_details,
         report_count=spec.report_count,
         progress_message=f"Adding {spec.label} column '{column_name}' ({spec.display_unit or spec.unit} {resolution})...",
     )

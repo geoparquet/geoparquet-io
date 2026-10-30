@@ -603,7 +603,7 @@ def add_stac_metadata_cmd(
     "--resolution",
     default=get_index_spec("h3").default_resolution,
     type=click.IntRange(get_index_spec("h3").min_resolution, get_index_spec("h3").max_resolution),
-    help="H3 resolution level (0-15). Res 7: ~5km², Res 9: ~105m², Res 11: ~2m², Res 13: ~0.04m². Default: 9",
+    help=f"H3 resolution level ({get_index_spec('h3').bounds_text}). Res 7: ~5km², Res 9: ~105m², Res 11: ~2m², Res 13: ~0.04m². Default: {get_index_spec('h3').default_resolution}",
 )
 @output_format_options
 @geoparquet_version_option
@@ -678,7 +678,7 @@ def add_h3(
     "--resolution",
     default=get_index_spec("a5").default_resolution,
     type=click.IntRange(get_index_spec("a5").min_resolution, get_index_spec("a5").max_resolution),
-    help="A5 resolution level (0-30). Res 10: ~41km², Res 15: ~39m², Res 20: ~39mm², Res 25: ~38μm². Default: 15",
+    help=f"A5 resolution level ({get_index_spec('a5').bounds_text}). Res 10: ~41km², Res 15: ~39m², Res 20: ~39mm², Res 25: ~38μm². Default: {get_index_spec('a5').default_resolution}",
 )
 @output_format_options
 @geoparquet_version_option
@@ -753,7 +753,7 @@ def add_a5(
     "--level",
     default=get_index_spec("s2").default_resolution,
     type=click.IntRange(get_index_spec("s2").min_resolution, get_index_spec("s2").max_resolution),
-    help="S2 level (0-30). Level 8: ~1,250km², Level 13: ~1.2km², Level 18: ~1,200m². Default: 13",
+    help=f"S2 level ({get_index_spec('s2').bounds_text}). Level 8: ~1,250km², Level 13: ~1.2km², Level 18: ~1,200m². Default: {get_index_spec('s2').default_resolution}",
 )
 @output_format_options
 @geoparquet_version_option
@@ -945,7 +945,7 @@ def add_kdtree(
     type=click.IntRange(
         get_index_spec("quadkey").min_resolution, get_index_spec("quadkey").max_resolution
     ),
-    help="Quadkey zoom level (0-23). Higher = more precision. Default: 13",
+    help=f"Quadkey zoom level ({get_index_spec('quadkey').bounds_text}). Higher = more precision. Default: {get_index_spec('quadkey').default_resolution}",
 )
 @click.option(
     "--use-centroid",

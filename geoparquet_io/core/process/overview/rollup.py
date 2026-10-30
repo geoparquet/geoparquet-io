@@ -24,21 +24,17 @@ from geoparquet_io.core.duckdb_utils import quote_identifier, register_arrow, sq
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.memory_limits import open_bounded_connection
-from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME
-from geoparquet_io.core.process.aggregate.by_h3 import H3_SCHEME
 from geoparquet_io.core.process.aggregate.common import PCT_CELL_FUNC, geometry_to_geom_expr
 from geoparquet_io.core.process.aggregate.grid_common import (
-    GridScheme,
     cell_area_expr,
     wrap_grid_geometry,
 )
 from geoparquet_io.core.process.overview.detect import (
     ADMIN_SCHEME,
+    GRID_SCHEMES,
     AggregateInfo,
     detect_aggregate_info,
 )
-
-GRID_SCHEMES: dict[str, GridScheme] = {"a5": A5_SCHEME, "h3": H3_SCHEME}
 
 
 def admin_parent_expr(cell_column: str) -> str:

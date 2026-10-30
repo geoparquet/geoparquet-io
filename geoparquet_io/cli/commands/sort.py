@@ -261,7 +261,7 @@ def sort_column(
     type=click.IntRange(
         get_index_spec("quadkey").min_resolution, get_index_spec("quadkey").max_resolution
     ),
-    help="Resolution when auto-adding quadkey column (0-23). Default: 13",
+    help=f"Resolution when auto-adding quadkey column ({get_index_spec('quadkey').bounds_text}). Default: {get_index_spec('quadkey').default_resolution}",
 )
 @click.option(
     "--use-centroid",
