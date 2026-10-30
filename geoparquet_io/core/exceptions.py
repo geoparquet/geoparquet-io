@@ -22,7 +22,7 @@ import json
 import re
 import socket
 import xml.etree.ElementTree
-from typing import NamedTuple
+from typing import NamedTuple, TypeGuard
 
 
 def sanitize_url_for_logging(url: str) -> str:
@@ -578,7 +578,7 @@ FATAL_STATUS_MESSAGES: dict[int, str] = {
 }
 
 
-def is_auth_status(status: int | None) -> bool:
+def is_auth_status(status: int | None) -> TypeGuard[int]:
     """Whether ``status`` means "this needs a credential" (401 or 403)."""
     return status in (401, 403)
 
