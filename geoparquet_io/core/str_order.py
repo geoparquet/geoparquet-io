@@ -22,7 +22,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
-from geoparquet_io.core.geo_metadata import parse_geo_metadata
+from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
@@ -352,7 +352,7 @@ def _str_order_streaming(
             # declared primary column over the conventional-name guess. Without
             # this a file whose primary column is e.g. `footprint` binder-errors
             # in stream mode while working in file mode.
-            geo_meta = parse_geo_metadata(metadata) or {}
+            geo_meta = sanitized_carried_geo(metadata)
             primary_column = geo_meta.get("primary_column")
             if primary_column in column_names:
                 geom_col = primary_column

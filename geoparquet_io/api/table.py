@@ -219,9 +219,9 @@ def _surviving_geometry_column(current: str | None, result: pa.Table) -> str | N
     if current is not None and current in result.column_names:
         return current
 
-    from geoparquet_io.core.geo_metadata import parse_geo_metadata
+    from geoparquet_io.core.geo_metadata import read_raw_geo
 
-    geo = parse_geo_metadata(result.schema.metadata)
+    geo = read_raw_geo(result.schema.metadata).block
     if not geo:
         return None
 
@@ -1129,9 +1129,9 @@ class Table:
             >>> table = gpio.read('data.parquet')
             >>> print(table.geoparquet_version)  # e.g., '1.0.0'
         """
-        from geoparquet_io.core.geo_metadata import carried_version, parse_geo_metadata
+        from geoparquet_io.core.geo_metadata import carried_version, read_raw_geo
 
-        geo_meta = parse_geo_metadata(self._table.schema.metadata)
+        geo_meta = read_raw_geo(self._table.schema.metadata).value
         if not isinstance(geo_meta, dict):
             return None
         return carried_version(geo_meta.get("version"))
@@ -3003,17 +3003,20 @@ class Table:
         }
 
         # Extract full geo metadata if available
+        from geoparquet_io.core.geo_metadata import read_raw_geo
+
         schema_metadata = self._table.schema.metadata
         if schema_metadata and b"geo" in schema_metadata:
             try:
-                geo_meta = json.loads(schema_metadata[b"geo"].decode("utf-8"))
+                geo_meta = read_raw_geo(schema_metadata).value
                 # A read-only reader, the Python API's `gpio inspect meta`:
                 # `geo_metadata` is documented as the file's full `geo` block,
                 # so it is handed back exactly as the file holds it and is NOT
-                # sanitized -- the same line #883 drew around `parse_geo_metadata`
-                # and `check`. Only the derived keys below need guarding: they
-                # indexed the raw block and crashed on a `columns` that is not
-                # an object, or an entry that is not one (#947).
+                # sanitized -- the same line #883 drew around the raw reader
+                # (`read_raw_geo`) and `check`. Only the derived keys below
+                # need guarding: they indexed the raw block and crashed on a
+                # `columns` that is not an object, or an entry that is not one
+                # (#947).
                 result["geo_metadata"] = geo_meta
 
                 # Extract geometry_types from geo metadata

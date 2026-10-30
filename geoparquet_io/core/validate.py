@@ -1436,6 +1436,18 @@ def _check_geometry_types_match_data(
 ) -> ValidationCheck:
     """Check 18: all geometry types must be included in 'geometry_types' metadata."""
 
+    # A `geometry_types` that is not a list is one defect, and
+    # `geometry_types_list` already FAILs it. Comparing it anyway read the
+    # string "Point" as the set of its letters and FAILed a second time (#1080).
+    if not isinstance(declared_types, list):
+        return ValidationCheck(
+            name=f"geometry_types_match_data_{geom_col}",
+            status=CheckStatus.SKIPPED,
+            message=f"geometry_types is not a list (see geometry_types_list_{geom_col}); "
+            "data not checked against it",
+            category="data_validation",
+        )
+
     raw_url = resolve_file_url(parquet_file, verbose=False)
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
 

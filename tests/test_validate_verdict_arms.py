@@ -158,7 +158,7 @@ COLUMN_METADATA_CASES = [
 #: block no longer stops DuckDB reading the file (#1080). A ``geometry_types``
 #: string is still compared to the data as if it were a list, so
 #: geometry_types_match_data FAILs on top of geometry_types_list.
-CASCADING_CASES = {"geometry_types_not_a_list"}
+CASCADING_CASES: set[str] = set()  # #1080 fixed: one defect, one FAILED verdict
 
 
 @pytest.mark.parametrize(

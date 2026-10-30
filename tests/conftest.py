@@ -349,7 +349,7 @@ def places_v11_file(tmp_path):
     GEOMETRY type.
     """
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-    from geoparquet_io.core.geo_metadata import parse_geo_metadata
+    from geoparquet_io.core.geo_metadata import read_raw_geo
 
     path = tmp_path / "places_v11.parquet"
 
@@ -370,7 +370,7 @@ def places_v11_file(tmp_path):
     # Non-vacuity: this must be a real 1.1 GeoParquet file with a bbox column and
     # no covering, not plain Parquet that quietly takes a fallback path.
     written = pq.read_metadata(str(path)).metadata
-    written_geo = parse_geo_metadata(written, False)
+    written_geo = read_raw_geo(written).value
     assert written_geo, "places_v11_file lost its geo metadata"
     assert written_geo["version"].startswith("1.1"), written_geo["version"]
     primary = written_geo["primary_column"]

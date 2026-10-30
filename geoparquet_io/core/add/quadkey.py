@@ -13,7 +13,6 @@ from geoparquet_io.core.crs_utils import (
     crs_string_from_table,
     get_crs_display_name,
     is_empty_crs_value,
-    parse_geo_metadata_from_schema,
     source_crs_string,
     transform_geom_sql,
     warn_empty_crs_once,
@@ -30,6 +29,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
+from geoparquet_io.core.geo_metadata import sanitize_geo_metadata, sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
@@ -107,7 +107,10 @@ def _validate_crs_from_geo_metadata(
     Common helper used by file-based, streaming, and table-based paths.
 
     Args:
-        geo_meta: Parsed geo metadata dict (from GeoParquet schema)
+        geo_meta: A *sanitized* geo block (``sanitized_carried_geo`` or
+            ``sanitize_geo_metadata``): this indexes ``columns`` and the
+            column's entry without shape checks, which on a raw block crashed
+            on six malformed shapes (#982)
         geom_col: Name of the geometry column
         verbose: Whether to print debug output
         source_description: Description for error messages (e.g., "file", "stream", "table")
@@ -161,14 +164,9 @@ def _validate_crs_for_quadkey(input_parquet: str, geom_col: str, verbose: bool) 
     Quadkeys require lat/lon coordinates. Raises ClickException if CRS is projected.
     """
 
-    # Get CRS from GeoParquet metadata
-    geo_meta = get_geo_metadata(input_parquet)
+    # Get CRS from GeoParquet metadata: sanitized, since the helper indexes it (#982)
+    geo_meta = sanitize_geo_metadata(get_geo_metadata(input_parquet), source=input_parquet)
     _validate_crs_from_geo_metadata(geo_meta, geom_col, verbose, source_description="file")
-
-
-def _parse_geo_metadata_from_schema(metadata: dict | None) -> dict | None:
-    """Parse geo metadata from schema metadata bytes dict (shared helper)."""
-    return parse_geo_metadata_from_schema(metadata)
 
 
 def _streaming_source_crs(
@@ -185,7 +183,7 @@ def _streaming_source_crs(
     """
     if not is_stdin(input_path):
         return source_crs_string(input_path, verbose, geom_col)
-    geo_meta = _parse_geo_metadata_from_schema(metadata)
+    geo_meta = sanitized_carried_geo(metadata)
     return crs_string_from_geo_meta(geo_meta, geom_col)
 
 
@@ -234,7 +232,7 @@ def add_quadkey_table(
     # Quadkeys require lon/lat degrees. Reproject a known non-CRS84 CRS (#525);
     # otherwise keep the guard (rejects projected input we can't identify, and
     # passes through default/unknown which is assumed WGS84).
-    geo_meta = _parse_geo_metadata_from_schema(table.schema.metadata)
+    geo_meta = sanitized_carried_geo(table.schema.metadata)
     source_crs = crs_string_from_table(table, geom_col)
     needs_transform = source_crs is not None
     if not needs_transform:
@@ -476,7 +474,7 @@ def _add_quadkey_streaming(
         source_crs = _streaming_source_crs(input_path, metadata, geom_col, verbose)
         needs_transform = source_crs is not None
         if not needs_transform:
-            geo_meta = _parse_geo_metadata_from_schema(metadata)
+            geo_meta = sanitized_carried_geo(metadata)
             _validate_crs_from_geo_metadata(
                 geo_meta, geom_col, verbose, source_description="stream"
             )

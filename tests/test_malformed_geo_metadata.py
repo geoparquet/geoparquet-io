@@ -28,6 +28,7 @@ from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.geo_metadata import (
     reset_malformed_geo_warnings,
     sanitize_geo_metadata,
+    sanitized_carried_geo,
 )
 
 # One WKB point (1.0, 2.0), little-endian.
@@ -288,13 +289,12 @@ def test_strategy_base_reader_sanitizes_every_key_shape(metadata):
     assert _parse_existing_geo_metadata(metadata) == {}
 
 
-def test_parse_geo_metadata_quietly_delegates_to_the_shared_check():
-    """``common._parse_geo_metadata_quietly`` must not keep a second copy of the check."""
-    from geoparquet_io.core.arrow_geo_metadata import _parse_geo_metadata_quietly
-
+def test_sanitized_carried_geo_drops_an_unusable_block():
+    """The carried decoder the write strategies read through (it replaced
+    ``arrow_geo_metadata._parse_geo_metadata_quietly``, #1367) keeps no copy of the check."""
     reset_malformed_geo_warnings()
     raw = json.dumps({"primary_column": 1, "columns": ["geometry"]}).encode("utf-8")
-    assert _parse_geo_metadata_quietly({b"geo": raw}) == {}
+    assert sanitized_carried_geo({b"geo": raw}) == {}
 
 
 def test_extract_crs_from_table_survives_a_malformed_block():
@@ -2207,18 +2207,7 @@ SWEEP_COMMANDS: list[tuple[str, list[str]]] = [
 #: Readers that still die on a raw block, with the issue that owns each. Not a
 #: waiver: the sweep fails if one of these stops crashing and the entry is left
 #: behind, so a fix cannot land without this list being updated.
-KNOWN_UNGUARDED: dict[str, set[str]] = {
-    # #982: `add quadkey._validate_crs_from_geo_metadata` reads
-    # `geo_meta.get("columns", {})[col].get("crs")` with no shape check at all.
-    # A write path, so the fix is `sanitized_carried_geo`, not another guard --
-    # a different batch from #979's, and out of its scope.
-    "columns_null": {"add quadkey"},
-    "columns_list": {"add quadkey"},
-    "columns_string": {"add quadkey"},
-    "entry_not_an_object": {"add quadkey"},
-    "block_is_a_list": {"add quadkey"},
-    "block_is_a_string": {"add quadkey"},
-}
+KNOWN_UNGUARDED: dict[str, set[str]] = {}
 
 #: One column name only: the sweep's job is breadth across *commands*, and the
 #: `geometry`-versus-`geom` axis is covered per reader above.

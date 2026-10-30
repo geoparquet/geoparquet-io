@@ -71,6 +71,7 @@ from geoparquet_io.core.geo_metadata import (
     declare_carried_bbox_column,
     gate_illegal_bbox_covering,
     prune_geo_metadata_to_columns,
+    read_raw_geo,
     sanitized_carried_geo,
     strip_bboxless_covering,
     strip_derived_stats,
@@ -186,9 +187,7 @@ def _block_edges(original_metadata: dict | None) -> dict[str, object]:
     if not geo_data:
         return {}
     try:
-        if isinstance(geo_data, bytes):
-            geo_data = geo_data.decode("utf-8")
-        geo_meta = json.loads(geo_data) if isinstance(geo_data, str) else geo_data
+        geo_meta = read_raw_geo({"geo": geo_data}).value
         return {
             name: col_meta["edges"]
             for name, col_meta in (geo_meta.get("columns") or {}).items()
@@ -300,7 +299,7 @@ def apply_nonplanar_edges(
         if geo_updates:
             _rewrite_file_with_geo_metadata(
                 output_file,
-                json.loads(geo_updates["geo"]),
+                read_raw_geo(geo_updates).value,
                 compression,
                 compression_level,
                 row_group_rows,
@@ -369,7 +368,7 @@ def _read_geo_key(output_file: str) -> dict | None:
     # Closed before the patch replaces the file (Windows requires it).
     with pq.ParquetFile(output_file) as pf:
         raw = (pf.metadata.metadata or {}).get(b"geo")
-    return json.loads(raw.decode("utf-8")) if raw else None
+    return read_raw_geo({b"geo": raw}).value if raw else None
 
 
 def _block_bbox_targets(

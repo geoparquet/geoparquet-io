@@ -18,6 +18,7 @@ import pyarrow.ipc as ipc
 import pytest
 
 from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.geo_metadata import read_raw_geo
 from geoparquet_io.core.streaming import (
     STREAM_MARKER,
     StreamingError,
@@ -28,7 +29,6 @@ from geoparquet_io.core.streaming import (
     apply_geoarrow_extension_type,
     apply_metadata_to_table,
     extract_crs_from_table,
-    extract_geo_metadata,
     find_geometry_column_from_metadata,
     find_geometry_column_from_table,
     is_stdin,
@@ -215,15 +215,15 @@ class TestMetadataHandling:
         metadata = {b"geo": json.dumps(geo_metadata).encode("utf-8")}
         return table.replace_schema_metadata(metadata)
 
-    def test_extract_geo_metadata(self, table_with_geo_metadata, geo_metadata):
+    def test_read_raw_geo_from_table(self, table_with_geo_metadata, geo_metadata):
         """Test extracting geo metadata from table."""
-        result = extract_geo_metadata(table_with_geo_metadata)
+        result = read_raw_geo(table_with_geo_metadata.schema.metadata).value
         assert result == geo_metadata
 
-    def test_extract_geo_metadata_returns_none_when_missing(self):
+    def test_read_raw_geo_returns_none_when_missing(self):
         """Test that missing metadata returns None."""
         table = pa.table({"id": [1, 2]})
-        assert extract_geo_metadata(table) is None
+        assert read_raw_geo(table.schema.metadata).value is None
 
     def test_apply_geo_metadata(self, geo_metadata):
         """Test applying geo metadata to table."""
@@ -269,7 +269,7 @@ class TestMetadataHandling:
         result = reader.read_all()
 
         # Verify metadata survived
-        restored = extract_geo_metadata(result)
+        restored = read_raw_geo(result.schema.metadata).value
         assert restored == geo_metadata
 
 

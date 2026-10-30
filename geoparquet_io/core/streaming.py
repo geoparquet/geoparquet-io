@@ -33,7 +33,7 @@ from geoparquet_io.core.geo_metadata import (
     carried_version,
     decode_carried_geo,
     prune_geo_metadata_to_columns,
-    sanitize_geo_metadata,
+    sanitized_carried_geo,
 )
 from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
 from geoparquet_io.core.geometry_detection import STANDARD_GEOMETRY_NAMES
@@ -166,24 +166,6 @@ def write_arrow_stream(table: pa.Table) -> None:
     writer = ipc.RecordBatchStreamWriter(sys.stdout.buffer, table.schema)
     writer.write_table(table)
     writer.close()
-
-
-def extract_geo_metadata(table: pa.Table) -> dict | None:
-    """
-    Extract GeoParquet metadata from Arrow table schema.
-
-    Args:
-        table: PyArrow Table with potential geo metadata
-
-    Returns:
-        Parsed geo metadata dict, or None if not present
-    """
-    if table.schema.metadata and b"geo" in table.schema.metadata:
-        try:
-            return json.loads(table.schema.metadata[b"geo"].decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return None
-    return None
 
 
 def apply_geo_metadata(table: pa.Table, geo_meta: dict) -> pa.Table:
@@ -566,7 +548,7 @@ def extract_crs_from_table(
             # `Table.write()` resolves the CRS through here before it builds any
             # metadata, so this reader sees a malformed carried block first and
             # has to survive it too (#771).
-            geo_meta = sanitize_geo_metadata(json.loads(geo_bytes.decode("utf-8")))
+            geo_meta = sanitized_carried_geo(table.schema.metadata)
             if isinstance(geo_meta, dict):
                 columns = geo_meta.get("columns", {})
                 # The literal `"geometry"` default named a column that does not
@@ -612,7 +594,7 @@ def extract_version_from_metadata(metadata: dict | None) -> str | None:
         return None
 
     try:
-        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+        geo_meta = sanitized_carried_geo(metadata)
         if isinstance(geo_meta, dict):
             # A truthiness guard let `2`, `2.0`, `["2.0"]` and `true` through to
             # `.split`, and the `except` below names the two decoder errors

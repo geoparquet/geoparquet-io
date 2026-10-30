@@ -37,6 +37,7 @@ from geoparquet_io.core.file_utils import (
     is_partition_path,
     resolve_file_url,
 )
+from geoparquet_io.core.geo_metadata import read_raw_geo
 from geoparquet_io.core.geoarrow_compat import srid_crs_as_text
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.remote import is_remote_url, is_s3_url, needs_httpfs
@@ -86,13 +87,9 @@ def _pyarrow_get_geo_metadata(parquet_file: str) -> dict | None:
     try:
         with pq.ParquetFile(parquet_file) as pf:
             metadata = pf.metadata.metadata
-        if metadata and b"geo" in metadata:
-            return json.loads(metadata[b"geo"].decode("utf-8"))
-        return None
-    except (json.JSONDecodeError, UnicodeDecodeError):
         # Unparsable 'geo' bytes mean "no usable geo metadata", the same answer
         # invalid JSON already got -- not an unreadable file.
-        return None
+        return read_raw_geo(metadata).value
     except Exception as e:
         error_msg = str(e)
         if classify_failure(e).kind is FailureKind.NOT_PARQUET:
@@ -505,12 +502,9 @@ def get_geo_metadata(parquet_file: str, con=None) -> dict | None:
         )
 
         if result and result[0]:
-            # Decode raw bytes to string and parse JSON
-            if isinstance(result[0], bytes):
-                json_str = result[0].decode("utf-8")
-            else:
-                json_str = str(result[0])
-            return json.loads(json_str)
+            # Raw bytes, decoded by the owner, to avoid DuckDB's VARCHAR escaping.
+            raw = result[0] if isinstance(result[0], bytes) else str(result[0])
+            return read_raw_geo({b"geo": raw}).value
         return None
     except duckdb.InvalidInputException as e:
         if classify_failure(e).kind is FailureKind.NOT_PARQUET:

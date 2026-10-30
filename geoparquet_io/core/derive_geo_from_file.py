@@ -30,7 +30,7 @@ from geoparquet_io.core.duckdb_metadata import (
     parse_geometry_logical_type,
     resolve_crs_reference,
 )
-from geoparquet_io.core.geo_metadata import _DIMENSION_SUFFIXES, _GEOMETRY_TYPE_CODES
+from geoparquet_io.core.geo_metadata import _DIMENSION_SUFFIXES, _GEOMETRY_TYPE_CODES, read_raw_geo
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.parquet_writer import without_geometry_dictionary
@@ -288,10 +288,7 @@ def _with_primary_column(raw_geo: bytes, primary_column: str | None) -> dict | N
     ``primary_column``: naming a column the block has no entry for would make it
     invalid, and a block this cannot parse is not this repair's to rewrite.
     """
-    try:
-        geo = json.loads(raw_geo)
-    except ValueError:
-        return None
+    geo = read_raw_geo({b"geo": raw_geo}).value
     if not isinstance(geo, dict) or not isinstance(geo.get("columns"), dict):
         return None
     if primary_column not in geo["columns"] or geo.get("primary_column") == primary_column:

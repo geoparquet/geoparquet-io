@@ -289,7 +289,7 @@ def _output_schema(
         )
         meta = dict(empty.schema.metadata or {})
         if b"geo" in meta and types:
-            geo = json.loads(meta[b"geo"])
+            geo = sanitized_carried_geo(meta)
             geo["columns"][geometry_column]["geometry_types"] = types
             empty = empty.replace_schema_metadata({**meta, b"geo": json.dumps(geo).encode()})
     else:

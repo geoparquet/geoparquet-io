@@ -645,7 +645,7 @@ def detect_all_geometry_columns(input_file: str, verbose: bool = False) -> dict:
     # Without it `columns: null` crashed on `.items()`, a non-string
     # `primary_column` reached `quote_identifier`, and a non-string `encoding`
     # reached `_calculate_bounds`'s `encoding.lower()`.
-    geo_meta = sanitize_geo_metadata(get_geo_metadata(input_file))
+    geo_meta = sanitize_geo_metadata(get_geo_metadata(input_file), source=str(input_file))
 
     if not geo_meta or not geo_meta.get("columns"):
         # No GeoParquet metadata -- or nothing left of it once the malformed

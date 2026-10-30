@@ -26,7 +26,6 @@ from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.crs_utils import (
     crs_string_from_geo_meta,
     entry_crs_is_unknown,
-    parse_geo_metadata_from_schema,
     source_crs_string,
 )
 from geoparquet_io.core.duckdb_utils import (
@@ -505,7 +504,7 @@ def _detect_transform_source_crs(
     (#1258), so this runs only for a query fn that transforms.
     """
     if is_stream:
-        return crs_string_from_geo_meta(parse_geo_metadata_from_schema(metadata), None)
+        return crs_string_from_geo_meta(sanitized_carried_geo(metadata), None)
     return source_crs_string(input_path)
 
 

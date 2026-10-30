@@ -431,8 +431,14 @@ def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, 
         return raw_path, None
 
     parquet_file = pq.ParquetFile(raw_path)
+    # The footer wins over the Arrow schema's view of it: a `geo` key appended
+    # after the writer opened is in the footer only, and the guard above read
+    # the footer to decide this file needs the rewrite (#913).
     metadata = dict(parquet_file.schema_arrow.metadata or {})
-    geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+    metadata.update(
+        (k, v) for k, v in (parquet_file.metadata.metadata or {}).items() if k != b"ARROW:schema"
+    )
+    geo_meta = _carried_geo(metadata)
     for col in geo_meta.get("columns", {}).values():
         if entry_crs_is_unknown(col):
             col.pop("crs", None)

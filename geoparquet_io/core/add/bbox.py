@@ -21,6 +21,7 @@ from geoparquet_io.core.geo_metadata import (
     bbox_struct_child_names_match,
     build_bbox_covering,
     covering_supported,
+    sanitized_carried_geo,
 )
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
@@ -231,10 +232,7 @@ def _declare_computed_bbox(metadata, geometry_column: str, bbox_column_name: str
     """
     if not metadata or b"geo" not in metadata:
         return metadata
-    try:
-        geo = json.loads(metadata[b"geo"])
-    except ValueError:
-        return metadata
+    geo = sanitized_carried_geo(metadata)
     columns = geo.get("columns") if isinstance(geo, dict) else None
     col_meta = columns.get(geometry_column) if isinstance(columns, dict) else None
     if not isinstance(col_meta, dict):
@@ -302,12 +300,7 @@ def _passthrough_version(metadata: dict | None, geoparquet_version: str | None) 
     if not metadata or b"geo" not in metadata:
         return None
 
-    import json
-
-    try:
-        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
+    geo_meta = sanitized_carried_geo(metadata)
     if not isinstance(geo_meta, dict):
         return None
     version = geo_meta.get("version")

@@ -7,9 +7,13 @@ metadata to Arrow tables and Parquet files. It handles both GeoParquet 1.x and
 
 Usage in core modules:
     from geoparquet_io.core.geo_metadata import (
-        parse_geo_metadata,
+        read_raw_geo,           # what a file literally holds (check, inspect)
+        sanitized_carried_geo,  # what a write/transform path may carry
         create_geo_metadata,
     )
+
+Those two are the only ``geo`` decoders (#1367 concept 3): nothing outside this
+module calls ``json.loads`` on a ``geo`` value (``tests/test_geo_block_decoders.py``).
 
 Note: This module uses lazy imports for functions from other core modules
 to avoid circular dependencies.
@@ -20,6 +24,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Collection, Sequence
+from dataclasses import dataclass
 from functools import cache, lru_cache
 from typing import TYPE_CHECKING
 
@@ -35,8 +40,6 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.logging_config import debug, warn
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
-
     import duckdb
     import pyarrow as pa
 
@@ -280,29 +283,46 @@ def carried_version(value, source: str | None = None) -> str | None:
     return None
 
 
-def decode_carried_geo(raw):
-    """Decode a raw carried ``geo`` value (bytes or str) to JSON, or None.
+def _decode_geo_json(raw) -> tuple[object, str | None, str]:
+    """Decode a raw ``geo`` value: ``(value, None, "")``, or ``(None, why, detail)``.
 
-    The decode step can fail one call before :func:`sanitize_geo_metadata` ever
-    sees a shape: bytes that are not UTF-8 crash ``.decode`` and a truncated
-    payload crashes ``json.loads``. Both get the malformed-block treatment --
-    the value is dropped so fresh metadata gets built, and one warning names
-    the cause -- instead of aborting the write with a raw decoder traceback.
-
-    Already-decoded values (a dict handed over directly) pass through untouched.
+    The one ``json.loads`` of a ``geo`` value in the package; both decoders,
+    :func:`read_raw_geo` and :func:`sanitized_carried_geo`, come through it, so
+    they cannot disagree about which bytes are decodable. Bytes are UTF-8;
+    a ``str`` is JSON text; anything else (a dict handed over already decoded)
+    passes through untouched. ``why`` is the phrase the warning uses, ``detail``
+    the decoder's own message. Never raises, never warns.
     """
     try:
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
         if isinstance(raw, str):
-            return json.loads(raw)
-    except UnicodeDecodeError:
-        _emit_malformed_geo_warning("the value is not valid UTF-8; fresh metadata will be written")
-        return None
-    except json.JSONDecodeError:
-        _emit_malformed_geo_warning("the value is not valid JSON; fresh metadata will be written")
-        return None
-    return raw
+            return json.loads(raw), None, ""
+    except UnicodeDecodeError as exc:
+        return None, "the value is not valid UTF-8", str(exc)
+    except json.JSONDecodeError as exc:
+        return None, "the value is not valid JSON", str(exc)
+    return raw, None, ""
+
+
+def decode_carried_geo(raw, source: str | None = None):
+    """Decode a raw carried ``geo`` value (bytes or str) to JSON, or None.
+
+    The value-level first step of :func:`sanitized_carried_geo`, for a write
+    path that holds the value rather than the metadata mapping. The decode step
+    can fail one call before :func:`sanitize_geo_metadata` ever sees a shape:
+    bytes that are not UTF-8 crash ``.decode`` and a truncated payload crashes
+    ``json.loads``. Both get the malformed-block treatment -- the value is
+    dropped so fresh metadata gets built, and one warning names the cause and,
+    when the caller knows it, the file (#957) -- instead of aborting the write
+    with a raw decoder traceback (approved change 6 of #1367).
+
+    Already-decoded values (a dict handed over directly) pass through untouched.
+    """
+    value, problem, _detail = _decode_geo_json(raw)
+    if problem is not None:
+        _emit_malformed_geo_warning(f"{problem}; fresh metadata will be written", source)
+    return value
 
 
 def _is_json_number(value) -> bool:
@@ -399,7 +419,7 @@ def _sanitize_columns(columns: dict) -> tuple[dict, list[str]]:
     return (kept if changed else columns), problems
 
 
-def sanitize_geo_metadata(geo_meta):
+def sanitize_geo_metadata(geo_meta, source: str | None = None):
     """Drop the parts of a carried ``geo`` block that readers cannot accept.
 
     The ``geo`` key on an input file is arbitrary JSON written by some other
@@ -418,13 +438,16 @@ def sanitize_geo_metadata(geo_meta):
     This is the single shape check every reader of the raw block that *assumes a
     dict* goes through: the write paths, and the ``inspect`` displays
     (``inspect_utils.extract_geo_info`` / ``get_preview_data``,
-    ``metadata_utils``). The raw readers (``parse_geo_metadata``,
-    ``crs_utils.parse_geo_metadata_from_schema``,
-    ``duckdb_metadata.get_geo_metadata``) deliberately do *not* sanitize:
-    ``gpio check`` has to see the file as it really is.
+    ``metadata_utils``). The read-only readers (:func:`read_raw_geo` and
+    ``duckdb_metadata.get_geo_metadata``, which decodes through it)
+    deliberately do *not* sanitize: ``gpio check`` has to see the file as it
+    really is.
 
     Args:
         geo_meta: A decoded ``geo`` block, or None.
+        source: The file the block came from, when the caller knows it. It goes
+            into every warning and its warn-once key, so a loop over several
+            malformed files names each of them (#957).
 
     Returns:
         ``geo_meta`` itself when it is already well-shaped, a repaired shallow
@@ -435,7 +458,7 @@ def sanitize_geo_metadata(geo_meta):
 
     if not isinstance(geo_meta, dict):
         _emit_malformed_geo_warning(
-            f"the block is {_article(_json_type_name(geo_meta))}, expected an object"
+            f"the block is {_article(_json_type_name(geo_meta))}, expected an object", source
         )
         return None
 
@@ -478,7 +501,7 @@ def sanitize_geo_metadata(geo_meta):
         _repair_primary_column(cleaned)
 
     for problem in problems:
-        _emit_malformed_geo_warning(problem)
+        _emit_malformed_geo_warning(problem, source)
     return cleaned
 
 
@@ -503,26 +526,83 @@ def _repair_primary_column(cleaned: dict) -> None:
         cleaned["primary_column"] = next(iter(columns))
 
 
-def sanitized_carried_geo(metadata) -> dict:
+def _geo_key_value(metadata):
+    """``(True, value)`` for the ``geo`` key of a metadata mapping, else ``(False, None)``.
+
+    Both key spellings are accepted: PyArrow hands back ``bytes`` keys and
+    DuckDB's KV metadata ``str`` ones, and several callers see both. ``b"geo"``
+    wins when both are present, as it did for every reader this replaced.
+    """
+    if not metadata:
+        return False, None
+    for key in (b"geo", "geo"):
+        if key in metadata:
+            return True, metadata[key]
+    return False, None
+
+
+def sanitized_carried_geo(metadata, source: str | None = None) -> dict:
     """The ``geo`` block on a Parquet/Arrow metadata mapping, sanitized, or ``{}``.
 
-    The three steps every write-path reader of a carried block repeats -- find
-    the key, decode it, check its shape -- in one place, so a reader is one call
-    away from the rule rather than three lines of its own (#947). Both key
-    spellings are accepted: PyArrow hands back ``bytes`` keys and DuckDB's KV
-    metadata ``str`` ones, and several callers see both.
+    The sanitized carried decoder: one of the two ``geo`` decoders (the other is
+    :func:`read_raw_geo`), and the one every write and transform path reads a
+    carried block through. The three steps every such reader used to repeat --
+    find the key, decode it, check its shape -- in one place, so a reader is one
+    call away from the rule rather than three lines of its own (#947). Bytes or
+    str keys; bad UTF-8 or bad JSON warns once and reads as absent (approved
+    change 6 of #1367); a non-object block, a non-object ``columns`` and
+    non-object entries are sanitized by :func:`sanitize_geo_metadata`.
+
+    ``source`` names the file for the warning (#957).
 
     Returns ``{}``, never ``None``, so callers can index the result directly;
     a block that sanitizing leaves unusable is indistinguishable from an absent
     one, which is exactly how #883 decided a malformed block should read.
     """
-    if not metadata:
+    present, raw = _geo_key_value(metadata)
+    if not present:
         return {}
-    for key in (b"geo", "geo"):
-        if key in metadata:
-            cleaned = sanitize_geo_metadata(decode_carried_geo(metadata[key]))
-            return cleaned if isinstance(cleaned, dict) else {}
-    return {}
+    cleaned = sanitize_geo_metadata(decode_carried_geo(raw, source), source)
+    return cleaned if isinstance(cleaned, dict) else {}
+
+
+@dataclass(frozen=True)
+class RawGeo:
+    """What a ``geo`` key literally holds, as :func:`read_raw_geo` reports it.
+
+    ``present`` is whether the key exists at all. ``value`` is the decoded JSON
+    exactly as the file holds it -- any JSON type, never sanitized -- or ``None``
+    when the key is absent or undecodable. ``error`` says why an undecodable
+    value could not be decoded ("the value is not valid UTF-8: ...", "the value
+    is not valid JSON: ..."), and is ``None`` otherwise.
+    """
+
+    present: bool
+    value: object = None
+    error: str | None = None
+
+    @property
+    def block(self) -> dict | None:
+        """``value`` when it is a JSON object, else ``None``."""
+        return self.value if isinstance(self.value, dict) else None
+
+
+def read_raw_geo(metadata) -> RawGeo:
+    """The raw diagnostic ``geo`` decoder: what a metadata mapping's ``geo`` key holds.
+
+    One of the two ``geo`` decoders (the other is :func:`sanitized_carried_geo`),
+    for the readers that must report what is literally there -- ``gpio check
+    spec`` and ``gpio inspect meta`` -- and so neither sanitize nor warn. Bytes
+    or str keys. Never raises: an undecodable value (bad UTF-8, bad JSON) comes
+    back with ``error`` set instead of a decoder traceback.
+
+    A write path must not use this: it would carry a malformed block forward.
+    """
+    present, raw = _geo_key_value(metadata)
+    if not present:
+        return RawGeo(present=False)
+    value, problem, detail = _decode_geo_json(raw)
+    return RawGeo(present=True, value=value, error=problem and f"{problem}: {detail}")
 
 
 def carried_geometry_column(geo_meta, column_names) -> str | None:
@@ -553,34 +633,6 @@ def _article(type_name: str) -> str:
 # =============================================================================
 # Metadata Parsing Functions
 # =============================================================================
-
-
-def parse_geo_metadata(metadata: dict | None, verbose: bool = False) -> dict | None:
-    """
-    Parse GeoParquet metadata from Parquet file metadata.
-
-    Extracts and decodes the 'geo' key from Parquet metadata bytes.
-
-    Args:
-        metadata: Parquet file metadata dict with bytes keys
-        verbose: Print verbose output
-
-    Returns:
-        Parsed geo metadata dict, or None if not present or invalid
-    """
-    if not metadata or b"geo" not in metadata:
-        return None
-
-    try:
-        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-        if verbose:
-            debug("\nParsed geo metadata:")
-            debug(json.dumps(geo_meta, indent=2))
-        return geo_meta
-    except json.JSONDecodeError:
-        if verbose:
-            warn("Failed to parse geo metadata as JSON")
-        return None
 
 
 def _parse_existing_geo_metadata(original_metadata: dict | None) -> dict | None:
@@ -954,15 +1006,13 @@ _DROP_GEO = object()
 
 
 def _decode_geo_value(raw):
-    """Decode a KV ``geo`` value (bytes/str/dict) to a dict, or ``None``."""
-    try:
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8")
-        if isinstance(raw, str):
-            raw = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    return raw if isinstance(raw, dict) else None
+    """Decode a KV ``geo`` value (bytes/str/dict) to a dict, or ``None``.
+
+    Silent on purpose: :func:`_rewrite_geo_metadata` leaves a value it cannot
+    decode exactly as it found it, and the write path that carried it has
+    already warned through :func:`sanitized_carried_geo`.
+    """
+    return read_raw_geo({b"geo": raw}).block
 
 
 def _encode_geo_value(geo_dict: dict, like):

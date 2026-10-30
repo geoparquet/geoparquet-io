@@ -20,7 +20,11 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.exceptions import GeoParquetError
-from geoparquet_io.core.geo_metadata import decode_carried_geo, sanitize_geo_metadata
+from geoparquet_io.core.geo_metadata import (
+    decode_carried_geo,
+    sanitize_geo_metadata,
+    sanitized_carried_geo,
+)
 from geoparquet_io.core.geoarrow_compat import srid_crs_as_text
 from geoparquet_io.core.geometry_detection import (
     detect_geometry_column_from_names,
@@ -540,7 +544,7 @@ def geoparquet_crs_is_null(parquet_file) -> bool:
     # `get_geo_metadata` is the read-only reader and hands the block back as the
     # file really holds it; the reproject paths that ask this question then act
     # on the answer, so the malformed parts get dropped here (#887).
-    geo_meta = sanitize_geo_metadata(get_geo_metadata(str(parquet_file)))
+    geo_meta = sanitize_geo_metadata(get_geo_metadata(str(parquet_file)), source=str(parquet_file))
     if not geo_meta:
         return False
     primary_col = _primary_column_of_file(geo_meta, parquet_file)
@@ -891,7 +895,7 @@ def _crs_from_geo_block(
     """
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
 
-    geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file))
+    geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file), source=str(parquet_file))
     if not geo_meta:
         return None, None, False
     columns = geo_meta.get("columns", {})
@@ -1042,7 +1046,7 @@ def unknown_crs_reason(parquet_file, geometry_column: str | None = None) -> str 
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
 
     raw_geo = get_geo_metadata(parquet_file)
-    geo_meta = sanitize_geo_metadata(raw_geo) or {}
+    geo_meta = sanitize_geo_metadata(raw_geo, source=str(parquet_file)) or {}
     columns = geo_meta.get("columns") or {}
     col = geometry_column if geometry_column in columns else None
     if col is None and columns:
@@ -1071,7 +1075,7 @@ def table_crs_is_unknown(table, geometry_column: str | None) -> bool:
     """
     if not geometry_column or geometry_column not in table.schema.names:
         return False
-    geo_meta = sanitize_geo_metadata(parse_geo_metadata_from_schema(table.schema.metadata))
+    geo_meta = sanitized_carried_geo(table.schema.metadata)
     col_meta = ((geo_meta or {}).get("columns") or {}).get(geometry_column)
     if isinstance(col_meta, dict) and "crs" in col_meta:
         return entry_crs_is_unknown(col_meta)
@@ -1892,25 +1896,6 @@ def reproject_to_source_sql(geom_expr: str, source_crs, base_crs: str = DEFAULT_
     )
 
 
-def parse_geo_metadata_from_schema(metadata: dict | None) -> dict | None:
-    """Parse GeoParquet ``geo`` metadata from an Arrow schema metadata dict.
-
-    The schema metadata may use bytes or string keys/values depending on how it
-    was accessed. Returns the parsed dict, or ``None`` if absent/unparsable.
-    """
-    if not metadata:
-        return None
-    geo_bytes = metadata.get(b"geo") or metadata.get("geo")
-    if not geo_bytes:
-        return None
-    try:
-        if isinstance(geo_bytes, bytes):
-            return json.loads(geo_bytes.decode("utf-8"))
-        return json.loads(geo_bytes)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
-
-
 def crs_string_from_geo_meta(geo_meta: dict | None, geom_col: str) -> str | None:
     """Return the ``ST_Transform`` source for a geometry column's CRS.
 
@@ -1922,9 +1907,8 @@ def crs_string_from_geo_meta(geo_meta: dict | None, geom_col: str) -> str | None
 
     A write-path reader: the string it returns is spliced into an
     ``ST_Transform`` call, so the block is sanitized first (#887). Sanitizing
-    here rather than in the callers keeps the single check in one place --
-    ``parse_geo_metadata_from_schema``, which both callers parse with, is a
-    read-only reader and deliberately hands the block over untouched.
+    here rather than in the callers keeps a caller that hands over a raw block
+    safe; the callers in the package read it with ``sanitized_carried_geo``.
     """
 
     geo_meta = sanitize_geo_metadata(geo_meta)
@@ -2124,7 +2108,7 @@ def crs_string_from_table(table, geom_col: str) -> str | None:
 
     Returns what :func:`transform_source_crs` returns, ``None`` for lon/lat input.
     """
-    geo_meta = parse_geo_metadata_from_schema(table.schema.metadata)
+    geo_meta = sanitized_carried_geo(table.schema.metadata)
     crs = crs_string_from_geo_meta(geo_meta, geom_col)
     if crs:
         return crs

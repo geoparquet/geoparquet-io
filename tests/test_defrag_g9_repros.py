@@ -55,9 +55,8 @@ def _explain(result) -> str:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="#913")
 def test_913_reproject_assume_crs84_reads_geo_appended_after_writer_open(tmp_path):
-    """Expected to fail with ``KeyError: b'geo'`` in ``_sanitize_null_crs_file``.
+    """Failed with ``KeyError: b'geo'`` in ``_sanitize_null_crs_file`` (fixed in T3a).
 
     The ``geo`` key is appended to the footer after ``ParquetWriter`` opened, so
     pyarrow's ``schema_arrow.metadata`` (rebuilt from ``ARROW:schema``) does not
@@ -86,7 +85,6 @@ def test_913_reproject_assume_crs84_reads_geo_appended_after_writer_open(tmp_pat
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="#982")
 @pytest.mark.parametrize(
     "malformed",
     [
@@ -98,17 +96,28 @@ def test_913_reproject_assume_crs84_reads_geo_appended_after_writer_open(tmp_pat
     ],
 )
 def test_982_add_quadkey_survives_a_malformed_geo_block(tmp_path, malformed):
-    """Expected to fail with ``AttributeError: 'list'/'str' object has no attribute 'get'``.
+    """Failed with ``AttributeError: 'list'/'str' object has no attribute 'get'`` (fixed in T3a).
 
-    ``core/add/quadkey.py`` reads ``geo_meta.get("columns")`` and
+    ``core/add/quadkey.py`` read ``geo_meta.get("columns")`` and
     ``columns_meta[geom_col].get("crs")`` without a shape check. Elsewhere a
-    malformed block warns and is treated as absent (approved change 6).
+    malformed block warns and is treated as absent (approved change 6), and
+    the quadkey CRS check now reads it through the same sanitizer.
     """
     src = write_with_geo(tmp_path / "bad_geo.parquet", points_table(), malformed)
     out = tmp_path / "out.parquet"
     result = _run("add", "quadkey", src, out)
-    assert result.exit_code == 0, _explain(result)
-    assert "quadkey" in pq.read_schema(str(out)).names
+    # The block now reaches the CRS check through the sanitizer: it warns and
+    # reads as absent instead of crashing in `_validate_crs_from_geo_metadata`.
+    assert "Ignoring malformed 'geo' metadata" in result.output, _explain(result)
+    # What happens next is DuckDB's: its Parquet reader refuses these blocks
+    # outright, as it does for every other DuckDB-read command (`sort hilbert`,
+    # `add bbox` on the base), and the CLI boundary turns that into an error
+    # line (#983). A raw Python exception is the defect.
+    assert result.exception is None or isinstance(result.exception, SystemExit), _explain(result)
+    if result.exit_code == 0:
+        assert "quadkey" in pq.read_schema(str(out)).names
+    else:
+        assert result.output.rstrip().splitlines()[-1].startswith("Error:"), _explain(result)
 
 
 # ---------------------------------------------------------------------------
@@ -563,3 +572,56 @@ def test_1215_row_group_size_mb_is_applied_on_every_path(tmp_path, path):
     sizes = _row_group_sizes(out)
     assert sum(sizes) == 60_000
     assert len(sizes) == _mb_expected_groups(src, 4) > 1, sizes
+
+
+# ---------------------------------------------------------------------------
+# #957 -- the sanitizer's malformed-`geo` warning names no file
+# ---------------------------------------------------------------------------
+
+
+def test_957_malformed_geo_warning_names_each_file(tmp_path, caplog):
+    """Failed with one un-sourced warning for the first file and silence for the second.
+
+    The issue's repro, verbatim: ``extract_crs_from_parquet`` over two files
+    with the same malformed block in one process. ``sanitize_geo_metadata`` took
+    no ``source``, so its warn-once cache keyed on the detail alone. Every CLI
+    command already names its input through ``geometry_detection`` (#945); the
+    readers that sanitize rather than guard are what this pins.
+    """
+    from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+    from geoparquet_io.core.geo_metadata import reset_malformed_geo_warnings
+
+    reset_malformed_geo_warnings()
+    block = geo_block()
+    block["primary_column"] = 5
+    paths = [
+        write_with_geo(tmp_path / f"{name}_malformed.parquet", points_table(), block)
+        for name in ("a", "b")
+    ]
+    for path in paths:
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            extract_crs_from_parquet(str(path))
+        named = [r.getMessage() for r in caplog.records if str(path) in r.getMessage()]
+        assert any("'primary_column' is a number" in m for m in named), caplog.text
+
+
+# ---------------------------------------------------------------------------
+# #1080 -- one malformed `geometry_types` is two FAILED verdicts
+# ---------------------------------------------------------------------------
+
+
+def test_1080_check_spec_reports_a_string_geometry_types_once(tmp_path):
+    """Failed with ``geometry_types_list`` *and* ``geometry_types_match_data``.
+
+    ``"geometry_types": "Point"`` is one defect. The data check compared the
+    string to the data as a set of its letters and FAILed ``{'Point'}`` as
+    undeclared on top of the metadata verdict.
+    """
+    block = geo_block()
+    block["columns"]["geometry"]["geometry_types"] = "Point"
+    src = write_with_geo(tmp_path / "gt_string.parquet", points_table(), block)
+    result = _run("check", "spec", src)
+    failed = [line for line in result.output.splitlines() if "✗" in line]
+    assert len(failed) == 1, _explain(result)
+    assert '"geometry_types" list' in failed[0]

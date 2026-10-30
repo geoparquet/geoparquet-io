@@ -10,7 +10,7 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     uses_aws_profile,
 )
-from geoparquet_io.core.geo_metadata import parse_geo_metadata
+from geoparquet_io.core.geo_metadata import read_raw_geo
 from geoparquet_io.core.inspect_utils import (
     extract_file_info,
     extract_geo_info,
@@ -48,7 +48,7 @@ def get_primary_geometry_column(parquet_file: str) -> str | None:
         Name of the primary geometry column, or None if not found
     """
     metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
-    geo_meta = parse_geo_metadata(metadata, verbose=False)
+    geo_meta = read_raw_geo(metadata).block
     return geo_meta.get("primary_column") if geo_meta else None
 
 
