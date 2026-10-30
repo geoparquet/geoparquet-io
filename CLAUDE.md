@@ -275,8 +275,9 @@ lane, and locally they time out and read as a flaky docs lane.
 
 | Stage | Hooks |
 |-------|-------|
-| commit | ruff, codespell, no-click-echo, duckdb-antipatterns, doc-sync, menard-check |
-| pre-push | xenon (complexity), import-linter, deptry, vulture |
+| commit | ruff, ruff-format, codespell, actionlint, zizmor, duckdb-antipatterns, no-click-echo, forbid-bespoke-schema-reconciliation, no-cwd-change-in-tests, check-api-for-cli, validate-claude-md, doc-sync, sync-dependencies (plus the stock whitespace/YAML/TOML/merge-conflict checks) |
+| commit-msg | commitizen |
+| pre-push | xenon (complexity), import-linter, deptry, vulture, mypy, menard-check, fast-tests |
 
 Complexity guidance: guard clauses, dictionary dispatch, max 30-40 lines/function.
 
