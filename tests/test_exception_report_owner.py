@@ -1,17 +1,17 @@
 """Caught-exception text reaches the user only through the sanitizing owners (#1367, #1034).
 
-An ``except ... as e`` handler that formats ``e`` straight into ``click.echo``,
-``print``, a ``warn``/``error`` log call or a ``ClickException`` prints text
-nobody sanitized: httpx, OWSLib and DuckDB all embed the request URL, query
-string and credentials included. The owners are
-``core.exceptions.sanitize_error_message`` / ``GeoParquetError`` (which
-sanitizes in its constructor) and ``cli.exception_handler.cli_error_for``.
+An ``except ... as e`` handler (or a function handed an exception) that formats
+the exception straight into ``click.echo``, ``print``, a ``ClickException`` or
+``could_not_run`` prints text nobody cleaned: httpx, OWSLib and DuckDB all embed
+the request URL, query string and credentials included. The owners are
+``core.exceptions.clean_error_text`` (inside ``GeoParquetError`` and
+``logging_config.warn``/``error``) and ``cli.exception_handler.error_text`` /
+``click_error_for``; ``sanitize_error_message`` is accepted too.
 
-A handler (or a function handed an exception) is flagged when it calls a
-reporting function with an argument that mentions the exception and is not
-wrapped in ``sanitize_error_message``. Logged text is not a reporter here:
-``logging_config.warn``/``error`` redact credentials once. ``UNSANITIZED_REMAINDER``
-lists the justified sites that remain (a reason for each); the list only shrinks.
+A site is flagged when it calls a reporter with an argument that mentions the
+exception and is not wrapped in one of those. ``warn``/``error`` are not
+reporters here: the logging layer cleans once. ``UNSANITIZED_REMAINDER`` lists
+the justified sites that remain (a reason for each); the list only shrinks.
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ import pathlib
 
 PACKAGE = pathlib.Path(__file__).resolve().parent.parent / "geoparquet_io"
 
-#: Where text reaches the user unredacted. ``warn``/``error`` are not here: the
-#: logging layer redacts credentials once (``logging_config``), so a caught
+#: Where text reaches the user uncleaned. ``warn``/``error`` are not here: the
+#: logging layer cleans once (``logging_config``), so a caught
 #: exception can be interpolated into a log line without a call-site wrap.
 REPORTERS = {"echo", "print", "ClickException", "BadParameter", "UsageError", "could_not_run"}
 #: Parameter names / annotations that mean "this function was handed an exception".
@@ -30,7 +30,13 @@ EXCEPTION_PARAMS = {"e", "exc", "err", "error", "exception"}
 EXCEPTION_ANNOTATIONS = {"Exception", "BaseException"}
 OWNERS = {"core/exceptions.py", "cli/exception_handler.py"}
 # `type(e)` names a class, not text the exception carries.
-SANITIZERS = {"sanitize_error_message", "sanitize_url_for_logging", "error_text", "type"}
+SANITIZERS = {
+    "sanitize_error_message",
+    "sanitize_url_for_logging",
+    "clean_error_text",
+    "error_text",
+    "type",
+}
 
 #: ``relative path:function`` -> reason the exception text is safe to print.
 UNSANITIZED_REMAINDER: dict[str, str] = {}

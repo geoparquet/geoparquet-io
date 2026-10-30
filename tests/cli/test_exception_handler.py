@@ -1,6 +1,7 @@
 """Tests for CLI exception handler."""
 
 import click
+import pytest
 
 from geoparquet_io.cli.exception_handler import (
     handle_core_exception,
@@ -124,16 +125,90 @@ def test_a_wrapped_duckdb_error_keeps_its_hint_on_a_glob_aware_command():
     assert "TMPDIR" in result.output
 
 
-def test_the_where_hint_does_not_displace_the_taxonomy():
-    """A spill-space error under `process aggregate --where` keeps its disk-shortage line."""
+def test_the_where_hint_only_goes_where_the_input_could_not_be_read():
+    """A disk shortage, an unpublished extension or a non-Parquet file are not a --where problem."""
     import duckdb
 
     from geoparquet_io.cli.exception_handler import click_error_for
 
-    exc = duckdb.OutOfMemoryException("Out of Memory Error: max_temp_directory_size reached")
-    error = click_error_for(exc, hint='This is most likely caused by --where "x"')
-    assert "TMPDIR" in error.message
-    assert "--where" in error.message
+    hint = 'This is most likely caused by --where "x"'
+    spill = duckdb.OutOfMemoryException("Out of Memory Error: max_temp_directory_size reached")
+    error = click_error_for(spill, hint=hint)
+    assert "TMPDIR" in error.message and "--where" not in error.message
+
+    not_parquet = duckdb.InvalidInputException("No magic bytes found at end of file 'x'")
+    assert "--where" not in click_error_for(not_parquet, hint=hint).message
+
+    binder = duckdb.BinderException('Binder Error: Referenced column "yr" not found')
+    assert "--where" in click_error_for(binder, hint=hint).message
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        lambda: (_ for _ in ()).throw(GeoParquetError("boom")),
+        lambda: __import__("duckdb").IOException(
+            "IO Error: No files found that match the pattern 'x'"
+        ),
+    ],
+    ids=["gpio-error", "duckdb-io"],
+)
+def test_a_glob_aware_command_and_a_plain_one_answer_alike(raised):
+    """One boundary: same output and the same --verbose traceback for the same exception."""
+    import logging
+
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.decorators import ErrorBoundaryGroup, GlobAwareCommand
+
+    def _boom():
+        exc = raised()
+        raise exc
+
+    def build(cls):
+        @click.group(cls=ErrorBoundaryGroup)
+        def root():
+            pass
+
+        @root.command("run", **({"cls": cls} if cls else {}))
+        def run():
+            _boom()
+
+        return root
+
+    class _Capture(logging.Handler):
+        def __init__(self):
+            super().__init__(logging.DEBUG)
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(record)
+
+    results = {}
+    for label, root, target in (
+        ("plain-root", build(None), "run"),
+        ("glob-root", build(GlobAwareCommand), "run"),
+    ):
+        handler = _Capture()
+        logger = logging.getLogger("geoparquet_io")
+        old = logger.level
+        logger.setLevel(logging.DEBUG)
+        logger.addHandler(handler)
+        try:
+            result = CliRunner().invoke(root, [target])
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(old)
+        traced = [r for r in handler.records if r.exc_info]
+        results[label] = (result.exit_code, result.output, len(traced))
+
+    assert results["plain-root"] == results["glob-root"]
+    assert results["glob-root"][2] == 1, "the --verbose traceback was not logged"
+
+    # Standalone (no root group): the command answers the same way.
+    standalone = CliRunner().invoke(build(GlobAwareCommand).commands["run"], [])
+    assert standalone.exit_code == results["glob-root"][0]
+    assert standalone.output == results["glob-root"][1]
 
 
 def test_an_invalid_parameter_wrapped_for_the_cli_is_a_bad_parameter_on_a_bigquery_source():

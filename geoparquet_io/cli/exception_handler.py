@@ -1,13 +1,16 @@
-"""
-Convert core exceptions to click exceptions at CLI boundary.
+"""The one place an exception becomes what the terminal shows.
 
-This module bridges the gap between framework-agnostic core exceptions
-and click-specific exceptions needed for proper CLI error display.
+Framework-agnostic core exceptions are translated here into Click exceptions:
+``handle_core_exception`` is the GeoParquetError table, ``cli_error_for`` /
+``click_error_for`` the full taxonomy, ``error_boundary`` the single boundary
+(translate, debug-log the traceback, re-raise) every command class uses.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import click
 
@@ -16,7 +19,7 @@ from geoparquet_io.core.exceptions import (
     GeoParquetError,
     InvalidParameterError,
     classify_failure,
-    sanitize_error_message,
+    clean_error_text,
 )
 
 
@@ -33,14 +36,15 @@ def handle_core_exception(exc: GeoParquetError) -> click.ClickException:
 
 
 def error_text(exc: BaseException) -> str:
-    """The text of ``exc`` for the terminal: the one place it is worded. Sanitized of ``exc``, minus DuckDB's echo of the generated SQL.
+    """The text of ``exc`` for the terminal, cleaned by the one policy.
 
-    A DuckDB binder/parser error appends ``LINE n: <the SQL gpio built>`` and a
+    Same ``clean_error_text`` the log path uses, minus DuckDB's echo of the
+    generated SQL. A DuckDB binder/parser error appends ``LINE n: <the SQL gpio built>`` and a
     caret; that excerpt buries the cause and is never the user's to act on.
     """
     import duckdb
 
-    text = exc.message if isinstance(exc, GeoParquetError) else sanitize_error_message(str(exc))
+    text = exc.message if isinstance(exc, GeoParquetError) else clean_error_text(str(exc))
     if isinstance(exc, duckdb.Error):
         text = text.split("\nLINE ")[0].strip()
     return text
@@ -120,7 +124,42 @@ def click_error_for(
     """
     import duckdb
 
+    from geoparquet_io.core.duckdb_utils import spill_space_hint
+    from geoparquet_io.core.exceptions import unpublished_extension_hint
+
     error = cli_error_for(exc, path=path) or click.ClickException(error_text(exc))
-    if hint and isinstance(exc, duckdb.Error) and type(error) is click.ClickException:
-        return click.ClickException(f"{error.message}\n\n{hint}")
+    # The hint says "the input could not be read as a file": it does not belong on
+    # a disk shortage, an unpublished extension or a file that is not Parquet.
+    already_explained = (
+        spill_space_hint(exc) is not None
+        or unpublished_extension_hint(exc) is not None
+        or classify_failure(exc).kind is FailureKind.NOT_PARQUET
+    )
+    if hint and isinstance(exc, duckdb.Error) and not already_explained:
+        if type(error) is click.ClickException:
+            return click.ClickException(f"{error.message}\n\n{hint}")
     return error
+
+
+@contextmanager
+def error_boundary() -> Iterator[None]:
+    """The one boundary: translate a failure no gpio frame owned, or let it through.
+
+    ``cli_error_for`` decides what is answered; an unanswered exception (a genuine
+    gpio bug) is re-raised untouched, traceback intact. The traceback of an
+    answered one is hidden, not discarded: ``--verbose`` prints it, because
+    ``verbose_option`` raises the package logger to DEBUG as the flag is parsed --
+    before the command body runs. Both the root group and every command class
+    wrap their ``invoke`` in this, so a command run on its own answers exactly as
+    it does under the root.
+    """
+    from geoparquet_io.core.logging_config import get_logger
+
+    try:
+        yield
+    except Exception as exc:
+        error = cli_error_for(exc)
+        if error is None:
+            raise
+        get_logger(__name__).debug("Converted a low-level failure to an error line", exc_info=exc)
+        raise error from exc

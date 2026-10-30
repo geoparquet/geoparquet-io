@@ -10,7 +10,7 @@ import math
 import click
 from click.core import ParameterSource
 
-from geoparquet_io.cli.exception_handler import cli_error_for, click_error_for
+from geoparquet_io.cli.exception_handler import click_error_for, error_boundary
 from geoparquet_io.core.compression import (
     ACCEPTED_CODEC_NAMES,
     ALLOWED_CODECS,
@@ -61,25 +61,8 @@ class ErrorBoundaryGroup(click.Group):
     """
 
     def invoke(self, ctx):
-        from geoparquet_io.cli.exception_handler import cli_error_for
-        from geoparquet_io.core.logging_config import get_logger
-
-        try:
+        with error_boundary():
             return super().invoke(ctx)
-        except Exception as exc:
-            error = cli_error_for(exc)
-            if error is None:
-                raise
-            # The traceback is hidden, not discarded: --verbose prints it, which
-            # is what a gpio bug that surfaces as a DuckDB error needs. That
-            # holds because `verbose_option` raises the package logger to DEBUG
-            # as the flag is parsed -- before the command body runs, so before
-            # anything can fail on the way to a core function's own
-            # `configure_verbose` call.
-            get_logger(__name__).debug(
-                "Converted a low-level failure to an error line", exc_info=exc
-            )
-            raise error from exc
 
 
 def parse_row_group_options(
@@ -1030,18 +1013,9 @@ class GlobAwareCommand(click.Command):
     }
 
     def invoke(self, ctx):
-        """Invoke the command; a gpio error becomes the one translation's answer.
-
-        The root ``ErrorBoundaryGroup`` does this for the real CLI. A command run
-        on its own (embedding hosts, tests) gets the same answer, in the same
-        order, because both ask ``cli_error_for``.
-        """
-        from geoparquet_io.core.exceptions import GeoParquetError
-
-        try:
+        """Invoke the command inside the same boundary the root group uses."""
+        with error_boundary():
             return super().invoke(ctx)
-        except GeoParquetError as e:
-            raise (cli_error_for(e) or click_error_for(e)) from None
 
     def make_context(self, info_name, args, parent=None, **extra):
         """Detect shell-expanded glob patterns and provide helpful errors."""

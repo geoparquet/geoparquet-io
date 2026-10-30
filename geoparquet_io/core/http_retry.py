@@ -40,6 +40,7 @@ from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from geoparquet_io.core.exceptions import (
+    FATAL_STATUS_MESSAGES,
     BatchTooLargeError,
     FailureKind,
     RemoteAccessError,
@@ -496,5 +497,5 @@ def _is_page_refusal(status: int, batch_size: int | None) -> bool:
 
 
 def _cause(exc: Any) -> Any:
-    """The chained cause of a status error: none for the fixed 401/403/404 messages."""
-    return None if exc.response.status_code in (401, 403, 404) else exc
+    """The chained cause of a status error: none for the fixed fatal-status messages."""
+    return None if exc.response.status_code in FATAL_STATUS_MESSAGES else exc

@@ -388,10 +388,10 @@ class BatchTooLargeError(GeoParquetError):
 
 # ---------------------------------------------------------------------------
 # Failure classification: one table, keyed on exception type and structured
-# fields, never on message text (#1020, #1034). The message of an HTTP or
-# DuckDB failure embeds the request URL, which embeds the user's own layer
-# name, filter and API key, so substring tests on it let input decide the
-# verdict. WFS, Carto and ArcGIS ask here.
+# fields (#1020, #1034). The message of an HTTP or DuckDB failure embeds the
+# request URL, which embeds the user's own layer name, filter and API key, so a
+# substring test on it lets input decide the verdict. Text is read in two bounded
+# places only (see `classify_failure`). Every service and the CLI ask here.
 # ---------------------------------------------------------------------------
 
 
@@ -521,7 +521,7 @@ def _classify_one(exc: BaseException) -> FailureClass:
         or _derives_from(exc, "requests", "ConnectionError")
     ):
         return FailureClass(FailureKind.UNREACHABLE)
-    if isinstance(exc, _MALFORMED_RESPONSE_TYPES) or _is_xml_syntax_error(exc):
+    if isinstance(exc, _MALFORMED_RESPONSE_TYPES) or _derives_from(exc, "lxml", "XMLSyntaxError"):
         return FailureClass(FailureKind.MALFORMED_RESPONSE)
     verdict = _duckdb_io_verdict(exc)
     if verdict is not None:
@@ -553,14 +553,6 @@ _MALFORMED_RESPONSE_TYPES: tuple[type[BaseException], ...] = (
     json.JSONDecodeError,
     UnicodeDecodeError,
 )
-
-
-def _is_xml_syntax_error(exc: BaseException) -> bool:
-    """lxml's parse error, by type, without making lxml a hard import."""
-    return any(
-        base.__module__.startswith("lxml.") and base.__name__ == "XMLSyntaxError"
-        for base in type(exc).__mro__
-    )
 
 
 def classify_failure(exc: BaseException) -> FailureClass:
