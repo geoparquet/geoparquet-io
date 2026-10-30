@@ -67,7 +67,10 @@ def _resolve_local_path(parquet_file: str) -> str:
 
 
 def _pyarrow_get_kv_metadata(parquet_file: str) -> dict[bytes, bytes]:
-    """Get key-value metadata using PyArrow (fast path for local files)."""
+    """Get key-value metadata using PyArrow (fast path for local files).
+
+    The one footer read for both the KV and the ``geo`` readers.
+    """
     try:
         # Closed on exit, not left to the collector: an in-place `check --fix`
         # renames over this file next, and Windows refuses while a reader holds
@@ -75,21 +78,6 @@ def _pyarrow_get_kv_metadata(parquet_file: str) -> dict[bytes, bytes]:
         with pq.ParquetFile(parquet_file) as pf:
             metadata = pf.metadata.metadata
         return dict(metadata) if metadata else {}
-    except Exception as e:
-        error_msg = str(e)
-        if classify_failure(e).kind is FailureKind.NOT_PARQUET:
-            raise not_parquet_file_error(parquet_file) from e
-        raise GeoParquetError(f"Cannot read file: {parquet_file}\n{error_msg}") from e
-
-
-def _pyarrow_get_geo_metadata(parquet_file: str) -> dict | None:
-    """Get and parse 'geo' metadata using PyArrow (fast path for local files)."""
-    try:
-        with pq.ParquetFile(parquet_file) as pf:
-            metadata = pf.metadata.metadata
-        # Unparsable 'geo' bytes mean "no usable geo metadata", the same answer
-        # invalid JSON already got -- not an unreadable file.
-        return read_raw_geo(metadata).value
     except Exception as e:
         error_msg = str(e)
         if classify_failure(e).kind is FailureKind.NOT_PARQUET:
@@ -483,7 +471,9 @@ def get_geo_metadata(parquet_file: str, con=None) -> dict | None:
     # Fast path: use PyArrow for local files
     resolved_path = _resolve_local_path(parquet_file)
     if _is_local_file(resolved_path) and con is None:
-        return _pyarrow_get_geo_metadata(resolved_path)
+        # Unparsable 'geo' bytes mean "no usable geo metadata", the same answer
+        # invalid JSON already got -- not an unreadable file.
+        return read_raw_geo(_pyarrow_get_kv_metadata(resolved_path)).value
 
     # Slow path: use DuckDB for remote files or when connection is provided
     import duckdb

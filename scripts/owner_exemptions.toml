@@ -534,9 +534,6 @@ reason = "geometry stats twin (concept 5); T3b"
 pair = "geoparquet_io/core/benchmark.py:benchmark_geopandas_fiona|geoparquet_io/core/benchmark.py:benchmark_geopandas_pyogrio"
 reason = "geopandas benchmark harness differing only in the engine= literal; T5c (one function, engine parameter, two registry entries)"
 [[G3.pairs]]
-pair = "geoparquet_io/core/geo_metadata.py:_initialize_geo_metadata|geoparquet_io/core/write_strategies/base.py:_initialize_geo_metadata"
-reason = "geo block initialisation copy (write_strategies/base vs geo_metadata); T3e composes the geo block once"
-[[G3.pairs]]
 pair = "geoparquet_io/core/partition/auto_resolution.py:_calculate_a5_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_h3_resolution"
 reason = "auto-resolution per index; T5b's one resolution calculator"
 [[G3.pairs]]
@@ -674,9 +671,6 @@ reason = "is-geographic CRS copy (approved change 8); T4c"
 [[G3.pylint]]
 block = "core.arrow_geo_metadata:_compute_geometry_types|core.geo_metadata:_compute_geometry_types"
 reason = "geometry stats twins; T3b"
-[[G3.pylint]]
-block = "core.arrow_geo_metadata:_detect_version_from_table|core.streaming:extract_version_from_metadata"
-reason = "version read from the geo key, copied; T2b"
 [[G3.pylint]]
 block = "core.crs_utils:<module>|core.duckdb_metadata:_get_pyarrow_logical_type"
 reason = "GeoArrow extension-name list copied; T3a's decoder owner"
