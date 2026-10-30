@@ -614,7 +614,7 @@ class TestHilbertDetectionAndWarnings:
 
     def test_spatial_check_passes_for_hilbert_files(self, temp_output_dir):
         """Test that files with ~100k rows/group are detected as Hilbert-ordered."""
-        from geoparquet_io.core.check_spatial_order import check_spatial_order_bbox_stats
+        from geoparquet_io.core.check_spatial_order import check_spatial_order
         from geoparquet_io.core.hilbert_order import hilbert_order
 
         # Create a test file and apply Hilbert ordering
@@ -630,9 +630,7 @@ class TestHilbertDetectionAndWarnings:
         )
 
         # Check spatial ordering - should pass despite high overlap
-        result = check_spatial_order_bbox_stats(
-            output_file, verbose=False, return_results=True, quiet=True
-        )
+        result = check_spatial_order(output_file, 100, 500, False, return_results=True, quiet=True)
 
         # Should be marked as passed (Hilbert-ordered with large groups)
         assert result["passed"] is True
@@ -644,7 +642,7 @@ class TestHilbertDetectionAndWarnings:
 
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.check_spatial_order import check_spatial_order_bbox_stats
+        from geoparquet_io.core.check_spatial_order import check_spatial_order
 
         output_file = os.path.join(temp_output_dir, "non_hilbert.parquet")
 
@@ -656,9 +654,7 @@ class TestHilbertDetectionAndWarnings:
         table = table.take(indices)
         pq.write_table(table, output_file, compression="ZSTD", row_group_size=50)
 
-        result = check_spatial_order_bbox_stats(
-            output_file, verbose=False, return_results=True, quiet=True
-        )
+        result = check_spatial_order(output_file, 100, 500, False, return_results=True, quiet=True)
 
         assert result["passed"] is False
         assert result["fix_available"] is True

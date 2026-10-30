@@ -220,3 +220,34 @@ class TestPreview:
         assert json.loads(values[2]) == {"name": "obj", "depth": {"a": [1, 2]}, "n": 1.5}
         assert json.loads(values[3]) == [1, "two", 3.0, None]
         assert values[4] is None
+
+
+class TestVariantThroughArrowSchemaProbes:
+    """The Arrow schema probes in ``add bbox`` and the stream reader go through
+    ``query_schema``; a local ``LIMIT 0`` Arrow probe raises on DuckDB 1.5."""
+
+    def test_streaming_add_bbox_survives_a_variant_column(self, variant_file):
+        from geoparquet_io.core.add.bbox import _make_streaming_bbox_query
+
+        con = get_duckdb_connection()
+        try:
+            source = f"read_parquet({sql_path(variant_file)})"
+            query, passed_through, name = _make_streaming_bbox_query(source, con, "bbox", False)
+            columns = [d[0] for d in con.execute(f"SELECT * FROM ({query}) LIMIT 0").description]
+        finally:
+            con.close()
+        assert not passed_through
+        assert name == "bbox"
+        assert {"properties", "bbox"} <= set(columns)
+
+    def test_stream_input_metadata_survives_a_variant_column(self, variant_file):
+        from geoparquet_io.core.stream_io import _file_stream_metadata
+
+        con = get_duckdb_connection()
+        try:
+            source = f"read_parquet({sql_path(variant_file)})"
+            # No Arrow schema in hand (the remote-adapter path): the probe runs.
+            metadata = _file_stream_metadata(con, source, variant_file, None, {})
+        finally:
+            con.close()
+        assert isinstance(metadata, dict)

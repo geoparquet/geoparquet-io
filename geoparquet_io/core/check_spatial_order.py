@@ -19,6 +19,7 @@ from geoparquet_io.core.check_verdict import (
 from geoparquet_io.core.duckdb_metadata import (
     get_per_row_group_bbox_stats,
     get_per_row_group_native_geo_stats,
+    get_row_group_bbox_stats,
 )
 from geoparquet_io.core.duckdb_utils import (
     disable_geoparquet_conversion,
@@ -194,48 +195,6 @@ def _print_bbox_stats_results(ratio, overlap_count, total_pairs, passed):
         progress("=> Data may benefit from spatial ordering (high row group overlap).")
 
 
-def check_spatial_order_bbox_stats(
-    parquet_file: str,
-    verbose: bool = False,
-    return_results: bool = False,
-    quiet: bool = False,
-) -> float | dict:
-    """Check spatial ordering using row group bbox statistics.
-
-    This method is faster than sampling because it only reads row group metadata
-    instead of actual geometry data. It checks if consecutive row groups have
-    overlapping bounding boxes, which indicates poor spatial ordering.
-
-    Args:
-        parquet_file: Path to parquet file
-        verbose: Print additional information
-        return_results: If True, return structured results dict
-        quiet: If True, suppress all output
-
-    Returns:
-        ratio (float) if return_results=False, or dict if return_results=True
-    """
-
-    bbox_col_name = check_bbox_structure(parquet_file, verbose).get("bbox_column_name")
-    if not bbox_col_name:
-        raise ValueError(
-            f"File {parquet_file} does not have a bbox column. "
-            "Use the sampling-based method instead."
-        )
-
-    if verbose:
-        debug(f"Using bbox column: {bbox_col_name}")
-
-    row_group_bboxes = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
-
-    if verbose:
-        debug(f"Analyzing {len(row_group_bboxes)} row groups")
-
-    return _check_spatial_order_from_row_group_bboxes(
-        row_group_bboxes, parquet_file, verbose, return_results, quiet, method="bbox_stats"
-    )
-
-
 def _check_spatial_order_from_row_group_bboxes(
     row_group_bboxes: list[dict],
     parquet_file: str,
@@ -358,36 +317,35 @@ def check_spatial_order(
 
     raw_url = resolve_file_url(parquet_file, verbose)
 
-    # Try bbox-stats method first (faster)
-    bbox_col_name = check_bbox_structure(parquet_file, verbose).get("bbox_column_name")
-    if bbox_col_name:
-        if verbose:
-            debug(f"Using bbox-stats method (bbox column: {bbox_col_name})")
-        try:
-            return check_spatial_order_bbox_stats(
-                parquet_file, verbose=verbose, return_results=return_results, quiet=quiet
-            )
-        except (ValueError, KeyError, IndexError) as e:
-            # ValueError: Invalid bbox column structure
-            # KeyError: Missing expected bbox fields (xmin, ymin, xmax, ymax)
-            # IndexError: Empty or malformed row group stats
-            if verbose:
-                warn(f"Bbox-stats method failed: {e}, falling back to sampling")
-            # Fall through to try native geo_bbox stats
+    # Row-group statistics first (no data read), from the one reader: native
+    # geo_bbox stats, then the bbox column's chunk statistics.
+    bbox_names: list[str | None] = []
 
-    # Try native geo_bbox stats (GeoParquet 2.0 / parquet-geo-only)
-    geometry_column = find_primary_geometry_column(parquet_file, verbose)
-    native_geo_stats = get_per_row_group_native_geo_stats(parquet_file, geometry_column)
-    if native_geo_stats:
+    def bbox_column():
+        bbox_names.append(check_bbox_structure(parquet_file, verbose).get("bbox_column_name"))
+        return bbox_names[-1]
+
+    row_group_bboxes, source = get_row_group_bbox_stats(
+        parquet_file,
+        native=lambda: get_per_row_group_native_geo_stats(
+            parquet_file, find_primary_geometry_column(parquet_file, verbose)
+        ),
+        bbox_column=bbox_column,
+    )
+    if row_group_bboxes:
+        method = "bbox_stats" if source == "bbox_struct" else "native_geo_bbox"
         if verbose:
-            debug(f"Using native geo_bbox stats ({len(native_geo_stats)} row groups)")
+            if source == "bbox_struct":
+                debug(f"Using bbox-stats method (bbox column: {bbox_names[-1]})")
+            else:
+                debug(f"Using native geo_bbox stats ({len(row_group_bboxes)} row groups)")
         try:
             return _check_spatial_order_from_row_group_bboxes(
-                native_geo_stats, parquet_file, verbose, return_results, quiet
+                row_group_bboxes, parquet_file, verbose, return_results, quiet, method=method
             )
         except (ValueError, KeyError, IndexError) as e:
             if verbose:
-                warn(f"Native geo_bbox method failed: {e}, falling back to sampling")
+                warn(f"Row-group stats method failed: {e}, falling back to sampling")
             # Fall through to sampling method
 
     # Fall back to sampling method

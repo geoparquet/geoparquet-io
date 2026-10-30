@@ -419,13 +419,13 @@ class TestEveryConsumerGetsThePrimarysAnswer:
     """
 
     def test_check_spatial_refuses_what_check_bbox_does_not_see(self, tmp_path):
-        from geoparquet_io.core.check_spatial_order import check_spatial_order_bbox_stats
+        from geoparquet_io.core.check_spatial_order import check_spatial_order
 
         path = _secondary_bbox_file(tmp_path, "in")
         assert _check_bbox_structure(path)["bbox_column_name"] is None
 
-        with pytest.raises(ValueError, match="does not have a bbox column"):
-            check_spatial_order_bbox_stats(str(path))
+        result = check_spatial_order(str(path), 100, 500, False, return_results=True, quiet=True)
+        assert result["method"] != "bbox_stats"
 
     def test_pushdown_readiness_reports_no_bbox_column(self, tmp_path):
         from geoparquet_io.core.check_spatial_order import check_spatial_pushdown_readiness

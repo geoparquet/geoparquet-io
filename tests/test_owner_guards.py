@@ -305,7 +305,13 @@ class _Module:
 
 
 def _identifier_tokens(node: ast.AST) -> Iterator[str]:
+    """Tokens of the variable and attribute names under *node*, not of a callee's
+    name: ``geo_bytes`` is the footer key by name, ``parse_duckdb_geo_type(t)``
+    is a call whose result is whatever that function returns."""
+    callees = {id(sub.func) for sub in ast.walk(node) if isinstance(sub, ast.Call)}
     for sub in ast.walk(node):
+        if id(sub) in callees:
+            continue
         if isinstance(sub, ast.Name):
             yield from sub.id.lower().split("_")
         elif isinstance(sub, ast.Attribute):
@@ -1671,6 +1677,25 @@ def test_g12_the_owner_is_exempt_and_only_the_owner(arm_name, tmp_path):
         (tmp_path / rel).write_text(G1_PLANTS[arm_name], encoding="utf-8")
 
     assert [h.path for h in arm_hits(tmp_path, arm_name)] == [nested]
+
+
+def test_g12_geo_parse_ignores_geo_in_a_callee_name(tmp_path):
+    """The footer key, not the token ``geo`` in the name of a function whose result is parsed.
+
+    ``crs_utils._crs_from_read_type`` parses the CRS out of
+    ``parse_duckdb_geo_type(t)``; the key read by subscript or ``.get`` still flags.
+    """
+    clean = (
+        "import json\n\ndef crs(t):\n    parsed = parse_duckdb_geo_type(t)\n"
+        "    value = parsed[1]\n    return json.loads(value)\n"
+    )
+    assert arm_hits(_plant(tmp_path / "a", "geo_parse", clean), "geo_parse") == []
+    for source in (
+        "import json\n\ndef read(md):\n    raw = md.get(b'geo')\n    return json.loads(raw)\n",
+        "import json\n\ndef read(geo_bytes):\n    return json.loads(geo_bytes)\n",
+    ):
+        repo = _plant(tmp_path / str(len(source)), "geo_parse", source)
+        assert len(arm_hits(repo, "geo_parse")) == 1, source
 
 
 def test_g12_an_exemption_excuses_exactly_its_count(tmp_path):

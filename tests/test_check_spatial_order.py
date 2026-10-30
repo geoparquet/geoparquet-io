@@ -5,9 +5,15 @@ import pytest
 from geoparquet_io.core.check_spatial_order import (
     _bboxes_overlap,
     check_spatial_order,
-    check_spatial_order_bbox_stats,
 )
 from geoparquet_io.core.duckdb_utils import fetch_one
+
+
+def _row_group_check(parquet_file, verbose=False, return_results=True, quiet=False):
+    """``check_spatial_order`` on a file it answers from row-group statistics."""
+    from geoparquet_io.core.check_spatial_order import check_spatial_order
+
+    return check_spatial_order(parquet_file, 100, 500, verbose, return_results, quiet)
 
 
 class TestCheckSpatialOrder:
@@ -168,13 +174,11 @@ class TestBboxOverlap:
 
 
 class TestCheckSpatialOrderBboxStats:
-    """Tests for check_spatial_order_bbox_stats function."""
+    """check_spatial_order answered from a bbox covering column's row-group statistics."""
 
     def test_returns_dict_structure(self, places_test_file):
         """Test that bbox-stats method returns proper dict structure."""
-        result = check_spatial_order_bbox_stats(
-            places_test_file, verbose=False, return_results=True, quiet=False
-        )
+        result = _row_group_check(places_test_file, verbose=False, return_results=True, quiet=False)
         assert isinstance(result, dict)
         assert "passed" in result
         assert "ratio" in result
@@ -188,9 +192,7 @@ class TestCheckSpatialOrderBboxStats:
 
     def test_with_spatially_ordered_file(self, places_test_file):
         """Test with file expected to have good spatial ordering."""
-        result = check_spatial_order_bbox_stats(
-            places_test_file, verbose=False, return_results=True, quiet=False
-        )
+        result = _row_group_check(places_test_file, verbose=False, return_results=True, quiet=False)
         # Just verify structure - actual ordering depends on test data
         assert isinstance(result["passed"], bool)
         assert isinstance(result["ratio"], float)
@@ -198,34 +200,26 @@ class TestCheckSpatialOrderBboxStats:
         assert result["overlap_count"] >= 0
         assert result["total_pairs"] >= 0
 
-    def test_without_bbox_column_raises_error(self, buildings_test_file):
-        """Test that files without bbox column raise ValueError."""
-        with pytest.raises(ValueError, match="does not have a bbox column"):
-            check_spatial_order_bbox_stats(
-                buildings_test_file, verbose=False, return_results=True, quiet=False
-            )
+    def test_without_bbox_column_falls_back_to_sampling(self, buildings_test_file):
+        """No row-group statistics to read: the check samples the data instead."""
+        result = _row_group_check(buildings_test_file)
+        assert result["method"] == "sampling"
 
     def test_verbose_mode(self, places_test_file):
         """Test bbox-stats method with verbose=True."""
-        result = check_spatial_order_bbox_stats(
-            places_test_file, verbose=True, return_results=True, quiet=False
-        )
+        result = _row_group_check(places_test_file, verbose=True, return_results=True, quiet=False)
         assert isinstance(result, dict)
         assert result["method"] == "bbox_stats"
 
     def test_quiet_mode(self, places_test_file):
         """Test bbox-stats method with quiet=True."""
-        result = check_spatial_order_bbox_stats(
-            places_test_file, verbose=False, return_results=True, quiet=True
-        )
+        result = _row_group_check(places_test_file, verbose=False, return_results=True, quiet=True)
         assert isinstance(result, dict)
         assert result["method"] == "bbox_stats"
 
     def test_passing_threshold(self, places_test_file):
         """Test that ratio < 0.3 means passed=True."""
-        result = check_spatial_order_bbox_stats(
-            places_test_file, verbose=False, return_results=True, quiet=False
-        )
+        result = _row_group_check(places_test_file, verbose=False, return_results=True, quiet=False)
         if result["ratio"] < 0.3:
             assert result["passed"] is True
             assert len(result["issues"]) == 0
@@ -237,7 +231,7 @@ class TestCheckSpatialOrderBboxStats:
 
     def test_issues_and_recommendations_when_failed(self, unsorted_test_file):
         """Test that failing check includes proper issues and recommendations."""
-        result = check_spatial_order_bbox_stats(
+        result = _row_group_check(
             unsorted_test_file, verbose=False, return_results=True, quiet=False
         )
         assert result["passed"] is False
@@ -248,7 +242,7 @@ class TestCheckSpatialOrderBboxStats:
 
     def test_without_return_results(self, places_test_file):
         """Test bbox-stats method with return_results=False."""
-        result = check_spatial_order_bbox_stats(
+        result = _row_group_check(
             places_test_file, verbose=False, return_results=False, quiet=False
         )
         # Should return ratio directly when return_results=False
@@ -339,7 +333,6 @@ class TestNativeGeoBboxDetection:
     def test_check_spatial_order_with_native_geo_bbox(self, tmp_path):
         """Test that check_spatial_order detects native geo_bbox stats from GeoParquet 2.0."""
         import duckdb
-        import pytest
 
         # Create a GeoParquet 2.0 file (without separate bbox column, but with native geo_bbox)
         output_file = str(tmp_path / "test_v2.parquet")
@@ -619,9 +612,7 @@ class TestSpatialLocalitySecondaryCheck:
         assert result == 0.0
 
     def test_secondary_metrics_included_in_bbox_stats_result(self, places_test_file):
-        """check_spatial_order_bbox_stats should include locality metrics."""
-        result = check_spatial_order_bbox_stats(
-            places_test_file, verbose=False, return_results=True, quiet=True
-        )
+        """the row-group-statistics answer should include locality metrics."""
+        result = _row_group_check(places_test_file, verbose=False, return_results=True, quiet=True)
         assert "estimated_skip_rate" in result
         assert "avg_bbox_area_ratio" in result

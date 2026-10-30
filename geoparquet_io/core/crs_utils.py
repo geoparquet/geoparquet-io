@@ -15,6 +15,7 @@ from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     describe_query,
     fetch_one,
+    parse_duckdb_geo_type,
     quote_identifier,
     sql_path,
 )
@@ -1283,10 +1284,6 @@ def _crs_from_read_type(input_file, con):
     ``ST_Read`` read as ISO-8859-1 binds any bytes, and its geometry column
     type carries the CRS as an authority code or as PROJJSON.
     """
-    # Aliased: the G1 geo_parse arm reads a ``geo`` token in the owner's name as
-    # the footer ``geo`` key, and this json.loads parses a CRS, not that key.
-    from geoparquet_io.core.duckdb_utils import parse_duckdb_geo_type as parse_type
-
     try:
         described = describe_query(
             con,
@@ -1295,7 +1292,7 @@ def _crs_from_read_type(input_file, con):
     except Exception:
         return None
     for _, column_type in described:
-        parsed = parse_type(column_type)
+        parsed = parse_duckdb_geo_type(column_type)
         if parsed is None or parsed[0] != "GEOMETRY" or not parsed[1]:
             continue
         value = parsed[1]

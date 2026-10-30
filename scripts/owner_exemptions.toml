@@ -613,9 +613,6 @@ reason = "index add workflow, one copy per index; T5b's index_ops driver replace
 pair = "geoparquet_io/core/add/h3.py:_add_h3_streaming|geoparquet_io/core/add/s2.py:_add_s2_streaming"
 reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
 [[G3.pairs]]
-pair = "geoparquet_io/core/add/s2.py:_create_geometry_view|geoparquet_io/core/extract.py:_setup_geometry_view"
-reason = "BLOB-vs-native geometry view with a DESCRIBE probe (concept 7, resolve_geometry_read); T3c"
-[[G3.pairs]]
 pair = "geoparquet_io/core/arrow_geo_metadata.py:_compute_bbox_from_data|geoparquet_io/core/geo_metadata.py:_compute_bbox_from_data"
 reason = "geometry stats twin (concept 5); T3b"
 [[G3.pairs]]
@@ -718,9 +715,6 @@ reason = "kwarg list forwarded to one callee; identical since T2a removed the pe
 block = "cli.commands.partition:partition_s2|cli.decorators:handle_directory_sub_partition"
 reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
 [[G3.pylint]]
-block = "core.add.a5:_add_a5_streaming.make_query|core.add.bbox:_make_streaming_bbox_query"
-reason = "the LIMIT 0 probe, STANDARD_GEOMETRY_NAMES loop and literal 'geometry' fallback (concept 7); T3c's primary_geometry_column"
-[[G3.pylint]]
 block = "core.add.a5:_add_a5_streaming.make_query|core.add.h3:_add_h3_streaming.make_query"
 reason = "index add workflow per index; T5b's index_ops driver"
 [[G3.pylint]]
@@ -748,14 +742,8 @@ reason = "permanent: the same keyword-argument list forwarded to one callee (API
 block = "core.add.bbox:_add_bbox_streaming|core.stream_io:execute_transform"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
-block = "core.add.geometry_metrics:_add_metrics_streaming.make_query|core.add.s2:_add_s2_streaming.make_query"
-reason = "the LIMIT 0 probe, STANDARD_GEOMETRY_NAMES loop and literal 'geometry' fallback (concept 7); T3c's primary_geometry_column"
-[[G3.pylint]]
 block = "core.add.geometry_metrics:_add_metrics_streaming|core.sort_by_column:_sort_by_column_streaming"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.add.h3:_add_h3_streaming.make_query|core.add.quadkey:_add_quadkey_streaming"
-reason = "index add workflow per index; T5b's index_ops driver"
 [[G3.pylint]]
 block = "core.add.h3:_add_h3_streaming|core.sort_by_column:_sort_by_column_streaming"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
