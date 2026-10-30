@@ -64,7 +64,7 @@ CHECK_OWNER_DEFS = REPO / "scripts" / "check_owner_defs.py"
 #: the commit that deletes a copy; raising it needs a reason in review.
 EXPECTED_COUNTS = {
     "G1.tid251": 15,
-    "G1.geo_parse": 17,
+    "G1.geo_parse": 0,
     "G1.set_memory_limit": 0,
     "G1.sql_escape": 1,
     "G1.cgroup": 0,
@@ -86,7 +86,7 @@ EXPECTED_COUNTS = {
     "G3.pylint": 55,
     "G13.options": 13,
     "G13.bbox_parsers": 3,
-    "G4.whitelist": 182,
+    "G4.whitelist": 181,
     "G4.tests_whitelist": 99,
 }
 
