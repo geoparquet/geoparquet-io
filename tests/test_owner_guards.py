@@ -1745,11 +1745,17 @@ def _find_edges(m: _Module) -> Iterator[Hit]:
 
 
 #: The footer patch's mechanism and its two refusals (``core/parquet_footer.py``).
-_FOOTER_PATCH_CALLS = frozenset({"_patch_footer_file", "patch_footer", "patch_footer_kv"})
+#: The owner's private patch and fallback, and the names they had before.
+_FOOTER_PATCH_PRIVATE = frozenset(
+    {"_patch_footer_file", "_fall_back", "patch_footer", "patch_footer_kv"}
+)
 _FOOTER_PATCH_REFUSALS = frozenset({"FooterPatchUnsupported", "FooterPatchRaced"})
+_FOOTER_PATCH_OWNER_MODULE = "geoparquet_io.core.parquet_footer"
 
 
 def _caught_names(handler: ast.ExceptHandler) -> Iterator[str]:
+    if handler.type is None:
+        return
     kinds = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
     for kind in kinds:
         if isinstance(kind, ast.Name):
@@ -1758,20 +1764,47 @@ def _caught_names(handler: ast.ExceptHandler) -> Iterator[str]:
             yield kind.attr
 
 
+def _calls_patch_or_rewrite(m: _Module, body: list[ast.stmt]) -> bool:
+    return any(
+        isinstance(sub, ast.Call)
+        and (m.dotted(sub.func) or "").rsplit(".", 1)[-1] == "patch_or_rewrite"
+        for stmt in body
+        for sub in ast.walk(stmt)
+    )
+
+
 def _find_footer_patch(m: _Module) -> Iterator[Hit]:
-    """A footer patch called, or its refusal caught, outside ``core/parquet_footer.py``
-    (#1367 concept 2): ``patch_footer(``/``patch_footer_kv(``, or ``except
-    FooterPatchUnsupported``/``FooterPatchRaced``. That pair is the
-    patch-else-rewrite decision ``parquet_footer.patch_or_rewrite`` owns; four
-    callers each hand-wrote it, one answered a race with a rewrite, one refused
-    where the others re-encoded, and each chose its own fallback codec (#1015).
+    """The patch-else-rewrite decision spelled outside ``core/parquet_footer.py``
+    (#1367 concept 2). ``parquet_footer.patch_or_rewrite`` owns it; six callers
+    each hand-wrote it, one answered a race with a rewrite, one refused where
+    the others re-encoded, and each chose its own fallback codec (#1015). Seen:
+
+    * the private patch or fallback (``_patch_footer_file``, ``_fall_back``, or
+      their old public names) imported from the owner under any alias, read
+      as an attribute, or fetched by ``getattr``;
+    * a refusal (``FooterPatchUnsupported``/``FooterPatchRaced``) imported from
+      the owner, or caught -- bare, as an attribute, or in a tuple;
+    * ``except GeoParquetError`` around a ``patch_or_rewrite`` call: the
+      refusal's base class, caught to answer it a second way.
     """
     for node in ast.walk(m.tree):
-        if isinstance(node, ast.Call) and _call_name(node) in _FOOTER_PATCH_CALLS:
+        if isinstance(node, ast.ImportFrom) and node.module == _FOOTER_PATCH_OWNER_MODULE:
+            for alias in node.names:
+                if alias.name in _FOOTER_PATCH_PRIVATE | _FOOTER_PATCH_REFUSALS:
+                    yield m.hit(node)
+        elif isinstance(node, ast.Attribute) and node.attr in _FOOTER_PATCH_PRIVATE:
             yield m.hit(node)
-        elif isinstance(node, ast.ExceptHandler) and node.type is not None:
+        elif m.calls(node, "getattr") and len(node.args) >= 2:
+            name = m.const(node.args[1])
+            if name in _FOOTER_PATCH_PRIVATE | _FOOTER_PATCH_REFUSALS:
+                yield m.hit(node)
+        elif isinstance(node, ast.ExceptHandler):
             if any(name in _FOOTER_PATCH_REFUSALS for name in _caught_names(node)):
                 yield m.hit(node)
+        elif isinstance(node, ast.Try) and _calls_patch_or_rewrite(m, node.body):
+            for handler in node.handlers:
+                if "GeoParquetError" in set(_caught_names(handler)):
+                    yield m.hit(handler)
 
 
 @dataclass(frozen=True)
@@ -2327,9 +2360,9 @@ G1_PLANTS = {
     "output_version": ('def version(md):\n    return sanitized_carried_geo(md).get("version")\n'),
     "edges": 'def spherical(col):\n    return col.get("edges") is not None\n',
     "footer_patch": (
-        "from geoparquet_io.core.parquet_footer import FooterPatchUnsupported\n\n"
+        "from geoparquet_io.core import parquet_footer\n\n"
         "def add(path, rewrite):\n    try:\n        rewrite(path)\n"
-        "    except FooterPatchUnsupported:\n        rewrite(path)\n"
+        "    except parquet_footer.FooterPatchUnsupported:\n        rewrite(path)\n"
     ),
     "overwrite_check": (
         "import os\n\ndef check(out, force):\n"
@@ -2587,32 +2620,99 @@ def test_g12_each_g1_arm_flags_its_pattern(arm_name, tmp_path):
     assert len(unexcused) == 1, unexcused
 
 
-#: Every spelling of the hand-written patch-else-rewrite the four #1367 copies
-#: used (T2d), each of which the footer_patch arm must see once.
+#: Every spelling of the hand-written patch-else-rewrite the #1367 copies used
+#: (T2d), and the one-hop dodges around it, each with the hits it must raise.
 FOOTER_PATCH_SHAPES = {
-    "kv patch call": (
+    "old kv patch, imported and called": (
         "from geoparquet_io.core.parquet_footer import patch_footer_kv\n\n"
-        'def add(p):\n    patch_footer_kv(p, {"k": "v"})\n'
+        'def add(p):\n    patch_footer_kv(p, {"k": "v"})\n',
+        1,
     ),
-    "module-attribute patch call": (
-        "from geoparquet_io.core import parquet_footer\n\n"
-        "def add(p):\n    return parquet_footer._patch_footer_file(p, None)\n"
+    "private patch under an alias": (
+        "from geoparquet_io.core.parquet_footer import _patch_footer_file as patch\n\n"
+        'def add(p):\n    return patch(p, {"k": "v"})\n',
+        1,
     ),
-    "race caught": (
+    "private patch as a module attribute": (
         "from geoparquet_io.core import parquet_footer as pf\n\n"
-        "def add(p, f):\n    try:\n        f(p)\n    except pf.FooterPatchRaced:\n        f(p)\n"
+        "def add(p):\n    return pf._patch_footer_file(p, None)\n",
+        1,
+    ),
+    "private patch passed, not called": (
+        "from geoparquet_io.core import parquet_footer\n\n"
+        "PATCH = parquet_footer._patch_footer_file\n",
+        1,
+    ),
+    "private patch by getattr": (
+        "from geoparquet_io.core import parquet_footer\n\n"
+        'NAME = "_patch_footer_file"\n\n'
+        "def add(p):\n    return getattr(parquet_footer, NAME)(p)\n",
+        1,
+    ),
+    "private fallback imported": (
+        "from geoparquet_io.core.parquet_footer import _fall_back\n",
+        1,
+    ),
+    "refusal imported": (
+        "from geoparquet_io.core.parquet_footer import FooterPatchRaced as Raced\n",
+        1,
+    ),
+    "race caught as an attribute": (
+        "from geoparquet_io.core import parquet_footer as pf\n\n"
+        "def add(p, f):\n    try:\n        f(p)\n    except pf.FooterPatchRaced:\n        f(p)\n",
+        1,
     ),
     "refusal in a tuple": (
         "def add(p, f):\n    try:\n        f(p)\n"
-        "    except (OSError, FooterPatchUnsupported):\n        return None\n"
+        "    except (OSError, FooterPatchUnsupported):\n        return None\n",
+        1,
+    ),
+    "refusal's base caught around the owner": (
+        "from geoparquet_io.core.exceptions import GeoParquetError\n"
+        "from geoparquet_io.core.parquet_footer import patch_or_rewrite\n\n"
+        "def add(p, rewrite):\n    try:\n"
+        '        patch_or_rewrite(p, {"k": "v"}, rewrite=rewrite)\n'
+        "    except GeoParquetError:\n        return None\n",
+        1,
+    ),
+}
+#: ...and the look-alikes it must not.
+FOOTER_PATCH_NEAR_MISSES = {
+    "the owner's entry point": (
+        "from geoparquet_io.core import parquet_footer\n"
+        "from geoparquet_io.core.parquet_footer import patch_or_rewrite\n\n"
+        "def add(p, rewrite):\n"
+        '    parquet_footer.patch_or_rewrite(p, {"k": "v"}, rewrite=rewrite)\n'
+        '    return patch_or_rewrite(p, {"k": "v"}, rewrite=rewrite)\n'
+    ),
+    "cleanup that re-raises around the owner": (
+        "from geoparquet_io.core.parquet_footer import patch_or_rewrite\n\n"
+        "def add(p, rewrite, tmp):\n    try:\n"
+        '        patch_or_rewrite(p, {"k": "v"}, output_file=tmp, rewrite=rewrite)\n'
+        "    except BaseException:\n        tmp.unlink()\n        raise\n"
+    ),
+    "GeoParquetError caught around something else": (
+        "from geoparquet_io.core.exceptions import GeoParquetError\n\n"
+        "def add(p, f):\n    try:\n        f(p)\n    except GeoParquetError:\n        return None\n"
+    ),
+    "a same-named function of another module": (
+        "def _patch_footer(footer):\n    return footer\n\n"
+        "def _fall_back_to_default(x):\n    return x\n"
     ),
 }
 
 
 @pytest.mark.parametrize("shape", sorted(FOOTER_PATCH_SHAPES))
 def test_g12_footer_patch_arm_flags_every_shape(shape, tmp_path):
-    repo = _plant(tmp_path, "footer_patch", FOOTER_PATCH_SHAPES[shape])
-    assert len(arm_hits(repo, "footer_patch")) == 1
+    source, expected = FOOTER_PATCH_SHAPES[shape]
+    repo = _plant(tmp_path, "footer_patch", source)
+    assert len(arm_hits(repo, "footer_patch")) == expected, arm_hits(repo, "footer_patch")
+
+
+@pytest.mark.parametrize("shape", sorted(FOOTER_PATCH_NEAR_MISSES))
+def test_g12_footer_patch_arm_leaves_the_owners_callers_alone(shape, tmp_path):
+    repo = _plant(tmp_path, "footer_patch", FOOTER_PATCH_NEAR_MISSES[shape])
+    assert arm_hits(repo, "footer_patch") == []
 
 
 #: The other shapes of a scheme test the arm must see (PR #1387 review).
