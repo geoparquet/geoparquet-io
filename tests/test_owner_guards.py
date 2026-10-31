@@ -82,13 +82,14 @@ EXPECTED_COUNTS = {
     "G1.scheme_test": 0,
     "G1.overwrite_check": 0,
     "G1.output_version": 0,
-    "G2.exemptions": 21,
-    "G3.pairs": 23,
-    "G3.baseline": 23,
-    "G3.pylint": 50,
+    "G1.geometry_stats": 0,
+    "G2.exemptions": 19,
+    "G3.pairs": 21,
+    "G3.baseline": 21,
+    "G3.pylint": 48,
     "G13.options": 13,
     "G13.bbox_parsers": 3,
-    "G4.whitelist": 181,
+    "G4.whitelist": 180,
     "G4.tests_whitelist": 95,
 }
 
@@ -1436,6 +1437,51 @@ def _find_overwrite_check(m: _Module) -> Iterator[Hit]:
             yield m.hit(node)
 
 
+#: The stats aggregates ``core/geo_metadata.py`` owns (#1367 concept 5). Each
+#: string literal is read as a template, an f-string's ``{...}`` parts as ``{}``.
+_STATS_AGGREGATE = re.compile(
+    r"(?is)\bST_Extent_Agg\b"
+    r"|\b(?:min|max)\s*\(\s*ST_[XYZ](?:min|max)\s*\("
+    r"|\b(?:min|max)\s*\(\s*(?:\{\}|\"?\w+\"?)\.\"?[xyz](?:min|max)\"?\s*\)"
+    r"|\bST_GeometryType\b.*\b(?:DISTINCT|GROUP\s+BY)\b"
+    r"|\b(?:DISTINCT|GROUP\s+BY)\b.*\bST_GeometryType\b"
+)
+
+
+def _string_template(node: ast.AST) -> str | None:
+    """A string literal's text, an f-string's interpolations spelled ``{}``."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            v.value if isinstance(v, ast.Constant) and isinstance(v.value, str) else "{}"
+            for v in node.values
+        )
+    return None
+
+
+def _find_geometry_stats(m: _Module) -> Iterator[Hit]:
+    """A geometry-stats or bounds aggregate outside ``core/geo_metadata.py``:
+    ``ST_Extent_Agg``, ``MIN``/``MAX`` of ``ST_XMin``..``ST_YMax`` or of a bbox
+    struct's ``.xmin``..``.ymax``, or ``ST_GeometryType`` under ``DISTINCT`` /
+    ``GROUP BY``.
+
+    ``geo_metadata.geometry_stats_of`` / ``bounds_of`` / ``geometry_types_of``
+    are the one stats routine with one degenerate-geometry policy. Would have
+    caught the 15+ bounds queries #1367 found, which disagreed on empty input
+    (NULLs, ``[0, 0, 0, 0]`` or a raise), on EMPTY geometries and on the
+    antimeridian, and the non-finite coordinate that one of them let through
+    as ``Infinity`` while another died on it (#236, #1165). A per-row
+    ``ST_XMin(g)`` building a bbox *column* is not an aggregate and passes.
+    """
+    for node in ast.walk(m.tree):
+        if id(node) in m.docstrings or isinstance(m.parents.get(id(node)), ast.JoinedStr):
+            continue
+        template = _string_template(node)
+        if template is not None and _STATS_AGGREGATE.search(template):
+            yield m.hit(node)
+
+
 @dataclass(frozen=True)
 class Arm:
     finder: Callable[..., Iterator[Hit]]
@@ -1477,6 +1523,7 @@ ARMS = {
     "scheme_test": Arm(_find_scheme_test, ("geoparquet_io/core/remote.py",), needs_repo=True),
     "overwrite_check": Arm(_find_overwrite_check, ("geoparquet_io/core/file_utils.py",)),
     "output_version": Arm(_find_output_version, _VERSION_OWNERS),
+    "geometry_stats": Arm(_find_geometry_stats, ("geoparquet_io/core/geo_metadata.py",)),
 }
 
 
@@ -1988,6 +2035,10 @@ G1_PLANTS = {
         "import os\n\ndef check(out, force):\n"
         "    if os.path.exists(out) and not force:\n        raise ValueError(out)\n"
     ),
+    "geometry_stats": (
+        "def bounds(con, q, g):\n"
+        '    return con.execute(f"SELECT MIN(ST_XMin({g})), MAX(ST_XMax({g})) FROM ({q})")\n'
+    ),
 }
 
 #: Near-misses each arm must not flag, so a planted hit is the pattern itself.
@@ -2026,6 +2077,10 @@ G1_CLEAN = {
     "output_version": ('def version(path):\n    return read_raw_geo(path).value.get("version")\n'),
     "overwrite_check": (
         "import os\n\ndef cleanup(tmp):\n    if os.path.exists(tmp):\n        os.remove(tmp)\n"
+    ),
+    "geometry_stats": (
+        "def bbox_column(g):\n"
+        '    return f"STRUCT_PACK(xmin := ST_XMin({g}), ymax := ST_YMax({g})) AS bbox"\n'
     ),
 }
 
@@ -2252,6 +2307,41 @@ def test_g12_scheme_arm_fallback_reads_the_owner_table(tmp_path):
     from geoparquet_io.core.remote import REMOTE_SCHEMES
 
     assert _remote_scheme_names(tmp_path) == frozenset(REMOTE_SCHEMES)
+
+
+#: Every spelling of a stats aggregate the #1367 sweep found (T3b), each of
+#: which the geometry_stats arm must see...
+STATS_SHAPES = {
+    "ST_Extent_Agg": 'Q = "SELECT ST_XMin(ST_Extent_Agg(g)) FROM t"\n',
+    "lower-case min over a line break": 'Q = """SELECT min(\n    ST_YMin(g)) FROM t"""\n',
+    "aggregate over a bbox struct field": (
+        'def q(b):\n    return f"SELECT MIN({b}.xmin), MAX({b}.ymax) FROM t"\n'
+    ),
+    "aggregate over a named struct field": 'Q = "SELECT max(bbox.xmax) FROM t"\n',
+    "FILTER on the aggregate": 'Q = "SELECT MIN(ST_XMin(g)) FILTER (WHERE NOT ST_IsEmpty(g)) FROM t"\n',
+    "distinct types": 'def q(c):\n    return f"SELECT DISTINCT ST_GeometryType({c}) FROM t"\n',
+    "types grouped": 'Q = "SELECT ST_GeometryType(g), COUNT(*) FROM t GROUP BY 1"\n',
+}
+#: ...and the per-row and probe shapes it must leave alone.
+STATS_NEAR_MISSES = {
+    "per-row bbox column": 'Q = "SELECT STRUCT_PACK(xmin := ST_XMin(g)) AS bbox FROM t"\n',
+    "per-row predicate": 'def q(g):\n    return f"ST_XMin({g}) >= 0 AND ST_XMax({g}) <= 1"\n',
+    "first-row type probe": 'Q = "SELECT ST_GeometryType(g) FROM t WHERE g IS NOT NULL LIMIT 1"\n',
+    "window over part extents": 'Q = "SELECT lo, max(hi) OVER (ORDER BY lo) FROM parts"\n',
+    "prose": 'def f():\n    """Uses MIN(ST_XMin(g)) through the owner."""\n',
+}
+
+
+@pytest.mark.parametrize("shape", sorted(STATS_SHAPES))
+def test_g12_geometry_stats_arm_flags_every_shape(shape, tmp_path):
+    repo = _plant(tmp_path, "geometry_stats", STATS_SHAPES[shape])
+    assert len(arm_hits(repo, "geometry_stats")) == 1, STATS_SHAPES[shape]
+
+
+@pytest.mark.parametrize("shape", sorted(STATS_NEAR_MISSES))
+def test_g12_geometry_stats_arm_passes_its_look_alikes(shape, tmp_path):
+    repo = _plant(tmp_path, "geometry_stats", STATS_NEAR_MISSES[shape])
+    assert arm_hits(repo, "geometry_stats") == []
 
 
 @pytest.mark.parametrize("arm_name", sorted(ARMS))
