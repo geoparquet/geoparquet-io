@@ -33,13 +33,13 @@ import math
 import os
 import shutil
 import struct
-import time
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
+from filelock import FileLock, Timeout
 
 import geoparquet_io as gpio
 from geoparquet_io.cli.main import cli
@@ -58,8 +58,9 @@ from tests.native_geo_probes import projjson
 #: The facade's default row-group count, lowered for this module only (see the
 #: ``outputs`` fixture): every path that takes the owner's default lands on it,
 #: and a path that hard-codes 49,152 or a writer's own default (DuckDB's
-#: 122,880, pyarrow's 1,048,576) does not. 4,096 is two whole writer vectors,
-#: so the DuckDB ``COPY`` paths land on it exactly.
+#: 122,880, pyarrow's 1,048,576) does not. DuckDB ``COPY`` writes whole
+#: writer vectors and may overshoot 4,096; the cell compares group counts,
+#: not exact group sizes (COPY can write [5000, 5000, 2000] here).
 G7_DEFAULT_ROW_GROUP_ROWS = 4_096
 N_ROWS = 12_000
 #: The input's own groups: neither one group nor the facade's.
@@ -209,17 +210,16 @@ def _write_outputs(source: Path, out_dir: Path) -> dict[str, Path]:
 
 @contextlib.contextmanager
 def _session_lock(path: Path):
-    """A lock every xdist worker of one session shares (``mkdir`` is atomic)."""
-    while True:
-        try:
-            path.mkdir()
-            break
-        except FileExistsError:
-            time.sleep(0.05)
+    """Bounded, OS-released lock shared by every xdist worker in a session."""
+    lock = FileLock(path)
+    try:
+        lock.acquire(timeout=120)
+    except Timeout as exc:
+        raise RuntimeError(f"Timed out after 120 s waiting for G7 build lock: {path}") from exc
     try:
         yield
     finally:
-        path.rmdir()
+        lock.release()
 
 
 @pytest.fixture(scope="module")
@@ -446,6 +446,10 @@ def _cases():
 
 @pytest.mark.parametrize(("path", "invariant"), list(_cases()))
 def test_write_path_invariant(path, invariant, outputs, source, tmp_path):
+    # The selected H3 partition has only 78 rows: one group cannot distinguish
+    # the patched default from a hard-coded or writer default.
+    if path == "partition_h3" and invariant == "row_groups":
+        pytest.skip("partition_h3 row-group coverage gap: 78 rows fit in every default")
     if invariant == "sidecar_keys" and path in SIDECAR_REFERENCE:
         reference = outputs[SIDECAR_REFERENCE[path]]
         keys = set(footer_kv(outputs[path])) - {b"geo"}

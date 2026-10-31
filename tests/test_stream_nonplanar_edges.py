@@ -55,7 +55,7 @@ def _storage(column):
 
 
 # ``footprint``: the column found by its type, not the default name, which is
-# everything the ``geometry`` spelling exercises and the name lookup besides.
+# everything the ``geometry`` spelling exercises.
 @pytest.mark.parametrize("geometry_column", ["footprint"])
 def test_native_geography_survives_two_extract_hops(tmp_path, geometry_column):
     source = tmp_path / "source.parquet"

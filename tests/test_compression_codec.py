@@ -549,9 +549,9 @@ def test_cli_gzip_level_inside_its_range_is_accepted(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-# convert geoparquet, sort hilbert and extract are G7's ``level`` cells
-# (tests/test_write_path_invariants.py); ``add bbox`` is not a G7 path.
-@pytest.mark.parametrize("command", ["add bbox"])
+# Keep one exact default pin for the G7 paths; sort hilbert and extract
+# retain G7's nearest-reference level check. ``add bbox`` is not a G7 path.
+@pytest.mark.parametrize("command", ["convert geoparquet", "add bbox"])
 def test_cli_unset_level_is_the_documented_fifteen(tmp_path, command):
     unset_dir = tmp_path / "unset"
     l15_dir = tmp_path / "l15"
@@ -561,6 +561,12 @@ def test_cli_unset_level_is_the_documented_fifteen(tmp_path, command):
     r2, l15 = _cli_write(l15_dir, command, ["--compression-level", "15"])
     assert r1.exit_code == 0, r1.output
     assert r2.exit_code == 0, r2.output
+    if command == "convert geoparquet":
+        l3_dir = tmp_path / "l3"
+        l3_dir.mkdir()
+        r3, l3 = _cli_write(l3_dir, command, ["--compression-level", "3"])
+        assert r3.exit_code == 0, r3.output
+        assert l3.read_bytes() != l15.read_bytes(), "3 and 15 must differ here"
     assert unset.read_bytes() == l15.read_bytes()
 
 

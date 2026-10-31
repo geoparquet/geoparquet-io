@@ -519,12 +519,12 @@ class TestTheStdoutStreamIsGatedLikeAFileWrite:
 
 @pytest.fixture(scope="module")
 def gdal_style_covering(tmp_path_factory) -> Path:
-    tmp_path = tmp_path_factory.mktemp("gdal_style_covering")
     """A ``geometry_bbox`` struct and a covering naming it -- what GDAL writes.
 
     Nothing but the input's own block vouches for that name: it is not the one
     self-evident ``bbox``, so a write that cannot see the block cannot declare it.
     """
+    tmp_path = tmp_path_factory.mktemp("gdal_style_covering")
     table = pq.read_table(str(PLACES_TEST_FILE))
     index = table.schema.get_field_index("bbox")
     table = table.set_column(index, "geometry_bbox", table.column("bbox"))
@@ -543,8 +543,8 @@ def gdal_style_covering(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def quadkey_file(tmp_path_factory) -> Path:
-    tmp_path = tmp_path_factory.mktemp("quadkey_file")
     """A bbox covering with a ``quadkey`` index entry beside it."""
+    tmp_path = tmp_path_factory.mktemp("quadkey_file")
     target = tmp_path / "quadkey.parquet"
     run_cli("add", "quadkey", PLACES_TEST_FILE, target)
     assert set(covering_of(target) or {}) == {"bbox", "quadkey"}
@@ -553,8 +553,8 @@ def quadkey_file(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def overture_order_covering(tmp_path_factory) -> Path:
-    tmp_path = tmp_path_factory.mktemp("overture_order_covering")
     """1.1, a covering declared over Overture's ``xmin, xmax, ymin, ymax`` struct."""
+    tmp_path = tmp_path_factory.mktemp("overture_order_covering")
     target = tmp_path / "overture_declared.parquet"
     table = pq.read_table(str(COUNTRY_PARTITION_DIR / "Honduras.parquet"))
     pq.write_table(table, str(target))
@@ -564,7 +564,6 @@ def overture_order_covering(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def v2_with_illegal_secondary_covering(tmp_path_factory) -> Path:
-    tmp_path = tmp_path_factory.mktemp("v2_with_illegal_secondary_covering")
     """2.0, a SECONDARY geometry column, and its covering over an illegal struct.
 
     The #953 shape carrying #1035's defect on the secondary: primary Point
@@ -577,6 +576,7 @@ def v2_with_illegal_secondary_covering(tmp_path_factory) -> Path:
     file: declaring it on the 1.1 source instead would let the conversion strip
     it, and the fixture would then prove nothing.
     """
+    tmp_path = tmp_path_factory.mktemp("v2_with_illegal_secondary_covering")
     from geoparquet_io.core.parquet_footer import _patch_footer_file
     from tests.fixtures.multi_geometry import create_multi_geometry_with_secondary_bbox
 
@@ -617,8 +617,8 @@ def v2_with_illegal_secondary_covering(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def v2_with_declared_covering(tmp_path_factory) -> Path:
-    tmp_path = tmp_path_factory.mktemp("v2_with_declared_covering")
     """GeoParquet 2.0, a bbox column, and a covering the file itself declares."""
+    tmp_path = tmp_path_factory.mktemp("v2_with_declared_covering")
     v2 = tmp_path / "v2.parquet"
     run_cli(
         "convert",
