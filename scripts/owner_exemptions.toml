@@ -19,6 +19,10 @@
 # ---------------------------------------------------------------------------
 # [[G1.tid251]] mirrors [tool.ruff.lint.per-file-ignores] in pyproject.toml:
 # one ignore line per file listed here.
+[G1]
+# Binary byte-unit arithmetic belongs exclusively to core/sizing.py.
+binary_mb = []
+
 [[G1.tid251]]
 path = "geoparquet_io/api/ops.py"
 name = "pyarrow.parquet.write_table"
@@ -70,45 +74,42 @@ path = "geoparquet_io/core/arcgis.py"
 name = "_is_page_pressure_error"
 reason = "permanent: ArcGIS JSON error-body code 500 marks page pressure (halve the page size), not an HTTP retry classification"
 # Bare json.dumps / json.dump in cli/ and core/: reports go through
-# core/json_output.dumps_json (#1226). A count = "*" entry allows a whole core/
-# module whose json.dumps calls serialize metadata (the geo block, footer keys,
-# PROJJSON, GeoJSON data), not a report; a new report in one of them is not
-# caught, which is the price of not listing 60 serializer lines one by one.
+# core/json_output.dumps_json (#1226). Metadata serializers have exact counts.
 [[G1.json_dumps]]
 path = "geoparquet_io/core/add/stac_metadata.py"
-count = "*"
+count = 2
 reason = "permanent: metadata serialization, not a report: stac-geoparquet footer payload"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/arcgis.py"
-count = "*"
+count = 1
 reason = "permanent: metadata serialization, not a report: geo block and a staged ArcGIS JSON document"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/bbox_structure.py"
-count = "*"
+count = 1
 reason = "permanent: metadata serialization, not a report: debug dump of the geo block"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/constants.py"
-count = "*"
+count = 1
 reason = "permanent: metadata serialization, not a report: collection footer key"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/crs_utils.py"
-count = "*"
+count = 7
 reason = "permanent: metadata serialization, not a report: PROJJSON for SQL, cache keys and messages"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/duckdb_metadata.py"
-count = "*"
+count = 1
 reason = "permanent: metadata serialization, not a report: CRS inside a GEOMETRY type string"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/duckdb_utils.py"
-count = "*"
+count = 1
 reason = "permanent: metadata serialization, not a report: ARROW:extension:metadata"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/extract.py"
-count = "*"
+count = 1
 reason = "permanent: metadata serialization, not a report: GeoJSON geometry handed to SQL"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/format_writers.py"
-count = "*"
+count = 1
 reason = "permanent: metadata serialization, not a report: SRS parameter for GDAL"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/geo_metadata.py"
@@ -118,43 +119,43 @@ count = 1
 reason = "permanent: metadata serialization, not a report: geo block (owner of its encoding)"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/geoarrow_compat.py"
-count = "*"
+count = 1
 reason = "permanent: metadata serialization, not a report: ARROW:extension:metadata"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/geojson_stream.py"
-count = "*"
+count = 5
 reason = "permanent: metadata serialization, not a report: GeoJSON output (the data, not a report)"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/metadata_utils.py"
-count = "*"
+count = 2
 reason = "permanent: metadata serialization, not a report: PROJJSON/covering pretty-printed inside the human meta view"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/parquet_footer.py"
-count = "*"
+count = 1
 reason = "permanent: metadata serialization, not a report: ARROW:extension:metadata"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/pmtiles.py"
-count = "*"
+count = 1
 reason = "permanent: metadata serialization, not a report: GeoJSON feature lines fed to tippecanoe"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/pmtiles_chunks.py"
-count = "*"
+count = 1
 reason = "permanent: metadata serialization, not a report: chunk manifest file"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/process/overview/overview_file.py"
-count = "*"
+count = 1
 reason = "permanent: metadata serialization, not a report: geo block and overviews footer key"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/stac.py"
-count = "*"
+count = 1
 reason = "permanent: metadata serialization, not a report: STAC item/collection JSON file"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/write_strategies/base.py"
-count = "*"
+count = 1
 reason = "permanent: metadata serialization, not a report: PROJJSON literal for SQL"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/write_strategies/duckdb_kv.py"
-count = "*"
+count = 1
 reason = "permanent: metadata serialization, not a report: PROJJSON for SQL"
 
 # Who owns one key of a geo block's column entry (#1367 concept 4). The
@@ -175,11 +176,11 @@ modules = ["geoparquet_io/core/parquet_schema.py"]
 
 # A geometry column chosen outside core/geometry_detection.py (#1367 concept 7).
 # Seed baseline recorded when the arm was created (#1392 pass 3): counts only
-# go down from here; T0e zeroes what it can.
+# go down from here; removing a copy removes its exemption.
 [[G1.geometry_identity]]
 path = "geoparquet_io/core/geo_metadata.py"
 line_pattern = '\.get\("primary_column"\)'
-count = "*"
+count = 8
 reason = "permanent: the geo-block decoder; reading the block's primary_column claim is its business"
 [[G1.geometry_identity]]
 path = "geoparquet_io/core/validate.py"
@@ -494,3 +495,23 @@ reason = "Only names used dynamically remain; each line explains its dynamic dis
 # G5: core/common.py (tests/test_common_split_guards.py)
 # ---------------------------------------------------------------------------
 # No exemptions: the pinned name sets and the size ceilings live in the test.
+
+[[G1.raw_parquet_copy]]
+path = "geoparquet_io/core/admin_datasets.py"
+count = 2
+reason = "permanent: cache Parquet staging; codec comes from resolve_codec"
+
+[[G1.raw_parquet_copy]]
+path = "geoparquet_io/core/benchmark.py"
+count = 1
+reason = "permanent: benchmark measures DuckDB COPY itself with resolved codec and row groups"
+
+[[G1.raw_parquet_copy]]
+path = "geoparquet_io/core/compression.py"
+count = 1
+reason = "permanent: dry-run display of the resolved facade COPY statement"
+
+[[G1.raw_parquet_copy]]
+path = "geoparquet_io/core/partition/staging.py"
+count = 1
+reason = "permanent: scratch or cache Parquet staging; codec comes from resolve_codec, not a final output"

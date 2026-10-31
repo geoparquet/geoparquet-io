@@ -96,6 +96,7 @@ def test_core_geometry_matches_installed_duckdb():
 
 
 @requires_core_geometry
+@pytest.mark.fresh_duckdb
 @pytest.mark.parametrize(
     "args",
     [
@@ -114,6 +115,7 @@ def test_inspect_skips_spatial_on_core_geometry(runner, places_test_file, extens
 
 
 @requires_core_geometry
+@pytest.mark.fresh_duckdb
 def test_inspect_head_output_intact_without_spatial(runner, places_test_file, extension_loads):
     result = runner.invoke(cli, ["inspect", "head", places_test_file, "3"], catch_exceptions=False)
 
@@ -124,6 +126,7 @@ def test_inspect_head_output_intact_without_spatial(runner, places_test_file, ex
 
 
 @requires_core_geometry
+@pytest.mark.fresh_duckdb
 @pytest.mark.parametrize(
     "args",
     [
@@ -242,6 +245,7 @@ def test_factory_resolves_auto_spatial_from_core_geometry(extension_loads):
 
 
 @requires_core_geometry
+@pytest.mark.fresh_duckdb
 def test_wkb_preview_renders_iso_wkb_without_spatial(extension_loads):
     """ISO WKB renders to WKT through DuckDB core alone, no `<GEOMETRY>` fallback."""
     assert wkb_to_wkt_preview(WKB_POINT) == "POINT (1 2)"

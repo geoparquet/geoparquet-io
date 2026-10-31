@@ -1,13 +1,11 @@
 """Detect identical test bodies with the same execution context (#1402)."""
 
 import ast
+import json
 from collections import defaultdict
 from pathlib import Path
 
-import pytest
-
 REPO = Path(__file__).resolve().parents[1]
-pytestmark = pytest.mark.meta
 
 
 def _dump(node):
@@ -31,7 +29,7 @@ def _decorators(node):
         sorted(
             _dump(mark)
             for mark in node.decorator_list
-            if ast.unparse(mark).startswith("pytest.mark.")
+            if ast.unparse(mark).startswith(("pytest.mark.", "pytest.fixture"))
         )
     )
 
@@ -49,8 +47,11 @@ def duplicate_groups(root):
                     (*classes, node.name),
                     (*marks, _decorators(node), _marks(node.body)),
                 )
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(
-                "test_"
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+                node.name.startswith("test_")
+                or any(
+                    ast.unparse(d).split("(")[0] == "pytest.fixture" for d in node.decorator_list
+                )
             ):
                 body = node.body
                 if (
@@ -87,7 +88,10 @@ def duplicate_groups(root):
 
 def test_no_duplicate_test_bodies():
     groups = duplicate_groups(REPO / "tests")
-    assert not groups, "Duplicate test bodies:\n" + "\n".join(" = ".join(group) for group in groups)
+    baseline = json.loads((REPO / "tests/fixture_duplicate_baseline.json").read_text())
+    assert groups == baseline, "Duplicate test bodies:\n" + "\n".join(
+        " = ".join(group) for group in groups
+    )
 
 
 def test_pre_hygiene_duplicates(tmp_path):
@@ -123,3 +127,11 @@ def test_duplicate_execution_context(tmp_path):
     ):
         second.write_text(source)
         assert duplicate_groups(tmp_path) == [], source
+
+
+def test_duplicate_fixtures_are_scanned(tmp_path):
+    (tmp_path / "conftest.py").write_text(
+        "@pytest.fixture\ndef first(value):\n    return value\n"
+        "@pytest.fixture\ndef second(value):\n    return value\n"
+    )
+    assert duplicate_groups(tmp_path) == [["conftest.py::first", "conftest.py::second"]]

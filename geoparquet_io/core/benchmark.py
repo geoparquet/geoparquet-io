@@ -38,6 +38,7 @@ from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.logging_config import progress
 from geoparquet_io.core.parquet_writer import resolve_row_group_rows
 from geoparquet_io.core.remote import needs_httpfs
+from geoparquet_io.core.sizing import bytes_to_mb
 
 # Converter registry with detection functions
 CONVERTERS = {
@@ -154,7 +155,7 @@ def get_file_info(filepath: Path) -> dict[str, Any]:
         return {
             "name": filepath.name,
             "format": filepath.suffix,
-            "size_mb": round(filepath.stat().st_size / (1024 * 1024), 2),
+            "size_mb": round(bytes_to_mb(filepath.stat().st_size), 2),
             "feature_count": feature_count,
             "geometry_type": geom_type,
         }
@@ -162,7 +163,7 @@ def get_file_info(filepath: Path) -> dict[str, Any]:
         return {
             "name": filepath.name,
             "format": filepath.suffix,
-            "size_mb": round(filepath.stat().st_size / (1024 * 1024), 2),
+            "size_mb": round(bytes_to_mb(filepath.stat().st_size), 2),
             "error": str(e),
         }
 
@@ -270,7 +271,7 @@ def benchmark_duckdb(input_path: Path, output_path: Path) -> tuple[float, float]
         tracemalloc.stop()
         conn.close()
 
-    peak_memory_mb = peak / (1024 * 1024)
+    peak_memory_mb = bytes_to_mb(peak)
 
     return elapsed, peak_memory_mb
 
@@ -296,7 +297,7 @@ def benchmark_geopandas(input_path: Path, output_path: Path, *, engine: str) -> 
         _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
 
-    peak_memory_mb = peak / (1024 * 1024)
+    peak_memory_mb = bytes_to_mb(peak)
 
     return elapsed, peak_memory_mb
 
@@ -333,7 +334,7 @@ def benchmark_gdal(input_path: Path, output_path: Path) -> tuple[float, float]:
 
         while process.poll() is None:
             try:
-                mem = ps_process.memory_info().rss / (1024 * 1024)
+                mem = bytes_to_mb(ps_process.memory_info().rss)
                 peak_memory = max(peak_memory, mem)
             except psutil.NoSuchProcess:
                 break
@@ -381,7 +382,7 @@ def run_single_benchmark(
             "elapsed_seconds": round(elapsed, 3),
             "memory_mb": round(memory, 2),
             "output_file": output_path.name,
-            "output_size_mb": round(output_path.stat().st_size / (1024 * 1024), 2),
+            "output_size_mb": round(bytes_to_mb(output_path.stat().st_size), 2),
             "success": True,
         }
     except Exception as e:

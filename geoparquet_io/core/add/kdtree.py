@@ -44,6 +44,7 @@ from geoparquet_io.core.remote import (
     display_path,
     needs_httpfs,
 )
+from geoparquet_io.core.sizing import bytes_to_mb
 from geoparquet_io.core.stream_io import write_output
 from geoparquet_io.core.streaming import (
     is_stdin,
@@ -66,7 +67,7 @@ ITERATIONS_MISSING = "must specify either iterations or auto"
 def _file_size_mb(path: str) -> float:
     """Size of ``path`` in MB, or 0.0 when it cannot be stat'd (e.g. a URL)."""
     try:
-        return os.path.getsize(path) / (1024 * 1024)
+        return bytes_to_mb(os.path.getsize(path))
     except OSError:
         return 0.0
 

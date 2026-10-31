@@ -31,7 +31,7 @@ streaming = importlib.import_module("geoparquet_io.core.streaming")
 admin_datasets = importlib.import_module("geoparquet_io.core.admin_datasets")
 admin_divisions = importlib.import_module("geoparquet_io.core.add.admin_divisions")
 
-ONE_MB = 1024 * 1024
+ONE_MB = 10**6
 
 
 @pytest.fixture

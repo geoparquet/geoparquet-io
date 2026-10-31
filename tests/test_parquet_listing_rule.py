@@ -51,4 +51,4 @@ def test_the_partition_size_report_skips_dot_entries(tmp_path):
     root = _tree(tmp_path)
     data = (root / "a.parquet").stat().st_size + (root / "k=1" / "b.parquet").stat().st_size
     total_mb, _avg = calculate_partition_stats(str(root), 2)
-    assert total_mb == data / (1024 * 1024)
+    assert total_mb == data / 10**6

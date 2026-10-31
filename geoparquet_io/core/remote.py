@@ -17,6 +17,7 @@ from geoparquet_io.core.exceptions import (
     sanitize_url_for_logging,
 )
 from geoparquet_io.core.logging_config import debug, info, progress, success
+from geoparquet_io.core.sizing import bytes_to_mb
 
 #: Every URL scheme gpio reads or writes, and the store family it belongs to.
 #: The one scheme table (#1367): :func:`is_remote_url` and every family test
@@ -379,7 +380,7 @@ def upload_if_remote(local_path, remote_path, profile=None, is_directory=False, 
         else:
             total_size = os.path.getsize(local_path)
 
-        size_mb = total_size / (1024 * 1024)
+        size_mb = bytes_to_mb(total_size)
         progress(f"Uploading {size_mb:.1f} MB to {sanitize_url_for_logging(remote_path)}...")
 
     pattern = "*.parquet" if is_directory else None

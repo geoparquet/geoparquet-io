@@ -35,6 +35,7 @@ from geoparquet_io.core.remote import (
     show_remote_read_message,
     upload_if_remote,
 )
+from geoparquet_io.core.sizing import bytes_to_mb
 
 
 class PartitionAnalysisError(PartitionError):
@@ -125,7 +126,7 @@ def calculate_partition_stats(output_folder: str, num_partitions: int) -> tuple[
         Tuple of (total_size_mb, avg_size_mb).
     """
     total_size_bytes = sum(os.path.getsize(f) for f in get_all_parquet_files(output_folder))
-    total_size_mb = total_size_bytes / (1024 * 1024)
+    total_size_mb = bytes_to_mb(total_size_bytes)
     avg_size_mb = total_size_mb / num_partitions if num_partitions > 0 else 0
     return total_size_mb, avg_size_mb
 
@@ -381,8 +382,8 @@ def analyze_partition_strategy(
     # Calculate derived metrics
     imbalance_ratio = max_rows / median_rows if median_rows > 0 else 0
     largest_partition_pct = (max_rows / total_rows * 100) if total_rows > 0 else 0
-    avg_size_mb = avg_size_bytes / (1024 * 1024)
-    max_size_mb = max_size_bytes / (1024 * 1024)
+    avg_size_mb = bytes_to_mb(avg_size_bytes)
+    max_size_mb = bytes_to_mb(max_size_bytes)
 
     # Check for errors and warnings
     errors = _check_partition_errors(
@@ -431,7 +432,7 @@ def analyze_partition_strategy(
             "avg": avg_rows,
         },
         "size_stats": {
-            "min_mb": min_size_bytes / (1024 * 1024),
+            "min_mb": bytes_to_mb(min_size_bytes),
             "max_mb": max_size_mb,
             "avg_mb": avg_size_mb,
         },

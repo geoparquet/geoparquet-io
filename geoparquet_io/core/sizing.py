@@ -17,6 +17,9 @@ import re
 #: reads is this many bytes (approved change 5 of #1367).
 BYTES_PER_MB = 10**6
 
+#: Binary buffer thresholds use MiB explicitly, never MB.
+BYTES_PER_MIB = 2**20
+
 _UNITS = {
     "": BYTES_PER_MB,
     "B": 1,

@@ -70,6 +70,8 @@ CHECK_OWNER_DEFS = REPO / "scripts" / "check_owner_defs.py"
 #: The pinned number of exemption entries per check (G1 per arm). Lower it with
 #: the commit that deletes a copy; raising it needs a reason in review.
 EXPECTED_COUNTS = {
+    "G1.binary_mb": 0,
+    "G1.raw_parquet_copy": 4,
     "G1.tid251": 8,
     "G1.geo_parse": 0,
     "G1.set_memory_limit": 0,
@@ -138,16 +140,13 @@ def _entry_matches(entry: dict, hit: Hit) -> bool:
 
 
 def reconcile(hits: list[Hit], entries: list[dict]) -> tuple[list[Hit], list[str]]:
-    """The unexcused hits, and a description of each entry whose count is off.
-
-    ``count = "*"`` (a per-file allowance, used only where a whole module is
-    legitimately in the pattern's business) matches one hit or more."""
+    """Unexcused hits and entries whose exact integer count is off."""
     unexcused = [h for h in hits if not any(_entry_matches(e, h) for e in entries)]
     miscounted = []
     for entry in entries:
         matched = sum(_entry_matches(entry, h) for h in hits)
         want = entry.get("count", 1)
-        if matched != want and not (want == "*" and matched >= 1):
+        if type(want) is not int or matched != want:
             miscounted.append(
                 f"{entry['path']} {entry.get('name', '')} {entry.get('line_pattern', '')}: "
                 f"entry says count={want}, matches {matched}"
@@ -986,7 +985,7 @@ def _find_json_dumps(m: _Module) -> Iterator[Hit]:
     ``dumps_json`` is strict JSON over values a bare ``json.dumps`` raises on
     (a DATE, a DECIMAL) or prints as the non-JSON ``NaN`` (#1226). The modules
     that serialize the geo block and other footer metadata are allowed per
-    file in the exemptions (``count = "*"``): that is metadata, not a report.
+    file with exact counts in the exemptions: that is metadata, not a report.
     """
     for node in walk(m.tree):
         if m.calls(node, "json.dumps", "json.dump"):
@@ -3522,9 +3521,61 @@ class Arm:
 
 _HTTP_OWNER = ("geoparquet_io/core/http_retry.py",)
 
+
 #: G1's AST arms: what each looks for, which module owns it, where it looks.
 #: The finder's docstring names the defect or regrowth it would have caught.
+def _find_binary_mb(m):
+    """Byte units belong to sizing, including binary byte thresholds."""
+    for node in walk(m.tree):
+        if isinstance(node, ast.BinOp) and (
+            ast.unparse(node)
+            in {
+                "1024 * 1024",
+                "1024 ** 2",
+                "2 ** 20",
+                "1 << 20",
+            }
+            or (
+                isinstance(node.op, ast.Mult)
+                and len(re.findall(r"\b1024\b", ast.unparse(node))) >= 2
+            )
+        ):
+            yield m.hit(node)
+
+
+def _find_raw_parquet_copy(m):
+    """Parquet COPY writes must pass through the write facade."""
+    for node in walk(m.tree):
+        if isinstance(node, (ast.Constant, ast.JoinedStr)):
+            if id(node) in m.docstrings:
+                continue
+            if isinstance(node, ast.Constant) and isinstance(
+                m.parents.get(id(node)), ast.JoinedStr
+            ):
+                continue
+            text = (
+                node.value
+                if isinstance(node, ast.Constant)
+                else " ".join(n.value for n in node.values if isinstance(n, ast.Constant))
+            )
+            if isinstance(text, str) and re.search(
+                r"\bCOPY\s+.+?\bTO\s+.+?\bFORMAT\s*(?:=\s*)?['\"]?PARQUET\b",
+                text,
+                re.I | re.S,
+            ):
+                yield m.hit(node)
+
+
 ARMS = {
+    "binary_mb": Arm(_find_binary_mb, ("geoparquet_io/core/sizing.py",)),
+    "raw_parquet_copy": Arm(
+        _find_raw_parquet_copy,
+        (
+            "geoparquet_io/core/parquet_writer.py",
+            "geoparquet_io/core/write_funnels.py",
+            "geoparquet_io/core/write_strategies/*",
+        ),
+    ),
     "geo_parse": Arm(_find_geo_parse, ("geoparquet_io/core/geo_metadata.py",)),
     "set_memory_limit": Arm(
         _find_set_memory_limit,
@@ -4018,6 +4069,7 @@ def _all_entries(data: dict) -> Iterator[tuple[str, dict]]:
 def test_every_exemption_entry_names_a_path_and_a_reason():
     problems = []
     for where, entry in _all_entries(load_exemptions()):
+        assert type(entry.get("count", 1)) is int, (where, entry)
         if where.startswith(("G3.", "G13.")):  # pairs/options, not paths: own tests
             continue
         if not str(entry.get("reason", "")).strip():
@@ -4039,6 +4091,8 @@ def test_g4_whitelist_has_a_reason():
 # ---------------------------------------------------------------------------
 
 G1_PLANTS = {
+    "binary_mb": "size = 1024 * 1024\n",
+    "raw_parquet_copy": "con.execute(\"COPY (SELECT * FROM t) TO 'x' (FORMAT PARQUET)\")\n",
     "staging": ("import os\n\ndef publish(staged, final):\n    os.replace(staged, final)\n"),
     "geo_parse": 'import json\n\ndef read(md):\n    return json.loads(md[b"geo"])\n',
     "set_memory_limit": "def cap(con):\n    con.execute(\"SET memory_limit = '4GB'\")\n",
@@ -4097,6 +4151,8 @@ G1_PLANTS = {
 
 #: Near-misses each arm must not flag, so a planted hit is the pattern itself.
 G1_CLEAN = {
+    "binary_mb": "size = mb_to_bytes(64)\n",
+    "raw_parquet_copy": "con.execute(\"COPY t TO 'x' (FORMAT CSV)\")\n",
     "staging": (
         "import tempfile\n\n"
         "def spill_dir():\n    return tempfile.gettempdir()\n\n"
@@ -5372,10 +5428,10 @@ def test_g12_the_g1_arms_pass_the_t0b_near_misses(tmp_path, arm_name, label, sou
     assert arm_hits(repo, arm_name) == [], f"{arm_name} flagged {label}"
 
 
-def test_g12_a_star_count_allows_a_whole_module_but_not_none(tmp_path):
+def test_g12_a_star_count_is_rejected(tmp_path):
     entry = {"path": "geoparquet_io/m.py", "count": "*", "reason": "r"}
     hits = [Hit("geoparquet_io/m.py", n, "f", "x") for n in (1, 2, 3)]
-    assert reconcile(hits, [entry]) == ([], [])
+    assert reconcile(hits, [entry])[1]
     assert reconcile([], [entry])[1], "a '*' entry matching nothing is stale"
 
 
@@ -6874,3 +6930,28 @@ STAGING_SHAPES = {
 def test_g12_staging_arm_flags_every_shape(shape, tmp_path):
     repo = _plant(tmp_path, "staging", STAGING_SHAPES[shape])
     assert len(arm_hits(repo, "staging")) == 1
+
+
+@pytest.mark.parametrize(
+    "expression", ["1024 * 1024", "1024**2", "2**20", "1 << 20", "16 * 1024 * 1024"]
+)
+def test_binary_mb_spellings_are_guarded(tmp_path, expression):
+    assert len(arm_hits(_plant(tmp_path, "binary_mb", "size = " + expression), "binary_mb")) == 1
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "COPY t TO 'x' (FORMAT PARQUET)",
+        "COPY (SELECT * FROM t) TO 'x' (FORMAT 'parquet')",
+    ],
+)
+def test_raw_parquet_copy_table_and_query_are_guarded(tmp_path, sql):
+    assert (
+        len(
+            arm_hits(
+                _plant(tmp_path, "raw_parquet_copy", "query = " + repr(sql)), "raw_parquet_copy"
+            )
+        )
+        == 1
+    )

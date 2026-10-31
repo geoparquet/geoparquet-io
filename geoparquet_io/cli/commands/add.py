@@ -40,9 +40,10 @@ from geoparquet_io.core.add.stac_metadata import (
 from geoparquet_io.core.add.stac_metadata import add_stac_metadata as add_stac_metadata_impl
 from geoparquet_io.core.file_utils import validate_parquet_extension
 from geoparquet_io.core.index_ops import get_index_spec
+from geoparquet_io.core.sizing import BYTES_PER_MB
 from geoparquet_io.core.streaming import StreamingError
 
-ONE_MB = 1024 * 1024
+ONE_MB = BYTES_PER_MB
 
 
 def _clear_admin_cache_interactively(cache_dir, clear_admin_cache):

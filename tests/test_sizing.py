@@ -259,3 +259,10 @@ def test_normalize_size_string(text, expected):
     normalized = normalize_size_string(text)
     assert normalized == expected
     assert parse_size_string(normalized) == parse_size_string(text)
+
+
+def test_requested_64_mb_row_group_is_graded_optimal():
+    from geoparquet_io.core.check_parquet_structure import assess_row_group_size
+
+    group_bytes = mb_to_bytes(64)
+    assert assess_row_group_size(group_bytes, group_bytes * 2)[0] == "optimal"

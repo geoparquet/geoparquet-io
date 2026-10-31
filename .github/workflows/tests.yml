@@ -376,12 +376,9 @@ jobs:
     # documented commands were therefore verified only after merge (#896).
     #
     # One runner, not the ten of the fast matrix: these assert that a documented
-    # command still works, which is not per-interpreter behaviour. The 57 blocks
-    # already in the fast lane keep their Windows and macOS coverage there; the
-    # rest stay Linux-only until slow-tests picks them up on merge. That is a real
-    # gap for the shell-quoting and path-encoding bugs this repo has seen only on
-    # Windows -- named here rather than glossed, and cheap to close later by adding
-    # an os matrix if it ever bites.
+    # command still works, which is not per-interpreter behaviour. All docs
+    # examples carry slow now; this PR job provides Linux coverage, and the
+    # slow matrix provides Windows and macOS coverage after merge.
     #
     # A gate through `all-checks` (#1367). #894 was this lane reading as flaky;
     # its network blocks are excluded here, but the ~234 that execute all spawn

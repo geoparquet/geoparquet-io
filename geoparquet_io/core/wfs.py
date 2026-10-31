@@ -31,6 +31,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.duckdb_utils import as_wkb_sql, geom_from_wkb_sql
 from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
+from geoparquet_io.core.sizing import BYTES_PER_MIB, bytes_to_mb
 
 # Public API
 __all__ = [
@@ -110,7 +111,7 @@ from geoparquet_io.core.write_funnels import write_geoparquet_table
 # own size; but DuckDB's reader allocates a multiple of the limit per active
 # reader, so a fixed 1 GiB ran small responses out of memory on modest hosts
 # (#1344). The limit is sized per response, with a floor, and capped at 1 GiB.
-_MIN_JSON_OBJECT_SIZE = 16 * 1024 * 1024
+_MIN_JSON_OBJECT_SIZE = 16 * BYTES_PER_MIB
 _MAX_JSON_OBJECT_SIZE = 1073741824
 
 
@@ -1915,7 +1916,7 @@ def _read_body_preview(path: str) -> str:
 
 # An empty FeatureCollection is a few hundred bytes of markup; a body larger
 # than this holds features and can skip the extra XML parse.
-_EMPTY_GML_SNIFF_MAX_BYTES: Final = 1024 * 1024
+_EMPTY_GML_SNIFF_MAX_BYTES: Final = BYTES_PER_MIB
 
 # FeatureCollection children that carry no features: bounds, metadata, or a
 # featureMembers wrapper with nothing inside (GeoServer's GML 3.1 empty shape).
@@ -2240,7 +2241,7 @@ def _fetch_wfs_page(
                 stack.enter_context(attempt_stack.pop_all())
             download.started = start_time
             download_time = time.time() - start_time
-            size_mb = download.total_bytes / (1024 * 1024)
+            size_mb = bytes_to_mb(download.total_bytes)
             debug(f"Downloaded {size_mb:.1f} MB in {download_time:.1f}s")
             return download
 

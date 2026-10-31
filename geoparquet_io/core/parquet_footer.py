@@ -65,6 +65,7 @@ from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import atomic_write
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.remote import is_remote_url
+from geoparquet_io.core.sizing import BYTES_PER_MIB
 
 #: Keys to set or, with a ``None`` value, to remove. A caller spells them as
 #: text; everything below the ``_normalized`` boundary works in the encoded
@@ -77,7 +78,7 @@ ENCRYPTED_MAGIC = b"PARE"
 
 # The trailer: a 4-byte little-endian footer length, then the magic.
 _TRAILER_SIZE = 8
-_COPY_CHUNK = 8 * 1024 * 1024
+_COPY_CHUNK = 8 * BYTES_PER_MIB
 
 # Thrift compact protocol type ids.
 _BOOL_TRUE, _BOOL_FALSE, _BYTE, _I16, _I32, _I64 = 1, 2, 3, 4, 5, 6

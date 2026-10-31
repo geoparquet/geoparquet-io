@@ -670,6 +670,7 @@
   ],
   "geoparquet_io.core.sizing": [
     "BYTES_PER_MB",
+    "BYTES_PER_MIB",
     "bytes_to_mb",
     "displayed_size_max",
     "format_memory_limit",

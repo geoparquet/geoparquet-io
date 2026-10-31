@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.file_utils import get_all_parquet_files
+from geoparquet_io.core.sizing import bytes_to_mb
 
 
 # Type-safe operation definition
@@ -35,7 +36,7 @@ def _run_write(input_path: Path, output_dir: Path) -> dict[str, Any]:
     pq.write_table(
         table, output_path, **resolve_codec(None, None, context="write").pyarrow_kwargs()
     )
-    return {"output_size_mb": output_path.stat().st_size / (1024 * 1024)}
+    return {"output_size_mb": bytes_to_mb(output_path.stat().st_size)}
 
 
 def _run_convert_geojson(input_path: Path, output_dir: Path) -> dict[str, Any]:
@@ -46,7 +47,7 @@ def _run_convert_geojson(input_path: Path, output_dir: Path) -> dict[str, Any]:
     geojson_path = input_path.with_suffix(".geojson")
     if geojson_path.exists():
         convert_to_geoparquet(str(geojson_path), str(output_path))
-        return {"output_size_mb": output_path.stat().st_size / (1024 * 1024)}
+        return {"output_size_mb": bytes_to_mb(output_path.stat().st_size)}
     return {"skipped": True, "reason": "No GeoJSON version available"}
 
 
@@ -58,7 +59,7 @@ def _run_convert_gpkg(input_path: Path, output_dir: Path) -> dict[str, Any]:
     gpkg_path = input_path.with_suffix(".gpkg")
     if gpkg_path.exists():
         convert_to_geoparquet(str(gpkg_path), str(output_path))
-        return {"output_size_mb": output_path.stat().st_size / (1024 * 1024)}
+        return {"output_size_mb": bytes_to_mb(output_path.stat().st_size)}
     return {"skipped": True, "reason": "No GeoPackage version available"}
 
 
@@ -169,7 +170,7 @@ def _run_chain_extract_bbox_sort(input_path: Path, output_dir: Path) -> dict[str
     return {
         "columns_selected": len(columns),
         "final_rows": result_table.num_rows,
-        "final_size_mb": final_output.stat().st_size / (1024 * 1024),
+        "final_size_mb": bytes_to_mb(final_output.stat().st_size),
         "steps_completed": 3,
     }
 
@@ -218,7 +219,7 @@ def _run_chain_convert_optimize(input_path: Path, output_dir: Path) -> dict[str,
     return {
         "source_format": source_format,
         "final_rows": result_table.num_rows,
-        "final_size_mb": final_output.stat().st_size / (1024 * 1024),
+        "final_size_mb": bytes_to_mb(final_output.stat().st_size),
         "steps_completed": 3,
     }
 
@@ -282,7 +283,7 @@ def _run_convert_shapefile(input_path: Path, output_dir: Path) -> dict[str, Any]
     shp_path = input_path.with_suffix(".shp")
     if shp_path.exists():
         convert_to_geoparquet(str(shp_path), str(output_path))
-        return {"output_size_mb": output_path.stat().st_size / (1024 * 1024)}
+        return {"output_size_mb": bytes_to_mb(output_path.stat().st_size)}
     return {"skipped": True, "reason": "No Shapefile version available"}
 
 
@@ -294,7 +295,7 @@ def _run_convert_fgb(input_path: Path, output_dir: Path) -> dict[str, Any]:
     fgb_path = input_path.with_suffix(".fgb")
     if fgb_path.exists():
         convert_to_geoparquet(str(fgb_path), str(output_path))
-        return {"output_size_mb": output_path.stat().st_size / (1024 * 1024)}
+        return {"output_size_mb": bytes_to_mb(output_path.stat().st_size)}
     return {"skipped": True, "reason": "No FlatGeobuf version available"}
 
 

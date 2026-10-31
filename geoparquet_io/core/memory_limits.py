@@ -34,6 +34,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.sizing import (
+    BYTES_PER_MIB,
     displayed_size_max,
     format_memory_limit,
     normalize_size_string,
@@ -188,7 +189,7 @@ def default_memory_limit() -> str | None:
 #: Memory each DuckDB thread needs for a large sort to spill rather than fail.
 #: Measured on a 4M-polygon Hilbert COPY: ~250MB per thread spilled reliably,
 #: under ~170MB raised OutOfMemoryException with a temp_directory set.
-_BYTES_PER_THREAD = 512 * 1024**2
+_BYTES_PER_THREAD = 512 * BYTES_PER_MIB
 
 
 def _thread_cap(limit_bytes: int) -> int:

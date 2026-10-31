@@ -46,6 +46,7 @@ from geoparquet_io.core.remote import (
     show_remote_read_message,
     validate_profile_for_urls,
 )
+from geoparquet_io.core.sizing import BYTES_PER_MIB
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
     is_stdin,
@@ -108,7 +109,7 @@ def _advised_output_version(
 # most about twice this beyond the output, against a whole column for a
 # concatenate-then-take, and each output chunk stays far below the 2 GiB a
 # 32-bit offset addresses.
-_GATHER_BATCH_BYTES = 16 * 1024 * 1024
+_GATHER_BATCH_BYTES = 16 * BYTES_PER_MIB
 _GATHER_THREADS = 4
 
 

@@ -11,7 +11,6 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 BUDGET = REPO / "tests" / "suite_budget.toml"
-pytestmark = pytest.mark.meta
 
 
 def collected_count(output):
@@ -34,14 +33,49 @@ def timeout_marks(root):
     The budget scans tests/ only, including the docs-example collector; each
     source call counts once, regardless of how many test items receive it.
     """
-    return sum(
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "timeout"
-        and ast.unparse(node.func.value) == "pytest.mark"
-        for path in root.rglob("*.py")
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-    )
+    count = 0
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        aliases = {"pytest": "pytest"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                aliases.update({a.asname or a.name: a.name for a in node.names})
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                aliases.update({a.asname or a.name: node.module + "." + a.name for a in node.names})
+
+        def resolved(node, aliases=aliases):
+            if isinstance(node, ast.Name):
+                return aliases.get(node.id, node.id)
+            if isinstance(node, ast.Attribute):
+                return resolved(node.value) + "." + node.attr
+            return ""
+
+        # Resolve simple assigned marker aliases too (timeout = mark.timeout).
+        for _ in range(len(tree.body)):
+            changed = False
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    origin = resolved(node.value)
+                    for target in node.targets:
+                        if isinstance(target, ast.Name) and origin.startswith("pytest."):
+                            if aliases.get(target.id) != origin:
+                                aliases[target.id] = origin
+                                changed = True
+            if not changed:
+                break
+
+        count += sum(
+            isinstance(n, ast.Call)
+            and resolved(n.func) in {"pytest.mark.timeout", "pytest.mark.timeout.with_args"}
+            for n in ast.walk(tree)
+        )
+    return count
+
+
+def test_default_timeout_is_pinned():
+    options = tomllib.loads((REPO / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"]
+    assert options["timeout"] == 60
+    assert "timeout" not in str(options.get("addopts", "")).lower()
 
 
 def test_fast_collection_budget():
@@ -64,6 +98,8 @@ def test_fast_collection_budget():
             "-q",
             "-p",
             "no:cacheprovider",
+            "-p",
+            "no:rerunfailures",
             "-o",
             "addopts=",
             "-m",
@@ -109,5 +145,11 @@ def test_budget_rejects_growth(tmp_path):
         'description = "pytest.mark.timeout(999)"\n'
     )
     assert timeout_marks(tmp_path) == 2
-    with pytest.raises(AssertionError, match="2 > 1"):
+    (tmp_path / "aliases.py").write_text(
+        "import pytest as pt\nfrom pytest import mark as m\n"
+        "a = m.timeout.with_args(90)\nb = pt.mark.timeout(80)\n"
+        "timeout_alias = m.timeout\nc = timeout_alias.with_args(70)\n"
+    )
+    assert timeout_marks(tmp_path) == 5
+    with pytest.raises(AssertionError, match="5 > 1"):
         assert_budget(timeout_marks(tmp_path), 1)

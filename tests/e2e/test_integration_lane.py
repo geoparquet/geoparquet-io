@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -158,34 +159,58 @@ def test_whole_pipeline_modules_run_in_slow_lane(module):
     assert selects("(slow or meta) and not network", names)
 
 
-def test_only_policy_modules_carry_slow_and_integration_marks():
-    """Moving another integration module to slow requires a policy-list edit."""
-    for path in sorted((PROJECT_ROOT / "tests").rglob("*.py")):
+def slow_mark_sites(root):
+    """Snapshot every slow marker expression, including function and alias forms."""
+    sites = []
+    for path in sorted(root.rglob("*.py")):
+        if "geoparquet-testing" in path.parts:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        names = set()
-        for statement in tree.body:
-            if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
-                continue
-            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
-            if not any(
-                isinstance(target, ast.Name) and target.id == "pytestmark" for target in targets
-            ):
-                continue
-            for node in ast.walk(statement.value):
-                if (
-                    isinstance(node, ast.Attribute)
-                    and isinstance(node.value, ast.Attribute)
-                    and node.value.attr == "mark"
-                    and isinstance(node.value.value, ast.Name)
-                    and node.value.value.id == "pytest"
-                ):
-                    names.add(node.attr)
-        if {"slow", "integration"} <= names:
-            relative = path.relative_to(PROJECT_ROOT).as_posix()
-            assert relative in SLOW_INTEGRATION_MODULES, (
-                f"{relative} has module-level slow and integration marks; "
-                "update SLOW_INTEGRATION_MODULES deliberately to change lane policy (#1402)"
-            )
+        aliases = {"pytest": "pytest"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                aliases.update({a.asname or a.name: a.name for a in node.names})
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                aliases.update({a.asname or a.name: node.module + "." + a.name for a in node.names})
+
+        def resolved(node, aliases=aliases):
+            if isinstance(node, ast.Name):
+                return aliases.get(node.id, node.id)
+            if isinstance(node, ast.Attribute):
+                return resolved(node.value) + "." + node.attr
+            return ""
+
+        def visit(node, scope, path=path):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                scope = (*scope, node.name)
+            if isinstance(node, ast.Attribute) and resolved(node) == "pytest.mark.slow":
+                sites.append(
+                    path.relative_to(root).as_posix() + "::" + ".".join(scope or ["<module>"])
+                )
+            for child in ast.iter_child_nodes(node):
+                visit(child, scope)
+
+        visit(tree, ())
+    return sorted(sites)
+
+
+def test_slow_marks_are_ratchet_pinned():
+    pinned = tomllib.loads((PROJECT_ROOT / "tests/suite_budget.toml").read_text())["fast_suite"][
+        "slow_mark_sites"
+    ]
+    assert slow_mark_sites(PROJECT_ROOT / "tests") == pinned
+
+
+def test_slow_snapshot_catches_function_and_alias_marks(tmp_path):
+    (tmp_path / "example.py").write_text(
+        "from pytest import mark as m\n@pytest.mark.slow\ndef test_a(): pass\n"
+        "@m.slow.with_args()\ndef test_b(): pass\npytestmark = m.slow\n"
+    )
+    assert slow_mark_sites(tmp_path) == [
+        "example.py::<module>",
+        "example.py::test_a",
+        "example.py::test_b",
+    ]
 
 
 def test_plain_integration_tests_still_run_in_fast_lane():

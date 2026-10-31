@@ -18,6 +18,7 @@ from geoparquet_io.benchmarks.profile_report import save_profile_data
 from geoparquet_io.core.benchmark import get_environment_info
 from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.logging_config import debug, progress
+from geoparquet_io.core.sizing import bytes_to_mb
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +136,7 @@ def run_single_operation(
         current_rss = process.memory_info().rss
 
         # Calculate RSS delta from baseline (memory used during operation)
-        rss_delta_mb = (current_rss - baseline_rss) / (1024 * 1024)
+        rss_delta_mb = bytes_to_mb(current_rss - baseline_rss)
 
         return BenchmarkResult(
             operation=operation,
@@ -159,7 +160,7 @@ def run_single_operation(
             )
 
         current_rss = process.memory_info().rss
-        rss_delta_mb = (current_rss - baseline_rss) / (1024 * 1024)
+        rss_delta_mb = bytes_to_mb(current_rss - baseline_rss)
 
         return BenchmarkResult(
             operation=operation,

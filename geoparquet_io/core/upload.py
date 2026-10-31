@@ -29,6 +29,7 @@ from geoparquet_io.core.remote import (
     is_http_url,
     is_s3_url,
 )
+from geoparquet_io.core.sizing import bytes_to_mb
 
 
 def _try_infer_region_from_bucket(bucket: str) -> str | None:
@@ -256,7 +257,7 @@ def _print_directory_dry_run(
     for f in files[:10]:  # Show first 10 files
         rel_path = f.relative_to(source)
         target_key = f"{prefix.rstrip('/')}/{rel_path}" if prefix else str(rel_path)
-        size_mb = f.stat().st_size / (1024 * 1024)
+        size_mb = bytes_to_mb(f.stat().st_size)
         print(f"  • {f.name} ({size_mb:.2f} MB) → {target_key}")
     if len(files) > 10:
         print(f"  ... and {len(files) - 10} more file(s)")
@@ -388,7 +389,7 @@ def _setup_store_and_kwargs(
 def _upload_file_sync(store, source: Path, target_key: str, **kwargs) -> None:
     """Upload a single file synchronously and report progress."""
     file_size = source.stat().st_size
-    size_mb = file_size / (1024 * 1024)
+    size_mb = bytes_to_mb(file_size)
 
     progress(f"Uploading {source.name} ({size_mb:.2f} MB) → {target_key}")
 
@@ -432,7 +433,7 @@ def _upload_one_file(
     try:
         target_key = _build_target_key(file_path, source, prefix)
         file_size = file_path.stat().st_size
-        size_mb = file_size / (1024 * 1024)
+        size_mb = bytes_to_mb(file_size)
         start_time = time.time()
 
         progress(f"Uploading {file_path.name} ({size_mb:.2f} MB) → {target_key}")
@@ -485,7 +486,7 @@ def _upload_directory_sync(
     max_files = max(1, max_files)
 
     total_size = sum(f.stat().st_size for f in files)
-    total_size_mb = total_size / (1024 * 1024)
+    total_size_mb = bytes_to_mb(total_size)
     progress(f"Found {len(files)} file(s) to upload ({total_size_mb:.2f} MB total)")
 
     # Always present: a fail-fast error sets it, and so does Ctrl-C (#1031).
@@ -593,7 +594,7 @@ def _upload_single_file(
     """Upload a single file."""
     target_key = _get_target_key(source, prefix, destination.endswith("/"))
     file_size = source.stat().st_size
-    size_mb = file_size / (1024 * 1024)
+    size_mb = bytes_to_mb(file_size)
 
     if dry_run:
         _print_single_file_dry_run(source, destination, target_key, size_mb, profile)
@@ -644,7 +645,7 @@ def _upload_directory(
         return
 
     total_size = sum(f.stat().st_size for f in files)
-    total_size_mb = total_size / (1024 * 1024)
+    total_size_mb = bytes_to_mb(total_size)
 
     if dry_run:
         _print_directory_dry_run(

@@ -95,7 +95,7 @@ from geoparquet_io.core.remote import (
     show_remote_read_message,
     validate_profile_for_urls,
 )
-from geoparquet_io.core.sizing import format_size
+from geoparquet_io.core.sizing import BYTES_PER_MIB, format_size
 from geoparquet_io.core.source_text import (
     SourceText,
     check_arrow_text,
@@ -758,13 +758,13 @@ def _dated_st_read_expr(input_file, layer, dates: DatetimeRead, column_aliases=N
 # with complex polygons (coastlines, admin boundaries) that exceed this.
 # 50MB should handle virtually any reasonable geospatial data.
 # See: https://github.com/geoparquet/geoparquet-io/issues/301
-CSV_MAX_LINE_SIZE_DEFAULT = 50 * 1024 * 1024  # 50 MB
+CSV_MAX_LINE_SIZE_DEFAULT = 50 * BYTES_PER_MIB  # 50 MiB
 # Floor for the CSV reader's buffer. DuckDB hands parallel scan work out per
 # buffer, so a buffer that tracks a small --csv-max-line-size all the way down
 # starves the scan: a 200k-row read costs 170ms at a 1KB buffer against 26ms at
 # 4MiB. Overhead is flat from ~4MiB up, and 4MiB is nowhere near the 800MiB
 # allocation #1113 removed.
-CSV_READ_BUFFER_MIN = 4 * 1024 * 1024  # 4 MB
+CSV_READ_BUFFER_MIN = 4 * BYTES_PER_MIB  # 4 MiB
 
 # Module-level override (set by CLI --csv-max-line-size option)
 _csv_max_line_size_override = None

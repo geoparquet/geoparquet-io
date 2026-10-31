@@ -26,7 +26,7 @@ from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.logging_config import debug, error, info, progress, success, warn
 from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
-from geoparquet_io.core.sizing import format_size
+from geoparquet_io.core.sizing import bytes_to_mb, format_size
 
 #: What a file with no row groups can be told about its compression: nothing.
 #: Shared with ``check_optimization`` so both checks word it the same way (#823).
@@ -122,8 +122,8 @@ def assess_row_group_size(
             - "suboptimal"
             - "poor"
     """
-    avg_group_size_mb = avg_group_size_bytes / (1024 * 1024)
-    total_size_mb = total_size_bytes / (1024 * 1024)
+    avg_group_size_mb = bytes_to_mb(avg_group_size_bytes)
+    total_size_mb = bytes_to_mb(total_size_bytes)
 
     if total_size_mb < 64:
         return "optimal", "Row group size is appropriate for small file", "green"
@@ -179,7 +179,7 @@ def _is_small_single_group(total_size_bytes=None, num_groups=None) -> bool:
     """
     if total_size_bytes is None or num_groups is None:
         return False
-    return total_size_bytes / (1024 * 1024) < 64 and num_groups == 1
+    return bytes_to_mb(total_size_bytes) < 64 and num_groups == 1
 
 
 def row_count_fix_available(avg_rows, total_size_bytes=None, num_groups=None) -> bool:
