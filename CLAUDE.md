@@ -262,6 +262,7 @@ local way to check it.
 
 | Marker | Description |
 |--------|-------------|
+| `@pytest.mark.fresh_duckdb` | requires an independent database to inspect connection initialization or extension state |
 | `@pytest.mark.slow` | marks tests as slow (deselect with '-m "not slow"') |
 | `@pytest.mark.network` | marks tests requiring network access (deselect with '-m "not network"') |
 | `@pytest.mark.integration` | marks end-to-end integration tests; runs in the fast suite unless also marked slow/network (see tests/e2e/test_integration_lane.py) |

@@ -219,6 +219,7 @@ def extension_loads(monkeypatch):
 
 
 @pytest.mark.parametrize(("version", "loads_spatial"), [("1.5.6", True), ("2.0.0", False)])
+@pytest.mark.fresh_duckdb
 def test_auto_spatial_reads_core_geometry(extension_loads, version, loads_spatial):
     """get_duckdb_connection(load_spatial=None) follows ``core_geometry``."""
     with pretend_duckdb_version(version):

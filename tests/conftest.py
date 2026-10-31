@@ -74,7 +74,7 @@ def _install_worker_database():
 
     real = utils.get_duckdb_connection
     parameters = signature(real)
-    state = {"root": None, "fresh": False, "cursors": 0}
+    state = {"root": None, "fresh": False, "cursors": 0, "schemas": []}
 
     @functools.wraps(real)
     def connection(*args, **kwargs):
@@ -89,16 +89,18 @@ def _install_worker_database():
             )
             or options["load_spatial"] is False
             or options["load_httpfs"]
-            or os.environ.get("GPIO_DUCKDB_PROFILE")
             or state["fresh"]
         ):
             return real(*args, **kwargs)
         if state["root"] is None:
             state["root"] = real()
         state["cursors"] += 1
-        cursor = state["root"].cursor()
         schema = f"test_connection_{state['cursors']}"
+        cursor = state["root"].cursor()
+        cursor.execute(f"SET threads = {_DUCKDB_TEST_THREADS}")
+        utils._apply_connection_limits(cursor, None, None)
         cursor.execute(f"CREATE SCHEMA {schema}")
+        state["schemas"].append(schema)
         cursor.execute(f"SET schema = '{schema}'")
         cursor.execute("SET arrow_large_buffer_size = true")
         cursor.execute("SET geometry_always_xy = true")
@@ -323,18 +325,16 @@ def clear_package_caches() -> None:
 def _isolate_package_caches(worker_duckdb_database, request):
     """Give every test in the suite a cold cache, warn-once caches included."""
     clear_package_caches()
-    # These tests inspect LOAD itself, or require fresh GDAL encoding state.
-    worker_duckdb_database["fresh"] = (
-        getattr(request.node, "originalname", None)
-        in {
-            "test_auto_spatial_reads_core_geometry",
-            "test_inspect_head_still_loads_spatial_without_core_geometry",
-            "test_factory_resolves_auto_spatial_from_core_geometry",
-        }
-        or request.node.path.name == "test_convert_codepage_shapefile.py"
-    )
-    yield
-    worker_duckdb_database["fresh"] = False
+    worker_duckdb_database["fresh"] = request.node.get_closest_marker("fresh_duckdb") is not None
+    first_schema = len(worker_duckdb_database["schemas"])
+    try:
+        yield
+    finally:
+        root = worker_duckdb_database["root"]
+        for schema in worker_duckdb_database["schemas"][first_schema:]:
+            root.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        del worker_duckdb_database["schemas"][first_schema:]
+        worker_duckdb_database["fresh"] = False
 
 
 def walk_cli_commands(cmd, path: tuple[str, ...] = ()):

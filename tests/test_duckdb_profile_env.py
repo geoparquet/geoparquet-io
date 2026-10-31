@@ -22,6 +22,9 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 
+pytestmark = pytest.mark.fresh_duckdb
+
+
 BUILDINGS = os.path.join(os.path.dirname(__file__), "data", "buildings_test.parquet")
 
 

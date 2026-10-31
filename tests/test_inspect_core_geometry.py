@@ -152,6 +152,7 @@ def test_inspect_works_with_spatial_genuinely_unavailable(runner, test_file, arg
 
 
 @requires_no_core_geometry
+@pytest.mark.fresh_duckdb
 def test_inspect_head_still_loads_spatial_without_core_geometry(runner, test_file, extension_loads):
     result = runner.invoke(cli, ["inspect", "head", test_file], catch_exceptions=False)
 
@@ -234,6 +235,7 @@ def test_preview_fallback_ignores_non_catalog_errors(extension_loads):
 # --- the load_spatial=None auto sentinel ----------------------------------------
 
 
+@pytest.mark.fresh_duckdb
 def test_factory_resolves_auto_spatial_from_core_geometry(extension_loads):
     """load_spatial=None loads spatial exactly where DuckDB's core lacks GEOMETRY."""
     get_duckdb_connection(load_spatial=None, load_httpfs=False).close()
