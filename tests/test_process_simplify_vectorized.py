@@ -1,8 +1,9 @@
 """Invariants the vectorized simplify path must not change (#1300).
 
-``_simplify_values`` and ``_accumulate_stats`` (since replaced by the\nstats owner's per-batch measure) used to walk every geometry in
-Python -- to build ``idx``, to scatter the output WKB back into a list, to fold
-the geometry-type set, and to invert the empty mask. On inputs with many small
+``_simplify_values`` and ``_accumulate_stats`` (since replaced by the stats
+owner's per-batch measure) used to walk every geometry in Python -- to build
+``idx``, to scatter the output WKB back into a list, to fold the geometry-type
+set, and to invert the empty mask. On inputs with many small
 geometries those loops, not the Rust kernel, dominated: ``coarsen._core`` was
 7% of a 1M-building profile.
 
