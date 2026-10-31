@@ -2251,15 +2251,6 @@ def _dict_str_keys(node: ast.Dict) -> set[str]:
     return {k.value for k in node.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)}
 
 
-def _subscript_keys(node: ast.AST) -> list[ast.AST]:
-    """The subscripts of ``a[k1][k2]...``, outermost base first."""
-    keys = []
-    while isinstance(node, ast.Subscript):
-        keys.append(node.slice)
-        node = node.value
-    return keys[::-1]
-
-
 #: The keys that make a dict a ``geo`` block, not a report.
 _BLOCK_KEYS = frozenset({"version", "columns", "primary_column"})
 #: Methods that edit the dict they are called on.
