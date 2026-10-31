@@ -152,8 +152,13 @@ EXTENSION_TO_FORMAT: dict[str, str] = {
 
 
 def default_output_name(input_path: str, format_name: str) -> str:
-    """``<input stem><format extension>`` in the working directory, for a GDAL format."""
-    return Path(input_path).stem + str(GDAL_FORMATS[format_name]["extension"])
+    """``<input stem><format extension>`` in the working directory.
+
+    The extension is the format's first in :data:`EXTENSION_TO_FORMAT`, so a
+    GDAL format gets its ``GDAL_FORMATS`` extension and ``csv`` gets ``.csv``.
+    """
+    extension = next(ext for ext, name in EXTENSION_TO_FORMAT.items() if name == format_name)
+    return Path(input_path).stem + extension
 
 
 def _get_srs_parameter(input_path: str, verbose: bool = False) -> str | None:

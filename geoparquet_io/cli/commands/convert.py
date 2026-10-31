@@ -917,8 +917,7 @@ def convert_csv(
     configure_verbose(verbose)
 
     if output_file is None:
-        # Generate output filename
-        output_file = Path(input_file).stem + ".csv"
+        output_file = default_output_name(input_file, "csv")
 
     with _activate_s3(ctx, aws_profile=aws_profile):
         write_csv(

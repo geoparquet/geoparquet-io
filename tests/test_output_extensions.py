@@ -48,3 +48,8 @@ def test_default_output_name(name):
     out = default_output_name("data/roads.parquet", name)
     assert out == "roads" + GDAL_FORMATS[name]["extension"]
     assert Path(out).parent == Path(".")
+
+
+def test_default_output_name_covers_csv():
+    """`gpio convert csv` with no output names it the way the GDAL writers do."""
+    assert default_output_name("data/roads.parquet", "csv") == "roads.csv"
