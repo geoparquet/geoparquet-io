@@ -49,12 +49,8 @@ from pathlib import Path
 
 import pytest
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
-
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
+from scripts.toml_utils import load_toml
 from tests._precommit_hook import core_tree, hook_entry
 
 REPO = Path(__file__).resolve().parents[1]
@@ -81,7 +77,7 @@ EXPECTED_COUNTS = {
     "G1.retry_wrappers": 0,
     "G1.json_dumps": 20,
     "G1.parquet_metadata": 0,
-    "G1.row_group_policy": 2,
+    "G1.row_group_policy": 1,
     "G1.scheme_test": 0,
     "G1.overwrite_check": 0,
     "G1.output_version": 0,
@@ -105,8 +101,7 @@ EXPECTED_COUNTS = {
 
 
 def load_exemptions(path: Path = EXEMPTIONS_FILE) -> dict:
-    with path.open("rb") as fh:
-        return tomllib.load(fh)
+    return load_toml(path)
 
 
 # ---------------------------------------------------------------------------
@@ -3557,8 +3552,7 @@ _BANNED = re.compile(r"^`(?P<api>[^`]+)` is banned")
 
 
 def _pyproject() -> dict:
-    with (REPO / "pyproject.toml").open("rb") as fh:
-        return tomllib.load(fh)
+    return load_toml(REPO / "pyproject.toml")
 
 
 def tid251_hits(repo: Path, target: Path, config: Path = REPO / "pyproject.toml") -> list[Hit]:
@@ -5923,9 +5917,17 @@ def test_g12_pylint_missing_fails(tmp_path):
     # A fresh venv has no pylint; its interpreter is also used by the runner.
     import venv
 
-    venv.EnvBuilder(with_pip=False).create(tmp_path / "empty")
+    venv.EnvBuilder(with_pip=False, symlinks=sys.platform != "win32").create(tmp_path / "empty")
     result = subprocess.run(
-        [str(tmp_path / "empty/bin/python"), str(CHECK_PYLINT_DUPLICATES), "--repo", str(REPO)],
+        [
+            str(
+                tmp_path
+                / ("empty/Scripts/python.exe" if sys.platform == "win32" else "empty/bin/python")
+            ),
+            str(CHECK_PYLINT_DUPLICATES),
+            "--repo",
+            str(REPO),
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -5943,7 +5945,7 @@ def cap__owner_only_reads(path: Path, root: Path = REPO) -> list[str]:
     found = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "core_geometry":
-            found.append(f"{path.relative_to(root)}:{node.lineno} core_geometry")
+            found.append(f"{path.relative_to(root).as_posix()}:{node.lineno} core_geometry")
         elif (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
@@ -5952,7 +5954,9 @@ def cap__owner_only_reads(path: Path, root: Path = REPO) -> list[str]:
             and isinstance(node.args[0], ast.Name)
             and node.args[0].id == "duckdb"
         ):
-            found.append(f"{path.relative_to(root)}:{node.lineno} {node.func.id}(duckdb)")
+            found.append(
+                f"{path.relative_to(root).as_posix()}:{node.lineno} {node.func.id}(duckdb)"
+            )
     return sorted(found)
 
 
@@ -6034,7 +6038,7 @@ def size__violations(root: Path = PACKAGE) -> list[str]:
     found = []
     for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        rel = path.relative_to(root)
+        rel = path.relative_to(root).as_posix()
         if path.resolve() != size_SIZING.resolve():
             found += [f"{rel}:{n} size parser/formatter" for n in size__size_function_defs(tree)]
             found += [f"{rel}:{n} size grammar" for n in size__size_regexes(tree)]
@@ -6512,7 +6516,7 @@ def exception__gpio_error_names() -> frozenset[str]:
     """Names of ``GeoParquetError`` and every subclass defined in the package."""
     bases: dict[str, set[str]] = {}
     for path in PACKAGE.rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text())):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.ClassDef):
                 bases.setdefault(node.name, set()).update(
                     b.id if isinstance(b, ast.Name) else b.attr

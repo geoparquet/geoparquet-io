@@ -192,7 +192,7 @@ def _file_columns(raw_url: str, con, verbose: bool) -> list[tuple[str, bool]] | 
         if own:
             from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
-            con = get_duckdb_connection(load_httpfs=needs_httpfs(raw_url))
+            con = get_duckdb_connection(load_spatial=None, load_httpfs=needs_httpfs(raw_url))
         described = describe_query(con, f"SELECT * FROM read_parquet({sql_path(raw_url)})")
         return [(name, _is_geometry_type(type_)) for name, type_ in described]
     except Exception as e:  # noqa: BLE001 - the footer, or the block, still answers

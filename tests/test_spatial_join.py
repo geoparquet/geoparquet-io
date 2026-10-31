@@ -342,7 +342,7 @@ def test_admin_subquery_is_built_only_in_admin_datasets():
         rel = path.relative_to(PACKAGE).as_posix()
         if rel == "core/admin_datasets.py":
             continue
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         count = _literals_containing(text, " as _col_") + _literals_containing(
             text, "struct_pack(xmin := ST_XMin("
         )
@@ -373,7 +373,7 @@ def test_admin_join_query_is_built_only_in_admin_datasets():
         rel = path.relative_to(PACKAGE).as_posix()
         if rel in (OWNER, "core/admin_datasets.py"):
             continue
-        count = len(_calls_named(path.read_text(), "build_spatial_join_query"))
+        count = len(_calls_named(path.read_text(encoding="utf-8"), "build_spatial_join_query"))
         if count:
             found[rel] = count
     assert found == {}
@@ -403,7 +403,7 @@ def test_admin_join_connections_are_opened_only_in_admin_datasets():
         rel = path.relative_to(PACKAGE).as_posix()
         if rel in (OWNER, "core/admin_datasets.py"):
             continue
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         count = sum(
             1
             for call in _calls_named(text, "get_duckdb_connection")
@@ -480,7 +480,7 @@ def test_admin_callers_leave_the_admin_side_to_admin_datasets():
     admin_datasets; the three admin commands only call it."""
     found = {}
     for rel in ADMIN_CALLERS:
-        spelled = admin_side_spellings((PACKAGE / rel).read_text())
+        spelled = admin_side_spellings((PACKAGE / rel).read_text(encoding="utf-8"))
         if spelled:
             found[rel] = spelled
     assert found == {}
@@ -617,7 +617,7 @@ def test_add_and_partition_leave_the_join_chain_to_admin_datasets():
     chained temp tables and the table-vs-path rule are run_admin_join's."""
     found = {}
     for rel in CHAIN_CALLERS:
-        spelled = chain_spellings((PACKAGE / rel).read_text())
+        spelled = chain_spellings((PACKAGE / rel).read_text(encoding="utf-8"))
         if spelled:
             found[rel] = spelled
     assert found == {}
@@ -631,7 +631,7 @@ def test_chain_guard_sees_a_second_chain():
 def test_no_admin_module_imports_the_partition_dataset_setup():
     """aggregate admin and overview rollup took partition's private setup."""
     for rel in (*ADMIN_CALLERS, "core/process/overview/rollup.py"):
-        assert "_setup_admin_dataset" not in (PACKAGE / rel).read_text(), rel
+        assert "_setup_admin_dataset" not in (PACKAGE / rel).read_text(encoding="utf-8"), rel
 
 
 def _two_level_admin(tmp_path, monkeypatch, *, per_level=True):
@@ -847,11 +847,11 @@ def test_one_rule_for_the_source_a_join_step_reads(monkeypatch):
 def _functions_calling(path: Path, name: str) -> list[str]:
     """``module:function`` for every function in ``path`` that calls ``name``."""
     found = []
-    for node in ast.walk(ast.parse(path.read_text())):
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and _calls_named(
             ast.unparse(node), name
         ):
-            found.append(f"{path.relative_to(PACKAGE)}:{node.name}")
+            found.append(f"{path.relative_to(PACKAGE).as_posix()}:{node.name}")
     return found
 
 
@@ -912,6 +912,6 @@ def test_run_admin_join_takes_exactly_one_sink(sinks):
 def test_partition_leaves_materializing_the_join_to_run_admin_join():
     """The last step's ``CREATE TEMP TABLE`` under ``scoped_write_memory_limit``
     is the driver's own statement; partition passes the table's name."""
-    source = (PACKAGE / "core/partition/admin_hierarchical.py").read_text()
+    source = (PACKAGE / "core/partition/admin_hierarchical.py").read_text(encoding="utf-8")
     assert _literals_containing(source, "TEMP TABLE") == 0
     assert _calls_named(source, "scoped_write_memory_limit") == []

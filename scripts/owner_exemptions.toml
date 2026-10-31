@@ -57,10 +57,6 @@ reason = "permanent: WFS request, feature count, streaming page download and sta
 # Row-group count: core/parquet_writer.py owns the default and every resolver (#981, #1215).
 [[G1.row_group_policy]]
 path = "geoparquet_io/core/benchmark.py"
-line_pattern = "ROW_GROUP_SIZE 100000"
-reason = "permanent: the benchmark's fixed DuckDB baseline layout; it measures DuckDB, not a gpio output"
-[[G1.row_group_policy]]
-path = "geoparquet_io/core/benchmark.py"
 line_pattern = "ROW_GROUP_SIZE=100000"
 reason = "permanent: the same baseline, named in the benchmark's report"
 # HTTP retry policy: core/http_retry.py owns attempts, delay, timeout, statuses and Retry-After.

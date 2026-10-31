@@ -41,7 +41,7 @@ def _index_workflow_copies(path: Path, source: str) -> list[str]:
         }
         streaming_copy = node.name == "make_query" and bool(called & INDEX_ONLY_NAMES)
         if ensure_copy or streaming_copy:
-            copies.append(f"{path}:{node.name}")
+            copies.append(f"{path.as_posix()}:{node.name}")
     return copies
 
 
@@ -51,7 +51,7 @@ def test_index_workflows_have_one_owner():
     for path in root.rglob("*.py"):
         if path.name == "index_ops.py":
             continue
-        copies += _index_workflow_copies(path.relative_to(root), path.read_text())
+        copies += _index_workflow_copies(path.relative_to(root), path.read_text(encoding="utf-8"))
     assert copies == [], f"{len(copies)} index workflow copies: {copies}"
 
 
@@ -280,7 +280,9 @@ def test_sort_table_reuses_case_insensitive_quadkey_column(remove_column):
 
 
 def test_index_drivers_use_shared_funnels():
-    tree = ast.parse((Path(__file__).parents[1] / "geoparquet_io/core/index_ops.py").read_text())
+    tree = ast.parse(
+        (Path(__file__).parents[1] / "geoparquet_io/core/index_ops.py").read_text(encoding="utf-8")
+    )
     functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
     for driver, funnel in [
         ("add_index_column", "add_computed_column"),

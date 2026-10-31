@@ -444,7 +444,7 @@ Reduce output size by selecting only needed columns:
 
 <!-- doctest: needs-tippecanoe -->
 ```bash
-gpio extract data.parquet --include-cols name,type,population | \
+gpio extract data.parquet --include-cols name,address | \
   gpio convert geojson - | \
   tippecanoe -P -o output.pmtiles
 ```

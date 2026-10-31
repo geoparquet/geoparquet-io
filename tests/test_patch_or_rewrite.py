@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -210,6 +211,9 @@ def test_the_surviving_keys_are_the_funnels_own(tmp_path):
     assert _sidecars(out) == SIDECARS
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="Windows chmod does not implement POSIX permission bits"
+)
 def test_a_rewrite_into_an_existing_destination_keeps_its_mode(tmp_path, monkeypatch):
     """The rewrite replaces the destination in place; a 0640 file stays 0640.
 
@@ -451,5 +455,5 @@ def test_only_the_facade_buffers_a_stream_for_a_row_group_answer():
                     for kw in node.keywords
                 )
             ):
-                copies.append(f"{path.relative_to(root)}:{node.lineno}")
+                copies.append(f"{path.relative_to(root).as_posix()}:{node.lineno}")
     assert copies == [], copies

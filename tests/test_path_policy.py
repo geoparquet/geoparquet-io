@@ -10,6 +10,7 @@ given.
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -108,13 +109,31 @@ def bracket_file(tmp_path) -> Path:
     return path
 
 
-def test_an_existing_file_named_with_glob_characters_is_one_file(tmp_path):
-    for name in ("l[c.parquet", "a*b.parquet", "q?.parquet"):
-        path = tmp_path / name
-        shutil.copy(PLACES, path)
-        assert not has_glob_pattern(str(path)), name
-        assert not is_partition_path(str(path)), name
-        assert get_first_parquet_file(str(path)) == str(path)
+@pytest.mark.parametrize(
+    "name",
+    [
+        "l[c.parquet",
+        "a[b].parquet",
+        pytest.param(
+            "a*b.parquet",
+            marks=pytest.mark.skipif(
+                os.name == "nt", reason="Windows filenames cannot contain * or ?"
+            ),
+        ),
+        pytest.param(
+            "q?.parquet",
+            marks=pytest.mark.skipif(
+                os.name == "nt", reason="Windows filenames cannot contain * or ?"
+            ),
+        ),
+    ],
+)
+def test_an_existing_file_named_with_glob_characters_is_one_file(tmp_path, name):
+    path = tmp_path / name
+    shutil.copy(PLACES, path)
+    assert not has_glob_pattern(str(path)), name
+    assert not is_partition_path(str(path)), name
+    assert get_first_parquet_file(str(path)) == str(path)
 
 
 def test_a_bracket_that_names_no_file_is_still_a_glob(tmp_path):

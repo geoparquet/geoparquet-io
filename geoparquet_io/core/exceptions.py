@@ -21,7 +21,7 @@ import enum
 import json
 import re
 import socket
-import xml.etree.ElementTree
+import xml.etree.ElementTree  # nosec B405 -- only classifies ParseError; never parses XML
 from typing import NamedTuple, TypeGuard
 
 

@@ -331,7 +331,7 @@ class TestEveryProcessWriterResolves:
                 if "compression_level" not in args:
                     continue
                 body = ast.get_source_segment(source, node) or ""
-                key = (str(path.relative_to(root)).replace("\\", "/"), node.name)
+                key = (path.relative_to(root).as_posix(), node.name)
                 found[key] = 'context="process"' in body
         return found
 

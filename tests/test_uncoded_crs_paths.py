@@ -393,7 +393,16 @@ def _pmtiles_bounds(path: Path) -> tuple[float, float, float, float]:
 @pytest.mark.parametrize("extra", [[], ["--where", "id >= 0"]], ids=["plain", "where"])
 def test_pmtiles_create_lands_in_tokyo(extra, fixtures, tmp_path):
     out = tmp_path / "out.pmtiles"
-    cmd = ["gpio", "pmtiles", "create", str(fixtures["geo-block"]), str(out), *extra]
+    cmd = [
+        "gpio",
+        "pmtiles",
+        "create",
+        str(fixtures["geo-block"]),
+        str(out),
+        "--max-zoom",
+        "14",
+        *extra,
+    ]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     assert proc.returncode == 0, proc.stderr
     min_lon, min_lat, max_lon, max_lat = _pmtiles_bounds(out)

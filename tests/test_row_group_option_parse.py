@@ -59,7 +59,7 @@ def _args(command: str, tmp_path: Path, out: Path) -> list[str]:
 
 COMMANDS = [
     pytest.param("simplify"),
-    pytest.param("polygonize", marks=_raster),
+    pytest.param("polygonize", marks=[_raster, _contour]),
     pytest.param("contour", marks=[_raster, _contour]),
 ]
 

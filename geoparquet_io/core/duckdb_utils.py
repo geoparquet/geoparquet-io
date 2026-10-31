@@ -1186,13 +1186,18 @@ def _spill_base_lock(base: str | os.PathLike):
 
 
 def _release_spill_lock(path: str) -> None:
-    with _spill_locks_guard:
-        marker = _spill_locks.pop(path, None)
-        if marker is not None:
-            match = _SPILL_DIR_RE.match(os.path.basename(path))
-            if match is not None and int(match[1]) == os.getpid():
-                shutil.rmtree(path, ignore_errors=True)
-            marker.close()
+    # Runs as a connection's weakref finalizer, so the cyclic GC can call it on
+    # any thread at any allocation -- including one inside spill_directory that
+    # holds _spill_locks_guard and the base flock. Taking a lock here would then
+    # wait on its own thread forever and stall every sibling process sharing the
+    # base (the CI matrix hang). So it takes none: the dict pop is atomic, and
+    # whoever pops a path owns its cleanup.
+    marker = _spill_locks.pop(path, None)
+    if marker is not None:
+        match = _SPILL_DIR_RE.match(os.path.basename(path))
+        if match is not None and int(match[1]) == os.getpid():
+            shutil.rmtree(path, ignore_errors=True)
+        marker.close()
 
 
 def _release_spill_locks() -> None:
@@ -1339,7 +1344,10 @@ def spill_directory(base_dir: str | os.PathLike | None = None) -> str:
             # descriptor before retaining another, so repeated connections stay bounded.
             for old_path in list(_spill_locks):
                 if not os.path.exists(old_path):
-                    _spill_locks.pop(old_path).close()
+                    # A finalizer may pop it meanwhile; see _release_spill_lock.
+                    stale = _spill_locks.pop(old_path, None)
+                    if stale is not None:
+                        stale.close()
             os.makedirs(path, mode=0o700, exist_ok=False)
             try:
                 marker = _spill_lock(path)

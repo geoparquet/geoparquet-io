@@ -25,10 +25,10 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib  # type: ignore[no-redef]
+if __name__ == "__main__" and not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.toml_utils import load_toml
 
 _REPORT = re.compile(r"\n(?=\S+: R0801:)")
 _SIDE = re.compile(r"^==([\w.]+):\[(\d+):(\d+)\]", re.M)
@@ -80,14 +80,29 @@ def parse_report(output: str, repo: Path | None = None) -> Counter[str]:
 
 
 def pinned(exemptions: Path) -> Counter[str]:
-    with exemptions.open("rb") as fh:
-        entries = tomllib.load(fh).get("G3", {}).get("pylint", [])
+    entries = load_toml(exemptions).get("G3", {}).get("pylint", [])
     return Counter({e["block"]: e.get("count", 1) for e in entries})
 
 
 def run_pylint(repo: Path, target: str) -> str:
+    # Pylint picks representative pairs from overlapping copies in input order.
+    # Filesystem traversal order differs between checkouts and platforms.
     result = subprocess.run(
-        [sys.executable, "-m", "pylint", target],
+        [
+            sys.executable,
+            "-m",
+            "pylint",
+            "--jobs=1",
+            "--min-similarity-lines=8",
+            *(
+                [
+                    p.relative_to(repo).as_posix()
+                    for p in sorted((repo / target).rglob("*.py"), reverse=True)
+                ]
+                if (repo / target).is_dir()
+                else [target]
+            ),
+        ],
         cwd=repo,
         capture_output=True,
         text=True,

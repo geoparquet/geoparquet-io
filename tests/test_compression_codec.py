@@ -598,7 +598,7 @@ def test_no_codec_map_or_list_outside_the_owner():
             continue
         lines = codec_collections(ast.parse(path.read_text(encoding="utf-8")))
         if lines:
-            found[str(path.relative_to(REPO))] = lines
+            found[path.relative_to(REPO).as_posix()] = lines
     assert found == {}, f"codec maps/lists outside core/compression.py: {found}"
 
 
@@ -838,7 +838,7 @@ def test_no_codec_policy_outside_the_owner():
     for path in sorted(PACKAGE.rglob("*.py")):
         if path == OWNER:
             continue
-        rel = str(path.relative_to(REPO))
+        rel = path.relative_to(REPO).as_posix()
         hits = codec_policy_copies(ast.parse(path.read_text(encoding="utf-8")))
         for shape, lines in hits.items():
             allowed, _reason = JUSTIFIED_CALL_SITES.get((rel, shape), (0, ""))

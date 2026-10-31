@@ -25,12 +25,8 @@ import click
 import pytest
 
 from geoparquet_io.cli.main import cli
+from scripts.toml_utils import load_toml
 from tests.test_cli_column_name_guard import _iter_options
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib  # type: ignore[no-redef]
 
 REPO = Path(__file__).resolve().parents[1]
 EXEMPTIONS_FILE = REPO / "scripts" / "owner_exemptions.toml"
@@ -139,8 +135,7 @@ def describe(group: click.Command, name: str) -> str:
 
 
 def _pinned() -> dict[str, dict]:
-    with EXEMPTIONS_FILE.open("rb") as fh:
-        entries = tomllib.load(fh).get("G13", {}).get("options", [])
+    entries = load_toml(EXEMPTIONS_FILE).get("G13", {}).get("options", [])
     return {e["option"]: e for e in entries}
 
 
@@ -341,8 +336,7 @@ def inline_bbox_parsers(repo: Path = REPO) -> list[tuple[str, str]]:
 
 
 def _pinned_bbox_parsers() -> dict[tuple[str, str], str]:
-    with EXEMPTIONS_FILE.open("rb") as fh:
-        entries = tomllib.load(fh).get("G13", {}).get("bbox_parsers", [])
+    entries = load_toml(EXEMPTIONS_FILE).get("G13", {}).get("bbox_parsers", [])
     return {(e["path"], e["name"]): e["reason"] for e in entries}
 
 

@@ -2006,7 +2006,7 @@ class TestCarriedSchemaMetadataKeysHasOneDefinition:
         # the duplicate this guards against.
         pattern = re.compile(r"""[\(\[\{]\s*["']geo["']\s*,\s*["']ARROW:schema["']""")
         sites = [
-            f"{path.relative_to(core_dir)}"
+            path.relative_to(core_dir).as_posix()
             for path in sorted(core_dir.rglob("*.py"))
             for _ in pattern.findall(path.read_text(encoding="utf-8"))
         ]

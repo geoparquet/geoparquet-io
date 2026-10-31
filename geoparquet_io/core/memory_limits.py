@@ -203,7 +203,9 @@ def _connection_limit(memory_limit: str | None) -> tuple[str | None, int | None]
 
     Threads are capped so each keeps ``_BYTES_PER_THREAD`` -- a small limit
     spread over many threads makes DuckDB raise instead of spill -- and only
-    when that is fewer threads than DuckDB would otherwise take.
+    when that is fewer threads than the host CPU count. A generous limit
+    leaves DuckDB's thread choice alone; a tight limit supplies a cap that
+    existing sessions apply only downward.
     """
     limit = validate_memory_limit(memory_limit) if memory_limit else default_memory_limit()
     if limit is None:
@@ -212,8 +214,7 @@ def _connection_limit(memory_limit: str | None) -> tuple[str | None, int | None]
     if not limit_bytes:  # pragma: no cover - validate_memory_limit accepts only sizes
         return limit, None
     threads = _thread_cap(limit_bytes)
-    default_threads = os.cpu_count() or threads
-    return limit, (threads if threads < default_threads else None)
+    return limit, threads if threads < (os.cpu_count() or 1) else None
 
 
 def open_bounded_connection(

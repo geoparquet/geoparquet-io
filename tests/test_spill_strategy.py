@@ -615,3 +615,49 @@ def test_spill_sweep_without_fcntl_uses_the_pid_check(tmp_path, dead_pid, monkey
     assert sweep_orphaned_spill_dirs(tmp_path) == [str(dead)]
     assert live.is_dir()
     assert not dead.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="no fcntl, so no spill marker and no finalizer")
+def test_a_connection_collected_while_the_spill_guard_is_held_does_not_deadlock(monkeypatch):
+    """The cyclic GC can run a connection's finalizer inside ``spill_directory``.
+
+    ``get_duckdb_connection`` registers ``weakref.finalize(con, _release_spill_lock)``.
+    A connection caught in a reference cycle (a traceback holding a frame that holds
+    the connection is enough) is freed only by the cyclic collector, which runs on
+    whichever thread allocates next -- including one that is inside
+    ``spill_directory`` with ``_spill_locks_guard`` held. A finalizer that takes
+    that non-reentrant lock then waits on its own thread forever, while the base
+    ``flock`` it also holds stalls every sibling process on the same temp directory.
+    That was the matrix hang: one test frozen at the 600 s cap, and before the cap,
+    every xdist worker silent.
+    """
+    import gc
+
+    from geoparquet_io.core import duckdb_utils
+
+    # A private guard of the same kind, so a regression wedges this lock, not the
+    # worker's real one that every later connection needs.
+    guard = threading.Lock()
+    monkeypatch.setattr(duckdb_utils, "_spill_locks_guard", guard)
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        con = get_duckdb_connection(load_spatial=False)
+        spill = con.execute("SELECT current_setting('temp_directory')").fetchall()[0][0]
+        assert spill in duckdb_utils._spill_locks
+        cycle = [con]
+        cycle.append(cycle)
+        del con, cycle
+
+        def collect_under_the_guard():
+            with guard:
+                gc.collect()
+
+        worker = threading.Thread(target=collect_under_the_guard, daemon=True)
+        worker.start()
+        worker.join(timeout=10)
+        assert not worker.is_alive(), "the spill finalizer deadlocked on _spill_locks_guard"
+        assert spill not in duckdb_utils._spill_locks
+    finally:
+        if was_enabled:
+            gc.enable()
