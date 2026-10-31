@@ -1444,8 +1444,10 @@ def _metadata_version(options: GeoBlockOptions, carried: dict) -> str | None:
     return GEOPARQUET_VERSIONS[version]["metadata_version"]
 
 
-#: The keys of a declared secondary entry the steps decide, not carry.
-_STEP_KEYS = frozenset({"encoding", "edges", "crs", "bbox", "geometry_types"})
+#: Facts DuckDB generates for each column; a verbatim carried block needs all.
+GENERATED_COLUMN_FIELDS = frozenset({"encoding", "bbox", "geometry_types"})
+#: Keys the composer decides rather than carrying declarations verbatim.
+_STEP_KEYS = GENERATED_COLUMN_FIELDS | {"edges", "crs"}
 
 
 def declared_write_metadata(metadata: dict | None) -> dict | None:

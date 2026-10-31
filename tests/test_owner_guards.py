@@ -3129,10 +3129,29 @@ _PUBLISH_MOVES = frozenset({"os.replace", "os.rename", "shutil.move"})
 _PATH_JOINS = frozenset({"os.path.join", "pathlib.Path", "Path"})
 
 
-def _builds_a_path(m: _Module, call: ast.Call) -> bool:
+def _builds_a_path(m: _Module, call: ast.AST) -> bool:
     """Whether *call*'s result is joined into a file name (``/``, ``+``,
     ``os.path.join``, an f-string), not used as a directory as it stands."""
     up = m.parents.get(id(call))
+    # Follow an allocated directory through its bound name before a path join.
+    targets = []
+    if isinstance(up, ast.Assign):
+        targets = [t.id for t in up.targets if isinstance(t, ast.Name)]
+    elif isinstance(up, ast.withitem) and isinstance(up.optional_vars, ast.Name):
+        targets = [up.optional_vars.id]
+    if targets:
+        scope = up
+        while m.parents.get(id(scope)) is not None and not isinstance(
+            scope, (ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            scope = m.parents[id(scope)]
+        return any(
+            isinstance(n, ast.Name)
+            and isinstance(n.ctx, ast.Load)
+            and n.id in targets
+            and _builds_a_path(m, n)
+            for n in ast.walk(scope)
+        )
     while isinstance(up, ast.Call) and m.dotted(up.func) in _PATH_JOINS:
         if m.dotted(up.func) == "os.path.join":
             return True
@@ -3154,12 +3173,13 @@ def _keeps_its_file(call: ast.Call) -> bool:
 
 def _find_staging(m: _Module) -> Iterator[Hit]:
     """A file staged, published or named for scratch outside
-    ``file_utils.atomic_write`` / ``scratch_file`` / ``scratch_path``
+    ``file_utils.atomic_write`` / ``scratch_file`` / ``scratch_dir`` / ``scratch_path``
     (#1367 concept 11, #1076).
 
     Hits: ``os.replace``, ``os.rename`` and ``shutil.move`` (a publish
     step); ``tempfile.mkstemp`` and a ``NamedTemporaryFile(delete=False)``
-    (a named temp kept past its block); and ``tempfile.gettempdir()`` joined
+    (a named temp kept past its block); and ``gettempdir()``, ``mkdtemp()``
+    or ``TemporaryDirectory()`` joined
     into a file name. Would have caught the fourteen staging copies #1076's
     family found -- reproject's ``NamedTemporaryFile`` + ``shutil.move`` that
     leaked its temp on Ctrl-C, ``geometry-metrics``' unstaged rewrite that
@@ -3179,7 +3199,11 @@ def _find_staging(m: _Module) -> Iterator[Hit]:
             yield m.hit(node)
         elif name == "tempfile.NamedTemporaryFile" and _keeps_its_file(node):
             yield m.hit(node)
-        elif name == "tempfile.gettempdir" and _builds_a_path(m, node):
+        elif name in {
+            "tempfile.gettempdir",
+            "tempfile.mkdtemp",
+            "tempfile.TemporaryDirectory",
+        } and _builds_a_path(m, node):
             yield m.hit(node)
 
 
@@ -6445,6 +6469,8 @@ def test_migrated_arm_repository(arm):
 
 
 STAGING_SHAPES = {
+    "mkdtemp_join": "import os, tempfile\n\ndef f():\n    d = tempfile.mkdtemp()\n    return os.path.join(d, 'x.parquet')\n",
+    "temporary_directory_div": "import tempfile\nfrom pathlib import Path\n\ndef f():\n    with tempfile.TemporaryDirectory() as d:\n        return Path(d) / 'x.parquet'\n",
     "replace": "import os\n\ndef f(a, b):\n    os.replace(a, b)\n",
     "rename_alias": "from os import rename\n\ndef f(a, b):\n    rename(a, b)\n",
     "move": "import shutil\n\ndef f(a, b):\n    shutil.move(a, b)\n",

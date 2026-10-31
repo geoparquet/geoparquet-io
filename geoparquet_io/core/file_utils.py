@@ -151,12 +151,7 @@ def get_first_parquet_file(partition_path: str) -> str | None:
         return partition_path
 
     if os.path.isdir(partition_path):
-        for root, dirs, files in os.walk(partition_path):
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
-            for f in sorted(files):
-                if f.endswith(".parquet") and not f.startswith("."):
-                    return os.path.join(root, f)
-        return None
+        return next(iter(get_all_parquet_files(partition_path)), None)
 
     if has_glob_pattern(partition_path):
         return next(iter(_parquet_glob_matches(partition_path)), None)
@@ -553,12 +548,17 @@ def scratch_file(suffix: str = ".parquet", *, prefix: str = "gpio_") -> Iterator
     created -- the writer makes it. The directory and everything in it are
     removed when the block exits, whatever the outcome.
     """
-    scratch = Path(tempfile.mkdtemp(prefix=prefix))
+    with scratch_dir(prefix=prefix) as scratch:
+        yield str(Path(scratch) / f"scratch{suffix}")
+
+
+@contextlib.contextmanager
+def scratch_dir(*, prefix: str = "gpio_", directory: str | None = None) -> Iterator[str]:
+    """A private (0700) scratch directory, removed with its contents on exit."""
+    scratch = Path(tempfile.mkdtemp(prefix=prefix, dir=directory))
     try:
-        yield str(scratch / f"scratch{suffix}")
+        yield str(scratch)
     finally:
-        for leftover in scratch.iterdir():
-            unlink_released_file(leftover)
         shutil.rmtree(scratch, ignore_errors=True)
 
 

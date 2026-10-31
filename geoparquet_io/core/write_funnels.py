@@ -84,6 +84,7 @@ from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessErr
 from geoparquet_io.core.file_utils import atomic_write, get_all_parquet_files, is_partition_path
 from geoparquet_io.core.geo_metadata import (
     DETECT_BBOX_COLUMN,
+    GENERATED_COLUMN_FIELDS,
     GEOPARQUET_VERSIONS,
     KEEP_CRS,
     GeoBlockOptions,
@@ -1126,26 +1127,10 @@ def _rewrite_parquet(
         upload_if_remote(local, destination, profile=write.profile, verbose=verbose)
 
 
-# Fields a carried `geo` block must still have for the 2.0 fast path to be able
-# to write it verbatim. When a caller invalidated the derived stats (reproject,
-# a row filter, a multi-file merge) they are stripped, and only the rewrite path
-# can recompute them — so we fall back to it rather than ship a thinner block
-# than DuckDB would have generated. ``bbox`` too: DuckDB's own block carries
-# the file bbox, and a carried block without one would ship a 2.0 file with no
-# file bbox at all; the rewrite measures it from the data (HANDOFFS row 69).
-_REQUIRED_CARRIED_GEO_FIELDS = ("encoding", "geometry_types", "bbox")
-
-# Column keys DuckDB's own `GEOPARQUET_VERSION 'V2'` block already writes. A
-# carried block is only worth substituting when it says something more than
-# these; otherwise DuckDB's freshly generated block is the better one, because
-# it describes the data actually written rather than the input.
-_DUCKDB_GENERATED_COLUMN_FIELDS = frozenset({"encoding", "geometry_types", "bbox"})
-
-
 def _carries_more_than_duckdb_generates(geo_dict: dict) -> bool:
     """Whether any column in ``geo_dict`` holds a key DuckDB would not write itself."""
     return any(
-        isinstance(col_meta, dict) and not set(col_meta) <= _DUCKDB_GENERATED_COLUMN_FIELDS
+        isinstance(col_meta, dict) and not set(col_meta) <= GENERATED_COLUMN_FIELDS
         for col_meta in (geo_dict.get("columns") or {}).values()
     )
 
@@ -1229,7 +1214,7 @@ def _fast_path_geo_decision(
     nothing here can recompute them. The fast path cannot merge: it replaces
     DuckDB's whole ``geo`` key with what this returns, so a block missing
     ``geometry_types`` would ship *without* the key GeoParquet requires. Taking
-    the rewrite is what ``_REQUIRED_CARRIED_GEO_FIELDS`` always said the answer
+    the rewrite is what ``GENERATED_COLUMN_FIELDS`` always said the answer
     was; what actually happened was the fast path running with DuckDB's bare
     block, so ``gpio partition quadkey|kdtree`` and ``extract --where/--limit
     /--bbox`` of a 2.0 input lost the covering it declared and ``gpio check bbox``
@@ -1296,9 +1281,9 @@ def _fast_path_geo_decision(
     )
     if not _carries_more_than_duckdb_generates(carried):
         return None, False
-    if any(
-        field not in carried["columns"][geometry_column] for field in _REQUIRED_CARRIED_GEO_FIELDS
-    ):
+    # A verbatim block must retain every generated fact. Invalidated stats
+    # require the rewrite path to measure them again (HANDOFFS row 69).
+    if any(field not in carried["columns"][geometry_column] for field in GENERATED_COLUMN_FIELDS):
         if verbose:
             debug(
                 "Taking the metadata rewrite: the carried geo block says more than "
@@ -1417,6 +1402,7 @@ def write_parquet_with_metadata(
     invalidate_derived_stats: bool = False,
     invalidate_derived_stats_columns: Collection[str] | None = None,
     drop_nonplanar_edges_columns: Collection[str] | None = None,
+    rebuild_geo_metadata: bool = False,
 ):
     """
     Write a parquet file with proper compression and metadata handling.
@@ -1432,6 +1418,8 @@ def write_parquet_with_metadata(
         con: DuckDB connection
         query: SQL query to execute
         output_file: Path to output file (local path or remote URL)
+        rebuild_geo_metadata: Rebuild geometry facts from the query, carrying only
+            declarations and sidecars from the input (a fresh conversion).
         original_metadata: Original metadata from source file
         compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
         compression_level: Compression level (varies by format)
@@ -1508,6 +1496,11 @@ def write_parquet_with_metadata(
     """
 
     configure_verbose(verbose)
+
+    # A conversion rebuilds the input's measured facts. Transforming an
+    # existing dataset can still use its carried block as a schema witness.
+    if rebuild_geo_metadata:
+        original_metadata = declared_write_metadata(original_metadata)
 
     # Use geometry column from geometry_info if provided, otherwise auto-detect
     # This ensures original column names are preserved (fixes #328)

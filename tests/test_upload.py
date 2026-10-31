@@ -1016,6 +1016,21 @@ class TestDirectoryUploadReportsWhatReachedTheStore:
         assert "10 of 10 file(s) failed to upload" in result.output
         assert result.exit_code == 1
 
+    def test_parquet_upload_skips_dot_entries(self, tmp_path):
+        source = self._make_files(tmp_path, count=2)
+        (source / "._sidecar.parquet").write_bytes(b"hidden")
+        stage = source / ".gpio-stage-orphan"
+        stage.mkdir()
+        (stage / "abandoned.parquet").write_bytes(b"hidden")
+        arrived = []
+
+        def fake_put(store, key, path, **kwargs):
+            arrived.append(Path(path).name)
+
+        result = self._run(source, fake_put, ["--pattern", "*.parquet"])
+        assert result.exit_code == 0, result.output
+        assert sorted(arrived) == ["part-00.parquet", "part-01.parquet"]
+
     def test_a_fully_successful_directory_upload_still_exits_zero(self, tmp_path):
         """The happy path is unchanged: no failure lines, exit 0."""
         source = self._make_files(tmp_path)

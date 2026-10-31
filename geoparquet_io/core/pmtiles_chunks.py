@@ -40,12 +40,12 @@ import glob
 import json
 import os
 import shutil
-import tempfile
 from pathlib import Path
 from typing import Any
 
 from geoparquet_io.core.bbox_structure import dataset_bounds
 from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     query_schema,
@@ -70,6 +70,7 @@ from geoparquet_io.core.logging_config import debug, success, warn
 from geoparquet_io.core.parquet_writer import WriteOptions, resolve_output_geoparquet_version
 from geoparquet_io.core.partition.staging import (
     PartitionWriteOptions,
+    create_staging_dir,
     finalize_partition_file,
     iter_staging_partitions,
     make_partition_aliases,
@@ -265,7 +266,7 @@ def _split_input(
     con = get_duckdb_connection(
         load_httpfs=needs_httpfs(input_path), temp_directory=spill_directory(scratch)
     )
-    staging = tempfile.mkdtemp(prefix=".staging_", dir=parts_dir)
+    staging = create_staging_dir(parts_dir)
     try:
         input_cols = query_schema(con, f"SELECT {projection} FROM {sql_path(input_url)}").names
         alias = make_partition_aliases(1, input_cols)[0]
@@ -277,7 +278,9 @@ def _split_input(
                 None, input_file=input_path, verbose=verbose
             ),
             input_file=input_path,
-            write=WriteOptions(compression_level=3),  # read once by tippecanoe; not worth 15
+            write=WriteOptions(
+                compression_level=resolve_codec(None, None, context="pmtiles-chunk").level
+            ),
         )
         for values, partition_dir in iter_staging_partitions(staging):
             chunk_file = os.path.join(parts_dir, f"{values[0]}.parquet")

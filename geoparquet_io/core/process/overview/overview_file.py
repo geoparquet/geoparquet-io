@@ -346,7 +346,7 @@ def write_overview_file(
     the output directory and moved into place, so a failure leaves nothing at
     ``output_path``. Returns the output path.
     """
-    compression_level = resolve_codec(compression, compression_level, context="process").level
+    codec = resolve_codec(compression, compression_level, context="process")
     _validate(levels, output_path)
     files = [pq.ParquetFile(lv.path) for lv in levels]
     try:
@@ -368,7 +368,7 @@ def write_overview_file(
             with open_parquet_writer(
                 staged,
                 schema,
-                resolve_codec(compression, compression_level, context="process").pyarrow_kwargs(),
+                codec.pyarrow_kwargs(),
                 geometry_columns=[geometry_column] if geometry_column else (),
             ) as writer:
                 _write_levels(writer.write_table, files, data_schema, schema, rows_per_group)

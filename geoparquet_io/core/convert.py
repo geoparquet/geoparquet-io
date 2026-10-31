@@ -3423,15 +3423,13 @@ def convert_to_geoparquet(
             )
 
             from geoparquet_io.core.duckdb_metadata import get_kv_metadata
-            from geoparquet_io.core.geo_metadata import declared_write_metadata
 
             write_parquet_with_metadata(
                 con,
                 query,
                 output_file,
-                original_metadata=(
-                    declared_write_metadata(get_kv_metadata(input_file)) if is_parquet else None
-                ),
+                original_metadata=get_kv_metadata(input_file) if is_parquet else None,
+                rebuild_geo_metadata=True,
                 custom_metadata=custom_metadata,
                 compression=compression,
                 compression_level=compression_level,

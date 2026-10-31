@@ -85,8 +85,8 @@ DUCKDB_COPY_FIXED_LEVELS = {"GZIP": 6, "BROTLI": 11}
 #: ``gpio process`` defaults, where they differ from :data:`COMPRESSION_RANGES`.
 _PROCESS_DEFAULTS = {"ZSTD": PROCESS_ZSTD_LEVEL}
 
-WriteContext = Literal["write", "process"]
-_CONTEXTS = ("write", "process")
+WriteContext = Literal["write", "process", "pmtiles-chunk"]
+_CONTEXTS = ("write", "process", "pmtiles-chunk")
 
 
 def _invalid_codec(name) -> InvalidParameterError:
@@ -204,6 +204,9 @@ def _canonical_codec(name: str | None) -> str:
 def _default_level(codec: str, context: WriteContext) -> int | None:
     if codec not in COMPRESSION_RANGES:
         return None
+    if context == "pmtiles-chunk" and codec == "ZSTD":
+        # Transient chunks are read once by tippecanoe.
+        return 3
     if context == "process":
         return _PROCESS_DEFAULTS.get(codec, COMPRESSION_RANGES[codec][2])
     return COMPRESSION_RANGES[codec][2]
@@ -224,7 +227,8 @@ def resolve_codec(
         level: The caller's level, or ``None`` for the codec's default. Ignored
             (and, with ``verbose``, reported) for codecs that take none.
         context: ``"write"`` for every ordinary write (ZSTD 15), ``"process"``
-            for the ``gpio process`` commands (ZSTD :data:`PROCESS_ZSTD_LEVEL`).
+            for the ``gpio process`` commands (ZSTD :data:`PROCESS_ZSTD_LEVEL`),
+            or ``"pmtiles-chunk"`` for transient tippecanoe input (ZSTD 3).
         verbose: Report a level given to a codec that takes none.
 
     Raises:

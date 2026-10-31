@@ -9,13 +9,12 @@ under a ``gpio:pyramid`` key in the archive's metadata JSON.
 from __future__ import annotations
 
 import os
-import tempfile
 from pathlib import Path
 
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.file_utils import atomic_write, handle_output_overwrite
+from geoparquet_io.core.file_utils import atomic_write, handle_output_overwrite, scratch_dir
 from geoparquet_io.core.geojson_stream import require_planar_geojson_file
 from geoparquet_io.core.logging_config import configure_verbose, debug, success, warn
 from geoparquet_io.core.pmtiles import (
@@ -402,7 +401,7 @@ def create_pmtiles_pyramid(
     )
     stem = Path(output_path).stem
 
-    with tempfile.TemporaryDirectory(dir=scratch) as tmpdir:
+    with scratch_dir(directory=scratch) as tmpdir:
         sources = _resolve_band_sources(input_path, info, plan, tmpdir, verbose, memory_limit)
         band_files: list[str] = []
         for i, band in enumerate(plan):

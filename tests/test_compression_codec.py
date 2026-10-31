@@ -793,10 +793,6 @@ _DOCSTRINGS: set[int] = set()
 #: case fold of a *text*-encoding codec name, which is not compression. Every
 #: gpio write among them still resolves its codec through the owner.
 JUSTIFIED_CALL_SITES = {
-    ("geoparquet_io/core/pmtiles_chunks.py", "level-literal-kwarg"): (
-        1,
-        "PMTiles chunk staging: a throwaway intermediate, ZSTD 3 for speed",
-    ),
     ("geoparquet_io/core/admin_datasets.py", "codec-literal-arg"): (
         2,
         "admin-boundary download caches (default and per-level Overture): ZSTD 3",

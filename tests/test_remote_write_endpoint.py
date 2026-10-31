@@ -48,7 +48,15 @@ COMMANDS = {
 @pytest.mark.parametrize("name", sorted(COMMANDS))
 def test_a_remote_output_is_uploaded_to_the_configured_endpoint(name, loopback):
     endpoint, requests, objects = loopback
-    args = ["--s3-endpoint", endpoint, "--s3-no-ssl", *COMMANDS[name], "s3://bkt/out.parquet"]
+    args = [
+        "--s3-endpoint",
+        endpoint,
+        "--s3-region",
+        "us-east-1",
+        "--s3-no-ssl",
+        *COMMANDS[name],
+        "s3://bkt/out.parquet",
+    ]
 
     result = CliRunner().invoke(cli, args)
 

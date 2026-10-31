@@ -631,7 +631,12 @@ def _upload_directory(
     Raises:
         RemoteAccessError: If any file failed or was never attempted
     """
-    files = list(source.rglob(pattern) if pattern else source.rglob("*"))
+    if pattern == "*.parquet":
+        from geoparquet_io.core.file_utils import get_all_parquet_files
+
+        files = [Path(p) for p in get_all_parquet_files(str(source))]
+    else:
+        files = list(source.rglob(pattern) if pattern else source.rglob("*"))
     files = [f for f in files if f.is_file()]
 
     if not files:
