@@ -831,6 +831,18 @@ def _version_of_table(
     return None
 
 
+def version_to_describe(schema: pa.Schema) -> str:
+    """The ``version=`` an in-memory description of ``schema`` composes with.
+
+    Auto mode's answer for a table with this schema: the carried block's,
+    else 2.0 for a GeoArrow column with no block (native data), else the
+    default. A description keeps what a carried block declares; this is the
+    answer for one that declares none, since the composer decides no version
+    itself (#1367 concept 4).
+    """
+    return resolve_output_geoparquet_version(None, table=schema.empty_table())
+
+
 def resolve_input_crs(
     input_crs: dict | str | None,
     *,

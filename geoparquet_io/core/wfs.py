@@ -75,6 +75,7 @@ from geoparquet_io.core.geo_metadata import (
     SchemaSource,
     bounds_of,
     compose_geo_block,
+    with_geo_block,
 )
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
@@ -3558,9 +3559,7 @@ def wfs_to_table(
             crs=_output_crs_projjson(crs),
         ),
     )
-    existing_meta[b"geo"] = json.dumps(geo_meta).encode("utf-8")
-
-    table = table.replace_schema_metadata(existing_meta)
+    table = with_geo_block(table.replace_schema_metadata(existing_meta), geo_meta)
 
     success(f"Fetched {table.num_rows:,} features from WFS")
     return table

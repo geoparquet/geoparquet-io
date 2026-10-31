@@ -42,6 +42,7 @@ from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
     SchemaSource,
     compose_geo_block,
+    with_geo_block,
 )
 from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
@@ -62,6 +63,7 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
+from geoparquet_io.core.parquet_writer import version_to_describe
 from geoparquet_io.core.remote import has_http_scheme
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
@@ -728,16 +730,14 @@ def _with_geo_metadata(table: pa.Table, version: str | None, crs: dict) -> pa.Ta
         SchemaSource(table.schema),
         GeoBlockOptions(
             geometry_column=BUILT_GEOMETRY_COLUMN,
-            version=version,
+            version=version or version_to_describe(table.schema),
+            describe=version is None,
             covering=None,
             crs=crs,
             stats={BUILT_GEOMETRY_COLUMN: {"geometry_types": []}},  # Mixed types possible
         ),
     )
-    existing_metadata = table.schema.metadata or {}
-    return table.replace_schema_metadata(
-        {**existing_metadata, b"geo": json.dumps(geo_metadata).encode("utf-8")}
-    )
+    return with_geo_block(table, geo_metadata)
 
 
 def _create_empty_geoparquet_table(

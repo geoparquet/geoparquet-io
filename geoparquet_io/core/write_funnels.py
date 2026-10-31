@@ -73,27 +73,29 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.edges import (
+    PLANAR,
     agree_across_files,
     block_edges,
     detect_edges,
-    edges_for_version,
     is_ellipsoidal,
     is_nonplanar,
     logical_type_edges,
     requests_planar,
-    restore_edges,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
 from geoparquet_io.core.file_utils import get_all_parquet_files, is_partition_path
 from geoparquet_io.core.geo_metadata import (
     DETECT_BBOX_COLUMN,
     GEOPARQUET_VERSIONS,
+    KEEP_CRS,
     SELF_EVIDENT_BBOX_COLUMN,
     GeoBlockOptions,
     QuerySource,
+    SchemaSource,
     compose_geo_block,
+    composes_a_covering,
+    declared_version,
     is_geoparquet_1x,
-    merge_secondary_geometry_metadata,
     prune_geo_metadata_to_columns,
     read_raw_geo,
     sanitized_carried_geo,
@@ -138,6 +140,7 @@ from geoparquet_io.core.parquet_writer import (
     resolve_row_group_rows_for_table,
     sized_stream,
     without_geometry_dictionary,
+    writable_geoparquet_version,
     write_arrow_table,
 )
 from geoparquet_io.core.remote import (
@@ -261,16 +264,20 @@ def apply_nonplanar_edges(
         return
 
     geo_meta = pending_geo if pending_geo is not None else _read_geo_key(output_file)
+    written_schema = pq.read_schema(output_file)
+    # The edges as the block's version can say them: the composer's mapping,
+    # read back off a block composed with them (a column the block does not
+    # describe, or an output with no block, keeps its algorithm).
+    restored = _restored_geo_block(written_schema, geo_meta, edges_by_col)
     geoparquet_1x = is_geoparquet_1x((geo_meta or {}).get("version"))
-    edges_by_col = {
-        name: edges_for_version(edges, geoparquet_1x) for name, edges in edges_by_col.items()
-    }
+    edges_by_col = {**edges_by_col, **_composed_edges(restored, edges_by_col)}
     geography = _geography_candidates(output_file, edges_by_col)
     targets = {**_block_bbox_targets(geo_meta, edges_by_col, geography), **geography}
     bounds = _geodesic_bounds(output_file, targets, geo_meta)
     geography_bbox = {name: bounds[name].per_group for name in geography if name in bounds}
     file_bboxes = {name: b.file_bbox for name, b in bounds.items() if b.file_bbox is not None}
     geo_updates = _geo_block_updates(
+        written_schema,
         geo_meta,
         edges_by_col,
         file_bboxes,
@@ -444,38 +451,74 @@ def _bbox_with_geodesic_xy(existing: object, box: tuple) -> list[float]:
     return [xmin, ymin, xmax, ymax]
 
 
+def _restored_geo_block(
+    written_schema, geo_meta: dict | None, edges_by_col: dict[str, str], stats=None
+) -> dict | None:
+    """The written ``geo`` block composed again with the edges (and bboxes) restored.
+
+    Composed, not edited: ``compose_geo_block`` over the written schema and the
+    block the writer left, at the version that block declares, with the edges
+    as a per-column request and the geodesic ``bbox`` as measured ``stats``. No
+    covering is asked for, and the CRS is kept. None for an output with no block.
+    """
+    if geo_meta is None:
+        return None
+    primary = geo_meta.get("primary_column")
+    columns = geo_meta.get("columns") or {}
+    if not isinstance(primary, str) or not isinstance(columns.get(primary), dict):
+        return geo_meta
+    version = writable_geoparquet_version(declared_version(geo_meta), preserve_input=True)
+    return compose_geo_block(
+        SchemaSource(written_schema, {b"geo": json.dumps(geo_meta).encode("utf-8")}),
+        GeoBlockOptions(
+            geometry_column=primary,
+            version=version,
+            covering=None,
+            crs=KEEP_CRS,
+            column_edges={name: e for name, e in edges_by_col.items() if name in columns},
+            stats=stats,
+        ),
+    )
+
+
+def _composed_edges(block: dict | None, edges_by_col: dict[str, str]) -> dict[str, str]:
+    """``edges_by_col``'s columns as ``block`` states their edges (planar where it states none)."""
+    if block is None:
+        return {}
+    stated = block_edges(block)
+    columns = block.get("columns") or {}
+    return {name: stated.get(name, PLANAR) for name in edges_by_col if name in columns}
+
+
 def _geo_block_updates(
+    written_schema,
     geo_meta: dict | None,
     edges_by_col: dict[str, str],
     file_bboxes: dict[str, tuple],
     force: bool = False,
     unbounded: Collection[str] = (),
 ) -> dict[str, str]:
-    """``{"geo": <block>}`` with edges and geodesic bboxes set, or ``{}``.
+    """``{"geo": <block>}`` composed with edges and geodesic bboxes, or ``{}``.
 
     ``force`` writes the block even unchanged -- the #1270 deferred repair's
     block is not in the file yet, so "unchanged" still has to land.
     ``unbounded`` names columns whose edges no geodesic box could be computed
     for: their planar ``bbox`` is removed rather than left to under-cover.
     """
-    changed = restore_edges(geo_meta, edges_by_col)
-    columns = (geo_meta or {}).get("columns") or {}
-    for name, box in file_bboxes.items():
-        col_meta = columns.get(name)
-        if not isinstance(col_meta, dict):
-            continue
-        bbox = _bbox_with_geodesic_xy(col_meta.get("bbox"), box)
-        if col_meta.get("bbox") != bbox:
-            col_meta["bbox"] = bbox
-            changed = True
-    for name in unbounded:
-        col_meta = columns.get(name)
-        if isinstance(col_meta, dict) and "bbox" in col_meta:
-            del col_meta["bbox"]
-            changed = True
-    if geo_meta is None or not (changed or force):
+    if geo_meta is None:
         return {}
-    return {"geo": json.dumps(geo_meta)}
+    columns = geo_meta.get("columns") or {}
+    stats: dict[str, dict] = {}
+    for name, box in file_bboxes.items():
+        if isinstance(columns.get(name), dict):
+            stats[name] = {"bbox": _bbox_with_geodesic_xy(columns[name].get("bbox"), box)}
+    for name in unbounded:
+        if isinstance(columns.get(name), dict):
+            stats[name] = {"bbox": None}
+    composed = _restored_geo_block(written_schema, geo_meta, edges_by_col, stats=stats)
+    if composed == geo_meta and not force:
+        return {}
+    return {"geo": json.dumps(composed)}
 
 
 def _ensure_v2_geo_metadata(
@@ -678,24 +721,6 @@ def _plain_copy_to(
         with pq.ParquetFile(output_path) as pf:
             success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
     return pending_v2_geo
-
-
-def _custom_cover_survives(covering, original_metadata, geometry_column, output_columns) -> bool:
-    """Whether a ``custom_metadata`` covering can outlive the #954 gate.
-
-    Conservative: it survives if it brings its own ``bbox`` member, if the
-    carried block already declares one for the primary, or if the output may
-    carry a conventional ``bbox`` column the rewrite would declare -- including
-    when the output's columns are unknown.
-    """
-    if not isinstance(covering, dict) or "bbox" in covering:
-        return True
-    if output_columns is None or SELF_EVIDENT_BBOX_COLUMN in output_columns:
-        return True
-    carried = sanitized_carried_geo(original_metadata)
-    primary = (carried.get("columns") or {}).get(geometry_column)
-    carried_covering = primary.get("covering") if isinstance(primary, dict) else None
-    return isinstance(carried_covering, dict) and "bbox" in carried_covering
 
 
 def _probe_output_columns(con, query: str, verbose: bool, purpose: str) -> list[str] | None:
@@ -1143,13 +1168,28 @@ def _geo_block_to_carry_on_fast_path(
     return carried
 
 
-def _fresh_block_declares_a_bbox(con, query: str, geometry_column: str, verbose: bool) -> bool:
-    """Whether the composer, with no carried block, declares a bbox covering for ``query``."""
-    block = compose_geo_block(
-        QuerySource(con, query),
-        GeoBlockOptions(geometry_column=geometry_column, version="2.0", verbose=verbose),
+def _fast_path_options(
+    geometry_column: str,
+    effective_version: str,
+    output_columns: list[str] | None,
+    input_crs,
+    verbose: bool,
+    geometry_info: dict | None = None,
+) -> GeoBlockOptions:
+    """The options the 2.0 fast path composes its carried block with.
+
+    Output columns known to hold no conventional ``bbox`` settle the declare
+    step without a schema probe.
+    """
+    detect = output_columns is None or SELF_EVIDENT_BBOX_COLUMN in output_columns
+    return GeoBlockOptions(
+        geometry_column=geometry_column,
+        version=effective_version,
+        covering=DETECT_BBOX_COLUMN if detect else None,
+        crs=input_crs,
+        geometry_info=geometry_info,
+        verbose=verbose,
     )
-    return "covering" in block["columns"][geometry_column]
 
 
 def _fast_path_geo_decision(
@@ -1228,7 +1268,13 @@ def _fast_path_geo_decision(
     no_block = (
         None,
         is_unknown_type_crs(input_crs)
-        or (detect and _fresh_block_declares_a_bbox(con, query, geometry_column, verbose)),
+        or (
+            detect
+            and composes_a_covering(
+                QuerySource(con, query),
+                GeoBlockOptions(geometry_column, version=effective_version, verbose=verbose),
+            )
+        ),
     )
     if not original_metadata:
         return no_block
@@ -1264,13 +1310,7 @@ def _fast_path_geo_decision(
     # known to hold no `bbox` settle the declare without a schema probe.
     carried = compose_geo_block(
         QuerySource(con, query, original_metadata),
-        GeoBlockOptions(
-            geometry_column=geometry_column,
-            version=effective_version,
-            covering=DETECT_BBOX_COLUMN if detect else None,
-            crs=input_crs,
-            verbose=verbose,
-        ),
+        _fast_path_options(geometry_column, effective_version, output_columns, input_crs, verbose),
     )
     if not _carries_more_than_duckdb_generates(carried):
         return None, False
@@ -1572,8 +1612,16 @@ def write_parquet_with_metadata(
     # with no bbox member to stand beside is dropped by every write path, so
     # forcing the single-threaded rewrite would only buy the fast path's output.
     if custom_metadata and "covering" in custom_metadata:
-        if _custom_cover_survives(
-            custom_metadata["covering"], original_metadata, geometry_column, output_columns
+        # Forced only when the composed block keeps a covering: an index entry
+        # with no bbox member to stand beside is dropped by every gate (#954).
+        if not geometry_column or composes_a_covering(
+            QuerySource(con, query, original_metadata),
+            GeoBlockOptions(
+                geometry_column,
+                version=effective_version,
+                custom_metadata=custom_metadata,
+                verbose=verbose,
+            ),
         ):
             rewrite_needed = True
             if verbose:
@@ -1627,9 +1675,20 @@ def write_parquet_with_metadata(
         # price of keeping the carried block at all -- only the rewrite path can
         # compute one, and the keys that make the block worth carrying (`epoch`,
         # `orientation`, a `covering`) would be lost by handing the write back to
-        # DuckDB instead. Merged after the "says more than DuckDB" gate, so a
-        # secondary's own `crs` cannot by itself make a block worth carrying.
-        merge_secondary_geometry_metadata(carried_geo_block, geometry_info)
+        # DuckDB instead. Composed again, with the secondaries, after the
+        # "says more than DuckDB" gate, so a secondary's own `crs` cannot by
+        # itself make a block worth carrying.
+        carried_geo_block = compose_geo_block(
+            QuerySource(con, query, original_metadata),
+            _fast_path_options(
+                geometry_column,
+                effective_version,
+                output_columns,
+                input_crs,
+                verbose,
+                geometry_info=geometry_info,
+            ),
+        )
     secondary_geo_columns = _secondary_geo_columns(carried_geo_block, geometry_info)
     rewrite_needed = rewrite_needed or _unknown_secondary_needs_rewrite(
         carried_geo_block, secondary_geo_columns, geometry_column, effective_version

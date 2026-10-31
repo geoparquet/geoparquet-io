@@ -184,7 +184,6 @@
     "UnresolvableCRSError",
     "WGS84_TRANSFORM_TARGET",
     "apply_output_crs",
-    "apply_target_crs_to_geo_meta",
     "column_is_geographic",
     "crs_authority_code",
     "crs_from_column_meta",
@@ -462,6 +461,8 @@
     "bbox_field_order_is_covering_legal",
     "bbox_struct_array",
     "bbox_struct_child_names_match",
+    "bbox_struct_sql",
+    "bbox_struct_type",
     "bbox_xy",
     "bboxless_covering_columns",
     "bounds_of",
@@ -471,6 +472,7 @@
     "carried_version",
     "compose_carried_geo",
     "compose_geo_block",
+    "composes_a_covering",
     "covering_lacks_bbox",
     "covering_supported",
     "declared_version",
@@ -484,7 +486,6 @@
     "is_covering_path",
     "is_geoparquet_1x",
     "is_levelled_overview",
-    "merge_secondary_geometry_metadata",
     "merged_geometry_stats",
     "missing_bbox_struct_fields",
     "prune_geo_metadata_to_columns",
@@ -504,6 +505,7 @@
     "strip_orientation",
     "strip_unsupported_covering",
     "with_geo_block",
+    "with_geo_key",
     "zm_suffix_sql"
   ],
   "geoparquet_io.core.geometry_detection": [
@@ -611,6 +613,7 @@
     "resolve_row_group_rows_for_sample",
     "resolve_row_group_rows_for_table",
     "sized_stream",
+    "version_to_describe",
     "without_geometry_dictionary",
     "writable_geoparquet_version",
     "write_arrow_table"

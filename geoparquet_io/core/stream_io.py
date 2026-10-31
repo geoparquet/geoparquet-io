@@ -14,7 +14,6 @@ Key abstractions:
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
@@ -37,9 +36,10 @@ from geoparquet_io.core.duckdb_utils import (
     register_arrow,
     sql_path,
 )
-from geoparquet_io.core.edges import declared_edges, set_edges
+from geoparquet_io.core.edges import declared_edges
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
+    KEEP_CRS,
     ArrowTableSource,
     GeoBlockOptions,
     backfill_derived_stats,
@@ -47,6 +47,7 @@ from geoparquet_io.core.geo_metadata import (
     compose_geo_block,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
+    with_geo_block,
 )
 from geoparquet_io.core.geometry_detection import (
     create_geometry_view,
@@ -54,7 +55,11 @@ from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
 )
 from geoparquet_io.core.logging_config import progress, warn
-from geoparquet_io.core.parquet_writer import WriteOptions, resolve_output_geoparquet_version
+from geoparquet_io.core.parquet_writer import (
+    WriteOptions,
+    resolve_output_geoparquet_version,
+    version_to_describe,
+)
 from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.streaming import (
     apply_geoarrow_extension_type,
@@ -206,28 +211,34 @@ def _stream_input_metadata(table: pa.Table) -> dict:
     # inferred column is declared by the block or GeoArrow-typed, so one answers.
     geometry_fields = pa.schema([table.schema.field(name) for name in inferred_columns])
     primary = primary_geometry_column(geometry_fields, geo=geo)
-    edges_by_col = table_nonplanar_edges(table, primary, None)
-    columns = {}
-    for name, inferred in inferred_columns.items():
-        column = {"encoding": "WKB", **inferred, **geo.get("columns", {}).get(name, {})}
-        # Normalize the declaration with the shared reader, so an unknown value
-        # cannot become a non-planar model merely by crossing a pipe. Not
-        # mapped to the block's version: this block is an intermediate whose
-        # version is the input's, and the write at the other end of the pipe
-        # maps to the output's, so a 2.0 output keeps an ellipsoidal algorithm.
-        set_edges(column, edges_by_col.get(name))
-        columns[name] = column
-    # The described columns, composed into the block as a description (the
-    # input's version, or 2.0 for native columns with no block): the composer
-    # owns the version and the covering gates, the stream only what each
-    # column's field and declaration say.
-    described = {**geo, "primary_column": primary, "columns": columns}
+    # What each column's field says (its CRS, the "not known" geometry types)
+    # and the edges resolved block-over-type, as the composer's inputs: the
+    # primary's through ``crs``/``stats``/``edges``, every other column's
+    # through ``geometry_info``. Whatever the carried block already says wins.
+    # Edges are recorded, not mapped, for a description: the write at the other
+    # end of the pipe maps them to the output's version, so a 2.0 output keeps
+    # an ellipsoidal algorithm.
+    declared = inferred_columns[primary]
+    carried = (geo.get("columns") or {}).get(primary) or {}
     block = compose_geo_block(
-        ArrowTableSource(table.replace_schema_metadata({b"geo": json.dumps(described)})),
-        GeoBlockOptions(geometry_column=primary, covering=None),
+        ArrowTableSource(table),
+        GeoBlockOptions(
+            geometry_column=primary,
+            version=version_to_describe(table.schema),
+            describe=True,
+            covering=None,
+            column_edges=table_nonplanar_edges(table, primary, None),
+            crs=declared["crs"] if "crs" in declared and "crs" not in carried else KEEP_CRS,
+            stats={primary: {k: v for k, v in declared.items() if k == "geometry_types"}}
+            if "geometry_types" not in carried
+            else None,
+            geometry_info={
+                "secondary": [name for name in inferred_columns if name != primary],
+                "metadata": inferred_columns,
+            },
+        ),
     )
-    metadata[b"geo"] = json.dumps(block).encode("utf-8")
-    return metadata
+    return dict(with_geo_block(table, block).schema.metadata)
 
 
 def _wrap_query_with_wkb_conversion(

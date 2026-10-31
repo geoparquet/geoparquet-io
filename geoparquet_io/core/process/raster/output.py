@@ -12,8 +12,6 @@ Docs: docs/guide/process-raster.md
 
 from __future__ import annotations
 
-import json
-
 import pyarrow as pa
 
 from geoparquet_io.core.geo_metadata import (
@@ -21,8 +19,10 @@ from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
     SchemaSource,
     compose_geo_block,
+    with_geo_block,
 )
 from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
+from geoparquet_io.core.parquet_writer import version_to_describe
 
 
 def finalize_raster_table(
@@ -42,12 +42,11 @@ def finalize_raster_table(
         SchemaSource(table.schema),
         GeoBlockOptions(
             geometry_column=BUILT_GEOMETRY_COLUMN,
+            version=version_to_describe(table.schema),
+            describe=True,
             covering=None,
             crs=KEEP_CRS if crs is None else crs,
         ),
     )
-    target = pa.schema(
-        [pa.field(f.name, f.type, nullable=f.nullable) for f in table.schema],
-        metadata={b"geo": json.dumps(geo).encode("utf-8")},
-    )
-    return table.cast(target)
+    target = pa.schema([pa.field(f.name, f.type, nullable=f.nullable) for f in table.schema])
+    return with_geo_block(table.cast(target), geo)

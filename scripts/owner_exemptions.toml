@@ -101,10 +101,6 @@ reason = "permanent: ArcGIS JSON error-body code 500 marks page pressure (halve 
 # PROJJSON, GeoJSON data), not a report; a new report in one of them is not
 # caught, which is the price of not listing 60 serializer lines one by one.
 [[G1.json_dumps]]
-path = "geoparquet_io/core/add/bbox.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
 path = "geoparquet_io/core/add/bbox_metadata.py"
 count = "*"
 reason = "metadata serialization, not a report: geo block (and its debug dump)"
@@ -124,10 +120,6 @@ reason = "metadata serialization, not a report: geo block"
 path = "geoparquet_io/core/bbox_structure.py"
 count = "*"
 reason = "metadata serialization, not a report: debug dump of the geo block"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/carto.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/check_fixes.py"
 count = "*"
@@ -189,31 +181,11 @@ path = "geoparquet_io/core/process/overview/overview_file.py"
 count = "*"
 reason = "metadata serialization, not a report: geo block and overviews footer key"
 [[G1.json_dumps]]
-path = "geoparquet_io/core/process/raster/output.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/process/simplify.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/reproject.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
 path = "geoparquet_io/core/stac.py"
 count = "*"
 reason = "metadata serialization, not a report: STAC item/collection JSON file"
 [[G1.json_dumps]]
-path = "geoparquet_io/core/stream_io.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
 path = "geoparquet_io/core/streaming.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/wfs.py"
 count = "*"
 reason = "metadata serialization, not a report: geo block"
 [[G1.json_dumps]]

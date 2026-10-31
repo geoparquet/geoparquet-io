@@ -88,10 +88,14 @@ def test_a_metadata_form_version_is_refused():
         compose_geo_block(ArrowTableSource(_table()), GeoBlockOptions("geometry", version="1.1.0"))
 
 
-def test_a_description_keeps_the_carried_version_or_takes_the_default():
+def test_a_description_keeps_the_carried_version_and_decides_none_itself():
+    """The composer resolves no version: a block-less description takes the facade's."""
     carried = {**CARRIED, "version": "1.0.0"}
     assert _compose(_table(geo=carried))["version"] == "1.0.0"
-    assert _compose(_table(geo=None))["version"] == "1.1.0"
+    assert _compose(_table(geo=carried), version="2.0", describe=True)["version"] == "1.0.0"
+    assert _compose(_table(geo=None), version="1.1", describe=True)["version"] == "1.1.0"
+    with pytest.raises(ValueError, match="declares none"):
+        compose_geo_block(ArrowTableSource(_table(geo=None)), GeoBlockOptions("geometry"))
 
 
 @pytest.mark.parametrize("version", ["1.1", "2.0"])
@@ -144,7 +148,7 @@ def test_crs_follows_the_output_rule_for_a_write_and_is_recorded_for_a_descripti
     crs84 = {"id": {"authority": "OGC", "code": "CRS84"}, "type": "GeographicCRS"}
     write = _compose(_table(geo=None), version="1.1", crs=crs84)
     assert "crs" not in write["columns"]["geometry"]
-    description = _compose(_table(geo=None), crs=crs84)
+    description = _compose(_table(geo=None), version="1.1", describe=True, crs=crs84)
     assert description["columns"]["geometry"]["crs"] == crs84
     kept = _compose(_table(), version="1.1", crs=KEEP_CRS)
     assert kept["columns"]["geometry"]["crs"] is None
@@ -158,7 +162,7 @@ def test_edges_map_to_the_version_for_a_write_and_stay_as_declared_for_a_descrip
     assert spherical["columns"]["geometry"]["orientation"] == "counterclockwise"
     v2 = _compose(_table(geo=None), version="2.0", edges="vincenty")
     assert v2["columns"]["geometry"]["edges"] == "vincenty"
-    description = _compose(_table(geo=None), edges="vincenty")
+    description = _compose(_table(geo=None), version="1.1", describe=True, edges="vincenty")
     assert description["columns"]["geometry"]["edges"] == "vincenty"
     assert "orientation" not in description["columns"]["geometry"]
 
@@ -182,6 +186,99 @@ def test_secondaries_get_their_declared_entry():
     extra = {"geom2": pa.array([b"\x01"], pa.binary())}
     block = _compose(_table(extra=extra), version="1.1", geometry_info=info)
     assert block["columns"]["geom2"] == {"crs": None, "encoding": "WKB"}
+
+
+GEOM2 = {"geom2": pa.array([b"\x01"], pa.binary())}
+
+
+def test_a_declared_secondary_goes_through_the_steps_not_pasted_in():
+    """Its edges are mapped (step 4), its crs follows the output rule (step 5),
+    its stats land (step 8); only its other keys are carried as declared."""
+    crs84 = {"id": {"authority": "OGC", "code": "CRS84"}, "type": "GeographicCRS"}
+    declared = {
+        "encoding": "point",
+        "edges": "vincenty",
+        "crs": crs84,
+        "geometry_types": ["Point"],
+        "bbox": [0, 0, 1, 1],
+        "epoch": 2020.5,
+    }
+    info = {"secondary": ["geom2"], "metadata": {"geom2": declared}}
+    block = _compose(_table(extra=GEOM2), version="1.1", geometry_info=info)
+    assert block["columns"]["geom2"] == {
+        "encoding": "point",
+        "edges": "spherical",
+        "geometry_types": ["Point"],
+        "bbox": [0, 0, 1, 1],
+        "epoch": 2020.5,
+    }
+    v2 = _compose(_table(extra=GEOM2), version="2.0", geometry_info=info)
+    assert v2["columns"]["geom2"]["edges"] == "vincenty"
+
+
+def test_a_carried_secondary_entry_wins_over_what_geometry_info_declares():
+    carried = copy.deepcopy(CARRIED)
+    carried["columns"]["geom2"] = {"encoding": "WKB", "geometry_types": ["Polygon"]}
+    info = {"secondary": ["geom2"], "metadata": {"geom2": {"geometry_types": ["Point"]}}}
+    block = _compose(_table(geo=carried, extra=GEOM2), version="1.1", geometry_info=info)
+    assert block["columns"]["geom2"]["geometry_types"] == ["Polygon"]
+
+
+def test_the_primary_is_never_a_secondary():
+    info = {"secondary": ["geometry"], "metadata": {"geometry": {"crs": None}}}
+    with pytest.raises(ValueError, match="primary geometry column"):
+        compose_geo_block(
+            ArrowTableSource(_table()),
+            GeoBlockOptions("geometry", version="1.1", geometry_info=info),
+        )
+
+
+def test_primary_column_relabels_and_geometry_column_alone_does_not():
+    carried = copy.deepcopy(CARRIED)
+    carried["columns"]["geom2"] = {"encoding": "WKB", "geometry_types": ["Point"]}
+    table = _table(geo=carried, extra=GEOM2)
+    kept = compose_geo_block(ArrowTableSource(table), GeoBlockOptions("geom2", version="1.1"))
+    assert kept["primary_column"] == "geometry"
+    relabelled = compose_geo_block(
+        ArrowTableSource(table), GeoBlockOptions("geom2", version="1.1", primary_column="geom2")
+    )
+    assert relabelled["primary_column"] == "geom2"
+
+
+def test_column_edges_are_mapped_and_imply_no_orientation():
+    """A restore of what the data has, not a request: no orientation is claimed."""
+    carried = copy.deepcopy(CARRIED)
+    carried["columns"]["geom2"] = {"encoding": "WKB", "geometry_types": ["Point"]}
+    block = _compose(
+        _table(geo=carried, extra=GEOM2),
+        version="1.1",
+        column_edges={"geometry": "spherical", "geom2": "vincenty"},
+    )
+    assert block["columns"]["geometry"]["edges"] == "spherical"
+    assert block["columns"]["geom2"]["edges"] == "spherical"
+    assert "orientation" not in block["columns"]["geometry"]
+    assert "orientation" not in block["columns"]["geom2"]
+
+
+def test_1_1_geoarrow_keeps_the_declared_native_encoding():
+    info = {"secondary": [], "metadata": {"geometry": {"encoding": "polygon"}}}
+    block = _compose(_table(), version="1.1-geoarrow", geometry_info=info)
+    assert block["columns"]["geometry"]["encoding"] == "polygon"
+    assert _compose(_table(), version="1.1", geometry_info=info)["columns"]["geometry"][
+        "encoding"
+    ] == ("WKB")
+
+
+def test_covering_provenance_names_the_column_when_nothing_is_carried():
+    """A table DuckDB built carries no block; the input's says which struct is the bbox (#953)."""
+    provenance = copy.deepcopy(CARRIED)
+    provenance["columns"]["geometry"]["covering"] = {"bbox": build_bbox_covering("bounds")}
+    extra = {"bounds": pa.array([{"xmin": 0.0, "ymin": 0.0, "xmax": 1.0, "ymax": 1.0}], BBOX_TYPE)}
+    table = _table(bbox_type=None, geo=None, extra=extra)
+    options = {"version": "1.1", "covering_provenance": {b"geo": json.dumps(provenance)}}
+    block = _compose(table, **options)
+    assert block["columns"]["geometry"]["covering"] == {"bbox": build_bbox_covering("bounds")}
+    assert "covering" not in _compose(table, version="1.1")["columns"]["geometry"]
 
 
 def test_never_mutates_the_source_metadata():

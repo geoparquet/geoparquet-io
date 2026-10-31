@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 
-import copy
 import functools
-import json
 import os
 import shutil
 import tempfile
 
 from geoparquet_io.core.add.bbox import add_bbox_column
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata
+from geoparquet_io.core.bbox_structure import bbox_covering_column_for
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_metadata import get_file_metadata
 from geoparquet_io.core.duckdb_utils import (
@@ -20,13 +19,15 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import is_same_file_path, resolve_file_url
 from geoparquet_io.core.geo_metadata import (
-    bbox_column_to_declare,
+    GeoBlockOptions,
+    SchemaSource,
     bboxless_covering_columns,
-    build_bbox_covering,
+    compose_geo_block,
     covering_lacks_bbox,
+    geo_key_value,
     sanitized_carried_geo,
-    strip_bboxless_covering,
 )
+from geoparquet_io.core.geometry_detection import primary_geometry_column, require_geometry_column
 from geoparquet_io.core.hilbert_order import hilbert_order
 from geoparquet_io.core.logging_config import debug, info, progress
 from geoparquet_io.core.parquet_footer import patch_or_rewrite
@@ -158,37 +159,34 @@ def _arrow_schema_of(parquet_file: str):
         con.close()
 
 
-def _supply_or_strip_bbox_member(parquet_file, geo_meta, verbose):
-    """Add the missing ``bbox`` member when the file carries a declarable
-    bbox column, else drop the covering.
+def _repaired_cover_block(parquet_file, original_metadata, geo_meta, verbose):
+    """The block a bbox-less covering repair writes, and the column it declared.
 
-    A remote file is asked the same question through DuckDB's schema probe.
-    It used to be stripped unasked, because ``pq.read_schema`` cannot open a
-    URL; that was harmless only while the remote repair handed the funnel the
-    *original* block to decide on (the footer patch and its fallback now get
-    the one repaired block, through ``patch_or_rewrite``).
-
-    Asks ``bbox_column_to_declare`` -- the gate ``_build_geo_block``
-    (``arrow_geo_metadata``) and the composer's bbox-covering step
-    (``geo_metadata.compose_geo_block``) ask -- so the footer patch and the funnel rewrite
-    cannot answer differently for one file, and an h3/s2/a5/quadkey/kdtree
-    entry beside the supplied member is kept rather than thrown away.
-
-    Returns the repaired block and the column it declared, or None when it
-    declared nothing and the covering was stripped instead.
+    Composed, not edited: ``compose_geo_block`` over the file's schema and its
+    own block, a description (the declared version is kept), with the default
+    covering request -- so a declarable bbox column gets the missing member
+    and an h3/s2/a5/quadkey/kdtree entry beside it is kept, and every other
+    bbox-less covering goes to the composer's gate. The footer patch and its
+    fallback get this one block (``patch_or_rewrite``), so they cannot answer
+    differently for one file. A remote file is asked the same question through
+    DuckDB's schema probe (:func:`_arrow_schema_of`); the primary is the
+    resolver's (``geometry_detection.primary_geometry_column``).
     """
-    primary = geo_meta.get("primary_column")
-    columns = geo_meta.get("columns") or {}
-    if primary and covering_lacks_bbox(columns.get(primary)):
-        name = bbox_column_to_declare(_arrow_schema_of(parquet_file), geo_meta, verbose=verbose)
-        if name:
-            repaired = copy.deepcopy(geo_meta)
-            repaired["columns"][primary].setdefault("covering", {})["bbox"] = build_bbox_covering(
-                name
-            )
-            # Any OTHER column's bbox-less covering is still illegal.
-            return strip_bboxless_covering(repaired, verbose), name
-    return strip_bboxless_covering(geo_meta, verbose), None
+    schema = _arrow_schema_of(parquet_file)
+    primary = require_geometry_column(
+        primary_geometry_column(schema, geo=geo_meta, verbose=verbose), parquet_file
+    )
+    block = compose_geo_block(
+        SchemaSource(schema, original_metadata),
+        GeoBlockOptions(
+            geometry_column=primary,
+            describe=True,
+            version=resolve_output_geoparquet_version(None, original_metadata=original_metadata),
+            verbose=verbose,
+        ),
+    )
+    lacked = covering_lacks_bbox((geo_meta.get("columns") or {}).get(primary))
+    return block, (bbox_covering_column_for(block, primary) if lacked else None)
 
 
 @uses_aws_profile
@@ -205,7 +203,7 @@ def fix_bboxless_cover(parquet_file, output_file, verbose=False, profile=None):
     Dropping is the repair for a file with nothing to declare. A file whose
     ``bbox`` struct is right there -- conventionally named, in the spec's field
     order -- gets the member *supplied* instead, by
-    :func:`_supply_or_strip_bbox_member`: the covering becomes usable and the
+    :func:`_repaired_cover_block`: the covering becomes usable and the
     index entry beside it survives. That is not this function's own policy but
     the write funnels': they do not simply drop, they run
     the composer's bbox-covering step *before* ``strip_bboxless_covering``, so a
@@ -250,7 +248,7 @@ def fix_bboxless_cover(parquet_file, output_file, verbose=False, profile=None):
             debug("No covering without a bbox member; nothing to drop.")
         return {"fix_applied": None, "success": True}
 
-    repaired, declared = _supply_or_strip_bbox_member(parquet_file, geo_meta, verbose)
+    repaired, declared = _repaired_cover_block(parquet_file, original_metadata, geo_meta, verbose)
     if declared:
         info(
             f"Declaring bbox column '{declared}' in the covering that had none "
@@ -266,7 +264,7 @@ def fix_bboxless_cover(parquet_file, output_file, verbose=False, profile=None):
 
     patch_or_rewrite(
         parquet_file,
-        {"geo": json.dumps(repaired)},
+        {"geo": geo_key_value(repaired)},
         output_file=output_file,
         rewrite=functools.partial(
             rewrite_footer_kv, write=WriteOptions(profile=profile), verbose=verbose

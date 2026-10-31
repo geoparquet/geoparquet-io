@@ -57,6 +57,7 @@ from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
     QuerySource,
     SchemaSource,
+    bbox_struct_sql,
     bbox_xy,
     bounds_of,
     build_bbox_covering,
@@ -77,7 +78,7 @@ from geoparquet_io.core.geometry_repair import (
     repair_query_geometry,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
-from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version, version_to_describe
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
     get_remote_error_hint,
@@ -1481,12 +1482,7 @@ def _build_csv_conversion_query(
         if skip_bbox:
             return ""
         return f""",
-                STRUCT_PACK(
-                    xmin := ST_XMin({geom}),
-                    ymin := ST_YMin({geom}),
-                    xmax := ST_XMax({geom}),
-                    ymax := ST_YMax({geom})
-                ) AS {quote_identifier(bbox_name)}"""
+                {bbox_struct_sql(geom, geometry_name)} AS {quote_identifier(bbox_name)}"""
 
     # Build geometry expression and exclusion list
     if geom_info["type"] == "wkt":
@@ -1764,11 +1760,9 @@ def _build_conversion_query(
     geoarrow_native = encoding.lower() not in {"wkb", "wkt"}
     if geoarrow_native:
         xmin_e, ymin_e, xmax_e, ymax_e, cx_e, cy_e = _geoarrow_coord_exprs(quoted_geom, encoding)
+        envelope = (xmin_e, ymin_e, xmax_e, ymax_e)
     else:
-        xmin_e = f"ST_XMin({quoted_geom})"
-        ymin_e = f"ST_YMin({quoted_geom})"
-        xmax_e = f"ST_XMax({quoted_geom})"
-        ymax_e = f"ST_YMax({quoted_geom})"
+        envelope = None
 
     exclude_cols = []
     if existing_bbox_col and skip_bbox:
@@ -1801,12 +1795,7 @@ def _build_conversion_query(
         # caller either preserves it or, for 2.0, skips the bbox.)
         base_select = f"""
             SELECT *,
-                STRUCT_PACK(
-                    xmin := {xmin_e},
-                    ymin := {ymin_e},
-                    xmax := {xmax_e},
-                    ymax := {ymax_e}
-                ) AS {quote_identifier(bbox_name)}
+                {bbox_struct_sql(quoted_geom, geom_column, envelope)} AS {quote_identifier(bbox_name)}
             FROM {table_expr}
         """
 
@@ -2601,6 +2590,8 @@ def read_spatial_to_arrow(
                 SchemaSource(arrow_table.schema),
                 GeoBlockOptions(
                     geometry_column=geometry_column,
+                    version=version_to_describe(arrow_table.schema),
+                    describe=True,
                     covering=None,
                     edges=input_edges,
                     crs=KEEP_CRS if detected_crs is None else detected_crs,

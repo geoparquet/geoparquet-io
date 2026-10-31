@@ -51,6 +51,7 @@ from geoparquet_io.core.geo_metadata import (
     compose_geo_block,
     geometry_types_of,
     prune_geo_metadata_to_columns,
+    with_geo_block,
 )
 from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
@@ -59,6 +60,7 @@ from geoparquet_io.core.http_retry import (
     make_request_with_retry,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
+from geoparquet_io.core.parquet_writer import version_to_describe
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 # What a 401/403 tells the user to fix: the options that carry an ArcGIS credential.
@@ -1137,6 +1139,8 @@ def _tag_output_crs(
         SchemaSource(table.schema),
         GeoBlockOptions(
             geometry_column=BUILT_GEOMETRY_COLUMN,
+            version=version_to_describe(table.schema),
+            describe=True,
             covering=None,
             crs=crs,
             stats={
@@ -1146,10 +1150,7 @@ def _tag_output_crs(
             },
         ),
     )
-    existing_metadata = table.schema.metadata or {}
-    return table.replace_schema_metadata(
-        {**existing_metadata, b"geo": json.dumps(geo_metadata).encode("utf-8")}
-    )
+    return with_geo_block(table, geo_metadata)
 
 
 def _resolve_field_selection(

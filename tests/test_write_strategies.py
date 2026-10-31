@@ -1915,28 +1915,35 @@ class TestNativeGeometryCrsAcrossStrategies:
 
 
 class TestMergeSecondaryGeometryMetadata:
-    """The one definition of "give every secondary column a ``geo`` entry"."""
+    """The one definition of "give every secondary column a ``geo`` entry": the composer's."""
+
+    @staticmethod
+    def _compose(geometry_info):
+        import pyarrow as pa
+
+        from geoparquet_io.core.geo_metadata import (
+            GeoBlockOptions,
+            SchemaSource,
+            compose_geo_block,
+        )
+
+        schema = pa.schema([("geometry", pa.binary()), ("geom2", pa.binary())])
+        return compose_geo_block(
+            SchemaSource(schema),
+            GeoBlockOptions("geometry", version="1.1", covering=None, geometry_info=geometry_info),
+        )
 
     def test_an_undeclared_secondary_still_gets_the_required_encoding(self):
         """``encoding`` is required by the spec, so a column the input left bare gets WKB."""
-        from geoparquet_io.core.geo_metadata import merge_secondary_geometry_metadata
-
-        geo_meta = {"columns": {"geometry": {"encoding": "WKB"}}}
-
-        merge_secondary_geometry_metadata(geo_meta, {"secondary": ["geom2"], "metadata": {}})
+        geo_meta = self._compose({"secondary": ["geom2"], "metadata": {}})
 
         assert geo_meta["columns"]["geom2"] == {"encoding": "WKB"}
 
     def test_the_input_metadata_wins_over_the_default(self):
         """A declared secondary keeps its own crs and encoding -- what the native type reads."""
-        from geoparquet_io.core.geo_metadata import merge_secondary_geometry_metadata
-
         crs = {"id": {"authority": "EPSG", "code": 27700}}
-        geo_meta = {"columns": {"geometry": {"encoding": "WKB"}}}
-
-        merge_secondary_geometry_metadata(
-            geo_meta,
-            {"secondary": ["geom2"], "metadata": {"geom2": {"encoding": "point", "crs": crs}}},
+        geo_meta = self._compose(
+            {"secondary": ["geom2"], "metadata": {"geom2": {"encoding": "point", "crs": crs}}}
         )
 
         assert geo_meta["columns"]["geom2"] == {"encoding": "point", "crs": crs}

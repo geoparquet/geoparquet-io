@@ -12,7 +12,6 @@ Docs: docs/guide/process-simplify.md
 
 from __future__ import annotations
 
-import json
 import os
 from typing import Any
 
@@ -38,6 +37,8 @@ from geoparquet_io.core.geo_metadata import (
     geometry_stats_of,
     merged_geometry_stats,
     sanitized_carried_geo,
+    strip_derived_stats,
+    with_geo_block,
 )
 from geoparquet_io.core.geoarrow_encoding import is_wkb_extension_field
 from geoparquet_io.core.geometry_detection import (
@@ -52,6 +53,7 @@ from geoparquet_io.core.parquet_writer import (
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
     sized_stream,
+    version_to_describe,
     without_geometry_dictionary,
 )
 from geoparquet_io.core.remote import is_remote_url
@@ -64,26 +66,6 @@ from geoparquet_io.core.write_funnels import (
 #: Above this row count, coverage mode's whole-column materialization gets a
 #: memory warning (plain mode processes chunk by chunk).
 _COVERAGE_WARN_ROWS = 1_000_000
-
-
-def strip_stale_geometry_stats(geo_meta: dict, geometry_column: str) -> dict:
-    """Drop ``geometry_types`` and ``bbox`` from ONE column of a ``geo`` dict.
-
-    A carried block's stats win over recomputation in the write funnel, so a
-    transform that changes geometry must remove them or the output lies.
-    Only the transformed column is stripped: another geometry column's stats
-    are still true, and the funnel carries (never recomputes) columns other
-    than the one being written. Everything else (``crs``, ``edges``,
-    ``covering``, ...) is kept. Mutates and returns ``geo_meta``; tolerates
-    malformed shapes.
-    """
-    columns = geo_meta.get("columns")
-    if isinstance(columns, dict):
-        col_meta = columns.get(geometry_column)
-        if isinstance(col_meta, dict):
-            col_meta.pop("geometry_types", None)
-            col_meta.pop("bbox", None)
-    return geo_meta
 
 
 def _utm_epsg(lon: float, lat: float) -> int:
@@ -357,13 +339,14 @@ def _refresh_bbox_column(table: pa.Table, geom_col: str) -> pa.Table:
 
 
 def _with_stripped_geo(table: pa.Table, geometry_column: str) -> pa.Table:
-    """Strip the simplified column's stale stats from the carried ``geo`` block."""
-    metadata = dict(table.schema.metadata or {})
-    geo = sanitized_carried_geo(metadata)
-    if not geo:
-        return table
-    strip_stale_geometry_stats(geo, geometry_column)
-    metadata[b"geo"] = json.dumps(geo).encode("utf-8")
+    """Strip the simplified column's stale stats from the carried ``geo`` block.
+
+    A carried block's stats win over recomputation in the write funnel, so the
+    transformed column's must go; another geometry column's are still true.
+    """
+    metadata = strip_derived_stats(
+        table.schema.metadata, columns=[geometry_column], recomputed_columns=[geometry_column]
+    )
     return table.replace_schema_metadata(metadata)
 
 
@@ -377,13 +360,17 @@ def _with_carried_edges(table: pa.Table, geometry_column: str, edges: str | None
     """
     if not edges:
         return table
-    metadata = dict(table.schema.metadata or {})
     geo = compose_geo_block(
         ArrowTableSource(table),
-        GeoBlockOptions(geometry_column=geometry_column, covering=None, edges=edges),
+        GeoBlockOptions(
+            geometry_column=geometry_column,
+            version=version_to_describe(table.schema),
+            describe=True,
+            covering=None,
+            edges=edges,
+        ),
     )
-    metadata[b"geo"] = json.dumps(geo).encode("utf-8")
-    return table.replace_schema_metadata(metadata)
+    return with_geo_block(table, geo)
 
 
 def simplify_table(
@@ -525,12 +512,13 @@ def _footer_kv_via_funnel(
         SchemaSource(schema, metadata),
         GeoBlockOptions(
             geometry_column=geom_col,
+            version=version_to_describe(schema),
+            describe=True,
             covering=None,
             stats={geom_col: {"bbox": stats.bbox, "geometry_types": stats.geometry_types or None}},
         ),
     )
-    metadata[b"geo"] = json.dumps(geo).encode("utf-8")
-    empty = schema.with_metadata(metadata).empty_table()
+    empty = with_geo_block(schema.with_metadata(metadata).empty_table(), geo)
     fd, tmp_path = tempfile.mkstemp(suffix=".parquet", prefix="gpio_simplify_footer_")
     os.close(fd)
     try:
