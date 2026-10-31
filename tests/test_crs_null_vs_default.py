@@ -18,6 +18,7 @@ from geoparquet_io.core.crs_utils import (
     geoparquet_crs_is_null,
     reset_null_crs_warnings,
 )
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.reproject import _reproject_streaming, reproject, reproject_table
 from geoparquet_io.core.validate import CheckStatus, _check_crs_valid
 from tests.conftest import get_geo_metadata
@@ -132,11 +133,8 @@ def _stream(input_file, output_file, target_crs, assume_crs84=False):
         output_file,
         target_crs,
         None,  # source_crs
-        "ZSTD",  # compression
-        None,  # compression_level
         False,  # verbose
-        None,  # profile
-        None,  # geoparquet_version
+        WriteOptions(compression="ZSTD"),
         assume_crs84=assume_crs84,
     )
 

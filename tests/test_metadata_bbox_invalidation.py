@@ -32,6 +32,7 @@ from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.extract import extract
 from geoparquet_io.core.geo_metadata import strip_derived_stats
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.reproject import reproject_impl
 from tests.conftest import get_geo_metadata
 
@@ -382,7 +383,7 @@ class TestReprojectBboxRefreshed:
             str(out),
             target_crs="EPSG:3857",
             source_crs="OGC:CRS84",
-            geoparquet_version=version,
+            write=WriteOptions(geoparquet_version=version),
         )
 
         bbox = _primary_col_meta(out).get("bbox")
@@ -505,11 +506,8 @@ class TestReprojectWarnsAboutCarriedBboxStructs:
                 str(out),
                 target_crs="EPSG:3857",
                 source_crs="OGC:CRS84",
-                compression="ZSTD",
-                compression_level=None,
+                write=WriteOptions(compression="ZSTD", geoparquet_version="1.1"),
                 verbose=False,
-                profile=None,
-                geoparquet_version="1.1",
             )
 
         assert "bounds" in caplog.text
@@ -806,11 +804,8 @@ class TestStreamingPathsInvalidateStats:
             str(out),
             target_crs="EPSG:3857",
             source_crs="OGC:CRS84",
-            compression="ZSTD",
-            compression_level=None,
+            write=WriteOptions(compression="ZSTD", geoparquet_version="1.1"),
             verbose=False,
-            profile=None,
-            geoparquet_version="1.1",
         )
 
         bbox = _primary_col_meta(out).get("bbox")

@@ -157,3 +157,25 @@ def test_the_write_flags_reach_every_partition_file(points_file, tmp_path):
     assert len(files) == 2
     for path in files:
         _assert_footer(path, rows=ROWS // 2)
+
+
+def test_piped_reproject_honours_the_write_flags(points_file, tmp_path):
+    """The stdin path of `convert reproject` used to drop the row-group flags."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    table = pq.read_table(points_file)
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    out = tmp_path / "out.parquet"
+    result = CliRunner().invoke(
+        cli,
+        ["convert", "reproject", "-", str(out), "--dst-crs", "EPSG:3857", *WRITE_FLAGS],
+        input=sink.getvalue().to_pybytes(),
+    )
+    assert result.exit_code == 0, result.output
+    _assert_footer(out)

@@ -671,6 +671,7 @@ class TestMultiGeometryReproject:
 
     def test_streaming_path_also_keeps_secondary_stats(self, tmp_path):
         """The pipe path strips the same way and needed the same scoping."""
+        from geoparquet_io.core.parquet_writer import WriteOptions
         from geoparquet_io.core.reproject import _reproject_streaming
 
         input_file = tmp_path / "in_stream.parquet"
@@ -681,11 +682,8 @@ class TestMultiGeometryReproject:
             str(output_file),
             "EPSG:3857",
             None,
-            "ZSTD",
-            None,
-            False,
-            None,
-            None,
+            False,  # verbose
+            WriteOptions(compression="ZSTD"),
         )
         meta = pq.read_metadata(str(output_file))
         geo_meta = json.loads(meta.metadata[b"geo"].decode("utf-8"))
