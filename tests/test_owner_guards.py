@@ -1582,15 +1582,12 @@ def _names_edges(node: ast.AST) -> bool:
 
 
 def _edge_type_access(node: ast.AST) -> bool:
-    """``ga.EdgeType.SPHERICAL``, ``ga.EdgeType[e.upper()]``, ``t.edge_type``, and a
-    case fold of an edges value (``edges.lower() == x``): the GeoArrow carrier and
-    the vocabulary's case, which the owner's reader, writer and fold hold."""
+    """``ga.EdgeType.SPHERICAL``, ``ga.EdgeType[e.upper()]``, ``t.edge_type``: the
+    GeoArrow carrier, which the owner's reader and writer hold."""
     if isinstance(node, ast.Attribute):
         return node.attr == "edge_type" or _is_edge_type_enum(node.value)
     if isinstance(node, ast.Subscript):
         return _is_edge_type_enum(node.value)
-    if isinstance(node, ast.Compare):
-        return any(_is_case_fold_of_edges(n) for n in (node.left, *node.comparators))
     return False
 
 
@@ -1601,6 +1598,8 @@ def _is_edge_type_enum(node: ast.AST) -> bool:
 
 
 def _is_case_fold_of_edges(node: ast.AST) -> bool:
+    """``edges.lower()`` / ``.upper()`` / ``.casefold()`` of an edges value,
+    compared or not: the owner's ``normalized_edges`` re-done."""
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -1620,6 +1619,78 @@ def _logical_type_edges_text(node: ast.AST) -> bool:
         and isinstance(node.value, str)
         and "algorithm=(" in node.value
     )
+
+
+def _is_edge_constant(node: ast.AST) -> bool:
+    """``PLANAR`` or ``edges.PLANAR``: an owner constant, by either spelling."""
+    name = node.id if isinstance(node, ast.Name) else getattr(node, "attr", None)
+    return isinstance(node, (ast.Name, ast.Attribute)) and name in _EDGE_CONSTANTS
+
+
+def _decides_with_edge_constant(node: ast.AST) -> bool:
+    """``e == SPHERICAL``, ``e != PLANAR``, ``e in (PLANAR, ...)``, ``e or PLANAR``:
+    a decision the owner's predicates (``is_nonplanar``, ``is_geodesic``,
+    ``declared_edges``) make, re-made with its constants."""
+    if isinstance(node, ast.Compare):
+        operands = (node.left, *node.comparators)
+        return any(
+            _is_edge_constant(n)
+            or (
+                isinstance(n, (ast.Tuple, ast.List, ast.Set))
+                and any(_is_edge_constant(e) for e in n.elts)
+            )
+            for n in operands
+        )
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        return any(_is_edge_constant(v) for v in node.values)
+    return False
+
+
+def _edge_type_import(node: ast.AST) -> bool:
+    """``from geoarrow.pyarrow import EdgeType`` (``as ET`` or not): the carrier's
+    enum under a name the attribute and subscript shapes cannot see."""
+    return isinstance(node, ast.ImportFrom) and any(a.name == "EdgeType" for a in node.names)
+
+
+def _logical_type_concat(node: ast.AST) -> bool:
+    """``"GEOGRAPHY(" + alg`` / ``"algorithm=%s" % a``: the f-string shape by
+    concatenation or ``%``."""
+    if not (isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod))):
+        return False
+    return any(
+        isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and any(part in n.value for part in _LOGICAL_TYPE_EDGES_TEXT)
+        for n in (node.left, node.right)
+    )
+
+
+#: Where a planar ``ST_Centroid(`` is a cell key: those sites take the
+#: owner's ``representative_point_sql``, which spells it for planar edges.
+_CELL_KEY_DIRS = (
+    "geoparquet_io/core/add/",
+    "geoparquet_io/core/partition/",
+    "geoparquet_io/core/process/aggregate/",
+)
+
+
+def _planar_cell_key(m: _Module, node: ast.AST) -> bool:
+    """A string or f-string spelling ``ST_Centroid(`` in a cell-key module
+    (an f-string once, not again by its parts; never prose)."""
+    if not m.path.startswith(_CELL_KEY_DIRS):
+        return False
+    if isinstance(node, ast.JoinedStr):
+        text = "".join(v.value for v in node.values if isinstance(v, ast.Constant))
+    elif (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in m.docstrings
+        and not isinstance(m.parents.get(id(node)), ast.JoinedStr)
+    ):
+        text = node.value
+    else:
+        return False
+    return "ST_Centroid(" in text
 
 
 def _find_edges(m: _Module) -> Iterator[Hit]:
@@ -1643,6 +1714,14 @@ def _find_edges(m: _Module) -> Iterator[Hit]:
     GEOGRAPHY type's ``algorithm=`` text built in an f-string or parsed with a
     pattern. A dict literal naming the field with ``None``, a constant, an owner
     constant or a field-type table entry (a tuple, a lambda) is not a hit.
+
+    The second audit added a compare or ``or`` against an owner constant
+    (``e != PLANAR``, ``e or PLANAR``, ``alg == SPHERICAL``: the owner's
+    predicates re-made), an ``EdgeType`` imported by name (aliased or not),
+    ``"GEOGRAPHY(" +`` concatenation, a case fold of an edges value outside a
+    compare (``edges.casefold()``), and a planar ``ST_Centroid(`` cell key in
+    an add, partition or aggregate module (those take
+    ``representative_point_sql``).
     """
     for node in m.strings():
         if node.value.lower() in _EDGE_NAMES:
@@ -1653,6 +1732,11 @@ def _find_edges(m: _Module) -> Iterator[Hit]:
             or _edges_key_written(node)
             or _edge_type_access(node)
             or _logical_type_edges_text(node)
+            or _decides_with_edge_constant(node)
+            or _edge_type_import(node)
+            or _logical_type_concat(node)
+            or _is_case_fold_of_edges(node)
+            or _planar_cell_key(m, node)
         ):
             yield m.hit(node)
 
@@ -2253,8 +2337,8 @@ G1_CLEAN = {
     ),
     "output_version": ('def version(path):\n    return read_raw_geo(path).value.get("version")\n'),
     "edges": (
-        "from geoparquet_io.core.edges import SPHERICAL, edges_of\n\n"
-        'def spherical(col):\n    return edges_of(col) == SPHERICAL  # not "spherical"\n'
+        "from geoparquet_io.core.edges import is_nonplanar, edges_of\n\n"
+        'def spherical(col):\n    return is_nonplanar(edges_of(col))  # not "spherical"\n'
         'REPORT = {"edges": None, "note": "spherical edges"}\n'
     ),
     "overwrite_check": (
@@ -3289,7 +3373,37 @@ EDGES_SHAPES = {
     "edge type member": "import geoarrow.pyarrow as ga\n\nT = ga.EdgeType.SPHERICAL\n",
     "edge type subscript": "import geoarrow.pyarrow as ga\n\n\ndef f(e):\n    return ga.EdgeType[e.upper()]\n",
     "edge type read": "def f(t):\n    return t.edge_type.name.lower()\n",
+    # The second audit's shapes.
+    "or planar": "from geoparquet_io.core.edges import PLANAR\n\n\ndef f(e):\n    return e or PLANAR\n",
+    "not planar": "from geoparquet_io.core.edges import PLANAR\n\n\ndef f(e):\n    return e != PLANAR\n",
+    "is spherical": "from geoparquet_io.core import edges\n\n\ndef f(a):\n    return a == edges.SPHERICAL\n",
+    "in constants": "from geoparquet_io.core.edges import PLANAR, SPHERICAL\n\n\ndef f(e):\n    return e in (PLANAR, SPHERICAL)\n",
+    "aliased edge type": "from geoarrow.pyarrow import EdgeType as ET\n\nT = ET.SPHERICAL\n",
+    "geography concat": 'def f(alg):\n    return "GEOGRAPHY(OGC:CRS84, " + alg + ")"\n',
+    "casefold": "def f(edges):\n    e = edges.casefold()\n    return e\n",
 }
+
+#: A planar centroid cell key, planted where a cell key is built.
+CELL_KEY_PLANTS = {
+    "geoparquet_io/core/add/some_cells.py": 'def f(g):\n    return f"h3_latlng_to_cell(ST_Y(ST_Centroid({g})), 0, 9)"\n',
+    "geoparquet_io/core/partition/some_cells.py": 'SQL = "SELECT ST_Centroid(geometry) FROM t"\n',
+    "geoparquet_io/core/process/aggregate/some_cells.py": 'def f(g):\n    return f"ST_Centroid({g})"\n',
+}
+
+
+@pytest.mark.parametrize("where", sorted(CELL_KEY_PLANTS))
+def test_g12_edges_arm_flags_a_planar_cell_key(where, tmp_path):
+    target = tmp_path / where
+    target.parent.mkdir(parents=True)
+    target.write_text(CELL_KEY_PLANTS[where], encoding="utf-8")
+    assert arm_hits(tmp_path, "edges"), where
+
+
+def test_g12_edges_arm_leaves_a_centroid_elsewhere_alone(tmp_path):
+    target = tmp_path / "geoparquet_io/core/pmtiles_chunks.py"
+    target.parent.mkdir(parents=True)
+    target.write_text('def f(g):\n    return f"ST_X(ST_Centroid({g}))"\n', encoding="utf-8")
+    assert arm_hits(tmp_path, "edges") == []
 
 
 @pytest.mark.parametrize("shape", sorted(EDGES_SHAPES))
