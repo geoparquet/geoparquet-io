@@ -36,7 +36,7 @@ from geoparquet_io.core.duckdb_utils import (
     register_arrow,
     sql_path,
 )
-from geoparquet_io.core.edges import PLANAR, declares_edges, edges_of, set_edges
+from geoparquet_io.core.edges import declared_edges, set_edges
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
@@ -59,6 +59,7 @@ from geoparquet_io.core.streaming import (
 )
 from geoparquet_io.core.write_funnels import (
     collect_nonplanar_edges,
+    declared_nonplanar_edges,
     table_nonplanar_edges,
     write_parquet_with_metadata,
 )
@@ -244,7 +245,7 @@ def _stream_input_metadata(table: pa.Table) -> dict:
         # mapped to the block's version: this block is an intermediate whose
         # version is the input's, and the write at the other end of the pipe
         # maps to the output's, so a 2.0 output keeps an ellipsoidal algorithm.
-        set_edges(column, edges_by_col.get(name, PLANAR))
+        set_edges(column, edges_by_col.get(name))
         columns[name] = column
     metadata[b"geo"] = json.dumps(
         {
@@ -430,7 +431,7 @@ def _write_stream_output(
         if entry_crs_is_unknown(columns.get(name)):
             crs = "srid:0"
         entry = columns.get(name)
-        edges = edges_of(entry) if declares_edges(entry) else PLANAR
+        edges = declared_edges(entry)
         table = apply_geoarrow_extension_type(table, name, crs, edges=edges)
 
     # Apply metadata to output table, the way the file path does (#722):
@@ -509,27 +510,39 @@ def _detect_transform_source_crs(
     return source_crs_string(input_path)
 
 
+def _query_fn_params(transform_query_fn) -> list[str]:
+    """The query builder's parameter names (empty when they cannot be read)."""
+    import inspect
+
+    try:
+        return list(inspect.signature(transform_query_fn).parameters)
+    except (TypeError, ValueError):
+        return []
+
+
 def _wants_source_crs(transform_query_fn) -> bool:
     """True when the query builder takes a third ``source_crs`` parameter.
 
     Keeps the ``(source, con)`` contract for existing callers (sort, bbox, ...)
     while letting CRS-aware builders opt in.
     """
-    import inspect
-
-    try:
-        params = inspect.signature(transform_query_fn).parameters
-    except (TypeError, ValueError):
-        return False
-    return len(params) >= 3
+    return len(_query_fn_params(transform_query_fn)) >= 3
 
 
 def _build_transform_query(transform_query_fn, source, con, input_path, metadata, is_stream):
-    """Call the query builder, resolving the input CRS only when it takes one."""
+    """Call the query builder, resolving the input CRS only when it takes one.
+
+    A builder with a fourth parameter also gets the input's non-planar edges
+    (``declared_nonplanar_edges``: the file, or a stream's own block), so a cell
+    key on stdin keys the way the file path does (#1293).
+    """
     if not _wants_source_crs(transform_query_fn):
         return transform_query_fn(source, con)
     source_crs = _detect_transform_source_crs(input_path, metadata, is_stream)
-    return transform_query_fn(source, con, source_crs)
+    if len(_query_fn_params(transform_query_fn)) < 4:
+        return transform_query_fn(source, con, source_crs)
+    edges = declared_nonplanar_edges(None if is_stream else input_path, metadata)
+    return transform_query_fn(source, con, source_crs, edges)
 
 
 def execute_transform(

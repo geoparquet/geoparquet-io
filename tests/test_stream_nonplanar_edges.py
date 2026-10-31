@@ -193,7 +193,7 @@ def test_empty_and_projected_streams_keep_only_surviving_geometry(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("declared", "expected"), [("planar", "planar"), ("sphercal", "spherical"), (7, "spherical")]
+    ("declared", "expected"), [("planar", None), ("sphercal", "spherical"), (7, "spherical")]
 )
 def test_stdin_edge_authority_uses_only_supported_algorithms(declared, expected):
     from geoparquet_io.core.stream_io import _stream_input_metadata
@@ -211,7 +211,8 @@ def test_stdin_edge_authority_uses_only_supported_algorithms(declared, expected)
         {b"geo": json.dumps(geo).encode()}
     )
     described = _stream_input_metadata(table)
-    assert json.loads(described[b"geo"])["columns"]["geometry"]["edges"] == expected
+    # Planar is said by leaving the key out (``edges.set_edges``).
+    assert json.loads(described[b"geo"])["columns"]["geometry"].get("edges") == expected
 
 
 @pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])

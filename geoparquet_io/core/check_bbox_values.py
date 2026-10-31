@@ -69,7 +69,7 @@ from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
     sql_path,
 )
-from geoparquet_io.core.edges import PLANAR, edges_of, is_geodesic, set_edges
+from geoparquet_io.core.edges import PLANAR, declared_edges, edges_of, is_geodesic, state_edges
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import raw_geo_of_file
 from geoparquet_io.core.geometry_detection import (
@@ -700,7 +700,7 @@ def _check(
         return _could_not_compare(str(e), bbox_column, geometry_column)
     finally:
         con.close()
-    set_edges(report, edges_of(column_meta) or PLANAR)
+    state_edges(report, declared_edges(column_meta))
     return report
 
 

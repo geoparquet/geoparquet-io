@@ -28,7 +28,7 @@ from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.duckdb_utils import quote_identifier
-from geoparquet_io.core.edges import edges_of, set_edges
+from geoparquet_io.core.edges import edges_of, state_edges
 from geoparquet_io.core.file_utils import unlink_released_file
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
 from geoparquet_io.core.logging_config import warn
@@ -2999,7 +2999,7 @@ class Table:
             )
             if isinstance(col_meta, dict):
                 result["geometry_types"] = col_meta.get("geometry_types")
-                set_edges(result, edges_of(col_meta))
+                state_edges(result, edges_of(col_meta))
                 result["orientation"] = col_meta.get("orientation")
 
                 # Check for covering/bbox info
