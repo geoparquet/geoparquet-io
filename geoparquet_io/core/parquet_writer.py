@@ -1150,10 +1150,10 @@ class WriteOptions:
     Every write path used to forward the same seven keywords from its public
     entry point through each private driver to ``write_parquet_with_metadata``
     / ``stream_io.write_output`` / ``stream_io.execute_transform``, and the
-    lists drifted into 18 copies (pylint R0801). An entry point builds this once
-    (:meth:`pick` from its own parameters, or the CLI's
-    ``decorators.write_options`` from the Click values), the drivers pass it
-    along, and the funnel call expands it once (:meth:`funnel_kwargs`).
+    lists drifted into 18 copies (pylint R0801). A public core entry point keeps
+    its keyword signature (the CLI and the Python API call it) and builds this
+    once with :meth:`pick` from its own parameters; the drivers pass it along,
+    and the funnel call expands it once (:meth:`funnel_kwargs`).
 
     Each field means what leaving the funnel's keyword out means when unset:
     ``None`` everywhere, which the facade resolves (codec ZSTD, the default
@@ -1173,6 +1173,12 @@ class WriteOptions:
         """The options named in *values*; other keys are ignored, absent fields stay unset."""
         return cls(**{f.name: values[f.name] for f in fields(cls) if f.name in values})
 
-    def funnel_kwargs(self) -> dict[str, Any]:
-        """The keywords every funnel takes, for ``funnel(..., **options.funnel_kwargs())``."""
-        return {f.name: getattr(self, f.name) for f in fields(self)}
+    def funnel_kwargs(self, *, exclude: tuple[str, ...] = ()) -> dict[str, Any]:
+        """The keywords every funnel takes, for ``funnel(..., **options.funnel_kwargs())``.
+
+        ``exclude`` names the fields a narrower funnel does not take: the Arrow
+        table funnels write through pyarrow, so there is no DuckDB
+        ``memory_limit`` to bound, and the plain-Parquet funnel has no
+        ``geoparquet_version``.
+        """
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.name not in exclude}
