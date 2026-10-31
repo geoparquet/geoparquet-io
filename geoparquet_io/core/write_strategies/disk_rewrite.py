@@ -42,6 +42,7 @@ from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import (
     apply_output_kv_metadata,
     output_schema_metadata,
+    regroup,
     resolve_output_geoparquet_version,
     resolve_row_group_rows_for_query,
     write_arrow_table,
@@ -540,28 +541,15 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                     if verbose and (i + 1) % 10 == 0:
                         debug(f"Rewrote {i + 1}/{num_source_groups} row groups...")
             else:
-                # Buffer until a whole target group is available, write exactly
-                # that many rows, and keep the overshoot for the next group.
-                pending: list[pa.Table] = []
-                pending_rows = 0
-                for i in range(num_source_groups):
-                    table = _conform_row_group(pf.read_row_group(i), new_schema, native_crs)
-                    pending.append(table)
-                    pending_rows += table.num_rows
-                    while pending_rows >= row_group_rows:
-                        combined = pa.concat_tables(pending)
-                        writer.write_table(
-                            combined.slice(0, row_group_rows), row_group_size=row_group_rows
-                        )
-                        remainder = combined.slice(row_group_rows)
-                        pending = [remainder] if remainder.num_rows else []
-                        pending_rows = remainder.num_rows
+                # Cut into whole target groups (the facade's one regrouper).
+                def conformed():
+                    for i in range(num_source_groups):
+                        yield _conform_row_group(pf.read_row_group(i), new_schema, native_crs)
+                        if verbose and (i + 1) % 10 == 0:
+                            debug(f"Rewrote {i + 1}/{num_source_groups} row groups...")
 
-                    if verbose and (i + 1) % 10 == 0:
-                        debug(f"Rewrote {i + 1}/{num_source_groups} row groups...")
-
-                if pending:
-                    writer.write_table(pa.concat_tables(pending), row_group_size=row_group_rows)
+                for group in regroup(conformed(), row_group_rows):
+                    writer.write_table(group, row_group_size=row_group_rows)
 
         if verbose:
             with pq.ParquetFile(output_path) as result_pf:

@@ -393,6 +393,40 @@ def resolve_row_group_rows_for_table(
     return _rows_for_byte_target(table, cast(float, row_group_size_mb), verbose)
 
 
+def regroup(chunks, rows: int):
+    """Yield the stream's rows in groups of exactly ``rows``; the last takes the remainder.
+
+    The one regrouper: every streamed write cuts its row groups here, after a
+    resolver above has decided ``rows``. ``chunks`` are Arrow record batches or
+    tables, and each group comes back as the same kind (``concat_batches`` /
+    ``concat_tables`` of zero-copy slices), so it holds at most ``rows`` rows.
+    A source in small or uneven groups (DuckDB 2.0's ``to_arrow_reader`` only
+    caps a batch at ``n``; a file's own row groups; batches shrunk by a
+    filter) comes out in whole groups.
+    """
+    import pyarrow as pa
+
+    pending: list = []
+    held = 0
+
+    def joined():
+        if isinstance(pending[0], pa.Table):
+            return pa.concat_tables(pending)
+        return pa.concat_batches(pending)
+
+    for chunk in chunks:
+        while chunk.num_rows:
+            take = min(rows - held, chunk.num_rows)
+            pending.append(chunk.slice(0, take))
+            held += take
+            chunk = chunk.slice(take)
+            if held == rows:
+                yield joined()
+                pending, held = [], 0
+    if held:
+        yield joined()
+
+
 def resolve_row_group_rows_for_sample(
     table,
     row_group_rows: int | None,

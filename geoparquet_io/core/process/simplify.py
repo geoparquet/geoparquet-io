@@ -12,6 +12,7 @@ Docs: docs/guide/process-simplify.md
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 from typing import Any
@@ -41,6 +42,7 @@ from geoparquet_io.core.logging_config import debug, info, warn
 from geoparquet_io.core.optional_deps import load_module, require_coarsen
 from geoparquet_io.core.parquet_writer import (
     WriteOptions,
+    regroup,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
     resolve_row_group_rows_for_sample,
@@ -649,6 +651,41 @@ def _simplify_file_streaming(
         )
         forward, inverse = _simplify_crs_transformers(simplify_crs, src_crs, sample)
     batches = pf.iter_batches(batch_size=read_rows)
+
+    def simplified():
+        """The input's batches, simplified, in order (counts and stats as they go)."""
+        nonlocal collapsed, dropped
+        for batch in batches:
+            table = pa.Table.from_batches([batch])
+            if drop_columns:
+                table = table.drop_columns(drop_columns)
+            table = table.replace_schema_metadata(schema.metadata)
+            values, n, empty_flags, geoms, idx = _simplify_values(
+                table.column(geom_col),
+                tolerance,
+                coverage=False,
+                preserve_topology=preserve_topology,
+                simplify_boundary=True,
+                threads=threads,
+                forward=forward,
+                inverse=inverse,
+            )
+            collapsed += n
+            table = table.set_column(
+                table.column_names.index(geom_col),
+                table.schema.field(geom_col),
+                pa.chunked_array([pa.array(values, type=pa.binary())]),
+            )
+            row_bounds = _row_bounds(shapely, np, len(empty_flags), geoms, idx)
+            if drop_empty and empty_flags.any():
+                keep = ~empty_flags
+                table = table.filter(pa.array(keep))
+                dropped += int(empty_flags.sum())
+                row_bounds = row_bounds[keep]
+            table = _refresh_bbox_covering(table, geom_col, bounds=row_bounds)
+            batch_stats.append(geometry_stats_of(table, geom_col))
+            yield table
+
     with remote_write_context(output_parquet, is_directory=False, verbose=verbose) as (
         actual_output,
         is_remote,
@@ -673,39 +710,8 @@ def _simplify_file_streaming(
                 store_schema=False,
                 **without_geometry_dictionary(writer_kwargs, schema, [geom_col]),
             ) as writer:
-                grouper = _RowGrouper(writer, rows, write.row_group_size_mb)
-                for batch in batches:
-                    table = pa.Table.from_batches([batch])
-                    if drop_columns:
-                        table = table.drop_columns(drop_columns)
-                    table = table.replace_schema_metadata(schema.metadata)
-                    values, n, empty_flags, geoms, idx = _simplify_values(
-                        table.column(geom_col),
-                        tolerance,
-                        coverage=False,
-                        preserve_topology=preserve_topology,
-                        simplify_boundary=True,
-                        threads=threads,
-                        forward=forward,
-                        inverse=inverse,
-                    )
-                    collapsed += n
-                    table = table.set_column(
-                        table.column_names.index(geom_col),
-                        table.schema.field(geom_col),
-                        pa.chunked_array([pa.array(values, type=pa.binary())]),
-                    )
-                    row_bounds = _row_bounds(shapely, np, len(empty_flags), geoms, idx)
-                    if drop_empty and empty_flags.any():
-                        keep = ~empty_flags
-                        table = table.filter(pa.array(keep))
-                        dropped += int(empty_flags.sum())
-                        row_bounds = row_bounds[keep]
-                    table = _refresh_bbox_covering(table, geom_col, bounds=row_bounds)
-                    batch_stats.append(geometry_stats_of(table, geom_col))
-                    grouper.add(table)
-                grouper.close(schema)
-                rows = grouper.rows
+                for group in regroup(*_groups_of(simplified(), rows, write, schema)):
+                    writer.write_table(group, row_group_size=group.num_rows)
                 writer.add_key_value_metadata(
                     _footer_kv_via_funnel(
                         schema,
@@ -725,51 +731,30 @@ def _simplify_file_streaming(
         warn(f"{collapsed} geometries collapsed to empty at tolerance {tolerance}")
     if dropped:
         info(f"dropped {dropped} empty geometries")
-    debug(f"streamed simplify in {rows}-row batches to {output_parquet}")
+    debug(f"streamed simplify in {read_rows}-row batches to {output_parquet}")
 
 
-class _RowGrouper:
-    """Writes simplified tables as row groups of exactly ``rows`` rows.
+def _groups_of(tables, rows: int | None, write: WriteOptions, schema: pa.Schema):
+    """``(tables, rows)`` for :func:`~geoparquet_io.core.parquet_writer.regroup`.
 
-    Batches arrive at the read size and shrink under ``drop_empty``, so they
-    are buffered and cut at ``rows``; the last group takes the remainder, as
-    the table funnel's does. With a byte target, ``rows`` is unknown until
-    the facade has measured the leading rows (``resolve_row_group_rows_for_sample``),
-    so the buffer holds them until then.
+    With a byte target (``rows`` is None) the leading simplified tables are
+    buffered until the facade's ``resolve_row_group_rows_for_sample`` answers;
+    they go back in front of the rest, in order.
     """
-
-    def __init__(self, writer, rows: int | None, row_group_size_mb: float | None):
-        self.writer, self.rows, self.mb = writer, rows, row_group_size_mb
-        self.pending: list[pa.Table] = []
-        self.pending_rows = 0
-
-    def add(self, table: pa.Table) -> None:
-        self.pending.append(table)
-        self.pending_rows += table.num_rows
-        if self.rows is None:
-            self.rows = resolve_row_group_rows_for_sample(
-                pa.concat_tables(self.pending), None, self.mb, final=False
-            )
-        self._flush(final=False)
-
-    def close(self, schema: pa.Schema) -> None:
-        if self.rows is None:
-            sample = pa.concat_tables(self.pending) if self.pending else schema.empty_table()
-            self.rows = resolve_row_group_rows_for_sample(sample, None, self.mb)
-        self._flush(final=True)
-
-    def _flush(self, final: bool) -> None:
-        if self.rows is None or not self.pending:
-            return
-        buffered = pa.concat_tables(self.pending)
-        start = 0
-        while buffered.num_rows - start >= self.rows or (final and start < buffered.num_rows):
-            group = buffered.slice(start, self.rows)
-            self.writer.write_table(group, row_group_size=group.num_rows)
-            start += group.num_rows
-        rest = buffered.slice(start)
-        self.pending = [rest] if rest.num_rows else []
-        self.pending_rows = rest.num_rows
+    if rows is not None:
+        return tables, rows
+    head: list[pa.Table] = []
+    for table in tables:
+        head.append(table)
+        rows = resolve_row_group_rows_for_sample(
+            pa.concat_tables(head), None, write.row_group_size_mb, final=False
+        )
+        if rows is not None:
+            break
+    if rows is None:
+        sample = pa.concat_tables(head) if head else schema.empty_table()
+        rows = resolve_row_group_rows_for_sample(sample, None, write.row_group_size_mb)
+    return itertools.chain(head, tables), rows
 
 
 def _simplify_file_in_memory(

@@ -52,6 +52,7 @@ from geoparquet_io.core.geoarrow_encoding import (
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.parquet_writer import (
     apply_output_kv_metadata,
+    regroup,
     resolve_output_geoparquet_version,
     resolve_row_group_rows_for_query,
     resolve_row_group_rows_for_table,
@@ -174,37 +175,13 @@ def _narrows_to_32_bit_binary(field_type: pa.DataType) -> bool:
     return storage == pa.binary()
 
 
-def _rebatch(batches, rows: int):
-    """Yield the stream's rows in batches of exactly ``rows`` (the last may be short).
-
-    Each batch becomes one output row group. DuckDB 1.5's
-    ``fetch_record_batch(n)`` re-chunked a result to ``n`` rows; 2.0's
-    ``to_arrow_reader(batch_size=n)`` only caps a batch at ``n``, so a source
-    written in small row groups would stream back -- and be written -- in
-    those small groups. Holds at most ``rows`` rows.
-    """
-    pending: list[pa.RecordBatch] = []
-    held = 0
-    for batch in batches:
-        while batch.num_rows:
-            take = min(rows - held, batch.num_rows)
-            pending.append(batch.slice(0, take))
-            held += take
-            batch = batch.slice(take)
-            if held == rows:
-                yield pa.concat_batches(pending)
-                pending, held = [], 0
-    if held:
-        yield pa.concat_batches(pending)
-
-
 def _sized_reader(con, query: str, batch_size: int) -> pa.RecordBatchReader:
-    """Stream ``query`` in ``batch_size``-row batches (see :func:`_rebatch`).
+    """Stream ``query`` in ``batch_size``-row batches (see :func:`~geoparquet_io.core.parquet_writer.regroup`).
 
     On DuckDB 2.0 nothing else may run on ``con`` until the reader is drained.
     """
     reader = con.sql(query).to_arrow_reader(batch_size=batch_size)
-    return pa.RecordBatchReader.from_batches(reader.schema, _rebatch(reader, batch_size))
+    return pa.RecordBatchReader.from_batches(reader.schema, regroup(reader, batch_size))
 
 
 def _binary_cast_spans(batch: pa.RecordBatch, schema: pa.Schema) -> list[tuple[int, int]]:
@@ -880,7 +857,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         batches_written = 0
 
         with pq.ParquetWriter(output_path, schema_with_meta, **writer_kwargs) as writer:
-            for batch in _rebatch(table.to_batches(), batch_size):
+            for batch in regroup(table.to_batches(), batch_size):
                 rows, groups = self._write_batch(
                     writer,
                     batch,
@@ -1067,7 +1044,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             debug(f"Writing plain Parquet in batches of {batch_size:,}...")
 
         with pq.ParquetWriter(output_path, table.schema, **writer_kwargs) as writer:
-            for batch in _rebatch(table.to_batches(), batch_size):
+            for batch in regroup(table.to_batches(), batch_size):
                 table_batch = pa.Table.from_batches([batch], schema=table.schema)
                 writer.write_table(table_batch)
                 rows_written += batch.num_rows

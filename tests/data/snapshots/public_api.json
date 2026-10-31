@@ -594,6 +594,7 @@
     "geoparquet_copy_options",
     "note_duckdb_copy_rounding",
     "output_schema_metadata",
+    "regroup",
     "resolve_input_crs",
     "resolve_output_geoparquet_version",
     "resolve_row_group_rows",
