@@ -75,13 +75,12 @@ import struct
 from collections.abc import Iterable, Mapping
 from typing import Any, NamedTuple
 
+from geoparquet_io.core.edges import ANDOYER, SPHERICAL, THOMAS, is_nonplanar
 from geoparquet_io.core.optional_deps import load_module
 
 Box = tuple[float, float, float, float]
 
-SPHERICAL = "spherical"
-ELLIPSOIDAL_ALGORITHMS = frozenset({"vincenty", "thomas", "andoyer", "karney"})
-_APPROXIMATE_ALGORITHMS = frozenset({"thomas", "andoyer"})
+_APPROXIMATE_ALGORITHMS = frozenset({THOMAS, ANDOYER})
 COUNTERCLOCKWISE = "counterclockwise"
 
 #: Outward margin on a geodesic vertex latitude (~0.1 m). The floating-point
@@ -766,7 +765,7 @@ def _bound_array(array: Any, acc: _Bound, ctx: _Context) -> None:
 
 
 def _context(edges: str, orientation: str | None, ellipsoid: tuple | None) -> _Context:
-    if edges != SPHERICAL and edges not in ELLIPSOIDAL_ALGORITHMS:
+    if not is_nonplanar(edges):
         raise ValueError(f"edges must be spherical or an ellipsoidal algorithm, not {edges!r}")
     semi_major, flattening = ellipsoid if ellipsoid else WGS84_ELLIPSOID
     return _Context(edges, orientation, (float(semi_major), float(flattening)))

@@ -30,6 +30,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_literal,
     sql_path,
 )
+from geoparquet_io.core.edges import EDGES
 from geoparquet_io.core.exceptions import (
     FailureKind,
     GeoParquetError,
@@ -819,9 +820,7 @@ def parse_geometry_logical_type(logical_type: str) -> dict | None:
     # just the 1.x pair -- an ellipsoidal algorithm read as "no algorithm"
     # degraded to spherical in every caller's fallback (#1272).
     # Case-insensitive, read back lowercase: the spelling the edges vocabulary uses.
-    algo_match = re.search(
-        r"algorithm=(planar|spherical|vincenty|thomas|andoyer|karney)", params, re.IGNORECASE
-    )
+    algo_match = re.search(rf"algorithm=({'|'.join(EDGES)})", params, re.IGNORECASE)
     if algo_match:
         result["algorithm"] = algo_match.group(1).lower()
 

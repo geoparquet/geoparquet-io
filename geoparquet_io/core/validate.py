@@ -51,13 +51,21 @@ from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
     sql_path,
 )
+from geoparquet_io.core.edges import (
+    GEOGRAPHY_EDGE_ALGORITHMS,
+    GEOPARQUET_1X_EDGES,
+    PLANAR,
+    SPHERICAL,
+    declares_edges,
+    edges_of,
+    logical_type_edges,
+)
 from geoparquet_io.core.exceptions import GeometryError, GeoParquetError
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     BBOX_COVERING_FIELD_ORDERS,
     GEOARROW_ENCODINGS,
-    GEOGRAPHY_EDGE_ALGORITHMS,
     GEOPARQUET_VERSIONS,
     QuerySource,
     bbox_xy,
@@ -154,7 +162,7 @@ _GEOARROW_ENCODING_TYPE = {
 }
 ORIENTATION_COUNTERCLOCKWISE = "counterclockwise"
 VALID_ORIENTATIONS = [ORIENTATION_COUNTERCLOCKWISE]
-VALID_EDGES_GEOPARQUET = ["planar", "spherical"]
+VALID_EDGES_GEOPARQUET = list(GEOPARQUET_1X_EDGES)
 VALID_EDGES_PARQUET_GEO = list(GEOGRAPHY_EDGE_ALGORITHMS)
 VALID_GEOMETRY_TYPES = [
     "Point",
@@ -546,7 +554,7 @@ def _check_edges_valid(
     GeoParquet 2.0 widened the vocabulary from planar/spherical to include the
     four ellipsoidal-geodesic algorithms; 1.x keeps the narrow set.
     """
-    edges = col_meta.get("edges")
+    edges = edges_of(col_meta)
 
     if edges is None:
         return ValidationCheck(
@@ -587,8 +595,8 @@ def _check_edges_spherical_on_projected_crs(
     geographic/unknown CRS), so conformant files gain no output line.
     """
 
-    edges = col_meta.get("edges")
-    if not edges or edges == "planar":
+    edges = edges_of(col_meta)
+    if not edges or edges == PLANAR:
         return None
 
     # An absent or null CRS means "OGC:CRS84 default" / "unknown"; neither is a
@@ -1474,7 +1482,7 @@ def _check_orientation_matches_data(
     con,
     sample_size: int,
     encoding: Any = "WKB",
-    edges: Any = "planar",
+    edges: Any = PLANAR,
 ) -> ValidationCheck:
     """Check 19: all polygon geometries must follow 'orientation' metadata."""
     name = f"orientation_matches_data_{geom_col}"
@@ -1516,7 +1524,7 @@ def _check_orientation_matches_data(
         if not rows:
             return _result(CheckStatus.SKIPPED, "no polygons to check against declared orientation")
         violations, checked = _polygon_orientation_violations(
-            [bytes(r[0]) for r in rows], geodesic=edges != "planar"
+            [bytes(r[0]) for r in rows], geodesic=edges != PLANAR
         )
     except Exception as e:
         return _result(CheckStatus.FAILED, f"failed to validate orientation: {e}")
@@ -2246,7 +2254,7 @@ def _check_geography_edges_valid(schema_info: list, geom_col: str) -> Validation
                     category="parquet_geo_types",
                 )
 
-            algorithm = parsed.get("algorithm", "spherical")  # Default is spherical
+            algorithm = logical_type_edges(parsed)
             if algorithm in VALID_EDGES_PARQUET_GEO:
                 return ValidationCheck(
                     name=f"geography_edges_valid_{geom_col}",
@@ -2463,8 +2471,8 @@ def _geography_edge_algorithm(schema_info: list | None, geom_col: str) -> str:
     for col in schema_info or []:
         if col.get("name") == geom_col:
             parsed = parse_geometry_logical_type(col.get("logical_type") or "") or {}
-            return parsed.get("algorithm") or "spherical"
-    return "spherical"
+            return logical_type_edges(parsed)
+    return SPHERICAL
 
 
 #: Points sampled along each edge by the geodesic-containment oracle.
@@ -2490,7 +2498,7 @@ def _geography_geod(schema_info: list | None, geom_col: str, algorithm: str):
     from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
     from geoparquet_io.core.geodesic_bbox import ellipsoid_for_crs
 
-    if algorithm == "spherical":
+    if algorithm == SPHERICAL:
         return Geod(a=6371008.8, f=0.0)
     crs = None
     for col in schema_info or []:
@@ -3431,7 +3439,7 @@ def _edges_schema_facts(schema_info: list, geom_col: str) -> tuple[bool, bool, s
         kind = native_geo_type(logical_type)
         if kind == "GEOGRAPHY":
             parsed = parse_geometry_logical_type(logical_type)
-            algorithm = parsed.get("algorithm", "spherical") if parsed else None
+            algorithm = logical_type_edges(parsed) if parsed else None
             return True, False, algorithm
         return False, kind == "GEOMETRY", None
     return False, False, None
@@ -3442,7 +3450,7 @@ def _check_v2_edges_consistency(
 ) -> ValidationCheck:
     """Check V2-5: edges in metadata must match algorithm in Parquet GEOGRAPHY type."""
     col_meta = geo_meta.get("columns", {}).get(geom_col, {})
-    metadata_edges = col_meta.get("edges", "planar")  # Default is planar
+    metadata_edges = edges_of(col_meta) if declares_edges(col_meta) else PLANAR
 
     is_geography, is_planar_geometry, schema_algorithm = _edges_schema_facts(schema_info, geom_col)
 
@@ -3453,7 +3461,7 @@ def _check_v2_edges_consistency(
         # this shape (most writers cannot emit the GEOGRAPHY logical type and
         # carry edges in geo metadata instead — gpio's own convert does), so
         # this is an interoperability warning, not a spec violation.
-        if is_planar_geometry and metadata_edges != "planar":
+        if is_planar_geometry and metadata_edges != PLANAR:
             return ValidationCheck(
                 name=f"v2_edges_consistency_{geom_col}",
                 status=CheckStatus.WARNING,
@@ -4531,7 +4539,7 @@ def _run_geoparquet_checks(
                     con,
                     sample_size,
                     encoding,
-                    col_meta.get("edges") or "planar",
+                    edges_of(col_meta) or PLANAR,
                 )
             )
 

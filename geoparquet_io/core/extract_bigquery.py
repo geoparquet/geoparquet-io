@@ -28,6 +28,7 @@ from geoparquet_io.core.duckdb_utils import (
     validate_where_clause,
     where_condition_fragment,
 )
+from geoparquet_io.core.edges import SPHERICAL
 from geoparquet_io.core.exceptions import ValidationError
 from geoparquet_io.core.extract import parse_bbox
 from geoparquet_io.core.file_utils import handle_output_overwrite
@@ -1501,7 +1502,7 @@ def _execute_bigquery_extraction(
         if edges is not None:
             final_edges = edges
         elif is_native_geometry:
-            final_edges = "spherical"
+            final_edges = SPHERICAL
         else:
             final_edges = None  # Planar (no edges metadata)
 

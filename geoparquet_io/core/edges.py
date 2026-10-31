@@ -1,0 +1,241 @@
+"""The ``edges`` field: one owner for its vocabulary, version gate and readers.
+
+GeoParquet's per-column ``edges`` says how to interpolate between two vertices:
+``planar`` (straight lines, the spec default, also spelled by leaving the key
+out), ``spherical`` (great circles), or -- in 2.0 and in a Parquet GEOGRAPHY
+type -- one of four ellipsoidal algorithms. Before #1367 the names were spelled
+out in five places, two readers recognised only ``spherical`` while two took all
+five, the 1.x pair was written twice, and the carried-metadata fallback counted a
+typo as non-planar where the file reader ignored it.
+
+This module owns:
+
+* the vocabulary (:data:`PLANAR`, :data:`SPHERICAL`, the ellipsoidal names, and
+  the tuples built from them, in parquet.thrift's enum order);
+* the version gate, :func:`edges_for_version` (what a 1.x block may say);
+* the one precedence, :func:`detect_edges` -- an explicit request, then the
+  carried ``geo`` block, then the native type;
+* the key's readers and writers on a column entry (:func:`edges_of`,
+  :func:`declares_edges`, :func:`set_edges`, :func:`without_edges`) and the
+  strip/restore pair a rewrite runs on a block (:func:`strip_edges`,
+  :func:`restore_edges`).
+
+It is a leaf: it imports nothing from gpio but the exceptions and the logger,
+so every layer can ask it, from ``duckdb_utils`` up. Reading a file or a table
+to *gather* what each carrier says is the callers' job (``write_funnels``
+``collect_nonplanar_edges`` / ``table_nonplanar_edges``); deciding what the
+answers mean is this module's.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Collection, Mapping, MutableMapping
+
+from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.logging_config import warn
+
+PLANAR = "planar"
+SPHERICAL = "spherical"
+VINCENTY = "vincenty"
+THOMAS = "thomas"
+ANDOYER = "andoyer"
+KARNEY = "karney"
+
+#: The ellipsoidal algorithms, in parquet.thrift's order.
+ELLIPSOIDAL_ALGORITHMS = (VINCENTY, THOMAS, ANDOYER, KARNEY)
+
+#: The non-planar edge algorithms a Parquet GEOGRAPHY can name, in the order of
+#: parquet.thrift's ``EdgeInterpolationAlgorithm`` (the position is the enum
+#: value). GeoParquet 2.0's ``edges`` spells them the same, lowercase.
+GEOGRAPHY_EDGE_ALGORITHMS = (SPHERICAL, *ELLIPSOIDAL_ALGORITHMS)
+
+#: What a GeoParquet 1.x ``edges`` may say.
+GEOPARQUET_1X_EDGES = (PLANAR, SPHERICAL)
+
+#: Every ``edges`` value gpio knows.
+EDGES = (PLANAR, *GEOGRAPHY_EDGE_ALGORITHMS)
+
+_KEY = "edges"
+
+
+def is_nonplanar(edges: object) -> bool:
+    """Whether ``edges`` is a GeoParquet non-planar algorithm (a typo is not)."""
+    return isinstance(edges, str) and edges in GEOGRAPHY_EDGE_ALGORITHMS
+
+
+def is_ellipsoidal(edges: object) -> bool:
+    """Whether ``edges`` names one of the four ellipsoidal algorithms."""
+    return isinstance(edges, str) and edges in ELLIPSOIDAL_ALGORITHMS
+
+
+def is_geodesic(edges: object) -> bool:
+    """Whether ``edges`` says anything but planar (``None`` is planar).
+
+    Wider than :func:`is_nonplanar`: an unknown value counts. For the checks
+    that compare a bbox with a planar envelope, which must not claim a
+    planar comparison for a column that does not say it is planar."""
+    return edges is not None and edges != PLANAR
+
+
+def requested_edges(edges: str | None) -> str | None:
+    """An explicit ``edges=`` request, validated once: a known value or ``None``.
+
+    Raises :class:`InvalidParameterError` naming the accepted values.
+    """
+    if edges is None or edges in EDGES:
+        return edges
+    raise InvalidParameterError(
+        "edges", f"Unknown edges {edges!r}; expected one of: {', '.join(EDGES)}."
+    )
+
+
+def edges_for_version(edges: str, geo_version: str | None) -> str:
+    """Map an edges value to one the output's spec version can say.
+
+    GeoParquet 1.x allows only ``planar`` and ``spherical``; an ellipsoidal
+    algorithm (from a 2.0 or native GEOGRAPHY input) degrades to ``spherical``
+    there, with a warning. 2.0, and a write with no block (``None``), keep the
+    algorithm. A value outside :data:`EDGES` is refused here, once.
+    """
+    requested_edges(edges)
+    if not str(geo_version).startswith("1."):
+        return edges
+    if edges in GEOPARQUET_1X_EDGES:
+        return edges
+    warn(f"edges algorithm '{edges}' is not representable in GeoParquet 1.x; writing 'spherical'")
+    return SPHERICAL
+
+
+def logical_type_edges(parsed: Mapping | None) -> str:
+    """The edges a parsed Parquet GEOGRAPHY logical type declares.
+
+    The type's algorithm, or ``spherical``, the Parquet default when a
+    GEOGRAPHY names none. ``parsed`` is ``duckdb_metadata.parse_geometry_logical_type``'s
+    answer for a GEOGRAPHY column.
+    """
+    return (parsed or {}).get("algorithm") or SPHERICAL
+
+
+def geoarrow_type_edges(arrow_type) -> str | None:
+    """The edges a resolved GeoArrow extension type declares, lowercase.
+
+    ``None`` for a type without an edge type (not GeoArrow, or unresolved).
+    """
+    name = getattr(getattr(arrow_type, "edge_type", None), "name", "")
+    return name.lower() or None
+
+
+# ---------------------------------------------------------------------------
+# The key on a column entry (a geo block column, a GeoArrow extension's JSON)
+# ---------------------------------------------------------------------------
+
+
+def edges_of(entry: object) -> object:
+    """The ``edges`` value ``entry`` states, as written; ``None`` when it states none.
+
+    ``entry`` is a ``geo`` column entry, a GeoArrow extension's metadata, or
+    any mapping that carries the key; anything else states nothing.
+    """
+    return entry.get(_KEY) if isinstance(entry, Mapping) else None
+
+
+def declares_edges(entry: object) -> bool:
+    """Whether ``entry`` has an ``edges`` key at all (absent means planar)."""
+    return isinstance(entry, Mapping) and _KEY in entry
+
+
+def set_edges(entry: MutableMapping, edges: object) -> None:
+    """Set ``entry``'s ``edges`` to ``edges``."""
+    entry[_KEY] = edges
+
+
+def without_edges(entry: Mapping) -> dict:
+    """A copy of ``entry`` without its ``edges`` key."""
+    return {key: value for key, value in entry.items() if key != _KEY}
+
+
+def block_edges(geo: Mapping | None) -> dict[str, object]:
+    """``{column: edges}`` for every column a decoded ``geo`` block gives ``edges``.
+
+    A column whose entry has no key is left out: it says nothing. ``geo`` is a
+    block already decoded and sanitized (``geo_metadata.sanitized_carried_geo``).
+    """
+    columns = (geo or {}).get("columns") or {}
+    return {name: edges_of(entry) for name, entry in columns.items() if declares_edges(entry)}
+
+
+def strip_edges(geo: dict, columns: Collection[str] | None = None) -> dict:
+    """Remove every non-planar ``edges`` from the decoded block ``geo``, in place.
+
+    A rewrite that invalidates the edge interpretation (reprojecting into a
+    projected CRS, #601) must not carry a declaration it cannot vouch for: the
+    key's absence -- planar, the spec default -- is then the truthful answer.
+    An explicit ``planar`` is left as it is. ``columns`` limits the strip to
+    those column entries (``None``: every column). Returns ``geo``.
+    """
+    for name, entry in (geo.get("columns") or {}).items():
+        if columns is not None and name not in columns:
+            continue
+        if declares_edges(entry) and edges_of(entry) != PLANAR:
+            del entry[_KEY]
+    return geo
+
+
+def restore_edges(geo: Mapping | None, edges_by_col: Mapping[str, str]) -> bool:
+    """Set each column's ``edges`` in the decoded block ``geo``, in place.
+
+    The restore half of a rewrite through DuckDB, which regenerates a block
+    without ``edges`` (#588). Only columns the block describes are touched.
+    ``edges_by_col`` is already mapped to the block's version. Returns whether
+    anything changed.
+    """
+    changed = False
+    columns = (geo or {}).get("columns") or {}
+    for name, edges in edges_by_col.items():
+        entry = columns.get(name)
+        if isinstance(entry, dict) and edges_of(entry) != edges:
+            set_edges(entry, edges)
+            changed = True
+    return changed
+
+
+# ---------------------------------------------------------------------------
+# The one precedence
+# ---------------------------------------------------------------------------
+
+
+def detect_edges(
+    native: Mapping[str, object] | None = None,
+    block: Mapping[str, object] | None = None,
+    explicit: str | None = None,
+    primary: str | None = None,
+) -> dict[str, str]:
+    """``{column: edges}`` for every column with non-planar edges, from three carriers.
+
+    One precedence, lowest first:
+
+    1. ``native`` -- what each column's type says (a Parquet GEOGRAPHY's
+       algorithm, a GeoArrow field's edge type). Only a non-planar algorithm
+       counts;
+    2. ``block`` -- what the carried ``geo`` block states
+       (:func:`block_edges`). ``planar`` wins over the type; a non-planar
+       algorithm replaces it; any other value (a typo) says nothing, so the
+       type decides (#1288);
+    3. ``explicit`` -- the caller's request for ``primary``. ``planar`` drops
+       the column; any other known value sets it; an unknown one is refused.
+
+    A planar column is left out: the answer is what a write must carry.
+    """
+    edges_by_col = {name: edges for name, edges in (native or {}).items() if is_nonplanar(edges)}
+    for name, declared in (block or {}).items():
+        if declared == PLANAR:
+            edges_by_col.pop(name, None)
+        elif is_nonplanar(declared):
+            edges_by_col[name] = declared
+    explicit = requested_edges(explicit or None)
+    if explicit is not None and primary is not None:
+        if explicit == PLANAR:
+            edges_by_col.pop(primary, None)
+        else:
+            edges_by_col[primary] = explicit
+    return edges_by_col

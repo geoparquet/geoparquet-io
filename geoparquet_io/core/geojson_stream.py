@@ -52,6 +52,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
     uses_aws_profile,
 )
+from geoparquet_io.core.edges import is_nonplanar
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import (
     get_all_parquet_files,
@@ -59,7 +60,7 @@ from geoparquet_io.core.file_utils import (
     has_glob_pattern,
     resolve_file_url,
 )
-from geoparquet_io.core.geo_metadata import GEOGRAPHY_EDGE_ALGORITHMS, sanitized_carried_geo
+from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
@@ -88,7 +89,7 @@ def _require_planar_geojson_edges(column: str, edges: str | None) -> None:
     both skipped, would silently change the meaning of the same coordinates.
     The declaration decides this contract, including point-only or empty data.
     """
-    if edges in GEOGRAPHY_EDGE_ALGORITHMS:
+    if is_nonplanar(edges):
         raise GeoParquetError(
             f"GeoJSON export does not support non-planar edges. Column {column!r} "
             f"declares {edges!r} edges. GeoJSON uses straight Cartesian segments. "

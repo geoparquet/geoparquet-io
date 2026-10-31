@@ -25,7 +25,7 @@ from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     quote_identifier,
 )
-from geoparquet_io.core.geo_metadata import GEOGRAPHY_EDGE_ALGORITHMS
+from geoparquet_io.core.edges import PLANAR, is_nonplanar
 from geoparquet_io.core.logging_config import debug, warn
 
 
@@ -42,13 +42,13 @@ def _should_skip_nonplanar(geometry_column: str, nonplanar_edges, repair: bool) 
     repair opted out the pass-through is what was asked for, so only a debug
     line is emitted.
 
-    Only a GeoParquet edge algorithm (``GEOGRAPHY_EDGE_ALGORITHMS``) skips. Any
+    Only a GeoParquet edge algorithm (``edges.is_nonplanar``) skips. Any
     other value -- ``"Planar"``, a typo, a number -- is not a declaration gpio
     can honor, so the column keeps the planar repair it would get anyway.
     """
-    if not nonplanar_edges or nonplanar_edges == "planar":
+    if not nonplanar_edges or nonplanar_edges == PLANAR:
         return False
-    if not isinstance(nonplanar_edges, str) or nonplanar_edges not in GEOGRAPHY_EDGE_ALGORITHMS:
+    if not is_nonplanar(nonplanar_edges):
         debug(
             f"Column '{geometry_column}' declares unrecognized edges {nonplanar_edges!r}; "
             "treating it as planar for geometry repair"
@@ -125,7 +125,7 @@ def warn_planar_math_for_file(op: str, input_path: str, geometry_column: str | N
 
 
 def _warn_planar_edges(op: str, geometry_column: str, edges: str | None) -> None:
-    if edges in GEOGRAPHY_EDGE_ALGORITHMS:
+    if is_nonplanar(edges):
         warn(
             f"{op} uses planar math on '{geometry_column}', which has {edges} edges. "
             "The result is planar. Geodesic support is tracked in #1286 and #1289."

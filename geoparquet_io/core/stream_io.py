@@ -36,6 +36,7 @@ from geoparquet_io.core.duckdb_utils import (
     register_arrow,
     sql_path,
 )
+from geoparquet_io.core.edges import PLANAR, declares_edges, edges_of, set_edges
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
@@ -239,8 +240,11 @@ def _stream_input_metadata(table: pa.Table) -> dict:
     for name, inferred in inferred_columns.items():
         column = {"encoding": "WKB", **inferred, **geo.get("columns", {}).get(name, {})}
         # Normalize the declaration with the shared reader, so an unknown value
-        # cannot become a non-planar model merely by crossing a pipe.
-        column["edges"] = edges_by_col.get(name, "planar")
+        # cannot become a non-planar model merely by crossing a pipe. Not
+        # mapped to the block's version: this block is an intermediate whose
+        # version is the input's, and the write at the other end of the pipe
+        # maps to the output's, so a 2.0 output keeps an ellipsoidal algorithm.
+        set_edges(column, edges_by_col.get(name, PLANAR))
         columns[name] = column
     metadata[b"geo"] = json.dumps(
         {
@@ -425,7 +429,8 @@ def _write_stream_output(
         crs = _extract_crs_from_metadata(original_metadata, name)
         if entry_crs_is_unknown(columns.get(name)):
             crs = "srid:0"
-        edges = columns.get(name, {}).get("edges", "planar")
+        entry = columns.get(name)
+        edges = edges_of(entry) if declares_edges(entry) else PLANAR
         table = apply_geoarrow_extension_type(table, name, crs, edges=edges)
 
     # Apply metadata to output table, the way the file path does (#722):

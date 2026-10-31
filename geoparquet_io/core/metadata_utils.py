@@ -22,6 +22,7 @@ from geoparquet_io.core.duckdb_metadata import (
     get_schema_info,
     parse_geometry_logical_type,
 )
+from geoparquet_io.core.edges import declares_edges, edges_of
 from geoparquet_io.core.geo_metadata import (
     bbox_xy,
     is_covering_path,
@@ -458,8 +459,8 @@ def _print_geo_column_info(console: Console, col_name: str, col_info: dict) -> N
 
     # Edge interpretation
     if col_info["logical_type"] == "Geography":
-        if col_info["edges"]:
-            console.print(f"    Edges: {col_info['edges']}")
+        if edges_of(col_info):
+            console.print(f"    Edges: {edges_of(col_info)}")
         else:
             console.print("    Edges: [dim]Not present - spherical (default value)[/dim]")
     else:
@@ -719,8 +720,8 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
                     )
 
                 # Edges
-                if "edges" in col_meta:
-                    console.print(f"    Edges: {col_meta['edges']}")
+                if declares_edges(col_meta):
+                    console.print(f"    Edges: {edges_of(col_meta)}")
                 else:
                     console.print("    Edges: [dim]Not present - planar (default value)[/dim]")
 

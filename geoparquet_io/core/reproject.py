@@ -41,6 +41,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
     uses_aws_profile,
 )
+from geoparquet_io.core.edges import PLANAR, edges_of, strip_edges
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     _bbox_claimed_by_another_column,
@@ -168,10 +169,9 @@ def _drop_nonplanar_edges_from_geo_meta(geo_meta: dict, target_crs: str, geom_co
     the input's geo metadata straight through (Arrow tables, streaming). Other
     columns are untransformed and keep their declaration.
     """
-    col_meta = (geo_meta.get("columns") or {}).get(geom_col)
-    edges = col_meta.get("edges") if isinstance(col_meta, dict) else None
-    if edges and edges != "planar":
-        del col_meta["edges"]
+    edges = edges_of((geo_meta.get("columns") or {}).get(geom_col))
+    if edges and edges != PLANAR:
+        strip_edges(geo_meta, columns=[geom_col])
         _warn_edges_dropped(geom_col, edges, target_crs)
 
 

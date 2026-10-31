@@ -34,6 +34,7 @@ from geoparquet_io.core.duckdb_metadata import (
     parse_geometry_logical_type,
     resolve_crs_reference,
 )
+from geoparquet_io.core.edges import declares_edges, logical_type_edges, set_edges
 from geoparquet_io.core.geo_metadata import (
     read_raw_geo,
     row_group_geometry_stats,
@@ -48,13 +49,13 @@ def _geography_edges_from_logical(logical: str) -> str | None:
     """Edges value implied by a native Geography logical type string.
 
     Returns the declared algorithm (e.g. "spherical", "vincenty"), defaulting
-    to "spherical" (the Parquet spec default) when none is spelled out.
-    Returns None for non-Geography logical types.
+    to "spherical" (the Parquet spec default) when none is spelled out
+    (:func:`~geoparquet_io.core.edges.logical_type_edges`). Returns None for
+    non-Geography logical types.
     """
     if native_geo_type(logical) != "GEOGRAPHY":
         return None
-    parsed = parse_geometry_logical_type(logical) or {}
-    return parsed.get("algorithm", "spherical")
+    return logical_type_edges(parse_geometry_logical_type(logical))
 
 
 def _crs_from_geo_logical(logical: str, parquet_file: str) -> tuple[bool, Any]:
@@ -123,7 +124,7 @@ def _geo_col_meta_from_stats(pf, col_index: int, logical: str, parquet_file: str
     # not drop: synthesize the matching edges declaration (#588).
     edges = _geography_edges_from_logical(logical)
     if edges:
-        col_meta["edges"] = edges
+        set_edges(col_meta, edges)
     return col_meta
 
 
@@ -185,10 +186,10 @@ def _native_secondary_meta(logical: str, declared: dict | None, input_file: str)
             crs_present, crs = True, None
         if crs_present:
             col_meta["crs"] = crs
-    if "edges" not in declared:
+    if not declares_edges(declared):
         edges = _geography_edges_from_logical(logical)
         if edges:
-            col_meta["edges"] = edges
+            set_edges(col_meta, edges)
     return col_meta
 
 

@@ -42,6 +42,7 @@ from geoparquet_io.core.duckdb_utils import (
     resolve_load_spatial,
     sql_path,
 )
+from geoparquet_io.core.edges import edges_of, set_edges
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     GeometryStats,
@@ -253,8 +254,8 @@ def _detect_metadata_mismatches(
         pass
 
     # Compare edges (only relevant for Geography type)
-    parquet_edges = parquet_geo_info.get("edges")
-    geoparquet_edges = geoparquet_info.get("edges")
+    parquet_edges = edges_of(parquet_geo_info)
+    geoparquet_edges = edges_of(geoparquet_info)
 
     if parquet_edges and geoparquet_edges:
         if parquet_edges.lower() != geoparquet_edges.lower():
@@ -341,7 +342,7 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
                     # Resolve CRS reference if needed (e.g., "projjson:key_name")
                     raw_crs = geom_details.get("crs")
                     parquet_geo_info["crs"] = resolve_crs_reference(parquet_file, raw_crs)
-                    parquet_geo_info["edges"] = geom_details.get("algorithm")
+                    set_edges(parquet_geo_info, geom_details.get("algorithm"))
             break
 
     # Extract GeoParquet metadata
@@ -361,7 +362,7 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
             crs = col_meta.get("crs")  # Keep raw PROJJSON, don't convert to string
             bbox = col_meta.get("bbox")
             geometry_types = col_meta.get("geometry_types")
-            edges = col_meta.get("edges")
+            edges = edges_of(col_meta)
 
         # Note: Keep crs as None if not specified - default handling is a display concern
 
@@ -422,7 +423,7 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
         "bbox": effective_bbox,
         "primary_column": primary_column,
         "geometry_types": effective_geometry_types,
-        "edges": geoparquet_info.get("edges") or parquet_geo_info.get("edges"),
+        "edges": edges_of(geoparquet_info) or edges_of(parquet_geo_info),
         "warnings": warnings,
     }
 

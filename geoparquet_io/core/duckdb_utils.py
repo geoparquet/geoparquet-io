@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     import duckdb
     import pyarrow as pa
 
+from geoparquet_io.core.edges import PLANAR, edges_of, without_edges
 from geoparquet_io.core.exceptions import ExtensionUnavailableError, ValidationError
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns
@@ -2562,7 +2563,7 @@ def geoarrow_field_edges(field) -> str | None:
     table declares once its block is weighed is
     ``write_funnels.table_nonplanar_edges``.
     """
-    edges = _geoarrow_extension(field)[1].get("edges")
+    edges = edges_of(_geoarrow_extension(field)[1])
     return edges.lower() if isinstance(edges, str) else None
 
 
@@ -2594,9 +2595,7 @@ def _planar_column(field, column, name: str, parsed: dict) -> tuple:
     storage = _storage(column)
     metadata = dict(field.metadata or {})
     metadata[_EXT_NAME] = name.encode("utf-8")
-    metadata[_EXT_META] = json.dumps({k: v for k, v in parsed.items() if k != "edges"}).encode(
-        "utf-8"
-    )
+    metadata[_EXT_META] = json.dumps(without_edges(parsed)).encode("utf-8")
     return pa.field(field.name, storage.type, field.nullable, metadata), storage
 
 
@@ -2612,7 +2611,7 @@ def _planar_view(table, columns: Iterable[str] | None = None) -> tuple:
     for index, field in enumerate(table.schema):
         if wanted is not None and field.name not in wanted:
             continue
-        if geoarrow_field_edges(field) in (None, "planar"):
+        if geoarrow_field_edges(field) in (None, PLANAR):
             continue
         name, parsed = _geoarrow_extension(field)
         originals[field.name] = field
@@ -2639,7 +2638,7 @@ class RegisteredArrow:
     @property
     def edges(self) -> dict[str, str]:
         """``{column: edges}`` for every column that was registered as planar."""
-        return {col: geoarrow_field_edges(field) or "planar" for col, field in self.fields.items()}
+        return {col: geoarrow_field_edges(field) or PLANAR for col, field in self.fields.items()}
 
     def restore_edges(self, result, columns: Iterable[str] | None = None):
         """``result`` with each pass-through geometry column given its input field back.
@@ -2689,7 +2688,7 @@ def register_arrow(con, name: str, table) -> RegisteredArrow:
 
     Every non-planar string is relabelled, not only a GeoParquet edge
     algorithm, because DuckDB rejects them all. Which values gpio honours is
-    the restore side's question (``geo_metadata.GEOGRAPHY_EDGE_ALGORITHMS``).
+    the restore side's question (``edges.GEOGRAPHY_EDGE_ALGORITHMS``).
     """
     view, registered = planar_view(table, name)
     if registered.fields:

@@ -83,6 +83,7 @@ EXPECTED_COUNTS = {
     "G1.overwrite_check": 0,
     "G1.output_version": 0,
     "G1.geometry_stats": 0,
+    "G1.edges": 0,
     "G2.exemptions": 19,
     "G3.pairs": 21,
     "G3.baseline": 21,
@@ -1519,6 +1520,59 @@ def _find_geometry_stats(m: _Module) -> Iterator[Hit]:
             yield m.hit(node)
 
 
+#: The values of a GeoParquet ``edges`` field (and of a Parquet GEOGRAPHY's
+#: edge algorithm). Spelled out here, not imported, so the arm still works on a
+#: tree whose owner is broken.
+_EDGE_NAMES = frozenset({"planar", "spherical", "vincenty", "thomas", "andoyer", "karney"})
+_EDGES_KEY = "edges"
+_KEY_METHODS = {"get", "pop", "setdefault"}
+
+
+def _is_edges_key(node: ast.AST | None) -> bool:
+    return isinstance(node, ast.Constant) and node.value == _EDGES_KEY
+
+
+def _edges_key_access(node: ast.AST) -> bool:
+    """``x["edges"]``, ``x.get("edges")`` / ``.pop`` / ``.setdefault``, or a
+    comparison against the key (``"edges" in x``, ``k != "edges"``)."""
+    if isinstance(node, ast.Subscript):
+        return _is_edges_key(node.slice)
+    if isinstance(node, ast.Call):
+        return (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr in _KEY_METHODS
+            and bool(node.args)
+            and _is_edges_key(node.args[0])
+        )
+    if isinstance(node, ast.Compare):
+        return any(_is_edges_key(n) for n in (node.left, *node.comparators))
+    return False
+
+
+def _find_edges(m: _Module) -> Iterator[Hit]:
+    """An ``edges`` decision outside ``core/edges.py`` (#1367 concept 6): a
+    string that *is* an edges value (``"spherical"``, ``"planar"``, an
+    ellipsoidal algorithm name), or a read, write or test of the ``edges`` key.
+
+    The owner holds the vocabulary, the 1.x/2.0 version gate, the one
+    precedence between a request, a carried block and a native type, and the
+    key's readers and writers. Would have caught the five literal sets and the
+    readers #1367 found: two that recognised only ``SPHERICAL`` beside two that
+    took all five algorithms, the ``("planar", "spherical")`` pair in the
+    version gate duplicating ``validate.py``'s, and a carried-metadata fallback
+    that counted a typo as non-planar where the file reader ignored it.
+
+    A dict literal's ``"edges"`` key is not a hit: it names the field in a
+    report or a field-type table without deciding anything about it.
+    """
+    for node in m.strings():
+        if node.value in _EDGE_NAMES:
+            yield m.hit(node)
+    for node in ast.walk(m.tree):
+        if _edges_key_access(node):
+            yield m.hit(node)
+
+
 @dataclass(frozen=True)
 class Arm:
     finder: Callable[..., Iterator[Hit]]
@@ -1561,6 +1615,7 @@ ARMS = {
     "overwrite_check": Arm(_find_overwrite_check, ("geoparquet_io/core/file_utils.py",)),
     "output_version": Arm(_find_output_version, _VERSION_OWNERS),
     "geometry_stats": Arm(_find_geometry_stats, ("geoparquet_io/core/geo_metadata.py",)),
+    "edges": Arm(_find_edges, ("geoparquet_io/core/edges.py",)),
 }
 
 
@@ -2068,6 +2123,7 @@ G1_PLANTS = {
     ),
     "scheme_test": 'def remote(p):\n    return p.startswith("s3://")\n',
     "output_version": ('def version(md):\n    return sanitized_carried_geo(md).get("version")\n'),
+    "edges": 'def spherical(col):\n    return col.get("edges") is not None\n',
     "overwrite_check": (
         "import os\n\ndef check(out, force):\n"
         "    if os.path.exists(out) and not force:\n        raise ValueError(out)\n"
@@ -2112,6 +2168,11 @@ G1_CLEAN = {
         '    return f"s3://{bucket}/{rest}"\n'
     ),
     "output_version": ('def version(path):\n    return read_raw_geo(path).value.get("version")\n'),
+    "edges": (
+        "from geoparquet_io.core.edges import SPHERICAL, edges_of\n\n"
+        'def spherical(col):\n    return edges_of(col) == SPHERICAL  # not "spherical"\n'
+        'REPORT = {"edges": None, "note": "spherical edges"}\n'
+    ),
     "overwrite_check": (
         "import os\n\ndef cleanup(tmp):\n    if os.path.exists(tmp):\n        os.remove(tmp)\n"
     ),
@@ -3118,3 +3179,24 @@ def test_g12_the_output_version_arm_catches_every_copy(tmp_path, source):
 @pytest.mark.parametrize("source", OUTPUT_VERSION_NON_DECISIONS)
 def test_g12_the_output_version_arm_leaves_non_decisions_alone(tmp_path, source):
     assert arm_hits(_plant(tmp_path, "output_version", source), "output_version") == [], source
+
+
+#: Every shape of an ``edges`` decision the G1.edges arm must see.
+EDGES_SHAPES = {
+    "literal compare": 'def f(e):\n    return e == "spherical"\n',
+    "literal tuple": 'ONE_X = ("planar", "spherical")\n',
+    "algorithm set": 'ELL = frozenset({"vincenty", "thomas", "andoyer", "karney"})\n',
+    "click choice": 'CHOICE = ["spherical", "planar"]\n',
+    "key read": 'def f(col):\n    return col["edges"]\n',
+    "key get": 'def f(col):\n    return col.get("edges", None)\n',
+    "key write": 'def f(col, e):\n    col["edges"] = e\n',
+    "key test": 'def f(col):\n    return "edges" in col\n',
+    "key filter": 'def f(d):\n    return {k: v for k, v in d.items() if k != "edges"}\n',
+    "f-string part": 'def f(n):\n    return f"{n}" + "karney"\n',
+}
+
+
+@pytest.mark.parametrize("shape", sorted(EDGES_SHAPES))
+def test_g12_edges_arm_flags_every_shape(shape, tmp_path):
+    repo = _plant(tmp_path, "edges", EDGES_SHAPES[shape])
+    assert arm_hits(repo, "edges"), shape

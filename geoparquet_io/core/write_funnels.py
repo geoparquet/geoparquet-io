@@ -60,15 +60,23 @@ from geoparquet_io.core.duckdb_utils import (
     parse_duckdb_geo_type,
     sql_path,
 )
+from geoparquet_io.core.edges import (
+    PLANAR,
+    block_edges,
+    detect_edges,
+    edges_for_version,
+    is_ellipsoidal,
+    is_nonplanar,
+    logical_type_edges,
+    restore_edges,
+)
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import is_partition_path
 from geoparquet_io.core.geo_metadata import (
-    GEOGRAPHY_EDGE_ALGORITHMS,
     GEOPARQUET_VERSIONS,
     SELF_EVIDENT_BBOX_COLUMN,
     carried_geometry_column,
     declare_carried_bbox_column,
-    edges_for_version,
     gate_illegal_bbox_covering,
     prune_geo_metadata_to_columns,
     read_raw_geo,
@@ -79,7 +87,6 @@ from geoparquet_io.core.geo_metadata import (
     strip_nonplanar_edges,
 )
 from geoparquet_io.core.geodesic_bbox import (
-    ELLIPSOIDAL_ALGORITHMS,
     ColumnBounds,
     ellipsoid_for_crs,
     geography_statistics,
@@ -98,7 +105,6 @@ from geoparquet_io.core.logging_config import (
 )
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_footer import (
-    EDGE_ALGORITHMS,
     FooterPatchRaced,
     FooterPatchUnsupported,
     patch_footer,
@@ -132,62 +138,39 @@ from geoparquet_io.core.write_strategies.base import (
 def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
     """Map geometry column -> non-planar edges value declared by the input.
 
-    The geo block's explicit planar or recognized non-planar declaration wins
-    over the native GEOGRAPHY type, just as in ``table_nonplanar_edges``.
-    Unrecognized values say nothing, so the type remains the fallback.
+    Each file's native GEOGRAPHY types and ``geo`` block, weighed by the one
+    precedence (:func:`~geoparquet_io.core.edges.detect_edges`): the block's
+    explicit planar or recognized non-planar declaration wins over the type,
+    and an unrecognized value says nothing.
     """
-    edges_by_col: dict[str, str] = {}
+    native: dict[str, str] = {}
+    declared: dict[str, object] = {}
     try:
         for col in get_schema_info(input_file):
             logical = col.get("logical_type") or ""
             if native_geo_type(logical) == "GEOGRAPHY":
-                parsed = parse_geometry_logical_type(logical) or {}
-                edges_by_col[col["name"]] = parsed.get("algorithm") or "spherical"
-        geo_meta = sanitized_carried_geo_of_file(input_file)
-        for name, col_meta in (geo_meta.get("columns") or {}).items():
-            edges = col_meta.get("edges") if isinstance(col_meta, dict) else None
-            if edges == "planar":
-                edges_by_col.pop(name, None)
-            elif edges in GEOGRAPHY_EDGE_ALGORITHMS:
-                edges_by_col[name] = edges
+                native[col["name"]] = logical_type_edges(parse_geometry_logical_type(logical))
+        declared = block_edges(sanitized_carried_geo_of_file(input_file))
     except Exception as e:
         # A broken optional geo block must not erase native declarations already
         # read. An empty answer would re-enable destructive planar work (#1287).
         fallback = (
             "keeping known non-planar declarations"
-            if edges_by_col
+            if detect_edges(native)
             else "treating its geometry as planar"
         )
         warn(f"Could not read the edges metadata of {input_file}; {fallback}: {e}")
-    return edges_by_col
-
-
-def _block_edges(original_metadata: dict | None) -> dict[str, object]:
-    """Map geometry column -> the ``edges`` value its carried ``geo`` block states.
-
-    A column whose block has no ``edges`` key is left out: it says nothing.
-    An unreadable block reads as empty (the sanitized carried decoder warns).
-    """
-    return {
-        name: col_meta["edges"]
-        for name, col_meta in (
-            sanitized_carried_geo(original_metadata).get("columns") or {}
-        ).items()
-        if "edges" in col_meta
-    }
+    return detect_edges(native, declared)
 
 
 def _collect_nonplanar_edges_from_metadata(original_metadata: dict | None) -> dict[str, str]:
     """Map geometry column -> non-planar edges declared in an input KV metadata dict.
 
     Fallback for write paths that carry the input's KV metadata but not its
-    path (the native GEOGRAPHY logical-type half needs the file itself).
+    path (the native GEOGRAPHY logical-type half needs the file itself). The
+    same precedence as a file, so a typo is no declaration here either.
     """
-    return {
-        name: edges
-        for name, edges in _block_edges(original_metadata).items()
-        if edges and edges != "planar"
-    }
+    return detect_edges(block=block_edges(sanitized_carried_geo(original_metadata)))
 
 
 def apply_nonplanar_edges(
@@ -317,7 +300,7 @@ def _geography_candidates(output_file: str, edges_by_col: dict[str, str]) -> dic
     ``check spec`` warns about on its own (#601). No CRS is OGC:CRS84.
     """
     geography: dict[str, str] = {}
-    candidates = {name: e for name, e in edges_by_col.items() if e in EDGE_ALGORITHMS}
+    candidates = {name: e for name, e in edges_by_col.items() if is_nonplanar(e)}
     if not candidates:
         return geography
     # Only a top-level GEOMETRY can be retyped; a 1.x output's WKB has no type.
@@ -366,7 +349,7 @@ def _block_bbox_targets(
         col_meta = columns.get(name)
         if name in geography or not isinstance(col_meta, dict):
             continue
-        if edges != "spherical" and edges not in ELLIPSOIDAL_ALGORITHMS:
+        if not is_nonplanar(edges):
             continue
         if is_geographic_crs(col_meta.get("crs")):
             targets[name] = edges
@@ -396,7 +379,7 @@ def _geodesic_bounds(
     ellipsoids = {
         name: ellipsoid_for_crs(extract_crs_from_parquet(output_file, geometry_column=name))
         for name, edges in targets.items()
-        if edges in ELLIPSOIDAL_ALGORITHMS
+        if is_ellipsoidal(edges)
     }
     try:
         bounds = geography_statistics(
@@ -443,13 +426,8 @@ def _geo_block_updates(
     ``unbounded`` names columns whose edges no geodesic box could be computed
     for: their planar ``bbox`` is removed rather than left to under-cover.
     """
-    changed = False
+    changed = restore_edges(geo_meta, edges_by_col)
     columns = (geo_meta or {}).get("columns") or {}
-    for name, edges in edges_by_col.items():
-        col_meta = columns.get(name)
-        if isinstance(col_meta, dict) and col_meta.get("edges") != edges:
-            col_meta["edges"] = edges
-            changed = True
     for name, box in file_bboxes.items():
         col_meta = columns.get(name)
         if not isinstance(col_meta, dict):
@@ -1646,26 +1624,18 @@ def table_nonplanar_edges(table, geometry_column: str, edges: str | None) -> dic
     """Map geometry column -> non-planar edges an in-memory table declares.
 
     The one reader of a table's edges (the repair gate's
-    ``geometry_repair.nonplanar_edges_of_arrow_table`` is a view of it). The
-    caller's ``edges`` wins for the primary, then the carried ``geo`` block,
-    then a GeoArrow field's own edge type. A block that states ``edges`` wins
-    over the type when they disagree, ``"planar"`` included. A block without
-    ``edges`` says nothing, so the type decides. Only a GeoParquet edge
-    algorithm (``GEOGRAPHY_EDGE_ALGORITHMS``) counts as a declaration, so a
-    typo falls through to the type (#1288). An explicit ``"planar"`` from the
-    caller is a choice too, so it drops the primary. The table is the only
-    witness the Arrow funnel has, since it never sees the input file.
+    ``geometry_repair.nonplanar_edges_of_arrow_table`` is a view of it). It
+    gathers the three carriers -- the caller's ``edges`` for the primary, the
+    carried ``geo`` block, each GeoArrow field's own edge type -- and the owner
+    weighs them (:func:`~geoparquet_io.core.edges.detect_edges`). The table is
+    the only witness the Arrow funnel has, since it never sees the input file.
     """
-    edges_by_col = nonplanar_edges_from_schema(table.schema)
-    for name, declared in _block_edges(table.schema.metadata).items():
-        if declared == "planar":
-            edges_by_col.pop(name, None)
-        elif declared in GEOGRAPHY_EDGE_ALGORITHMS:
-            edges_by_col[name] = declared
-    if edges == "planar":
-        edges_by_col.pop(geometry_column, None)
-    elif edges:
-        edges_by_col[geometry_column] = edges
+    edges_by_col = detect_edges(
+        nonplanar_edges_from_schema(table.schema),
+        block_edges(sanitized_carried_geo(table.schema.metadata)),
+        edges,
+        geometry_column,
+    )
     return {name: e for name, e in edges_by_col.items() if name in table.column_names}
 
 
@@ -1785,7 +1755,7 @@ def write_geoparquet_table(
     # Read before the metadata pass rebuilds the column: a 1.x write strips the
     # GeoArrow edge type, and a 2.0 one regenerates a block without `edges`.
     edges_by_col = table_nonplanar_edges(table, geometry_column, edges) if has_geometry else {}
-    if has_geometry and edges == "planar":
+    if has_geometry and edges == PLANAR:
         # An explicit planar choice also clears a native GEOGRAPHY type, which
         # a 2.0 write would otherwise keep as spherical.
         table = with_planar_edge_types(table, [geometry_column])

@@ -339,6 +339,20 @@ reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 "pin_duckdb_settings" = ["geoparquet_io/core/duckdb_utils.py"]
 "format_memory_limit" = ["geoparquet_io/core/sizing.py"]
 "nudged_size" = ["geoparquet_io/core/sizing.py"]
+# T3d (#1367 concept 6): the edges field's vocabulary, version gate, the one
+# precedence between a request, a carried block and a native type, and the key's
+# readers. The gatherers that read a file or a table stay with their callers
+# (write_funnels.collect_nonplanar_edges / table_nonplanar_edges).
+"*edges_for_version*" = ["geoparquet_io/core/edges.py"]
+"detect_edges" = ["geoparquet_io/core/edges.py"]
+"requested_edges" = ["geoparquet_io/core/edges.py"]
+"agree_across_files" = ["geoparquet_io/core/edges.py"]
+"edges_of" = ["geoparquet_io/core/edges.py"]
+"block_edges" = ["geoparquet_io/core/edges.py"]
+"strip_edges" = ["geoparquet_io/core/edges.py"]
+"logical_type_edges" = ["geoparquet_io/core/edges.py"]
+"*_type_edges" = ["geoparquet_io/core/edges.py"]
+"*spherical_edge_type*" = ["geoparquet_io/core/edges.py"]
 # The row-group policy (T2c): one resolver family, one MB -> rows measurement,
 # one vector snap. write_strategies/row_group_sizing.py carried a second
 # `_resolve_row_group_rows*` pair with its parameters swapped (#1030).
