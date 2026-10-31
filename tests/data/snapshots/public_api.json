@@ -72,6 +72,13 @@
     "read",
     "read_partition"
   ],
+  "geoparquet_io.benchmarks": [
+    "BENCHMARK_DATA_URL",
+    "BENCHMARK_FILES",
+    "CHAIN_OPERATIONS",
+    "CORE_OPERATIONS",
+    "FULL_OPERATIONS"
+  ],
   "geoparquet_io.cli.commands.check": [
     "MultiFileCheckRunner",
     "T",
@@ -181,7 +188,6 @@
     "MAX_PROJJSON_CHARS",
     "MAX_WKT_CHARS",
     "NULL_CRS_HINT",
-    "NULL_CRS_NO_FLAG_ERROR",
     "PARQUET_UNKNOWN_CRS",
     "PROJJSON_CRS_TYPES",
     "UNKNOWN_BY_EMPTY",
@@ -247,9 +253,7 @@
     "get_compression_stats",
     "get_file_metadata",
     "get_kv_metadata",
-    "get_native_geo_statistics",
     "get_native_geo_stats_by_row_group",
-    "get_num_row_groups",
     "get_per_row_group_bbox_stats",
     "get_per_row_group_native_geo_stats",
     "get_row_count",
@@ -287,6 +291,7 @@
     "duckdb_capabilities",
     "duckdb_type_contains_geometry",
     "duckdb_type_is_geometry",
+    "duckdb_type_is_integer",
     "duckdb_type_is_numeric",
     "fetch_one",
     "fetch_row",
@@ -435,7 +440,6 @@
     "shapefile_members",
     "write_csv",
     "write_flatgeobuf",
-    "write_format",
     "write_gdal_format",
     "write_geojson",
     "write_geopackage",

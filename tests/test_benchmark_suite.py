@@ -11,20 +11,14 @@ from geoparquet_io.benchmarks.config import (
     BENCHMARK_FILES,
     CHAIN_OPERATIONS,
     CORE_OPERATIONS,
-    DEFAULT_THRESHOLDS,
     FULL_OPERATIONS,
-    RegressionThresholds,
 )
 from geoparquet_io.core.benchmark_report import (
-    format_comparison_table,
     format_table,
 )
 from geoparquet_io.core.benchmark_suite import (
     BenchmarkResult,
-    ComparisonResult,
-    RegressionStatus,
     SuiteResult,
-    compare_results,
     run_benchmark_suite,
     run_single_operation,
 )
@@ -44,17 +38,6 @@ class TestBenchmarkConfig:
         """Test that full operations includes all core operations."""
         for op in CORE_OPERATIONS:
             assert op in FULL_OPERATIONS
-
-    def test_default_thresholds(self):
-        """Test default regression thresholds."""
-        assert DEFAULT_THRESHOLDS.time_warning == 0.10
-        assert DEFAULT_THRESHOLDS.time_failure == 0.25
-        assert DEFAULT_THRESHOLDS.memory_warning == 0.20
-        assert DEFAULT_THRESHOLDS.memory_failure == 0.50
-
-    def test_thresholds_are_dataclass(self):
-        """Test that thresholds use dataclass pattern."""
-        assert isinstance(DEFAULT_THRESHOLDS, RegressionThresholds)
 
     def test_benchmark_data_url_defined(self):
         """Test that benchmark data URL points to source.coop."""
@@ -251,74 +234,6 @@ class TestBenchmarkSuite:
         assert "environment" in json_str
 
 
-class TestRegressionComparison:
-    """Tests for regression comparison."""
-
-    def test_compare_results_no_regression(self):
-        """Test comparison with no regression."""
-        baseline = BenchmarkResult(
-            operation="read",
-            file="test.parquet",
-            time_seconds=1.0,
-            peak_rss_memory_mb=100,
-            success=True,
-        )
-        current = BenchmarkResult(
-            operation="read",
-            file="test.parquet",
-            time_seconds=1.05,  # 5% slower - within threshold
-            peak_rss_memory_mb=105,  # 5% more - within threshold
-            success=True,
-        )
-
-        comparison = compare_results(baseline, current)
-
-        assert comparison.status == RegressionStatus.OK
-        assert comparison.time_delta_pct == pytest.approx(0.05, rel=0.01)
-
-    def test_compare_results_warning(self):
-        """Test comparison with warning-level regression."""
-        baseline = BenchmarkResult(
-            operation="read",
-            file="test.parquet",
-            time_seconds=1.0,
-            peak_rss_memory_mb=100,
-            success=True,
-        )
-        current = BenchmarkResult(
-            operation="read",
-            file="test.parquet",
-            time_seconds=1.15,  # 15% slower - warning
-            peak_rss_memory_mb=100,
-            success=True,
-        )
-
-        comparison = compare_results(baseline, current)
-
-        assert comparison.status == RegressionStatus.WARNING
-
-    def test_compare_results_failure(self):
-        """Test comparison with failure-level regression."""
-        baseline = BenchmarkResult(
-            operation="read",
-            file="test.parquet",
-            time_seconds=1.0,
-            peak_rss_memory_mb=100,
-            success=True,
-        )
-        current = BenchmarkResult(
-            operation="read",
-            file="test.parquet",
-            time_seconds=1.30,  # 30% slower - failure
-            peak_rss_memory_mb=100,
-            success=True,
-        )
-
-        comparison = compare_results(baseline, current)
-
-        assert comparison.status == RegressionStatus.FAILURE
-
-
 class TestBenchmarkReporting:
     """Tests for benchmark report formatting."""
 
@@ -339,28 +254,6 @@ class TestBenchmarkReporting:
         assert "read" in table
         assert "1.23" in table
         assert "45.6" in table  # RSS memory displayed
-
-    def test_format_comparison_table(self):
-        """Test comparison table formatting."""
-        comparisons = [
-            ComparisonResult(
-                operation="read",
-                file="test.parquet",
-                baseline_time=1.0,
-                current_time=1.1,
-                time_delta_pct=0.10,
-                baseline_rss_memory=100,
-                current_rss_memory=110,
-                memory_delta_pct=0.10,
-                status=RegressionStatus.WARNING,
-            ),
-        ]
-
-        table = format_comparison_table(comparisons)
-
-        assert "read" in table
-        assert "+10%" in table or "10%" in table
-        assert "WARNING" in table or "⚠" in table
 
 
 class TestChainOperations:

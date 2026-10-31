@@ -111,13 +111,6 @@ def _detect_crs_from_table(table: pa.Table, geom_col: str) -> str:
     return transform_source_crs(crs) or lonlat_source_name(crs)
 
 
-def _table_geo_column_meta(table: pa.Table, geom_col: str) -> dict:
-    """Return the geo-metadata dict for ``geom_col``, or ``{}`` if unavailable."""
-    columns = sanitized_carried_geo(table.schema.metadata).get("columns", {})
-    entry = columns.get(geom_col) if isinstance(columns, dict) else None
-    return entry if isinstance(entry, dict) else {}
-
-
 def _target_crs_is_projected(target_crs: str, con=None) -> bool:
     """True when reprojecting into ``target_crs`` lands in projected space.
 

@@ -295,14 +295,15 @@ def carry_edges(
     set on the column of that name the block describes. Returns ``geo``.
     """
     columns = (geo or {}).get("columns") or {}
-    for entry in columns.values():
-        if declares_edges(entry):
+    edges_by_col = edges_by_col or {}
+    for name, entry in columns.items():
+        if not isinstance(entry, dict):
+            continue
+        if name in edges_by_col:
+            set_edges(entry, edges_by_col[name])
+        elif declares_edges(entry):
             carried = edges_of(entry)
             set_edges(entry, carried if is_nonplanar(carried) else None)
-    for name, edges in (edges_by_col or {}).items():
-        entry = columns.get(name)
-        if isinstance(entry, dict):
-            set_edges(entry, edges)
     return geo
 
 

@@ -13,7 +13,7 @@ The five paths, one class each:
   directories derived nothing. It now reads through ``get_schema_info`` /
   ``sanitized_carried_geo_of_file``, the pair ``collect_nonplanar_edges`` already asks the
   same question of, which resolve all four spellings.
-* **the 2.0 fast path** -- ``_geo_block_to_carry_on_fast_path`` writes the
+* **the 2.0 fast path** -- ``_fast_path_geo_decision`` writes the
   input's own block verbatim, so a 2.0 input whose block omits a native
   secondary kept it undescribed through ``sort``/``extract``.
 * **``gpio convert``** -- it passes a ``geometry_info`` built from the ``geo``
@@ -305,7 +305,7 @@ def _v2_block_omitting_the_secondary(source, path):
     """A 2.0 file whose ``geo`` block describes ``geometry`` only, plus an ``epoch``.
 
     The ``epoch`` is what makes the block worth carrying at all: without a key
-    DuckDB would not generate itself, ``_geo_block_to_carry_on_fast_path`` hands
+    DuckDB would not generate itself, ``_fast_path_geo_decision`` hands
     the write back to DuckDB's own (complete) block and there is nothing to fix.
     """
     table = pq.read_table(str(source))

@@ -18,6 +18,7 @@ from geoparquet_io.core.check_verdict import (
 )
 from geoparquet_io.core.crs_utils import column_is_geographic
 from geoparquet_io.core.duckdb_metadata import (
+    get_file_metadata,
     get_per_row_group_bbox_stats,
     get_per_row_group_native_geo_stats,
     get_row_group_bbox_stats,
@@ -613,10 +614,10 @@ def check_spatial_pushdown_readiness(
         debug(f"Using bbox column: {bbox_col_name}")
 
     row_group_bboxes = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
-    num_rgs = len(row_group_bboxes)
+    num_rgs = get_file_metadata(parquet_file)["num_row_groups"]
 
     if verbose:
-        debug(f"Found {num_rgs} row groups with bbox stats")
+        debug(f"Found {len(row_group_bboxes)} row groups with bbox stats out of {num_rgs}")
 
     if num_rgs <= 1:
         if verbose:
@@ -631,13 +632,18 @@ def check_spatial_pushdown_readiness(
             "recommendations": ["Consider using smaller row groups for spatial queries"],
         }
 
-    avg_area_ratio, avg_skip_rate = _compute_locality_metrics(
-        row_group_bboxes,
-        num_samples=num_samples,
-        query_fraction=query_fraction,
-        seed=seed,
-        geographic=column_is_geographic(parquet_file),
-    )
+    if row_group_bboxes:
+        avg_area_ratio, avg_skip_rate = _compute_locality_metrics(
+            row_group_bboxes,
+            num_samples=num_samples,
+            query_fraction=query_fraction,
+            seed=seed,
+            geographic=column_is_geographic(parquet_file),
+        )
+        # Missing statistics cannot prove a row group is skippable.
+        avg_skip_rate *= len(row_group_bboxes) / num_rgs
+    else:
+        avg_area_ratio, avg_skip_rate = 0.0, 0.0
 
     if verbose:
         debug(f"Average bbox area ratio: {avg_area_ratio:.4f}")

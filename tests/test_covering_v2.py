@@ -28,7 +28,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.duckdb_utils import fetch_one
-from tests.conftest import fast_path_query, get_geo_metadata
+from tests.conftest import get_geo_metadata
 
 BBOX_COVERING = {
     "xmin": ["bbox", "xmin"],
@@ -457,42 +457,6 @@ def test_advised_output_version_honours_an_explicit_version():
     from geoparquet_io.core.hilbert_order import _advised_output_version
 
     assert _advised_output_version("-", "2.0", verbose=False) == "2.0"
-
-
-def test_fast_path_carry_declines_a_geo_block_too_thin_to_stand_in(tmp_path):
-    """Carrying a block that lacks the fields DuckDB would have written is worse
-    than letting DuckDB write it, so the carry declines and the write falls back."""
-    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
-
-    thin = {
-        "geo": json.dumps(
-            {
-                "version": "2.0.0",
-                "primary_column": "geometry",
-                # covering present, but no encoding/geometry_types
-                "columns": {"geometry": {"covering": {"bbox": BBOX_COVERING}}},
-            }
-        )
-    }
-    assert (
-        _geo_block_to_carry_on_fast_path(thin, "geometry", "2.0", **fast_path_query("bbox")) is None
-    )
-
-
-def test_fast_path_carry_declines_a_block_duckdb_would_write_itself():
-    """No covering, no epoch, no orientation: DuckDB's own generated block stands."""
-    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
-
-    plain = {
-        "geo": json.dumps(
-            {
-                "version": "2.0.0",
-                "primary_column": "geometry",
-                "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
-            }
-        )
-    }
-    assert _geo_block_to_carry_on_fast_path(plain, "geometry", "2.0", **fast_path_query()) is None
 
 
 def test_a_non_bbox_covering_survives_a_write_that_adds_a_bbox_covering(tmp_path):

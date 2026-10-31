@@ -256,36 +256,6 @@ def raise_for_schema_mismatch(exc: BaseException, path: str) -> None:
     ) from exc
 
 
-def get_files_to_check(
-    path: str,
-    check_all: bool = False,
-    check_sample: int | None = None,
-    verbose: bool = False,
-    fix: bool = False,
-) -> tuple[list[str], str]:
-    """
-    Get list of files to check from a partitioned dataset.
-
-    Args:
-        path: File path, directory, or glob pattern
-        check_all: If True, return all files
-        check_sample: If set, return first N files
-        verbose: Print debug messages
-        fix: If True the caller is about to repair these files, so never
-            sample: a repair acts on every matched file. An explicit
-            ``check_sample`` still wins -- that is the user naming the subset.
-
-    Returns:
-        tuple: (files_to_check, notice_message)
-            - files_to_check: List of file paths to check
-            - notice_message: Informational message about what's being checked (or empty)
-    """
-    files, notice, _ = select_files_to_check(
-        path, check_all=check_all, check_sample=check_sample, verbose=verbose, fix=fix
-    )
-    return files, notice
-
-
 def select_files_to_check(
     path: str,
     check_all: bool = False,
@@ -293,7 +263,7 @@ def select_files_to_check(
     verbose: bool = False,
     fix: bool = False,
 ) -> tuple[list[str], str, int]:
-    """:func:`get_files_to_check`, plus how many files the input matched.
+    """Select files to check, a selection description, and the total matched count.
 
     The count is what lets a sampled run say its verdict covers only part of
     the input. A remote glob, which cannot be enumerated, counts as the one

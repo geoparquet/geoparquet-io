@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from geoparquet_io.core.column_selection import fold
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
+    duckdb_type_is_integer,
     fetch_one,
     fetch_row,
     quote_identifier,
@@ -47,17 +48,6 @@ VALID_SCHEMES = (*GRID_SCHEMES, ADMIN_SCHEME)
 DEFAULT_CELL_COLUMNS = {
     **{name: scheme.default_column for name, scheme in GRID_SCHEMES.items()},
     ADMIN_SCHEME: "admin_code",
-}
-
-_INTEGER_TYPES = {
-    "TINYINT",
-    "SMALLINT",
-    "INTEGER",
-    "BIGINT",
-    "UTINYINT",
-    "USMALLINT",
-    "UINTEGER",
-    "UBIGINT",
 }
 
 
@@ -145,12 +135,12 @@ def _detect_scheme(
 
 def _stores_cells(spec, dtype: str) -> bool:
     """Whether a column of ``dtype`` can hold this grid index's cell ids."""
-    return dtype in _INTEGER_TYPES if spec.cell_integer else dtype == "VARCHAR"
+    return duckdb_type_is_integer(dtype) if spec.cell_integer else dtype == "VARCHAR"
 
 
 def _scheme_for_column(con, relation: str, name: str, dtype: str) -> str:
     """Infer the scheme for an explicitly named cell column."""
-    if dtype in _INTEGER_TYPES:
+    if duckdb_type_is_integer(dtype):
         for scheme_name, grid in GRID_SCHEMES.items():
             if grid.spec.cell_integer and scheme_name in fold(name):
                 return scheme_name
@@ -206,7 +196,14 @@ def _classify_columns(columns: list[tuple[str, str]], cell_column: str, scheme: 
             rollups.append(RollupColumn(name, func, source_column=source))
             continue
         rollups.append(
-            RollupColumn(name, func, cast_to_bigint=(func == "sum" and dtype in _INTEGER_TYPES))
+            RollupColumn(
+                name,
+                func,
+                # HUGEINT sums must retain their width rather than narrow to BIGINT.
+                cast_to_bigint=(
+                    func == "sum" and duckdb_type_is_integer(dtype) and "HUGE" not in dtype
+                ),
+            )
         )
     return tuple(rollups), tuple(dropped)
 
@@ -324,14 +321,6 @@ def detect_aggregate_info(
         out_geometry=out_geometry,
         dropped_columns=dropped,
     )
-
-
-def detect_aggregate_file(
-    input_parquet: str, cell_column: str | None = None, scheme: str | None = None
-) -> AggregateInfo:
-    """File-path convenience wrapper around :func:`detect_aggregate_info`."""
-    with aggregate_connection(input_parquet) as (con, relation):
-        return detect_aggregate_info(con, relation, cell_column, scheme)
 
 
 @contextmanager

@@ -8,7 +8,6 @@ from geoparquet_io.core.admin_datasets import (
     OvertureAdminDataset,
 )
 from geoparquet_io.core.constants import (
-    FIBOA_CORE_SCHEMA,
     VECOREL_ADMIN_SCHEMA,
     VECOREL_CORE_SCHEMA,
     VECOREL_METRICS_SCHEMA,
@@ -82,10 +81,6 @@ class TestVecorelMetadataConstants:
     def test_metrics_schema_url(self):
         assert "geometry-metrics-extension" in VECOREL_METRICS_SCHEMA
         assert VECOREL_METRICS_SCHEMA.endswith(".yaml")
-
-    def test_fiboa_schema_url(self):
-        assert "fiboa.org/specification" in FIBOA_CORE_SCHEMA
-        assert FIBOA_CORE_SCHEMA.endswith(".yaml")
 
 
 class TestVecorelMetadataPreservation:

@@ -30,7 +30,6 @@ from geoparquet_io.core.streaming import (
     apply_metadata_to_table,
     extract_crs_from_table,
     is_stdin,
-    is_stdout,
     read_arrow_stream,
     should_stream_output,
     validate_output,
@@ -50,12 +49,6 @@ class TestStreamMarker:
 
     def test_is_stdin_with_none(self):
         assert is_stdin(None) is False
-
-    def test_is_stdout_with_marker(self):
-        assert is_stdout("-") is True
-
-    def test_is_stdout_with_file(self):
-        assert is_stdout("/path/to/file.parquet") is False
 
     def test_stream_marker_value(self):
         assert STREAM_MARKER == "-"

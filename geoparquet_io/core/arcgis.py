@@ -1684,7 +1684,7 @@ def arcgis_to_table(
     exclude_list = split_column_list(exclude_cols, "--exclude-cols")
 
     # Validate URL
-    service_url, layer_id = validate_arcgis_url(service_url)
+    service_url, _ = validate_arcgis_url(service_url)
 
     # Resolve authentication
     token = resolve_token(auth, service_url, verbose, timeout=timeout) if auth else None

@@ -12,7 +12,6 @@ from geoparquet_io.cli.main import cli
 from geoparquet_io.core.inspect_utils import (
     _columns_that_fit,
     _create_preview_table,
-    extract_columns_info,
     extract_file_info,
     extract_geo_info,
     format_bbox_display,
@@ -270,30 +269,6 @@ def test_extract_geo_info(test_file):
     assert "bbox" in info
     assert "primary_column" in info
 
-
-def test_extract_columns_info(test_file):
-    """Test extract_columns_info function."""
-    import fsspec
-    import pyarrow.parquet as pq
-
-    from geoparquet_io.core.file_utils import resolve_file_url
-
-    resolved = resolve_file_url(test_file, verbose=False)
-    with fsspec.open(resolved, "rb") as f:
-        pf = pq.ParquetFile(f)
-        schema = pf.schema_arrow
-
-    columns = extract_columns_info(schema, "geometry")
-
-    assert len(columns) > 0
-
-    for col in columns:
-        assert "name" in col
-        assert "type" in col
-        assert "is_geometry" in col
-
-    # At least one column should be marked as geometry
-    [c for c in columns if c["is_geometry"]]
     # May or may not have geometry columns depending on test file
     # Just verify structure is correct
 

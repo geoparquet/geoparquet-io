@@ -85,7 +85,7 @@ from geoparquet_io.core.write_funnels import (
 #   what it generates carries no `covering` -- so `check all --fix` on a 2.0
 #   file with a bbox column discarded the covering and then complained that the
 #   bbox column was not declared in one (#1003). Since #738/#772 the carried
-#   block is what `_geo_block_to_carry_on_fast_path` substitutes for DuckDB's,
+#   block is what `_fast_path_geo_decision` substitutes for DuckDB's,
 #   and these two rewrites keep every row of their input, so it still describes
 #   the output exactly.
 #

@@ -211,7 +211,6 @@ class TestPerRowGroup:
         def refuse(*args, **kwargs):
             raise AssertionError("the validator consulted the writer's bound")
 
-        monkeypatch.setattr(writer, "geodesic_bbox_of_wkb", refuse)
         monkeypatch.setattr(writer, "row_group_geography_bboxes", refuse)
         assert _check(path, "geography_stats_cover_edges_geometry").status == CheckStatus.WARNING
 

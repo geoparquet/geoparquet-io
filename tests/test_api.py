@@ -1116,6 +1116,7 @@ class TestFrontDoorDelegation:
 #: to any of their public names is a diff to tests/data/snapshots/public_api.json,
 #: so nothing moves silently.
 PUBLIC_API_MODULES = (
+    "geoparquet_io.benchmarks",
     "geoparquet_io.api",
     "geoparquet_io.api.ops",
     "geoparquet_io.api.table",

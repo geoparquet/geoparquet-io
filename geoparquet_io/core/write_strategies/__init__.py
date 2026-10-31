@@ -79,16 +79,6 @@ class WriteStrategyFactory:
         return cls._strategy_classes[strategy]()
 
     @classmethod
-    def list_strategies(cls) -> list[str]:
-        """
-        List available strategy names.
-
-        Returns:
-            List of strategy value strings
-        """
-        return [s.value for s in WriteStrategy]
-
-    @classmethod
     def clear_cache(cls) -> None:
         """
         Clear the strategy instance cache.

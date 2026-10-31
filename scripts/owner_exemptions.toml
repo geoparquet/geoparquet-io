@@ -138,7 +138,9 @@ count = "*"
 reason = "metadata serialization, not a report: SRS parameter for GDAL"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/geo_metadata.py"
-count = "*"
+name = "geo_key_value"
+line_pattern = 'json\.dumps'
+count = 1
 reason = "metadata serialization, not a report: geo block (owner of its encoding)"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/geoarrow_compat.py"
@@ -234,6 +236,31 @@ reason = "extract_geo_info's result: the resolver's answer, not the block's clai
 path = "geoparquet_io/core/wfs.py"
 name = "_probe_properties_type"
 reason = "the GeoJSON properties column's type (unnest a STRUCT), not a geometry read kind"
+
+[[G1.schema_probe]]
+path = "geoparquet_io/core/carto.py"
+count = 1
+reason = "permanent: remote CARTO SQL API probe"
+[[G1.schema_probe]]
+path = "geoparquet_io/core/convert.py"
+count = 1
+reason = "permanent: ST_Read column bind detects non-UTF-8 names"
+[[G1.spatial_filter]]
+path = "geoparquet_io/core/carto.py"
+count = 1
+reason = "permanent: constant geometry filter, not a spatial join"
+[[G1.spatial_filter]]
+path = "geoparquet_io/core/extract.py"
+count = 2
+reason = "permanent: constant geometry filter, not a spatial join"
+[[G1.spatial_filter]]
+path = "geoparquet_io/core/extract_bigquery.py"
+count = 2
+reason = "permanent: constant geometry filter, not a spatial join"
+[[G1.spatial_filter]]
+path = "geoparquet_io/core/wfs.py"
+count = 1
+reason = "permanent: constant geometry filter, not a spatial join"
 
 # ---------------------------------------------------------------------------
 # G2: owner-only definitions (scripts/check_owner_defs.py)

@@ -16,7 +16,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.check_parquet_structure import check_all
 from geoparquet_io.core.convert import convert_to_geoparquet
-from geoparquet_io.core.format_writers import write_format
+from geoparquet_io.core.format_writers import write_gdal_format
 
 
 def _check_all_passed(results: dict) -> bool:
@@ -31,7 +31,7 @@ class TestShapefileCRSExport:
         """Shapefile export should create .prj file even for EPSG:4326."""
         output_shp = tmp_path / "output.shp"
 
-        write_format(places_test_file, str(output_shp), "shapefile")
+        write_gdal_format(places_test_file, str(output_shp), "shapefile")
 
         # .prj file must exist
         prj_file = output_shp.with_suffix(".prj")
@@ -49,7 +49,7 @@ class TestShapefileCRSExport:
         """Shapefile .prj should reference WGS84 for EPSG:4326 source."""
         output_shp = tmp_path / "output.shp"
 
-        write_format(places_test_file, str(output_shp), "shapefile")
+        write_gdal_format(places_test_file, str(output_shp), "shapefile")
 
         prj_file = output_shp.with_suffix(".prj")
         prj_content = prj_file.read_text()
@@ -65,7 +65,7 @@ class TestShapefileCRSExport:
         output_parquet = tmp_path / "roundtrip.parquet"
 
         # Export to shapefile
-        write_format(places_test_file, str(shp_file), "shapefile")
+        write_gdal_format(places_test_file, str(shp_file), "shapefile")
 
         # Import back to GeoParquet - this is the key test for #190
         # Before the fix, this would fail with "No CRS found in input file"
@@ -91,7 +91,7 @@ class TestFlatGeobufCRSExport:
         output_parquet = tmp_path / "roundtrip.parquet"
 
         # Export to FlatGeobuf
-        write_format(places_test_file, str(fgb_file), "flatgeobuf")
+        write_gdal_format(places_test_file, str(fgb_file), "flatgeobuf")
 
         # Import back to GeoParquet - this is the key test for #189
         # Before the fix, this would fail with "No CRS found in input file"
@@ -111,7 +111,7 @@ class TestFlatGeobufCRSExport:
         fgb_file = tmp_path / "output.fgb"
         reimported = tmp_path / "reimported.parquet"
 
-        write_format(places_test_file, str(fgb_file), "flatgeobuf")
+        write_gdal_format(places_test_file, str(fgb_file), "flatgeobuf")
 
         # This should not raise "No CRS found" error
         convert_to_geoparquet(str(fgb_file), str(reimported))
@@ -128,7 +128,7 @@ class TestGeoPackageCRSExport:
         output_parquet = tmp_path / "roundtrip.parquet"
 
         # Export to GeoPackage
-        write_format(places_test_file, str(gpkg_file), "geopackage")
+        write_gdal_format(places_test_file, str(gpkg_file), "geopackage")
 
         # Import back to GeoParquet
         convert_to_geoparquet(str(gpkg_file), str(output_parquet))
@@ -146,7 +146,7 @@ class TestGeoPackageCRSExport:
         """GeoPackage export should populate gpkg_spatial_ref_sys table."""
         gpkg_file = tmp_path / "output.gpkg"
 
-        write_format(places_test_file, str(gpkg_file), "geopackage")
+        write_gdal_format(places_test_file, str(gpkg_file), "geopackage")
 
         # Query the GeoPackage SRS table directly via sqlite3
         con = sqlite3.connect(str(gpkg_file))
@@ -202,7 +202,7 @@ class TestProjectedCRSExport:
         output_parquet = tmp_path / "roundtrip.parquet"
 
         # Export to shapefile
-        write_format(fields_5070_file, str(shp_file), "shapefile")
+        write_gdal_format(fields_5070_file, str(shp_file), "shapefile")
 
         # Verify .prj exists and contains projected CRS info
         prj_file = shp_file.with_suffix(".prj")
@@ -233,7 +233,7 @@ class TestProjectedCRSExport:
         output_parquet = tmp_path / "roundtrip.parquet"
 
         # Export to FlatGeobuf
-        write_format(fields_5070_file, str(fgb_file), "flatgeobuf")
+        write_gdal_format(fields_5070_file, str(fgb_file), "flatgeobuf")
 
         # Import back
         convert_to_geoparquet(str(fgb_file), str(output_parquet))
@@ -254,7 +254,7 @@ class TestProjectedCRSExport:
         output_parquet = tmp_path / "roundtrip.parquet"
 
         # Export to GeoPackage
-        write_format(fields_5070_file, str(gpkg_file), "geopackage")
+        write_gdal_format(fields_5070_file, str(gpkg_file), "geopackage")
 
         # Import back
         convert_to_geoparquet(str(gpkg_file), str(output_parquet))

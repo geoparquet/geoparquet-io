@@ -54,11 +54,6 @@ def is_stdin(path: str | None) -> bool:
     return path == STREAM_MARKER
 
 
-def is_stdout(path: str | None) -> bool:
-    """Check if path indicates explicit stdout streaming."""
-    return path == STREAM_MARKER
-
-
 def should_stream_output(output_path: str | None) -> bool:
     """
     Determine if output should go to stdout.

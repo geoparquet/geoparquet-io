@@ -289,15 +289,6 @@ class TestOwnerQuery:
 PACKAGE = Path(__file__).resolve().parent.parent / "geoparquet_io"
 OWNER = "core/duckdb_utils.py"
 
-# These sites filter rows against a constant geometry (a --bbox/--geometry
-# extract filter, or a remote service's SQL dialect); none joins two tables.
-FILTER_BASELINE = {
-    "core/carto.py": 1,
-    "core/extract.py": 2,
-    "core/extract_bigquery.py": 2,
-    "core/wfs.py": 1,
-}
-
 
 def _docstring_ids(tree):
     ids = set()
@@ -321,18 +312,6 @@ def st_intersects_literals(source: str) -> int:
         and id(node) not in skip
         and "ST_Intersects(" in node.value
     )
-
-
-def test_st_intersects_is_spelled_only_in_the_owner():
-    found = {}
-    for path in sorted(PACKAGE.rglob("*.py")):
-        rel = path.relative_to(PACKAGE).as_posix()
-        if rel == OWNER:
-            continue
-        count = st_intersects_literals(path.read_text())
-        if count:
-            found[rel] = count
-    assert found == FILTER_BASELINE
 
 
 def test_guard_sees_a_hand_rolled_join():

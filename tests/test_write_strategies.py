@@ -78,14 +78,6 @@ class TestWriteStrategyFactory:
         assert strategy.name == "disk-rewrite"
         assert strategy.supports_streaming is False
 
-    def test_list_strategies(self):
-        """List all available strategies."""
-        strategies = WriteStrategyFactory.list_strategies()
-        assert "in-memory" in strategies
-        assert "streaming" in strategies
-        assert "duckdb-kv" in strategies
-        assert "disk-rewrite" in strategies
-
     def test_cache_clear(self):
         """Cache can be cleared."""
         WriteStrategyFactory.get_strategy(WriteStrategy.ARROW_MEMORY)

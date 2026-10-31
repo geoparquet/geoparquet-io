@@ -72,13 +72,12 @@ from __future__ import annotations
 
 import math
 import struct
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import Any, NamedTuple
 
 from geoparquet_io.core.edges import (
     ANDOYER,
     COUNTERCLOCKWISE,
-    SPHERICAL,
     THOMAS,
     is_ellipsoidal,
     is_nonplanar,
@@ -775,46 +774,6 @@ def _context(edges: str, orientation: str | None, ellipsoid: tuple | None) -> _C
         raise ValueError(f"edges must be spherical or an ellipsoidal algorithm, not {edges!r}")
     semi_major, flattening = ellipsoid if ellipsoid else WGS84_ELLIPSOID
     return _Context(edges, orientation, (float(semi_major), float(flattening)))
-
-
-def geodesic_bbox_of_wkb(
-    values: Iterable[Any],
-    edges: str = SPHERICAL,
-    *,
-    orientation: str | None = None,
-    ellipsoid: tuple[float, float] | None = None,
-) -> Box | None:
-    """The geodesic bound of some WKB values, or None.
-
-    Args:
-        values: WKB geometries (bytes-like); ``None`` entries are skipped.
-        edges: The edge algorithm, a non-planar GeoParquet ``edges`` name.
-        orientation: The column's ``orientation``; ``"counterclockwise"``
-            puts each ring's interior on its left, anything else reads a ring
-            as the smaller of the two regions it bounds.
-        ellipsoid: ``(semi-major axis, flattening)`` for the ellipsoidal
-            algorithms; WGS84 when omitted.
-
-    Returns:
-        ``(xmin, ymin, xmax, ymax)`` with ``xmin > xmax`` for an antimeridian
-        wrap, or ``None`` when there is nothing to bound -- no non-empty
-        geometry -- or a value cannot be bounded (unparsable WKB, a non-finite
-        coordinate, a latitude outside [-90, 90]). Never raises for bad data.
-    """
-    import pyarrow as pa
-
-    ctx = _context(edges, orientation, ellipsoid)
-    items = [bytes(v) if isinstance(v, (bytearray, memoryview)) else v for v in values]
-    try:
-        array = pa.array(items, type=pa.binary())
-    except (TypeError, ValueError, pa.ArrowException):
-        return None
-    acc = _Bound()
-    try:
-        _bound_array(array, acc, ctx)
-    except _WkbError:
-        return None
-    return acc.result()
 
 
 def row_group_geography_bboxes(

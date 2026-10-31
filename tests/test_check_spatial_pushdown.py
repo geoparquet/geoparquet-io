@@ -195,3 +195,49 @@ class TestCheckSpatialPushdownReadinessUnit:
         avg_skip = sum(skip_rates) / len(skip_rates)
         # All RGs overlap, so skip rate should be 0
         assert avg_skip == 0.0
+
+
+@pytest.mark.parametrize("with_stats", [1, 2])
+def test_cli_reports_all_three_row_groups_including_one_without_bbox(tmp_path, with_stats):
+    import json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from click.testing import CliRunner
+    from shapely import Point, to_wkb
+
+    from geoparquet_io.cli.main import cli
+
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {
+                "encoding": "WKB",
+                "geometry_types": ["Point"],
+                "covering": {"bbox": {k: ["bbox", k] for k in ("xmin", "ymin", "xmax", "ymax")}},
+            }
+        },
+    }
+    bbox = pa.array(
+        [
+            {"xmin": 0.0, "ymin": 0.0, "xmax": 0.0, "ymax": 0.0},
+            None,
+            ({"xmin": 2.0, "ymin": 2.0, "xmax": 2.0, "ymax": 2.0} if with_stats == 2 else None),
+        ],
+        type=pa.struct([(k, pa.float64()) for k in ("xmin", "ymin", "xmax", "ymax")]),
+    )
+    table = pa.table({"geometry": [to_wkb(Point(0, 0)), None, to_wkb(Point(2, 2))], "bbox": bbox})
+    table = table.replace_schema_metadata({b"geo": json.dumps(geo).encode()})
+    path = tmp_path / "three.parquet"
+    pq.write_table(table, path, row_group_size=1)
+    assert pq.ParquetFile(path).metadata.num_row_groups == 3
+    result = CliRunner().invoke(cli, ["check", "spatial", str(path)])
+    assert "Row groups: 3" in result.output, result.output
+
+    from geoparquet_io.core.check_spatial_order import check_spatial_pushdown_readiness
+
+    readiness = check_spatial_pushdown_readiness(str(path))
+    assert readiness["num_row_groups"] == 3
+    assert "Single row group provides no pushdown benefit" not in readiness["issues"]
+    assert readiness["estimated_skip_rate"] <= with_stats / 3

@@ -40,6 +40,7 @@ import json
 import re
 import subprocess
 import sys
+from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
@@ -57,6 +58,8 @@ from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
 from tests._precommit_hook import core_tree, hook_entry
 
 REPO = Path(__file__).resolve().parents[1]
+PACKAGE = REPO / "geoparquet_io"
+OWNER = PACKAGE / "core" / "duckdb_utils.py"
 EXEMPTIONS_FILE = REPO / "scripts" / "owner_exemptions.toml"
 CHECK_OWNER_DEFS = REPO / "scripts" / "check_owner_defs.py"
 
@@ -94,7 +97,7 @@ EXPECTED_COUNTS = {
     "G3.pylint": 17,
     "G13.options": 11,
     "G13.bbox_parsers": 0,
-    "G4.whitelist": 174,
+    "G4.whitelist": 148,
     "G4.tests_whitelist": 95,
 }
 
@@ -3015,6 +3018,15 @@ def _block_edits(tree: ast.AST) -> Iterator[ast.AST]:
         )
         aliases |= _loop_entry_names(scope, aliases)
         copies = _bound_names(scope, _is_block_copy)
+        # A primary/columns store identifies a neutral-name mapping as a block.
+        block_names = {
+            name
+            for name, stores in _keyed_stores(scope).items()
+            if any(key in {"primary_column", "columns"} for key, _ in stores)
+        }
+        copies |= (
+            _bound_names(scope, lambda value, names: isinstance(value, ast.DictComp)) & block_names
+        )
         yield from _restated_blocks(scope)
         for node in _walk_scope(scope):
             if _edits_by_store(node, aliases, copies) or _edits_by_call(node, aliases):
@@ -5546,3 +5558,819 @@ def test_g12_the_entry_key_owner_table_names_real_modules():
     for path, keys in owners.items():
         assert (REPO / path).exists(), path
         assert keys, path
+
+
+def test_g12_geo_compose_neutral_comprehension_primary_store(tmp_path):
+    source = (
+        "def f(payload):\n    result = {k: v for k, v in payload.items()}\n"
+        '    result["primary_column"] = "shape"\n    return result\n'
+    )
+    assert arm_hits(_plant(tmp_path, "geo_compose", source), "geo_compose")
+
+
+def test_g12_pylint_missing_fails(tmp_path):
+    # A fresh venv has no pylint; its interpreter is also used by the runner.
+    import venv
+
+    venv.EnvBuilder(with_pip=False).create(tmp_path / "empty")
+    result = subprocess.run(
+        [str(tmp_path / "empty/bin/python"), str(CHECK_PYLINT_DUPLICATES), "--repo", str(REPO)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "pylint failed to run" in result.stderr
+
+
+# --- guard: version-dependent facts are read in the owner only ---------------------
+
+
+def cap__owner_only_reads(path: Path, root: Path = REPO) -> list[str]:
+    """``.core_geometry`` reads and ``hasattr``/``getattr(duckdb, ...)`` feature probes."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "core_geometry":
+            found.append(f"{path.relative_to(root)}:{node.lineno} core_geometry")
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in ("hasattr", "getattr")
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "duckdb"
+        ):
+            found.append(f"{path.relative_to(root)}:{node.lineno} {node.func.id}(duckdb)")
+    return sorted(found)
+
+
+def test_cap_version_dependent_facts_are_decided_by_the_owner():
+    """Auto spatial resolves in ``resolve_load_spatial``; no module probes ``duckdb`` itself."""
+    found = [
+        site
+        for path in sorted(PACKAGE.rglob("*.py"))
+        if path.resolve() != OWNER.resolve()
+        for site in cap__owner_only_reads(path)
+    ]
+    assert not found, "decide these in core/duckdb_utils.py:\n  " + "\n  ".join(found)
+
+
+def test_cap_owner_only_guard_sees_both_shapes(tmp_path):
+    module = tmp_path / "rogue.py"
+    module.write_text(
+        "import duckdb\n"
+        "from geoparquet_io.core.duckdb_utils import duckdb_capabilities\n"
+        "A = not duckdb_capabilities().core_geometry\n"
+        "B = hasattr(duckdb, 'HTTPException')\n"
+    )
+    assert cap__owner_only_reads(module, root=tmp_path) == [
+        "rogue.py:3 core_geometry",
+        "rogue.py:4 hasattr(duckdb)",
+    ]
+
+
+# --- guard: one parser, one formatter, one SET ----------------------------------
+
+size_SIZING = PACKAGE / "core" / "sizing.py"
+size_SET_OWNERS = {PACKAGE / "core" / "duckdb_utils.py", PACKAGE / "core" / "memory_limits.py"}
+
+
+def size__size_function_defs(tree: ast.AST) -> list[int]:
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.lstrip("_").startswith(
+            ("parse_size", "format_size", "format_memory_limit", "displayed_size", "nudged_size")
+        )
+    ]
+
+
+def size__size_regexes(tree: ast.AST) -> list[int]:
+    """``re.compile`` of a pattern that spells a size unit (``KiB``, ``MB``...)."""
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "compile"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+        and ("iB" in node.args[0].value or "MB" in node.args[0].value.upper().replace("\\", ""))
+    ]
+
+
+def size__set_memory_limit_literals(tree: ast.AST) -> list[int]:
+    """String literals that issue ``SET memory_limit`` (docstrings that mention it do not)."""
+    docstrings = {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+    }
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+        and "set memory_limit" in node.value.lower()
+    ]
+
+
+def size__violations(root: Path = PACKAGE) -> list[str]:
+    found = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        rel = path.relative_to(root)
+        if path.resolve() != size_SIZING.resolve():
+            found += [f"{rel}:{n} size parser/formatter" for n in size__size_function_defs(tree)]
+            found += [f"{rel}:{n} size grammar" for n in size__size_regexes(tree)]
+        if path.resolve() not in {p.resolve() for p in size_SET_OWNERS}:
+            found += [f"{rel}:{n} SET memory_limit" for n in size__set_memory_limit_literals(tree)]
+    return found
+
+
+def test_size_one_parser_one_formatter_one_set():
+    found = size__violations()
+    assert not found, (
+        "size parsing/formatting belongs in core/sizing.py and SET memory_limit in "
+        "duckdb_utils/memory_limits:\n  " + "\n  ".join(found)
+    )
+
+
+def test_size_guard_catches_both_patterns(tmp_path):
+    (tmp_path / "rogue.py").write_text(
+        '"""Docs may say SET memory_limit."""\n'
+        "def _parse_size(t):\n    return 1\n\n"
+        "def f(con, v):\n    con.execute(f\"SET memory_limit = '{v}'\")\n"
+        "import re\nR = re.compile(r'^(\\d+) ([KMG]iB)$')\n"
+        "def _displayed_size_max(t):\n    return t\n"
+    )
+    assert size__violations(tmp_path) == [
+        "rogue.py:2 size parser/formatter",
+        "rogue.py:9 size parser/formatter",
+        "rogue.py:8 size grammar",
+        "rogue.py:6 SET memory_limit",
+    ]
+
+
+# --- guard: one place applies a memory limit and its thread cap -------------------
+
+size_LIMIT_APPLIER = "core/duckdb_utils.py:_apply_memory_limit"
+# Where the setting name is a variable on purpose: the SET primitive and the
+# save/restore/pin trio that move any setting a write overrides.
+size_SETTING_PRIMITIVES = {
+    "core/duckdb_utils.py:_set_setting",
+    "core/duckdb_utils.py:restore_duckdb_settings",
+    "core/duckdb_utils.py:pin_duckdb_settings",
+}
+
+
+def size__limit_setters(path: Path, root: Path) -> set[str]:
+    """``path:function`` for every function that SETs ``memory_limit`` or ``threads``."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    docstrings = {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+    }
+
+    def sets_a_limit(node: ast.AST) -> bool:
+        if isinstance(node, ast.JoinedStr):
+            # f"SET {name} = ..." -- a setting named by a variable can be either limit.
+            parts = node.values
+            return any(
+                isinstance(a, ast.Constant)
+                and isinstance(a.value, str)
+                and re.search(r"(?<![A-Za-z_])SET\s+$", a.value, re.IGNORECASE) is not None
+                and isinstance(b, ast.FormattedValue)
+                for a, b in zip(parts, parts[1:], strict=False)
+            )
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            text = node.value.lower()
+            return id(node) not in docstrings and (
+                "set memory_limit" in text or "set threads" in text
+            )
+        return (
+            isinstance(node, ast.Call)
+            and getattr(node.func, "id", getattr(node.func, "attr", None)) == "_set_setting"
+            and len(node.args) >= 2
+            and (
+                not isinstance(node.args[1], ast.Constant)
+                or node.args[1].value in ("memory_limit", "threads")
+            )
+        )
+
+    rel = path.relative_to(root).as_posix()
+    return {
+        f"{rel}:{func.name}"
+        for func in ast.walk(tree)
+        if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(sets_a_limit(node) for node in ast.walk(func))
+    }
+
+
+def size__all_limit_setters(root: Path = PACKAGE) -> set[str]:
+    return {site for path in sorted(root.rglob("*.py")) for site in size__limit_setters(path, root)}
+
+
+def test_size_memory_limit_and_thread_cap_are_applied_in_one_place():
+    """The connection default, a scoped write and an open connection share one apply step."""
+    assert size__all_limit_setters() == {size_LIMIT_APPLIER, *size_SETTING_PRIMITIVES}
+
+
+def test_size_limit_setter_guard_sees_each_spelling(tmp_path):
+    (tmp_path / "rogue.py").write_text(
+        '"""SET memory_limit in prose is fine."""\n'
+        "def a(con, v):\n    con.execute(f\"SET memory_limit = '{v}'\")\n"
+        "def b(con, n):\n    con.execute(f'SET threads = {n}')\n"
+        "def c(con, n):\n    _set_setting(con, 'threads', n)\n"
+        "def d(con):\n    con.execute('SET preserve_insertion_order = false')\n"
+        'def e(con, key, v):\n    con.execute(f"SET {key} = {v}")\n'
+        "def f(con, key, v):\n    _set_setting(con, key, v)\n"
+        "def g(con, v):\n    _set_setting(con, 'preserve_insertion_order', v)\n"
+    )
+    assert size__all_limit_setters(tmp_path) == {
+        "rogue.py:a",
+        "rogue.py:b",
+        "rogue.py:c",
+        "rogue.py:e",
+        "rogue.py:f",
+    }
+
+
+# --- guards ---------------------------------------------------------------------------
+
+#: A schema probe: ``LIMIT 0``, ``DESCRIBE``, or a ``TYPEOF(col)`` that reads a row for its type.
+query__PROBE_SQL = re.compile(r"\bLIMIT\s+0\b|\bDESCRIBE\b|\b(?i:typeof)\s*\(")
+
+#: The probe owner's own functions: the only code allowed to spell a schema probe.
+#: ``_query_schema_without_variant`` is ``query_schema``'s VARIANT fallback.
+query_PROBE_OWNER = "geoparquet_io/core/duckdb_utils.py"
+query_PROBE_OWNER_FUNCTIONS = frozenset(
+    {"describe_query", "query_schema", "_query_schema_without_variant"}
+)
+
+#: ``LIMIT 0`` / ``DESCRIBE`` literals left outside the owner functions, per file.
+#: Only sites inside functions a later track deletes; each names the track and may
+#: only go down (a routed site lowers its file's number in the same commit).
+
+#: A Parquet logical type read as a string, as either reader renders it: DuckDB's
+#: ``GeometryType(...)``/``GeographyType(...)`` anywhere in a literal, or PyArrow's
+#: ``Geometry(``/``Geography(`` at its start; plus a bare family name used as a
+#: prefix or substring test (``lt.startswith("Geometry")``, ``"Geography" in lt``).
+#: Comparing an owner-decided *label* (``== "Geography"``) is not a probe.
+query__NATIVE_PROBE = re.compile(r"(?<!ST_)Geo(?:graphy|metry)Type|^Geo(?:graphy|metry)\\?\(")
+query__FAMILIES = frozenset({"Geometry", "Geography"})
+
+#: Native-type string probes left outside ``duckdb_metadata.py``. May only go down.
+
+#: Tests of a DuckDB type name (DESCRIBE / TYPEOF output) for GEOMETRY outside
+#: ``duckdb_utils.py`` / ``duckdb_metadata.py``: ``"GEOMETRY" in t``, ``t.startswith("GEOMETRY")``,
+#: ``t.upper() == "GEOMETRY"`` (owner: ``duckdb_utils.parse_duckdb_geo_type``). Comparing an owner's answer
+#: (``parse_duckdb_geo_type(t)[0] == "GEOMETRY"``, ``native_geo_type(lt) == ...``)
+#: is not one. May only go down.
+
+query__GEO_TYPE_OWNERS = frozenset(
+    {"native_geo_type", "parse_duckdb_geo_type", "is_native_geo_column"}
+)
+
+
+def query__docstring_ids(tree: ast.AST) -> set[int]:
+    return {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+    }
+
+
+def query__string_literals(tree: ast.AST, skip: set[int] = frozenset()):
+    docstrings = query__docstring_ids(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) not in docstrings and id(node) not in skip:
+                yield node
+
+
+def query__owner_function_nodes(tree: ast.AST, names: frozenset[str]) -> set[int]:
+    return {
+        id(sub)
+        for func in ast.walk(tree)
+        if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) and func.name in names
+        for sub in ast.walk(func)
+    }
+
+
+def query__modules(root: Path):
+    for path in sorted(root.rglob("*.py")):
+        yield path.relative_to(root.parent).as_posix(), ast.parse(path.read_text(encoding="utf-8"))
+
+
+def query__probe_counts(root: Path = PACKAGE) -> Counter:
+    counts: Counter = Counter()
+    owner = query_PROBE_OWNER.split("/", 1)[1]
+    for rel, tree in query__modules(root):
+        skip = (
+            query__owner_function_nodes(tree, query_PROBE_OWNER_FUNCTIONS)
+            if rel.split("/", 1)[1] == owner
+            else set()
+        )
+        counts[rel] += sum(
+            1 for n in query__string_literals(tree, skip) if query__PROBE_SQL.search(n.value)
+        )
+    return +counts
+
+
+def query__consts(node: ast.AST) -> list[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, ast.Tuple):
+        return [v for e in node.elts for v in query__consts(e)]
+    return []
+
+
+query__MEMBERSHIP = (ast.In, ast.NotIn)  # codespell:ignore
+
+
+def query__prefix_or_substring_tests(tree: ast.AST, wanted) -> int:
+    """``x.startswith(c)`` / ``x.endswith(c)`` / ``c in x`` with a constant ``c`` in ``wanted``."""
+    found = 0
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("startswith", "endswith")
+        ):
+            found += any(wanted(c) for a in node.args for c in query__consts(a))
+        elif isinstance(node, ast.Compare) and any(
+            isinstance(op, query__MEMBERSHIP) for op in node.ops
+        ):
+            found += any(wanted(c) for c in query__consts(node.left))
+    return found
+
+
+def query__native_counts(root: Path = PACKAGE) -> Counter:
+    counts: Counter = Counter()
+    for rel, tree in query__modules(root):
+        if rel.endswith("/duckdb_metadata.py"):
+            continue
+        counts[rel] += sum(
+            1 for n in query__string_literals(tree) if query__NATIVE_PROBE.search(n.value)
+        )
+        counts[rel] += query__prefix_or_substring_tests(tree, query__FAMILIES.__contains__)
+        if any(
+            isinstance(n, ast.FunctionDef) and n.name == "_is_geography_column"
+            for n in ast.walk(tree)
+        ):
+            counts[f"{rel}::_is_geography_column"] += 1
+    return +counts
+
+
+def query__owner_names(tree: ast.AST) -> set[str]:
+    """The geo-type owners' names in this module, ``import ... as`` aliases included."""
+    return query__GEO_TYPE_OWNERS | {
+        alias.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.name in query__GEO_TYPE_OWNERS and alias.asname
+    }
+
+
+def query__owner_answers(tree: ast.AST, owners: set[str]) -> set[str]:
+    """Names bound straight from a geo-type owner call (``parsed = parse_duckdb_geo_type(t)``)."""
+    return {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and query__is_owner_call(node.value, owners, set())
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+
+
+def query__is_owner_call(node: ast.AST, owners: set[str], answers: set[str]) -> bool:
+    if isinstance(node, ast.Subscript):
+        node = node.value
+    if isinstance(node, ast.Name):
+        return node.id in answers
+    if isinstance(node, ast.Call):
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        return name in owners
+    return False
+
+
+def query__duckdb_geo_type_checks(tree: ast.AST) -> int:
+    owners = query__owner_names(tree)
+    answers = query__owner_answers(tree, owners)
+    found = query__prefix_or_substring_tests(tree, "GEOMETRY".__eq__)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare) or not any(
+            isinstance(op, (ast.Eq, ast.NotEq)) for op in node.ops
+        ):
+            continue
+        operands = [node.left, *node.comparators]
+        if any(c == "GEOMETRY" for x in operands for c in query__consts(x)) and not any(
+            query__is_owner_call(x, owners, answers) for x in operands
+        ):
+            found += 1
+    return found
+
+
+#: The DuckDB type-name owner's own functions, the only code that may spell the test.
+query_GEO_TYPE_OWNER_FUNCTIONS = frozenset(
+    {"parse_duckdb_geo_type", "duckdb_type_is_geometry", "duckdb_type_contains_geometry"}
+)
+
+
+def query__without_functions(tree: ast.AST, names: frozenset[str]) -> ast.AST:
+    """*tree* with the named top-level functions dropped."""
+    kept = [
+        n
+        for n in getattr(tree, "body", [])
+        if not (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names)
+    ]
+    return ast.Module(body=kept, type_ignores=[])
+
+
+def query__duckdb_geo_type_counts(root: Path = PACKAGE) -> Counter:
+    owner = query_PROBE_OWNER.split("/", 1)[1]
+    return +Counter(
+        {
+            rel: query__duckdb_geo_type_checks(
+                query__without_functions(tree, query_GEO_TYPE_OWNER_FUNCTIONS)
+                if rel.split("/", 1)[1] == owner
+                else tree
+            )
+            for rel, tree in query__modules(root)
+            if not rel.endswith("/duckdb_metadata.py")
+        }
+    )
+
+
+def test_query_guards_catch_new_copies(tmp_path):
+    pkg = tmp_path / "pkg"
+    (pkg / "core").mkdir(parents=True)
+    (pkg / "rogue.py").write_text(
+        '"""DESCRIBE in a docstring is fine."""\n'
+        "def _is_geography_column(rows, col):\n"
+        '    return "GeographyType" in rows[col]\n\n'
+        "def pa_native(t):\n"
+        '    return str(t).startswith(("Geometry", "Geography"))\n\n'
+        "def pa_regex(t):\n"
+        '    return re.match("Geography\\\\(.*algorithm=(\\\\w+)", t)\n\n'
+        "def cols(con, src):\n"
+        '    return con.execute(f"SELECT * FROM {src} LIMIT 0").description\n\n'
+        "def col_type(con, src, c):\n"
+        '    return con.execute(f"SELECT typeof({c}) FROM {src} LIMIT 1").fetchone()\n\n'
+        "def is_geom(t):\n"
+        '    return t.upper() == "GEOMETRY" or t.startswith("GEOMETRY") or "GEOMETRY" in t\n'
+    )
+    # Near-misses: comparing an owner's answer or a decided label is not a probe.
+    (pkg / "clean.py").write_text(
+        "from x.duckdb_metadata import parse_duckdb_geo_type as parse_type\n\n"
+        "def f(t, lt, info):\n"
+        "    parsed = parse_type(t)\n"
+        '    a = parsed[0] == "GEOMETRY"\n'
+        '    b = native_geo_type(lt) != "GEOMETRY"\n'
+        '    c = info["logical_type"] == "Geography"\n'
+        '    return a, b, c, "geometry" in info\n'
+    )
+    # The owner's probe functions may spell the probe; any other function there may not.
+    (pkg / "core" / "duckdb_utils.py").write_text(
+        "def describe_query(con, sql):\n"
+        '    return con.execute(f"DESCRIBE ({sql})").fetchall()\n\n'
+        "def query_schema(con, sql):\n"
+        '    return con.sql(f"SELECT * FROM ({sql}) LIMIT 0")\n\n'
+        "def _wrap(con, q):\n"
+        '    return con.execute(f"DESCRIBE ({q})").fetchall()\n\n'
+        "def duckdb_type_contains_geometry(t):\n"
+        '    return "GEOMETRY" in t\n\n'
+        "def _wkb(t):\n"
+        '    return t.startswith("GEOMETRY")\n'
+    )
+    assert dict(query__probe_counts(pkg)) == {"pkg/rogue.py": 2, "pkg/core/duckdb_utils.py": 1}
+    assert dict(query__native_counts(pkg)) == {
+        "pkg/rogue.py": 3,
+        "pkg/rogue.py::_is_geography_column": 1,
+    }
+    assert dict(query__duckdb_geo_type_counts(pkg)) == {
+        "pkg/rogue.py": 3,
+        "pkg/core/duckdb_utils.py": 1,
+    }
+
+
+#: Where text reaches the user uncleaned. ``warn``/``error`` are not here: the
+#: logging layer cleans once (``logging_config``), so a caught
+#: exception can be interpolated into a log line without a call-site wrap.
+exception_REPORTERS = {
+    "echo",
+    "print",
+    "ClickException",
+    "BadParameter",
+    "UsageError",
+    "could_not_run",
+}
+#: Parameter names / annotations that mean "this function was handed an exception".
+exception_EXCEPTION_PARAMS = {"e", "exc", "err", "error", "exception"}
+exception_EXCEPTION_ANNOTATIONS = {"Exception", "BaseException"}
+#: Attributes of a gpio error that its constructor already cleaned.
+exception_CLEAN_ATTRS = {"reason", "message"}
+# `type(e)` names a class, not text the exception carries.
+exception_SANITIZERS = {
+    "sanitize_url_for_logging",
+    "clean_error_text",
+    "error_text",
+    "type",
+}
+
+#: ``relative path:function`` -> reason the exception text is safe to print.
+
+
+def exception__names(node: ast.AST) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+
+def exception__call_name(call: ast.Call) -> str | None:
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return None
+
+
+def exception__wrapped(arg: ast.AST, trusted: frozenset[str] = frozenset()) -> ast.AST:
+    """The argument with every cleaned subtree removed.
+
+    Cleaned: a ``sanitize_*`` / ``clean_error_text`` call, and the ``.reason`` /
+    ``.message`` of a name bound by ``except <gpio error> as x``, which
+    ``GeoParquetError`` cleans at construction. The same attribute on any other
+    exception (``URLError.reason``) is raw text.
+    """
+
+    class _Strip(ast.NodeTransformer):
+        def visit_Call(self, node):  # noqa: N802
+            if exception__call_name(node) in exception_SANITIZERS:
+                return ast.Constant(value="")
+            return self.generic_visit(node)
+
+        def visit_Attribute(self, node):  # noqa: N802
+            if (
+                node.attr in exception_CLEAN_ATTRS
+                and isinstance(node.value, ast.Name)
+                and node.value.id in trusted
+            ):
+                return ast.Constant(value="")
+            return self.generic_visit(node)
+
+    import copy
+
+    return _Strip().visit(copy.deepcopy(arg))
+
+
+def exception__reports(
+    node: ast.AST,
+    names: set[str],
+    scope: str,
+    found: list[tuple[str, int]],
+    trusted: frozenset[str] = frozenset(),
+) -> None:
+    for call in (n for n in ast.walk(node) if isinstance(n, ast.Call)):
+        if exception__call_name(call) not in exception_REPORTERS:
+            continue
+        args = [*call.args, *(k.value for k in call.keywords)]
+        if any(names & exception__names(exception__wrapped(a, trusted)) for a in args):
+            found.append((scope, call.lineno))
+
+
+def exception__exception_params(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    names = set()
+    for arg in [*func.args.args, *func.args.kwonlyargs, *func.args.posonlyargs]:
+        annotation = ast.unparse(arg.annotation) if arg.annotation else ""
+        if arg.arg in exception_EXCEPTION_PARAMS or any(
+            t in annotation for t in exception_EXCEPTION_ANNOTATIONS
+        ):
+            names.add(arg.arg)
+    return names
+
+
+def exception__gpio_error_names() -> frozenset[str]:
+    """Names of ``GeoParquetError`` and every subclass defined in the package."""
+    bases: dict[str, set[str]] = {}
+    for path in PACKAGE.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.ClassDef):
+                bases.setdefault(node.name, set()).update(
+                    b.id if isinstance(b, ast.Name) else b.attr
+                    for b in node.bases
+                    if isinstance(b, (ast.Name, ast.Attribute))
+                )
+    known = {"GeoParquetError"}
+    grew = True
+    while grew:
+        grew = False
+        for name, parents in bases.items():
+            if name not in known and parents & known:
+                known.add(name)
+                grew = True
+    return frozenset(known)
+
+
+exception__GPIO_ERRORS = exception__gpio_error_names()
+
+
+def exception__is_gpio_error(handler_type: ast.expr | None) -> bool:
+    """Whether an ``except`` clause names only gpio error classes."""
+    if handler_type is None:
+        return False
+    nodes = handler_type.elts if isinstance(handler_type, ast.Tuple) else [handler_type]
+    names = [n.id if isinstance(n, ast.Name) else getattr(n, "attr", "") for n in nodes]
+    return bool(names) and all(name in exception__GPIO_ERRORS for name in names)
+
+
+def exception_unsanitized_reports(source: str) -> list[tuple[str, int]]:
+    """``(enclosing function, line)`` for each raw-exception report in ``source``.
+
+    Two shapes: an ``except ... as e`` body that reports ``e``, and a function
+    handed an exception (by parameter name or annotation) that reports it
+    outside any ``except`` body -- the helper that builds a ``ClickException``
+    from ``exc.reason`` is invisible to the first shape.
+    """
+    tree = ast.parse(source)
+    found: list[tuple[str, int]] = []
+
+    def visit(node: ast.AST, scope: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            inner = scope
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                inner = child.name
+                names = exception__exception_params(child)
+                if names:
+                    exception__reports(child, names, inner, found)
+            if isinstance(child, ast.ExceptHandler) and child.name:
+                trusted = (
+                    frozenset({child.name}) if exception__is_gpio_error(child.type) else frozenset()
+                )
+                for stmt in child.body:
+                    exception__reports(stmt, {child.name}, scope, found, trusted)
+            visit(child, inner)
+
+    visit(tree, "<module>")
+    return sorted(set(found))
+
+
+def test_exception_the_detector_flags_a_raw_report_and_passes_a_sanitized_one():
+    raw = (
+        "def f():\n    try:\n        g()\n    except OSError as e:\n        click.echo(f'x {e}')\n"
+    )
+    safe = (
+        "def f():\n    try:\n        g()\n    except OSError as e:\n"
+        "        click.echo(f'x {clean_error_text(str(e))}')\n"
+    )
+    assert exception_unsanitized_reports(raw) == [("f", 5)]
+    assert exception_unsanitized_reports(safe) == []
+
+
+def test_exception_the_detector_flags_a_click_error_built_from_an_exception_argument():
+    """No ``except`` body here: the helper is handed the exception."""
+    by_name = "def to_click(exc):\n    return click.ClickException(exc.args[0])\n"
+    by_annotation = "def to_click(problem: Exception):\n    raise click.UsageError(str(problem))\n"
+    clean = "def to_click(exc):\n    return click.ClickException(clean_error_text(str(exc)))\n"
+    assert exception_unsanitized_reports(by_name) == [("to_click", 2)]
+    assert exception_unsanitized_reports(by_annotation) == [("to_click", 2)]
+    assert exception_unsanitized_reports(clean) == []
+
+
+def test_exception_the_detector_trusts_cleaned_attributes_only_on_a_gpio_error():
+    gpio = (
+        "def f():\n    try:\n        g()\n    except InvalidParameterError as exc:\n"
+        "        raise click.BadParameter(exc.reason)\n"
+    )
+    url_error = (
+        "def f():\n    try:\n        g()\n    except URLError as exc:\n"
+        "        raise click.BadParameter(exc.reason)\n"
+    )
+    by_param = "def f(exc):\n    return click.BadParameter(exc.reason)\n"
+    assert exception_unsanitized_reports(gpio) == []
+    assert exception_unsanitized_reports(url_error) == [("f", 5)]
+    assert exception_unsanitized_reports(by_param) == [("f", 2)]
+
+
+def test_exception_the_detector_flags_could_not_run_fed_a_raw_exception():
+    raw = "def f():\n    try:\n        g()\n    except Exception as e:\n        return could_not_run('x', str(e))\n"
+    assert exception_unsanitized_reports(raw) == [("f", 5)]
+
+
+def _find_schema_probe(m):
+    skip = (
+        query__owner_function_nodes(m.tree, query_PROBE_OWNER_FUNCTIONS)
+        if m.path == query_PROBE_OWNER
+        else set()
+    )
+    for n in query__string_literals(m.tree, skip):
+        if query__PROBE_SQL.search(n.value):
+            yield m.hit(n)
+
+
+def _find_native_probe(m):
+    for n in query__string_literals(m.tree):
+        if query__NATIVE_PROBE.search(n.value):
+            yield m.hit(n)
+    for n in ast.walk(m.tree):
+        if isinstance(n, ast.FunctionDef) and n.name == "_is_geography_column":
+            yield m.hit(n)
+        if isinstance(n, (ast.Call, ast.Compare)):
+            count = query__prefix_or_substring_tests(
+                ast.Module(body=[ast.Expr(value=n)], type_ignores=[]), query__FAMILIES.__contains__
+            )
+            # Scan only a node's own comparison/call, avoiding descendants counted twice.
+            if count and not any(
+                isinstance(c, (ast.Call, ast.Compare)) for c in ast.iter_child_nodes(n)
+            ):
+                for _ in range(count):
+                    yield m.hit(n)
+
+
+def _find_geo_type_probe(m):
+    tree = (
+        query__without_functions(m.tree, query_GEO_TYPE_OWNER_FUNCTIONS)
+        if m.path == query_PROBE_OWNER
+        else m.tree
+    )
+    for _ in range(query__duckdb_geo_type_checks(tree)):
+        yield m.hit(tree.body[0])
+
+
+def _find_raw_exception(m):
+    for scope, line in exception_unsanitized_reports("\n".join(m.lines)):
+        yield Hit(m.path, line, scope, m.lines[line - 1])
+
+
+def _find_spatial_filter(m):
+    docstrings = _docstring_nodes(m.tree)
+    for n in ast.walk(m.tree):
+        if (
+            isinstance(n, ast.Constant)
+            and isinstance(n.value, str)
+            and id(n) not in docstrings
+            and "ST_Intersects(" in n.value
+        ):
+            yield m.hit(n)
+
+
+ARMS.update(
+    {
+        "schema_probe": Arm(_find_schema_probe, ()),
+        "native_probe": Arm(_find_native_probe, ("geoparquet_io/core/duckdb_metadata.py",)),
+        "geo_type_probe": Arm(_find_geo_type_probe, ("geoparquet_io/core/duckdb_metadata.py",)),
+        "exception_report": Arm(
+            _find_raw_exception,
+            ("geoparquet_io/core/exceptions.py", "geoparquet_io/cli/exception_handler.py"),
+        ),
+        "spatial_filter": Arm(_find_spatial_filter, ("geoparquet_io/core/duckdb_utils.py",)),
+    }
+)
+EXPECTED_COUNTS.update(
+    {
+        "G1.schema_probe": 2,
+        "G1.native_probe": 0,
+        "G1.geo_type_probe": 0,
+        "G1.exception_report": 0,
+        "G1.spatial_filter": 4,
+    }
+)
+
+
+@pytest.mark.parametrize(
+    ("arm", "source"),
+    [
+        (
+            "retry_loop",
+            "import time\ndef f(client):\n    for attempt in range(3):\n        client.get('u')\n        time.sleep(1)\n",
+        ),
+        ("retry_constants", "DEFAULT_RETRY_DELAY = 2.0\n"),
+        ("retry_param_defaults", "def f(max_retries=3): pass\n"),
+        ("retry_status_sets", "RETRY = {408, 429, 503}\n"),
+        ("retry_after", "x = response.headers.get('Retry-After')\n"),
+        ("retry_wrappers", "def f(timeout):\n    return get_shared_http_client(timeout=timeout)\n"),
+        ("exception_report", "def f(exc):\n    print(str(exc))\n"),
+        ("spatial_filter", "SQL = 'ON ST_Intersects(a.geom, b.geom)'\n"),
+        ("schema_probe", "SQL = 'SELECT * FROM t LIMIT 0'\n"),
+        ("native_probe", "x = str(t).startswith('Geometry')\n"),
+        ("geo_type_probe", "x = t.upper() == 'GEOMETRY'\n"),
+    ],
+)
+def test_migrated_arms_catch_plants(tmp_path, arm, source):
+    assert arm_hits(_plant(tmp_path, arm, source), arm)
+
+
+@pytest.mark.parametrize(
+    "arm", ["schema_probe", "native_probe", "geo_type_probe", "exception_report", "spatial_filter"]
+)
+def test_migrated_arm_repository(arm):
+    hits, stale = reconcile(arm_hits(REPO, arm), load_exemptions().get("G1", {}).get(arm, []))
+    assert not hits, _format(hits)
+    assert not stale, stale
