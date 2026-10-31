@@ -42,8 +42,8 @@ DIRECTIVE_KEYWORDS = {
     # keyword: takes a value?
     "skip": "optional",  # skip="reason"; the reason is shown in the skip report
     "network": "no",  # needs the internet -> pytest.mark.network
-    "slow": "no",  # force into the slow lane
-    "fast": "no",  # force into the fast lane, whatever page it lives on
+    "slow": "no",  # legacy lane hint; all examples are slow (#1402)
+    "fast": "no",  # legacy lane hint; cannot override slow policy (#1402)
     "needs-tippecanoe": "no",  # skipif tippecanoe is not installed
     "needs-ogr": "no",  # skipif ogr2ogr is not installed
     "setup": "required",  # setup="shell command"; may be repeated
