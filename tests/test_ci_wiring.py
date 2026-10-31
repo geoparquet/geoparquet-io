@@ -194,14 +194,14 @@ class TestAllChecksJob:
 
 
 class TestTriggers:
-    def test_push_runs_on_defrag_integration_branches(self):
-        # #1367's tracks merge into a defrag/* integration branch, not main;
-        # without this pattern those merges get no CI run at all.
+    def test_a_pr_branch_runs_the_workflow_once(self):
+        # A branch with an open PR gets its run from `pull_request`; listing it
+        # under `push` too starts a second, identical run on every push.
         workflow = _load_workflow("tests.yml")
         # PyYAML reads the bare key `on` as the boolean True.
         triggers = workflow.get("on", workflow.get(True))
         branches = triggers["push"]["branches"]
-        assert "defrag/**" in branches, f"tests.yml push branches lack defrag/**: {branches}"
+        assert branches == ["main", "refactor"], f"tests.yml push branches: {branches}"
         assert triggers["pull_request"]["branches"] == ["main"]
 
 
