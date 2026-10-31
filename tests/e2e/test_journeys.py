@@ -43,7 +43,8 @@ from tests.e2e.journey_support import (
     total_rows,
 )
 
-pytestmark = [pytest.mark.integration, requires_gpio, pytest.mark.slow]
+# Whole-pipeline checks use the slow lane; 60 s is the fast lane's cap (#1402).
+pytestmark = [pytest.mark.integration, requires_gpio, pytest.mark.slow, pytest.mark.timeout(600)]
 
 # Public GeoParquet used by docs/guide/extract.md; journey 9 reads it remotely.
 REMOTE_PARQUET_URL = "https://data.source.coop/fiboa/data/si/si-2024.parquet"

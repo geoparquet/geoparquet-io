@@ -29,6 +29,11 @@ def assert_budget(count, maximum):
 
 
 def timeout_marks(root):
+    """Count literal pytest.mark.timeout calls in Python files under root.
+
+    The budget scans tests/ only, including the docs-example collector; each
+    source call counts once, regardless of how many test items receive it.
+    """
     return sum(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)

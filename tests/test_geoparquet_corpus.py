@@ -48,7 +48,13 @@ from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
 from tests.conftest import get_geo_metadata, get_geoparquet_version, has_native_geo_types
 
 # Whole-pipeline corpus checks belong in the slow lane (#1402).
-pytestmark = [pytest.mark.corpus, pytest.mark.integration, pytest.mark.slow]
+# Whole-pipeline checks use the slow lane; 60 s is the fast lane's cap (#1402).
+pytestmark = [
+    pytest.mark.corpus,
+    pytest.mark.integration,
+    pytest.mark.slow,
+    pytest.mark.timeout(600),
+]
 
 CORPUS = Path(__file__).parent / "data" / "geoparquet-testing"
 

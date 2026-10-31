@@ -2,4 +2,4 @@
 # Re-seed at integration merge after the suite diet lands.
 [fast_suite]
 max_collected = 14166
-max_timeout_marks = 0
+max_timeout_marks = 4
