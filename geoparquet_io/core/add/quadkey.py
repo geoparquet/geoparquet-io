@@ -27,6 +27,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
     uses_aws_profile,
 )
+from geoparquet_io.core.edges import is_nonplanar, representative_point_sql
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo, sanitized_carried_geo_of_file
@@ -34,7 +35,7 @@ from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
-from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
+from geoparquet_io.core.geometry_repair import nonplanar_edges_of_arrow_table
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
@@ -48,13 +49,16 @@ from geoparquet_io.core.remote import (
     needs_httpfs,
     validate_profile_for_urls,
 )
-from geoparquet_io.core.stream_io import open_input, write_output
+from geoparquet_io.core.stream_io import input_nonplanar_edges, open_input, write_output
 from geoparquet_io.core.streaming import (
     find_geometry_column_from_table,
     is_stdin,
     should_stream_output,
 )
-from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+from geoparquet_io.core.write_funnels import (
+    collect_nonplanar_edges,
+    write_parquet_with_metadata,
+)
 
 
 def _is_geographic_crs(crs_info: dict | str | None) -> bool | None:
@@ -187,10 +191,35 @@ def _streaming_source_crs(
     return crs_string_from_geo_meta(geo_meta, geom_col)
 
 
+#: Past Web Mercator's edge, short of the pole mercantile cannot take.
+_POLE_SAFE_LAT = 89.9
+
+
 def _lat_lon_to_quadkey(lat: float, lon: float, level: int) -> str:
-    """Convert latitude and longitude to a quadkey string using mercantile."""
+    """Convert latitude and longitude to a quadkey string using mercantile.
+
+    Web Mercator stops at about 85.05 degrees, and every latitude past it keys to
+    the edge row. mercantile raises at a pole itself, where a spherical polar cap's
+    point lies (#1293), so the latitude is held to 89.9, which keys to that row.
+    """
+    lat = max(-_POLE_SAFE_LAT, min(_POLE_SAFE_LAT, lat))
     tile = mercantile.tile(lon, lat, level)
     return mercantile.quadkey(tile)
+
+
+def register_quadkey_udf(con) -> None:
+    """Register :func:`_lat_lon_to_quadkey` as ``lat_lon_to_quadkey(lat, lon, level)``.
+
+    The one quadkey keyer and its one latitude bound, for every path that keys
+    a quadkey in SQL: add, sort and partition, the partition resolution probe,
+    and the overview tile probe.
+    """
+    con.create_function(
+        "lat_lon_to_quadkey",
+        _lat_lon_to_quadkey,
+        ["DOUBLE", "DOUBLE", "INTEGER"],
+        "VARCHAR",
+    )
 
 
 def add_quadkey_table(
@@ -242,9 +271,12 @@ def add_quadkey_table(
 
     # Check if bbox column exists. A stored bbox is in the input CRS, so it can't
     # be used when we need to reproject — fall back to the (reprojected) centroid.
+    # Nor for non-planar edges: a planar box's midpoint is not on the sphere's
+    # shape (#1293).
+    edges = nonplanar_edges_of_arrow_table(table, geom_col)
     use_bbox = False
     bbox_col = None
-    if not use_centroid and not needs_transform:
+    if not use_centroid and not needs_transform and not is_nonplanar(edges):
         for name in ["bbox", "bounds", "bounding_box"]:
             if name in table.column_names:
                 use_bbox = True
@@ -257,14 +289,8 @@ def add_quadkey_table(
         con.execute("SET geometry_always_xy = true;")
 
         # Register Python UDF
-        con.create_function(
-            "lat_lon_to_quadkey",
-            _lat_lon_to_quadkey,
-            ["DOUBLE", "DOUBLE", "INTEGER"],
-            "VARCHAR",
-        )
+        register_quadkey_udf(con)
 
-        warn_planar_math("add_quadkey", table, geom_col)
         registered = register_arrow(con, "__input_table", table)
 
         # Check if geometry column is BLOB (needs conversion)
@@ -295,8 +321,9 @@ def add_quadkey_table(
             )
         else:
             geom_ref = transform_geom_sql(quote_identifier(geom_col), source_crs)
-            lat_expr = f"ST_Y(ST_Centroid({geom_ref}))"
-            lon_expr = f"ST_X(ST_Centroid({geom_ref}))"
+            point = representative_point_sql(geom_ref, edges)
+            lat_expr = f"ST_Y({point})"
+            lon_expr = f"ST_X({point})"
 
         # Get non-geometry columns
         other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
@@ -375,8 +402,6 @@ def add_quadkey_column(
         hive_input: Read a multi-file input with hive partitioning on, so the
             ``key=value`` directory names come through as columns
     """
-    warn_planar_math_for_file("add_quadkey", input_parquet)
-
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
@@ -449,12 +474,7 @@ def _add_quadkey_streaming(
         con.execute("SET geometry_always_xy = true;")
 
         # Register Python UDF for quadkey generation
-        con.create_function(
-            "lat_lon_to_quadkey",
-            _lat_lon_to_quadkey,
-            ["DOUBLE", "DOUBLE", "INTEGER"],
-            "VARCHAR",
-        )
+        register_quadkey_udf(con)
 
         # Get column names from query result (works with both table names and read_parquet)
         col_names = query_schema(con, f"SELECT * FROM {source}").names
@@ -481,8 +501,10 @@ def _add_quadkey_streaming(
 
         # Check for bbox column. A stored bbox is in the input CRS, so it can't be
         # used when we need to reproject — fall back to the (reprojected) centroid.
+        # Nor for non-planar edges, which key from a point on the sphere (#1293).
+        edges = input_nonplanar_edges(input_path, metadata, is_stream).get(geom_col)
         bbox_col = None
-        if not use_centroid and not needs_transform:
+        if not use_centroid and not needs_transform and not is_nonplanar(edges):
             for name in ["bbox", "bounds", "bounding_box"]:
                 if name in col_names:
                     bbox_col = name
@@ -498,8 +520,9 @@ def _add_quadkey_streaming(
             )
         else:
             geom_ref = transform_geom_sql(quote_identifier(geom_col), source_crs)
-            lat_expr = f"ST_Y(ST_Centroid({geom_ref}))"
-            lon_expr = f"ST_X(ST_Centroid({geom_ref}))"
+            point = representative_point_sql(geom_ref, edges)
+            lat_expr = f"ST_Y({point})"
+            lon_expr = f"ST_X({point})"
 
         query = f"""
             SELECT *,
@@ -612,10 +635,12 @@ def _add_quadkey_file_based(
 
     # Determine whether to use bbox or centroid. A stored bbox column is in the
     # input CRS, so it can't be used when we need to reproject — fall back to the
-    # (reprojected) centroid in that case.
+    # (reprojected) centroid in that case. Nor for non-planar edges, which key
+    # from a point on the sphere (#1293).
+    edges = collect_nonplanar_edges(input_parquet).get(geom_col)
     use_bbox = False
     bbox_col = None
-    if not use_centroid and not needs_transform:
+    if not use_centroid and not needs_transform and not is_nonplanar(edges):
         bbox_advice = get_bbox_advice(input_parquet, "bounds_calculation", verbose)
         if bbox_advice["has_bbox_column"]:
             use_bbox = True
@@ -654,12 +679,7 @@ def _add_quadkey_file_based(
 
     try:
         # Register Python UDF for quadkey generation
-        con.create_function(
-            "lat_lon_to_quadkey",
-            _lat_lon_to_quadkey,
-            ["DOUBLE", "DOUBLE", "INTEGER"],
-            "VARCHAR",
-        )
+        register_quadkey_udf(con)
 
         # Build the SQL expression based on calculation method
         if use_bbox:
@@ -668,8 +688,9 @@ def _add_quadkey_file_based(
             lon_expr = f"(({quoted_bbox}.xmin + {quoted_bbox}.xmax) / 2.0)"
         else:
             geom_ref = transform_geom_sql(quote_identifier(geom_col), source_crs)
-            lat_expr = f"ST_Y(ST_Centroid({geom_ref}))"
-            lon_expr = f"ST_X(ST_Centroid({geom_ref}))"
+            point = representative_point_sql(geom_ref, edges)
+            lat_expr = f"ST_Y({point})"
+            lon_expr = f"ST_X({point})"
 
         # Build SELECT query with new column
         query = f"""

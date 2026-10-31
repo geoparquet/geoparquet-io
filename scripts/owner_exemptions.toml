@@ -339,6 +339,38 @@ reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 "pin_duckdb_settings" = ["geoparquet_io/core/duckdb_utils.py"]
 "format_memory_limit" = ["geoparquet_io/core/sizing.py"]
 "nudged_size" = ["geoparquet_io/core/sizing.py"]
+# T3d (#1367 concept 6): the edges field's vocabulary, version gate, the one
+# precedence between a request, a carried block and a native type, and the key's
+# readers. The gatherers that read a file or a table stay with their callers
+# (write_funnels.collect_nonplanar_edges / table_nonplanar_edges).
+"*edges_for_version*" = ["geoparquet_io/core/edges.py"]
+"detect_edges" = ["geoparquet_io/core/edges.py"]
+"requested_edges" = ["geoparquet_io/core/edges.py"]
+"agree_across_files" = ["geoparquet_io/core/edges.py"]
+"edges_of" = ["geoparquet_io/core/edges.py"]
+"block_edges" = ["geoparquet_io/core/edges.py"]
+"strip_edges" = ["geoparquet_io/core/edges.py"]
+"logical_type_edges" = ["geoparquet_io/core/edges.py"]
+"*_type_edges" = ["geoparquet_io/core/edges.py"]
+"*spherical_edge_type*" = ["geoparquet_io/core/edges.py"]
+"representative_point*" = ["geoparquet_io/core/edges.py"]
+"set_edges" = ["geoparquet_io/core/edges.py"]
+"state_edges" = ["geoparquet_io/core/edges.py"]
+"without_edges" = ["geoparquet_io/core/edges.py"]
+"declares_edges" = ["geoparquet_io/core/edges.py"]
+"declared_edges" = ["geoparquet_io/core/edges.py"]
+"is_nonplanar" = ["geoparquet_io/core/edges.py"]
+"is_geodesic" = ["geoparquet_io/core/edges.py"]
+"is_ellipsoidal" = ["geoparquet_io/core/edges.py"]
+"normalized_edges" = ["geoparquet_io/core/edges.py"]
+"edges_allowed" = ["geoparquet_io/core/edges.py"]
+"*_field_edges" = ["geoparquet_io/core/edges.py"]
+"geoarrow_edge_type" = ["geoparquet_io/core/edges.py"]
+"logical_type_algorithm" = ["geoparquet_io/core/edges.py"]
+"carry_edges" = ["geoparquet_io/core/edges.py"]
+"requests_planar" = ["geoparquet_io/core/edges.py"]
+"implied_orientation" = ["geoparquet_io/core/edges.py"]
+"is_geoparquet_1x" = ["geoparquet_io/core/geo_metadata.py"]
 # The row-group policy (T2c): one resolver family, one MB -> rows measurement,
 # one vector snap. write_strategies/row_group_sizing.py carried a second
 # `_resolve_row_group_rows*` pair with its parameters swapped (#1030).

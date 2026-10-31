@@ -629,6 +629,10 @@ layers = [
     "geoparquet_io.core.geo_metadata : geoparquet_io.core.crs_utils : geoparquet_io.core.duckdb_metadata : geoparquet_io.core.geometry_detection",
     # Leaves.
     "geoparquet_io.core.duckdb_utils : geoparquet_io.core.arrow_types : geoparquet_io.core.compression : geoparquet_io.core.sizing",
+    # The edges vocabulary and its rules (#1367 concept 6), below the leaves:
+    # duckdb_utils relabels GeoArrow edge types with it and geo_metadata gates
+    # a block's edges by version with it, so it imports nothing above.
+    "geoparquet_io.core.edges",
 ]
 # Each ignored edge is a deferred import of a stage-C resident that has not
 # moved out of common.py yet (#1010's "Stages C and D" table). Deleting the

@@ -30,6 +30,7 @@ from geoparquet_io.core.duckdb_utils import (
     describe_query,
     duckdb_type_is_geometry,
 )
+from geoparquet_io.core.edges import edges_of
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     NATIVE_GEOMETRY_VERSIONS,
@@ -939,7 +940,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                     field.name,
                     native_wkb_type(
                         native_crs.get(field.name),
-                        edges=(declared.get(field.name) or {}).get("edges"),
+                        edges=edges_of(declared.get(field.name)),
                     ),
                 )
                 if field.name in geo_columns

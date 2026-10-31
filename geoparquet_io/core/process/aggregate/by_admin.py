@@ -20,6 +20,7 @@ from geoparquet_io.core.duckdb_utils import (
     validate_where_clause,
     where_sql_fragment,
 )
+from geoparquet_io.core.edges import PLANAR, representative_point_sql
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
@@ -155,7 +156,9 @@ def _wrap_admin_geometry(agg_sql: str, out_geometry: str) -> str:
         return f"SELECT a.* EXCLUDE (__admin_geom) FROM ({agg_sql}) a"
 
     geom_wkb = "a.__admin_geom"  # WKB binary stored in __admin_geom
-    centroid = f"ST_AsWKB(ST_Centroid(ST_GeomFromWKB({geom_wkb})))"
+    # The admin polygons are planar, so their centroid is the planar point.
+    point = representative_point_sql(f"ST_GeomFromWKB({geom_wkb})", PLANAR)
+    centroid = f"ST_AsWKB({point})"
     if out_geometry == "polygon":
         geom_cols = f"{geom_wkb} AS geometry"
     elif out_geometry == "centroid":

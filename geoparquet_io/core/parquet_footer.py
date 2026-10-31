@@ -55,8 +55,8 @@ from typing import BinaryIO, TypeAlias
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.edges import GEOGRAPHY_EDGE_ALGORITHMS, set_edges
 from geoparquet_io.core.exceptions import GeoParquetError
-from geoparquet_io.core.geo_metadata import GEOGRAPHY_EDGE_ALGORITHMS
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.write_strategies import atomic_write
 
@@ -474,7 +474,7 @@ def _with_geography_fields(schema: pa.Schema, geography: Mapping[str, str]) -> p
             raise FooterPatchUnsupported(
                 f"the ARROW:schema extension metadata of {name!r} is not JSON: {exc}"
             ) from exc
-        extension["edges"] = edges
+        set_edges(extension, edges)
         metadata[b"ARROW:extension:metadata"] = json.dumps(extension).encode("utf-8")
         schema = schema.set(index, pa.field(name, storage, field.nullable, metadata))
     return schema

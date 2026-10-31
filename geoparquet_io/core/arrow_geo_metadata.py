@@ -26,10 +26,16 @@ from geoparquet_io.core.crs_utils import (
     is_default_crs,
     is_empty_crs_value,
 )
-from geoparquet_io.core.duckdb_utils import geoarrow_field_edges, planar_view
+from geoparquet_io.core.duckdb_utils import geoarrow_extension, planar_view
+from geoparquet_io.core.edges import (
+    declares_edges,
+    geoarrow_edge_type,
+    geoarrow_type_edges,
+    is_nonplanar,
+    set_edges,
+)
 from geoparquet_io.core.geo_metadata import (
     DEFAULT_GEOPARQUET_VERSION,
-    GEOGRAPHY_EDGE_ALGORITHMS,
     GEOPARQUET_VERSIONS,
     _bbox_claimed_by_another_column,
     _self_evident_bbox_column,
@@ -222,16 +228,6 @@ def _secondary_crs_from_field(field) -> dict:
     return {}
 
 
-def _is_spherical_edge_type(arrow_type) -> bool:
-    """Whether a GeoArrow extension type declares spherical edges."""
-    edge_type = getattr(arrow_type, "edge_type", None)
-    return getattr(edge_type, "name", "").upper() == "SPHERICAL"
-
-
-# One reader of a field's edges, shared with the DuckDB registration step (#1253).
-_field_edges = geoarrow_field_edges
-
-
 def nonplanar_edges_from_schema(schema) -> dict[str, str]:
     """Map each GeoArrow field with non-planar edges to its edges value.
 
@@ -241,15 +237,15 @@ def nonplanar_edges_from_schema(schema) -> dict[str, str]:
     need this to carry the edges over (#1269, #1253).
 
     The type carrier only. Only a GeoParquet edge algorithm
-    (``GEOGRAPHY_EDGE_ALGORITHMS``) counts (#1288). What a table declares once
+    (``edges.is_nonplanar``) counts (#1288). What a table declares once
     its ``geo`` block is weighed too is ``write_funnels.table_nonplanar_edges``.
     """
     edges_by_col: dict[str, str] = {}
     for field in schema:
         if not is_geoarrow_extension_field(field):
             continue
-        edges = _field_edges(field)
-        if edges in GEOGRAPHY_EDGE_ALGORITHMS:
+        edges = geoarrow_type_edges(field.type, geoarrow_extension(field)[1])
+        if is_nonplanar(edges):
             edges_by_col[field.name] = edges
     return edges_by_col
 
@@ -334,8 +330,9 @@ def table_geometry_info(
             col_meta.update(_secondary_crs_from_field(field))
         # The schema carries the edge interpretation as well as the CRS: left
         # behind, a spherical secondary came out planar with no warning.
-        if "edges" not in col_meta and _is_spherical_edge_type(field.type):
-            col_meta["edges"] = "spherical"
+        type_edges = geoarrow_type_edges(field.type, geoarrow_extension(field)[1])
+        if not declares_edges(col_meta) and is_nonplanar(type_edges):
+            set_edges(col_meta, type_edges)
         metadata[field.name] = col_meta
 
     if not metadata:
@@ -423,8 +420,9 @@ def _process_geometry_column_for_version(
                 new_type = ga.wkb()
             # The CRS is normalized, never the edges: a spherical column rebuilt
             # as a bare `ga.wkb()` came out a planar GEOMETRY (#1175).
-            if _is_spherical_edge_type(wkb_arr.type):
-                new_type = new_type.with_edge_type(ga.EdgeType.SPHERICAL)
+            type_edges = geoarrow_type_edges(wkb_arr.type)
+            if is_nonplanar(type_edges):
+                new_type = new_type.with_edge_type(geoarrow_edge_type(type_edges))
             # Always rebuild: geoarrow's WkbType.__eq__ ignores the CRS, so a
             # "types are equal" shortcut would skip precisely the case this is
             # here to normalize.
@@ -613,7 +611,7 @@ def _apply_geoparquet_metadata(
         input_crs: PROJJSON dict with CRS
         custom_metadata: Custom metadata (e.g., H3 covering info)
         verbose: Whether to print verbose output
-        edges: Edge interpretation, "spherical" or "planar" (default None = planar).
+        edges: Edge interpretation, one of ``edges.EDGES`` (default None = planar).
                Use "spherical" for data from BigQuery or other S2-based sources.
         geometry_info: Dict containing multi-geometry column info with keys:
             - "primary": primary geometry column name
@@ -913,8 +911,7 @@ def describe_wkb_geometry(
     column: dict = {"encoding": "WKB", "geometry_types": []}
     if crs is not None:
         column["crs"] = crs
-    if edges and edges != "planar":
-        column["edges"] = edges
+    set_edges(column, edges)
     geo = {
         "version": GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]["metadata_version"],
         "primary_column": geometry_column,

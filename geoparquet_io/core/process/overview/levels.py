@@ -172,14 +172,14 @@ def probe_worst_tile_counts(con, cells_sql: str, max_zoom: int = MAX_PROBE_ZOOM)
 
     ``cells_sql`` must select one row per cell with ``lon``/``lat`` columns.
     The connection must have the ``lat_lon_to_quadkey`` UDF registered (see
-    :func:`geoparquet_io.core.partition.auto_resolution._register_quadkey_udf`).
-    A quadkey prefix of length ``z`` identifies the WebMercator tile at zoom
-    ``z``, so one quadkey per cell at ``max_zoom`` covers every zoom via
-    ``substr``. Latitudes are clamped to the WebMercator domain.
+    :func:`geoparquet_io.core.add.quadkey.register_quadkey_udf`, which holds a
+    latitude past the WebMercator domain to its edge row). A quadkey prefix of
+    length ``z`` identifies the WebMercator tile at zoom ``z``, so one quadkey
+    per cell at ``max_zoom`` covers every zoom via ``substr``.
     """
     con.execute(
         "CREATE OR REPLACE TEMP TABLE __overview_qk AS "
-        f"SELECT lat_lon_to_quadkey(LEAST(GREATEST(lat, -85.05), 85.05), lon, {max_zoom}) AS qk "
+        f"SELECT lat_lon_to_quadkey(lat, lon, {max_zoom}) AS qk "
         f"FROM ({cells_sql}) WHERE lon IS NOT NULL AND lat IS NOT NULL"
     )
     counts: dict[int, int] = {}

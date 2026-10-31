@@ -703,6 +703,11 @@ Validates file structure and metadata against the GeoParquet specification:
   scans read GeoArrow coordinates directly. GeoParquet 1.0 and 2.0 are
   WKB-only per their spec text, so a file claiming a GeoArrow encoding under
   either version fails.
+- **Edges values** — `edges_valid_<column>` accepts `planar` and `spherical`
+  in a 1.x block and adds the four ellipsoidal algorithms (`vincenty`,
+  `thomas`, `andoyer`, `karney`) at 2.0. A block whose `version` is missing or
+  is not a version string is not 1.x, so all five values pass: the same answer
+  the writers give when they map a block's edges to its version.
 - **Spherical edges on a projected CRS** — a column declaring `edges` other
   than `planar` while its CRS is projected **warns**
   (`edges_spherical_on_projected_crs_<column>`). Great-circle edges are only

@@ -11,6 +11,7 @@ module stays a thin descriptor.
 from __future__ import annotations
 
 import gc
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import duckdb
@@ -37,6 +38,7 @@ from geoparquet_io.core.duckdb_utils import (
     validate_where_clause,
     where_sql_fragment,
 )
+from geoparquet_io.core.edges import representative_point_sql
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import has_glob_pattern, resolve_file_url
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
@@ -60,7 +62,11 @@ from geoparquet_io.core.process.aggregate.common import (
     validate_metric_nodata,
 )
 from geoparquet_io.core.remote import needs_httpfs
-from geoparquet_io.core.write_funnels import write_aggregate_table
+from geoparquet_io.core.write_funnels import (
+    collect_nonplanar_edges,
+    table_nonplanar_edges,
+    write_aggregate_table,
+)
 
 
 @dataclass(frozen=True)
@@ -307,11 +313,14 @@ def bucket_point_expr(
     source_crs: dict | str | None,
     bucket_point: str,
     bbox_column: str | None,
+    edges: Mapping[str, str] | None = None,
 ) -> tuple[str, tuple[str, ...]]:
     """Build the keying-point expression for a source relation.
 
     Returns ``(pt_expr, exclude_columns)``. ``pt_expr`` yields a lon/lat POINT
-    (reprojected from a non-CRS84 ``source_crs``, #525). In ``bbox`` and
+    (reprojected from a non-CRS84 ``source_crs``, #525). A geometry keys from
+    ``edges.representative_point_sql`` with its column's ``edges`` (the input's
+    non-planar columns), the point the ``add`` cell keys take (#1293). In ``bbox`` and
     point-column modes the main geometry column is excluded from the passthrough
     SELECT so Parquet projection pushdown never reads its column chunks (#567).
     The bbox/point column is validated against ``relation`` so a typo fails with
@@ -322,7 +331,7 @@ def bucket_point_expr(
         geom_expr = crs_transform_sql_expr(
             geometry_to_geom_expr(con, relation, geom_col), source_crs
         )
-        return f"ST_Centroid({geom_expr})", ()
+        return representative_point_sql(geom_expr, (edges or {}).get(geom_col)), ()
     if bucket_point == BUCKET_POINT_BBOX:
         if not bbox_column:
             raise InvalidParameterError(
@@ -335,13 +344,13 @@ def bucket_point_expr(
         pt = f"ST_Point({lon}, ({qbox}.ymin + {qbox}.ymax) / 2.0)"
         # The bbox covering column is stored in the file's CRS, same as geometry.
         return crs_transform_sql_expr(pt, source_crs), (geom_col,)
-    # Any other value names an existing (point) geometry column. ST_Centroid is a
+    # Any other value names an existing (point) geometry column. The point is a
     # no-op for points and keeps non-point columns keyable rather than erroring.
     _validate_point_column(con, relation, bucket_point)
     point_expr = crs_transform_sql_expr(
         geometry_to_geom_expr(con, relation, bucket_point), source_crs
     )
-    return f"ST_Centroid({point_expr})", (geom_col,)
+    return representative_point_sql(point_expr, (edges or {}).get(bucket_point)), (geom_col,)
 
 
 def cell_area_expr(scheme: GridScheme, resolution: int, cell_expr: str) -> str | None:
@@ -452,6 +461,7 @@ def read_grid_source_sql(
     bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
     keep_columns: tuple[str, ...] | None = None,
+    edges: Mapping[str, str] | None = None,
 ) -> str:
     """Source relation exposing the original columns plus a keying POINT ``__pt``.
 
@@ -474,7 +484,7 @@ def read_grid_source_sql(
     """
     read_rel = aggregate_source_relation(input_url)
     pt_expr, exclude = bucket_point_expr(
-        con, read_rel, geom_col, source_crs, bucket_point, bbox_column
+        con, read_rel, geom_col, source_crs, bucket_point, bbox_column, edges
     )
     select_list = source_select_list(con, read_rel, keep_columns, (*exclude, *_RESERVED_INTERNAL))
     return f"SELECT {select_list}{pt_expr} AS __pt FROM {read_rel}{where_sql_fragment(where)}"
@@ -918,7 +928,9 @@ def aggregate_grid_file(
 
     input_url = resolve_file_url(input_parquet, verbose)
     geom_col = find_primary_geometry_column(input_parquet, verbose) or "geometry"
-    warn_planar_math_for_file("aggregate", input_parquet, geom_col)
+    if bucket_point == BUCKET_POINT_BBOX:
+        warn_planar_math_for_file("aggregate", input_parquet, geom_col)
+    edges = collect_nonplanar_edges(input_parquet)
     source_crs = extract_crs_from_parquet(input_parquet, verbose, geometry_column=geom_col)
 
     con = open_bounded_connection(
@@ -947,6 +959,7 @@ def aggregate_grid_file(
             bucket_point=bucket_point,
             bbox_column=bbox_column,
             keep_columns=needed_source_columns(metrics, breakdown, breakdown_spec),
+            edges=edges,
         )
         final_sql = build_grid_query(
             con,
@@ -1039,11 +1052,13 @@ def aggregate_grid_table(
     try:
         load_community_extension(con, scheme.extension, feature=f"{scheme.name} aggregation")
         con.execute("SET geometry_always_xy = true")
-        warn_planar_math("aggregate", table, geom_col)
+        if bucket_point == BUCKET_POINT_BBOX:
+            warn_planar_math("aggregate", table, geom_col)
+        edges = table_nonplanar_edges(table, geom_col, None)
         register_arrow(con, "__agg_input", table)
         source_crs = extract_crs_from_table(table, geom_col)
         pt_expr, exclude = bucket_point_expr(
-            con, "__agg_input", geom_col, source_crs, bucket_point, bbox_column
+            con, "__agg_input", geom_col, source_crs, bucket_point, bbox_column, edges
         )
         hidden = (geom_col, *exclude, *_RESERVED_INTERNAL)
         input_columns = _relation_columns(con, "__agg_input") - set(hidden)

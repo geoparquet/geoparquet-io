@@ -36,6 +36,12 @@ from geoparquet_io.core.duckdb_utils import (
     query_schema,
     quote_identifier,
 )
+from geoparquet_io.core.edges import (
+    carry_edges,
+    edges_for_version,
+    implied_orientation,
+    strip_edges,
+)
 from geoparquet_io.core.logging_config import debug, warn
 
 if TYPE_CHECKING:
@@ -64,11 +70,6 @@ DEFAULT_GEOPARQUET_VERSION = "1.1"
 #: In both, the type is where each column's CRS lives (parquet-geo-only has no
 #: ``geo`` block at all), so every geometry column is typed, not just the primary.
 NATIVE_GEOMETRY_VERSIONS = frozenset({"2.0", "parquet-geo-only"})
-
-#: The non-planar edge algorithms a Parquet GEOGRAPHY can name, in the order of
-#: parquet.thrift's ``EdgeInterpolationAlgorithm`` (the position is the enum
-#: value). GeoParquet's ``edges`` spells them the same, lowercase.
-GEOGRAPHY_EDGE_ALGORITHMS = ("spherical", "vincenty", "thomas", "andoyer", "karney")
 
 #: The spec's single-geometry-type GeoArrow encodings. GeoParquet 1.1 permits
 #: these alongside "WKB" ("Supported values: "WKB"; one of "point",
@@ -741,6 +742,17 @@ def _add_bbox_covering(
         debug(f"Added bbox covering metadata for column '{bbox_info['bbox_column_name']}'")
 
 
+def is_geoparquet_1x(geo_version: object) -> bool:
+    """Whether ``geo_version`` is a GeoParquet 1.x version: the edges gate.
+
+    The one parse of "is this 1.x": a string whose first dotted part is ``1``.
+    The write facade's ``parquet_writer.writable_geoparquet_version`` branches
+    on it, and ``edges.edges_for_version`` gets it on every path. A missing or
+    unparsable version is not 1.x, so it gates nothing (#1367 concept 6).
+    """
+    return isinstance(geo_version, str) and geo_version.startswith("1.")
+
+
 def covering_supported(version: str | None) -> bool:
     """Whether a GeoParquet version may carry the ``covering`` column key.
 
@@ -1201,15 +1213,7 @@ def strip_nonplanar_edges(
     Both ``"geo"`` and ``b"geo"`` keys are handled; the input is never mutated.
     """
 
-    def _drop(geo_dict: dict) -> dict:
-        for col_name, col_meta in (geo_dict.get("columns") or {}).items():
-            if columns is not None and col_name not in columns:
-                continue
-            if isinstance(col_meta, dict) and col_meta.get("edges", "planar") != "planar":
-                del col_meta["edges"]
-        return geo_dict
-
-    return _rewrite_geo_metadata(metadata, _drop)
+    return _rewrite_geo_metadata(metadata, lambda geo: strip_edges(geo, columns))
 
 
 def backfill_derived_stats(
@@ -1389,7 +1393,7 @@ def create_geo_metadata(
         custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         verbose: Whether to print verbose output
         version: GeoParquet version string (e.g., "1.0.0", "1.1.0", "2.0.0")
-        edges: Edge interpretation, "spherical" or "planar" (default None = planar).
+        edges: Edge interpretation, one of ``edges.EDGES`` (default None = planar).
                Use "spherical" for data from BigQuery or other S2-based sources.
         encoding: The primary's ``encoding`` when the carried block names none.
         strip_bboxless: Run :func:`strip_bboxless_covering` here. ``False`` for
@@ -1405,12 +1409,15 @@ def create_geo_metadata(
     if "encoding" not in geo_meta["columns"][geom_col]:
         geo_meta["columns"][geom_col]["encoding"] = encoding
 
-    # Add edges if specified (for spherical geometry from BigQuery, etc.)
-    if edges:
-        geo_meta["columns"][geom_col]["edges"] = edges
-        # When spherical, orientation should be counterclockwise per GeoParquet spec
-        if edges == "spherical":
-            geo_meta["columns"][geom_col]["orientation"] = "counterclockwise"
+    # Carried edges as every writer says them, then the requested edges (for
+    # spherical geometry from BigQuery, etc.) in what the block's version can say.
+    carry_edges(
+        geo_meta,
+        {geom_col: edges_for_version(edges, is_geoparquet_1x(version))} if edges else None,
+    )
+    orientation = implied_orientation(edges)
+    if orientation:
+        geo_meta["columns"][geom_col]["orientation"] = orientation
 
     # Add bbox covering if needed
     _add_bbox_covering(geo_meta, geom_col, bbox_info, verbose)
@@ -1428,21 +1435,6 @@ def create_geo_metadata(
     # bbox column exists to give it the one member the spec defines (#954).
     geo_meta = strip_unsupported_covering(geo_meta, version, verbose)
     return strip_bboxless_covering(geo_meta, verbose) if strip_bboxless else geo_meta
-
-
-def edges_for_version(edges: str, geo_version: str) -> str:
-    """Map an edges value to one representable in the output's spec version.
-
-    GeoParquet 1.x only allows {"planar", "spherical"}; ellipsoidal algorithms
-    (vincenty/karney/andoyer/thomas) from 2.0/native inputs degrade to
-    "spherical" with a warning. 2.0 outputs keep the algorithm verbatim.
-    """
-    if not str(geo_version).startswith("1."):
-        return edges
-    if edges in ("planar", "spherical"):
-        return edges
-    warn(f"edges algorithm '{edges}' is not representable in GeoParquet 1.x; writing 'spherical'")
-    return "spherical"
 
 
 @dataclass(frozen=True)
@@ -1539,7 +1531,7 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
     wraps :func:`create_geo_metadata`, and the gates actually run in this order:
 
     1. covering build (the carried block, sanitized; ``bbox_column``; custom
-       coverings; ``edges`` mapped by :func:`edges_for_version`), inside
+       coverings; ``edges`` mapped by :func:`~geoparquet_io.core.edges.edges_for_version`), inside
        :func:`create_geo_metadata`;
     2. :func:`strip_unsupported_covering` (no ``covering`` before 1.1), inside
        :func:`create_geo_metadata`;
@@ -1561,7 +1553,6 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
         "has_bbox_column": options.bbox_column is not None,
         "bbox_column_name": options.bbox_column,
     }
-    edges = edges_for_version(options.edges, options.version) if options.edges else None
     # Steps 1 and 2, and 3 unless deferred.
     geo_meta = create_geo_metadata(
         dict(metadata) if metadata else None,
@@ -1570,7 +1561,7 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
         options.custom_metadata,
         options.verbose,
         version=options.version,
-        edges=edges,
+        edges=options.edges,
         encoding=options.encoding,
         strip_bboxless=not options.defer_bboxless_gate,
     )

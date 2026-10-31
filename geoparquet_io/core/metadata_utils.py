@@ -22,6 +22,7 @@ from geoparquet_io.core.duckdb_metadata import (
     get_schema_info,
     parse_geometry_logical_type,
 )
+from geoparquet_io.core.edges import declares_edges, edges_of, logical_type_edges, state_edges
 from geoparquet_io.core.geo_metadata import (
     bbox_xy,
     is_covering_path,
@@ -458,10 +459,7 @@ def _print_geo_column_info(console: Console, col_name: str, col_info: dict) -> N
 
     # Edge interpretation
     if col_info["logical_type"] == "Geography":
-        if col_info["edges"]:
-            console.print(f"    Edges: {col_info['edges']}")
-        else:
-            console.print("    Edges: [dim]Not present - spherical (default value)[/dim]")
+        console.print(f"    Edges: {edges_of(col_info)}")
     else:
         console.print("    Edges: [dim]N/A (only applies to Geography type)[/dim]")
 
@@ -545,14 +543,17 @@ def _build_geo_columns_info(schema_info: list, geo_columns: dict) -> dict:
         if col_name in geo_columns:
             logical_type = col.get("logical_type") or ""
             parsed = parse_geometry_logical_type(logical_type) if logical_type else {}
-            geo_columns_info[col_name] = {
+            info: dict = {
                 "logical_type": geo_columns.get(col_name),
                 "geometry_type": parsed.get("geometry_type") if parsed else None,
                 "coordinate_dimension": parsed.get("coordinate_dimension") if parsed else None,
                 "crs": parsed.get("crs") if parsed else None,
-                "edges": parsed.get("algorithm") if parsed else None,
-                "row_group_stats": [],
             }
+            # A GEOGRAPHY that names no algorithm is spherical, the Parquet default.
+            geography = bool(parsed) and parsed.get("geo_type") == "Geography"
+            state_edges(info, logical_type_edges(parsed) if geography else None)
+            info["row_group_stats"] = []
+            geo_columns_info[col_name] = info
     return geo_columns_info
 
 
@@ -719,8 +720,8 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
                     )
 
                 # Edges
-                if "edges" in col_meta:
-                    console.print(f"    Edges: {col_meta['edges']}")
+                if declares_edges(col_meta):
+                    console.print(f"    Edges: {edges_of(col_meta)}")
                 else:
                     console.print("    Edges: [dim]Not present - planar (default value)[/dim]")
 

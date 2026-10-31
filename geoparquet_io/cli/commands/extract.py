@@ -34,6 +34,7 @@ from geoparquet_io.cli.decorators import (
 )
 from geoparquet_io.cli.exception_handler import error_text
 from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT
+from geoparquet_io.core.edges import PLANAR, SPHERICAL
 from geoparquet_io.core.extract import extract as extract_impl
 from geoparquet_io.core.file_utils import validate_parquet_extension
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
@@ -652,7 +653,7 @@ def _reject_query_shaping_with_sql(ctx: click.Context, sql: str | None) -> None:
 )
 @click.option(
     "--edges",
-    type=click.Choice(["spherical", "planar"], case_sensitive=False),
+    type=click.Choice([SPHERICAL, PLANAR], case_sensitive=False),
     default=None,
     help="Edge interpretation for GeoParquet metadata. "
     "Native GEOGRAPHY columns default to 'spherical' (BigQuery uses S2). "

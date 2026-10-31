@@ -28,6 +28,7 @@ from geoparquet_io.core.duckdb_utils import (
     validate_where_clause,
     where_condition_fragment,
 )
+from geoparquet_io.core.edges import SPHERICAL
 from geoparquet_io.core.exceptions import ValidationError
 from geoparquet_io.core.extract import parse_bbox
 from geoparquet_io.core.file_utils import handle_output_overwrite
@@ -1258,7 +1259,7 @@ def extract_bigquery(
             Auto-detected for native GEOGRAPHY columns. Use this to
             specify a VARCHAR column containing WKT or GeoJSON geometry.
         geometry_format: Format of geometry in VARCHAR columns ("wkt" or "geojson")
-        edges: Edge interpretation for GeoParquet metadata ("spherical" or "planar").
+        edges: Edge interpretation for GeoParquet metadata, one of ``edges.EDGES``.
             If None (default), uses "spherical" for native GEOGRAPHY columns (BigQuery
             uses S2 spherical geometry) and "planar" for VARCHAR columns.
         dry_run: Show SQL without executing
@@ -1501,7 +1502,7 @@ def _execute_bigquery_extraction(
         if edges is not None:
             final_edges = edges
         elif is_native_geometry:
-            final_edges = "spherical"
+            final_edges = SPHERICAL
         else:
             final_edges = None  # Planar (no edges metadata)
 

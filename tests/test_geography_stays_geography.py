@@ -424,11 +424,18 @@ def test_an_output_with_no_carrier_at_all_says_the_edges_are_lost(tmp_path, capl
     assert "Edge interpretation is lost" in caplog.text
 
 
-def test_an_edges_value_parquet_cannot_name_stays_in_the_block_only(duckdb_v2):
-    """A malformed input ``edges`` must not crash the write in the retype."""
+def test_an_edges_value_parquet_cannot_name_is_refused_before_the_retype(duckdb_v2):
+    """A malformed ``edges`` must not crash the write in the retype.
+
+    The edges owner refuses a value outside its vocabulary once, at the version
+    gate, with a parameter error and before the footer is touched (#1367
+    concept 6). No read path hands one over: a carried typo is no declaration
+    (``edges.detect_edges``), so only a direct caller can reach this."""
     from geoparquet_io.core import write_funnels
+    from geoparquet_io.core.exceptions import InvalidParameterError
 
-    write_funnels.apply_nonplanar_edges({"geometry": "geodesic"}, str(duckdb_v2))
+    before = duckdb_v2.read_bytes()
+    with pytest.raises(InvalidParameterError, match="Unknown edges 'geodesic'"):
+        write_funnels.apply_nonplanar_edges({"geometry": "geodesic"}, str(duckdb_v2))
 
-    assert _edges_in_geo_block(duckdb_v2) == "geodesic"
-    assert logical_geo_types(duckdb_v2)["geometry"][0] == "Geometry"
+    assert duckdb_v2.read_bytes() == before

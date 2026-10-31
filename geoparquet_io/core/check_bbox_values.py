@@ -69,6 +69,7 @@ from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
     sql_path,
 )
+from geoparquet_io.core.edges import PLANAR, declared_edges, edges_of, is_geodesic, state_edges
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import raw_geo_of_file
 from geoparquet_io.core.geometry_detection import (
@@ -197,7 +198,7 @@ def _empty_report(skip_reason, bbox_column=None, geometry_column=None) -> dict:
         "skip_reason": skip_reason,
         "bbox_column_name": bbox_column,
         "geometry_column": geometry_column,
-        "edges": "planar",
+        "edges": PLANAR,
         "total_rows": 0,
         "checked_rows": 0,
         "sampled": False,
@@ -564,9 +565,9 @@ def _report_notes(report: dict) -> None:
             f"   {report['wrapped_rows']:,} bbox values cross the antimeridian (xmin > xmax), "
             "read as RFC 7946 5.2 wrap-around"
         )
-    if report["edges"] != "planar":
+    if is_geodesic(edges_of(report)):
         info(
-            f"   Edges are {report['edges']}: each bbox is compared with the planar envelope "
+            f"   Edges are {edges_of(report)}: each bbox is compared with the planar envelope "
             "of its geometry's vertices, which a geodesic edge can bulge past"
         )
 
@@ -699,7 +700,7 @@ def _check(
         return _could_not_compare(str(e), bbox_column, geometry_column)
     finally:
         con.close()
-    report["edges"] = column_meta.get("edges") or "planar"
+    state_edges(report, declared_edges(column_meta))
     return report
 
 

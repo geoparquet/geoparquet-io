@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from geoparquet_io.core.crs_utils import PARQUET_UNKNOWN_CRS, is_default_crs, is_unknown_type_crs
+from geoparquet_io.core.edges import geoarrow_edge_type, is_nonplanar
 from geoparquet_io.core.logging_config import debug
 
 if TYPE_CHECKING:
@@ -93,10 +94,10 @@ def native_wkb_type(crs: dict | str | None, edges: str | None = None):
         geoarrow_type = geoarrow_type.with_crs(PARQUET_UNKNOWN_CRS)
     elif crs and not is_default_crs(crs):
         geoarrow_type = geoarrow_type.with_crs(crs)
-    # A column the block declares spherical is a GEOGRAPHY; typing it a planar
+    # A column the block declares non-planar is a GEOGRAPHY; typing it a planar
     # GEOMETRY beside `edges: spherical` makes the file disagree with itself.
-    if edges == "spherical":
-        geoarrow_type = geoarrow_type.with_edge_type(ga.EdgeType.SPHERICAL)
+    if is_nonplanar(edges):
+        geoarrow_type = geoarrow_type.with_edge_type(geoarrow_edge_type(edges))
     return geoarrow_type
 
 

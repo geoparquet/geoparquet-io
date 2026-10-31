@@ -30,6 +30,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_literal,
     sql_path,
 )
+from geoparquet_io.core.edges import logical_type_algorithm
 from geoparquet_io.core.exceptions import (
     FailureKind,
     GeoParquetError,
@@ -815,15 +816,10 @@ def parse_geometry_logical_type(logical_type: str) -> dict | None:
     if crs is not None:
         result["crs"] = crs
 
-    # Parse algorithm for Geography: the full parquet.thrift vocabulary, not
-    # just the 1.x pair -- an ellipsoidal algorithm read as "no algorithm"
-    # degraded to spherical in every caller's fallback (#1272).
-    # Case-insensitive, read back lowercase: the spelling the edges vocabulary uses.
-    algo_match = re.search(
-        r"algorithm=(planar|spherical|vincenty|thomas|andoyer|karney)", params, re.IGNORECASE
-    )
-    if algo_match:
-        result["algorithm"] = algo_match.group(1).lower()
+    # Parse algorithm for Geography (the owner's reader, #1272).
+    algorithm = logical_type_algorithm(params)
+    if algorithm:
+        result["algorithm"] = algorithm
 
     # Parse geometry type and coordinate dimension from positional params
     # Split by comma but respect braces

@@ -31,13 +31,14 @@ from geoparquet_io.core.duckdb_utils import (
     register_arrow,
     require_community_extension,
 )
+from geoparquet_io.core.edges import representative_point_sql
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
-from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
+from geoparquet_io.core.geometry_repair import nonplanar_edges_of_arrow_table
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import execute_transform
@@ -46,6 +47,7 @@ from geoparquet_io.core.streaming import (
     is_stdin,
     should_stream_output,
 )
+from geoparquet_io.core.write_funnels import collect_nonplanar_edges
 
 # Named in the error when 'geography' is unavailable, so the message says which
 # command stopped working rather than just which extension is missing (#737).
@@ -79,12 +81,15 @@ def _create_geometry_view(con, table, geom_col):
     return "__input_table"
 
 
-def _build_s2_select_query(table, source_ref, geom_col, s2_column_name, level, geom_ref=None):
+def _build_s2_select_query(
+    table, source_ref, geom_col, s2_column_name, level, geom_ref=None, edges=None
+):
     """Build SELECT query to add S2 column to table.
 
     Args:
         geom_ref: SQL geometry expression for keying (defaults to the raw column;
             pass a reprojected expression for non-CRS84 input).
+        edges: The column's edges; non-planar keys from a point on the sphere (#1293).
 
     Returns:
         str: Complete SELECT query with S2 expression
@@ -93,11 +98,12 @@ def _build_s2_select_query(table, source_ref, geom_col, s2_column_name, level, g
         geom_ref = quote_identifier(geom_col)
 
     # Build S2 cell expression (keyed on lon/lat, reprojected when needed)
+    point = representative_point_sql(geom_ref, edges)
     s2_expr = f"""s2_cell_token(
         s2_cell_parent(
             s2_cellfromlonlat(
-                ST_X(ST_Centroid({geom_ref})),
-                ST_Y(ST_Centroid({geom_ref}))
+                ST_X({point}),
+                ST_Y({point})
             ),
             {level}
         )
@@ -165,13 +171,13 @@ def add_s2_table(
         con.execute("SET geometry_always_xy = true;")
 
         _load_geography_extension(con)
-        warn_planar_math("add_s2", table, geom_col)
+        edges = nonplanar_edges_of_arrow_table(table, geom_col)
         registered = register_arrow(con, "__input_table", table)
 
         source_ref = _create_geometry_view(con, table, geom_col)
         geom_ref = transform_geom_sql(quote_identifier(geom_col), source_crs)
         query = _build_s2_select_query(
-            table, source_ref, geom_col, s2_column_name, level, geom_ref=geom_ref
+            table, source_ref, geom_col, s2_column_name, level, geom_ref=geom_ref, edges=edges
         )
         result = con.sql(query).arrow().read_all()
 
@@ -191,19 +197,23 @@ def _make_add_s2_query(
     s2_column_name: str,
     level: int,
     source_crs: str | None = None,
+    edges: dict[str, str] | None = None,
 ) -> str:
     """Build query to add S2 column to a source.
 
     ``source_crs`` reprojects a non-CRS84 input to lon/lat before centroid keying
-    (#525); ``None`` (CRS84 / CRS-less) leaves the geometry untouched.
+    (#525); ``None`` (CRS84 / CRS-less) leaves the geometry untouched. ``edges``
+    maps the input's non-planar columns to their edges: those key from a point
+    on the sphere (#1293).
     """
     geom_ref = transform_geom_sql(quote_identifier(geometry_column), source_crs)
+    point = representative_point_sql(geom_ref, (edges or {}).get(geometry_column))
     # s2_cellfromlonlat returns a cell at level 30, use s2_cell_parent to get desired level
     s2_expr = f"""s2_cell_token(
         s2_cell_parent(
             s2_cellfromlonlat(
-                ST_X(ST_Centroid({geom_ref})),
-                ST_Y(ST_Centroid({geom_ref}))
+                ST_X({point}),
+                ST_Y({point})
             ),
             {level}
         )
@@ -266,8 +276,6 @@ def add_s2_column(
     # extension that computes S2 cells is unavailable for this DuckDB (#737).
     require_community_extension("geography", feature=_S2_FEATURE)
 
-    warn_planar_math_for_file("add_s2", input_parquet)
-
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
@@ -304,12 +312,14 @@ def add_s2_column(
     )
 
     # Define the S2 SQL expression (using token/string format for portability)
-    # s2_cellfromlonlat returns a cell at level 30, use s2_cell_parent to get desired level
+    # s2_cellfromlonlat returns a cell at level 30, use s2_cell_parent to get desired level.
+    # Keyed from a point on the sphere when the edges are not planar (#1293).
+    point = representative_point_sql(geom_ref, collect_nonplanar_edges(input_parquet).get(geom_col))
     sql_expression = f"""s2_cell_token(
         s2_cell_parent(
             s2_cellfromlonlat(
-                ST_X(ST_Centroid({geom_ref})),
-                ST_Y(ST_Centroid({geom_ref}))
+                ST_X({point}),
+                ST_Y({point})
             ),
             {s2_level}
         )
@@ -367,11 +377,14 @@ def _add_s2_streaming(
     if should_stream_output(output_path):
         verbose = False
 
-    def make_query(source: str, con, source_crs: str | None = None) -> str:
+    def make_query(
+        source: str, con, source_crs: str | None = None, edges: dict | None = None
+    ) -> str:
         """Build the add S2 query for streaming source.
 
         ``source_crs`` is the streamed input's CRS (from its Arrow geo metadata),
-        used to reproject non-CRS84 input to lon/lat before keying (#525).
+        used to reproject non-CRS84 input to lon/lat before keying (#525);
+        ``edges`` the input's non-planar edges, file or stream (#1293).
         """
         # Load geography extension
         _load_geography_extension(con)
@@ -391,7 +404,7 @@ def _add_s2_streaming(
         if verbose:
             debug(f"Using geometry column: {geom_col}")
 
-        return _make_add_s2_query(source, geom_col, s2_column_name, level, source_crs)
+        return _make_add_s2_query(source, geom_col, s2_column_name, level, source_crs, edges)
 
     execute_transform(
         input_path,

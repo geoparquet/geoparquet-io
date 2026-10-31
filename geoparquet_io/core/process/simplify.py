@@ -23,6 +23,7 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.bbox_structure import bbox_covering_column_for
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.crs_utils import is_geographic_crs
+from geoparquet_io.core.edges import set_edges
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
@@ -420,7 +421,7 @@ def _with_carried_edges(table: pa.Table, geometry_column: str, edges: str | None
         "columns": {},
     }
     columns = geo.setdefault("columns", {})
-    columns.setdefault(geometry_column, {"encoding": "WKB"})["edges"] = edges
+    set_edges(columns.setdefault(geometry_column, {"encoding": "WKB"}), edges)
     metadata[b"geo"] = json.dumps(geo).encode("utf-8")
     return table.replace_schema_metadata(metadata)
 

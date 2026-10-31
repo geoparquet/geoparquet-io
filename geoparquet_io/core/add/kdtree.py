@@ -18,6 +18,7 @@ from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
     sql_path,
 )
+from geoparquet_io.core.edges import PLANAR, representative_point_sql
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
@@ -190,8 +191,8 @@ def _centroid_sql(con, input_path, geom_col) -> str:
     quoted = quote_identifier(geom_col)
     ((_, column_type),) = describe_query(con, f"SELECT {quoted} FROM {sql_path(input_path)}")
     if duckdb_type_is_geometry(column_type):
-        return f"ST_Centroid({quoted})"
-    return f"ST_Centroid(ST_GeomFromWKB({quoted}))"
+        return representative_point_sql(quoted, PLANAR)
+    return representative_point_sql(f"ST_GeomFromWKB({quoted})", PLANAR)
 
 
 def _build_sampling_query(

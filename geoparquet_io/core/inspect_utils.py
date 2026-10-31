@@ -42,6 +42,15 @@ from geoparquet_io.core.duckdb_utils import (
     resolve_load_spatial,
     sql_path,
 )
+from geoparquet_io.core.edges import (
+    PLANAR,
+    declares_edges,
+    detect_edges,
+    edges_of,
+    logical_type_edges,
+    normalized_edges,
+    state_edges,
+)
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     GeometryStats,
@@ -253,11 +262,11 @@ def _detect_metadata_mismatches(
         pass
 
     # Compare edges (only relevant for Geography type)
-    parquet_edges = parquet_geo_info.get("edges")
-    geoparquet_edges = geoparquet_info.get("edges")
+    parquet_edges = edges_of(parquet_geo_info)
+    geoparquet_edges = edges_of(geoparquet_info)
 
     if parquet_edges and geoparquet_edges:
-        if parquet_edges.lower() != geoparquet_edges.lower():
+        if normalized_edges(parquet_edges) != normalized_edges(geoparquet_edges):
             warnings.append(
                 f"Edges mismatch: Parquet geo type has '{parquet_edges}' "
                 f"but GeoParquet metadata has '{geoparquet_edges}'"
@@ -341,7 +350,8 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
                     # Resolve CRS reference if needed (e.g., "projjson:key_name")
                     raw_crs = geom_details.get("crs")
                     parquet_geo_info["crs"] = resolve_crs_reference(parquet_file, raw_crs)
-                    parquet_geo_info["edges"] = geom_details.get("algorithm")
+                    if geom_details.get("geo_type") == "Geography":
+                        state_edges(parquet_geo_info, logical_type_edges(geom_details))
             break
 
     # Extract GeoParquet metadata
@@ -354,14 +364,13 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
         crs = None
         bbox = None
         geometry_types = None
-        edges = None
+        col_meta = None
 
         if primary_column in columns_meta:
             col_meta = columns_meta[primary_column]
             crs = col_meta.get("crs")  # Keep raw PROJJSON, don't convert to string
             bbox = col_meta.get("bbox")
             geometry_types = col_meta.get("geometry_types")
-            edges = col_meta.get("edges")
 
         # Note: Keep crs as None if not specified - default handling is a display concern
 
@@ -371,8 +380,9 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
             "bbox": bbox,
             "primary_column": primary_column,
             "geometry_types": geometry_types,
-            "edges": edges,
         }
+        if declares_edges(col_meta):
+            state_edges(geoparquet_info, edges_of(col_meta))
 
         # Use GeoParquet primary_column if we didn't find one from Parquet type
         if not geometry_column:
@@ -414,7 +424,7 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
     if geo_meta and parquet_type != "No Parquet geo logical type":
         warnings = _detect_metadata_mismatches(parquet_geo_info, geoparquet_info)
 
-    return {
+    geo_info: dict[str, Any] = {
         "parquet_type": parquet_type,
         "has_geo_metadata": bool(geo_meta),
         "version": geoparquet_info.get("version"),
@@ -422,9 +432,17 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
         "bbox": effective_bbox,
         "primary_column": primary_column,
         "geometry_types": effective_geometry_types,
-        "edges": geoparquet_info.get("edges") or parquet_geo_info.get("edges"),
         "warnings": warnings,
     }
+    state_edges(geo_info, _effective_edges(parquet_geo_info, geoparquet_info, primary_column))
+    return geo_info
+
+
+def _effective_edges(parquet_geo_info: dict, geoparquet_info: dict, column: str) -> str:
+    """The column's edges by the owner's one precedence: the block over the type."""
+    native = {column: edges_of(parquet_geo_info)}
+    block = {column: edges_of(geoparquet_info)} if declares_edges(geoparquet_info) else None
+    return detect_edges(native, block).get(column, PLANAR)
 
 
 def extract_columns_info(schema: pa.Schema, primary_geom_col: str | None) -> list[dict[str, Any]]:

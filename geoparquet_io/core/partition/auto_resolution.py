@@ -22,10 +22,12 @@ from geoparquet_io.core.duckdb_utils import (
     validate_where_clause,
     where_sql_fragment,
 )
+from geoparquet_io.core.edges import representative_point_sql
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, info, warn
 from geoparquet_io.core.remote import needs_httpfs
+from geoparquet_io.core.write_funnels import collect_nonplanar_edges
 
 # Tuning for the extent-aware probe (issue #524). Sampling a multiple of the
 # target partition count keeps cells near the target resolution well-populated,
@@ -346,21 +348,6 @@ def _cell_expr(index_type: str, lon: str, lat: str, resolution: int) -> str:
     raise ValueError(f"Unsupported spatial index type: {index_type}")
 
 
-def _register_quadkey_udf(con) -> None:
-    """Register the mercantile-based quadkey UDF used by the add-quadkey path."""
-    import mercantile
-
-    def lat_lon_to_quadkey(lat: float, lon: float, level: int) -> str:
-        return mercantile.quadkey(mercantile.tile(lon, lat, level))
-
-    con.create_function(
-        "lat_lon_to_quadkey",
-        lat_lon_to_quadkey,
-        ["DOUBLE", "DOUBLE", "INTEGER"],
-        "VARCHAR",
-    )
-
-
 def _geom_sql(con, url: str, geom_col: str) -> str:
     """Return a GEOMETRY-typed SQL expression for ``geom_col`` in ``url``.
 
@@ -383,6 +370,7 @@ def _probe_distinct_cell_counts(
     sample_clause: str,
     resolutions: list[int],
     where: str | None = None,
+    edges: str | None = None,
 ) -> list[int]:
     """Count distinct non-empty cells per resolution over a bounded sample.
 
@@ -393,9 +381,10 @@ def _probe_distinct_cell_counts(
     see a contiguous slice of the extent and badly underestimate the non-empty
     cell count -- the exact failure mode this probe exists to prevent (#524).
 
-    The centroid mirrors the cell assignment in the ``add/`` modules
-    (``ST_X/ST_Y(ST_Centroid(geom))``), so probe counts track real partitioning.
-    It is computed once per sampled row and reused for lon and lat.
+    The point mirrors the cell assignment in the ``add/`` modules
+    (``edges.representative_point_sql``: the centroid for planar ``edges``, a
+    point on the sphere otherwise, #1293), so probe counts track real
+    partitioning. It is computed once per sampled row and reused for lon and lat.
 
     ``where`` restricts the probe to the rows the aggregation will see. The
     filter is nested *beneath* the sample: a WHERE sitting next to ``USING
@@ -404,7 +393,7 @@ def _probe_distinct_cell_counts(
     over-resolve (gpio #612). Nesting also keeps the clause away from the top
     level of the statement, where it could otherwise chain a second one.
     """
-    centroid = f"ST_Centroid({geom_sql})"
+    centroid = representative_point_sql(geom_sql, edges)
     filtered = f"(SELECT {centroid} AS c FROM {sql_path(url)}{where_sql_fragment(where)})"
     sample_cte = f"SELECT ST_X(c) AS lon, ST_Y(c) AS lat FROM {filtered}{sample_clause}"
     if index_type == "quadkey":
@@ -483,7 +472,9 @@ def _probe_extent_resolution(
         if index_extension:
             load_community_extension(con, index_extension)
         if spatial_index_type == "quadkey":
-            _register_quadkey_udf(con)
+            from geoparquet_io.core.add.quadkey import register_quadkey_udf
+
+            register_quadkey_udf(con)
 
         geom_col = find_primary_geometry_column(input_parquet, verbose)
         # Reproject a known non-CRS84 input to lon/lat before centroiding, so the
@@ -501,8 +492,9 @@ def _probe_extent_resolution(
         # Skip the reservoir sample (a full scan) when the file already fits the
         # budget; otherwise draw a uniform sample of sample_size rows.
         sample_clause = "" if sample_size >= total_rows else f" USING SAMPLE {sample_size} ROWS"
+        edges = collect_nonplanar_edges(input_parquet).get(geom_col)
         counts = _probe_distinct_cell_counts(
-            con, url, spatial_index_type, geom_sql, sample_clause, resolutions, where=where
+            con, url, spatial_index_type, geom_sql, sample_clause, resolutions, where, edges
         )
     except Exception as e:
         # Unconditional: falling back to the global formula silently produces a

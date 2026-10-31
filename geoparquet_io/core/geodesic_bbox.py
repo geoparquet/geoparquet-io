@@ -75,13 +75,12 @@ import struct
 from collections.abc import Iterable, Mapping
 from typing import Any, NamedTuple
 
+from geoparquet_io.core.edges import ANDOYER, SPHERICAL, THOMAS, is_ellipsoidal, is_nonplanar
 from geoparquet_io.core.optional_deps import load_module
 
 Box = tuple[float, float, float, float]
 
-SPHERICAL = "spherical"
-ELLIPSOIDAL_ALGORITHMS = frozenset({"vincenty", "thomas", "andoyer", "karney"})
-_APPROXIMATE_ALGORITHMS = frozenset({"thomas", "andoyer"})
+_APPROXIMATE_ALGORITHMS = frozenset({THOMAS, ANDOYER})
 COUNTERCLOCKWISE = "counterclockwise"
 
 #: Outward margin on a geodesic vertex latitude (~0.1 m). The floating-point
@@ -659,7 +658,7 @@ def _pole_flags(
         return bool(north.any()), bool(south.any())
     # The smaller side. Only the half-sphere tie is ambiguous, and it covers
     # both sides.
-    slack = err + (_ELLIPSOIDAL_HALF_TOLERANCE if ctx.algorithm != SPHERICAL else 1e-12)
+    slack = err + (_ELLIPSOIDAL_HALF_TOLERANCE if is_ellipsoidal(ctx.algorithm) else 1e-12)
     left = area <= 2.0 * math.pi + slack
     right = area >= 2.0 * math.pi - slack
     north = touch_n | (left & n_in_left) | (right & ~n_in_left)
@@ -668,7 +667,7 @@ def _pole_flags(
 
 
 def _is_long_ellipsoidal(np: Any, geom: _Geometry, ctx: _Context) -> bool:
-    if ctx.algorithm == SPHERICAL:
+    if not is_ellipsoidal(ctx.algorithm):
         return False
     angle = np.degrees(np.arctan2(geom.sine, geom.dot))
     return bool((geom.normal & (angle > ELLIPSOIDAL_MAX_ARC_DEG)).any())
@@ -695,7 +694,7 @@ def _bound_vertices(
     if len(edges.a) == 0:
         return
 
-    if ctx.algorithm == SPHERICAL:
+    if not is_ellipsoidal(ctx.algorithm):
         hi, lo = _spherical_vertices(np, geom)
     else:
         hi, lo = _ellipsoidal_vertices(np, lon, lat, edges, geom, ctx)
@@ -766,7 +765,7 @@ def _bound_array(array: Any, acc: _Bound, ctx: _Context) -> None:
 
 
 def _context(edges: str, orientation: str | None, ellipsoid: tuple | None) -> _Context:
-    if edges != SPHERICAL and edges not in ELLIPSOIDAL_ALGORITHMS:
+    if not is_nonplanar(edges):
         raise ValueError(f"edges must be spherical or an ellipsoidal algorithm, not {edges!r}")
     semi_major, flattening = ellipsoid if ellipsoid else WGS84_ELLIPSOID
     return _Context(edges, orientation, (float(semi_major), float(flattening)))
