@@ -3,4 +3,3 @@
 # Each pair's reason (the track that removes it, or permanent) is in
 # scripts/owner_exemptions.toml under [[G3.pairs]]. This list only falls: delete a
 # line with the copy (check_duplicates.py --update drops gone pairs). Never add one.
-
