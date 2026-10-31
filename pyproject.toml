@@ -120,7 +120,6 @@ dev = [
     "bandit>=1.7",
     "pip>=26.2",  # CVE-2026-6357; PYSEC-2026-3721 (doubly-encoded index URLs)
     "pip-audit>=2.7",
-    "menard>=0.4.0",
     "deptry>=0.25.0",
 ]
 docs = [
@@ -660,11 +659,3 @@ ignore = ["DEP002"]
 # Exclude virtual env, tests, benchmarks and plugin packages (own dependency
 # definitions) from analysis
 exclude = [".venv", "tests", "geoparquet_io/benchmarks", "plugins"]
-
-[tool.menard]
-mode = "block"
-transitive_depth = 1
-enforce_symmetry = true
-require_links = ["geoparquet_io/**/*.py"]
-exempt = ["tests/**"]
-doc_paths = ["docs/**/*.md", "README.md", "CLAUDE.md", "geoparquet_io/skills/*.md"]

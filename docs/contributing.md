@@ -194,7 +194,7 @@ failure to CI.
 uv run pre-commit run --all-files                        # commit-stage hooks
 uv run pre-commit run --all-files --hook-stage pre-push  # deptry, vulture,
                                                          # xenon, mypy,
-                                                         # import-linter, menard
+                                                         # import-linter
 ```
 
 One ignore file gates quality over time:

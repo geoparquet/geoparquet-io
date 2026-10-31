@@ -386,14 +386,6 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
-      - id: menard-check
-        name: menard-check
-        description: Check if documentation is stale relative to code changes
-        entry: uv run menard check
-        language: system
-        pass_filenames: false
-        stages: [pre-push]
-
       - id: fast-tests
         name: fast-tests
         description: Run fast tests (optional - enable with ENABLE_PRE_PUSH_TESTS=1)

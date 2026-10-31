@@ -322,7 +322,7 @@ copies or compatibility wrappers. The guard set and migration notes are in
 |-------|-------|
 | commit | ruff, ruff-format, codespell, actionlint, zizmor, duckdb-antipatterns, no-click-echo, owner-only-defs, check-duplicates, pylint-duplicates, vulture, vulture-tests, no-cwd-change-in-tests, check-api-for-cli, validate-claude-md, doc-sync, sync-dependencies (plus the stock whitespace/YAML/TOML/merge-conflict checks) |
 | commit-msg | commitizen |
-| pre-push | xenon (complexity), import-linter, deptry, owner-only-defs, check-duplicates, pylint-duplicates, vulture, vulture-tests, mypy, menard-check, fast-tests |
+| pre-push | xenon (complexity), import-linter, deptry, owner-only-defs, check-duplicates, pylint-duplicates, vulture, vulture-tests, mypy, fast-tests |
 
 Complexity guidance: guard clauses, dictionary dispatch, max 30-40 lines/function.
 
