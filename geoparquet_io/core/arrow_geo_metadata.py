@@ -35,7 +35,6 @@ from geoparquet_io.core.geo_metadata import (
     _get_geometry_type_name,
     _self_evident_bbox_column,
     bbox_column_to_declare,
-    carried_version,
     create_geo_metadata,
     geoarrow_wkb_codes,
     sanitized_carried_geo,
@@ -51,75 +50,13 @@ from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.parquet_writer import (
     _CARRIED_SCHEMA_METADATA_KEYS_BYTES,
     output_schema_metadata,
+    resolve_output_geoparquet_version,
 )
 from geoparquet_io.core.write_strategies.base import (
     merge_secondary_geometry_metadata,
     native_geometry_crs,
     resolve_geometry_columns,
 )
-
-
-def _detect_version_from_table(table, verbose: bool = False) -> str | None:
-    """
-    Detect GeoParquet version from table's schema metadata.
-
-    Checks the table's schema metadata for existing geo metadata and extracts
-    the version. This allows preserving v2.0 or parquet-geo-only formats when
-    writing a table that was read from such a source.
-
-    Also checks for native geoarrow extension types which indicate v2.0 or
-    parquet-geo-only format.
-
-    Args:
-        table: PyArrow Table to check
-        verbose: Whether to print verbose output
-
-    Returns:
-        Version string (e.g., "1.1", "2.0", "parquet-geo-only") or None if not detected
-    """
-
-    # Check for native geoarrow extension types (indicates v2.0 or parquet-geo-only).
-    # `is_geoarrow_extension_field` reads the field, not just the type, so a
-    # metadata-declared geoarrow column is detected too -- without that, the
-    # same table resolved to "parquet-geo-only" or to the 1.1 default purely
-    # according to whether geoarrow.pyarrow had been imported (#792).
-    has_native_geo = any(is_geoarrow_extension_field(field) for field in table.schema)
-
-    # Check schema metadata for geo version
-    metadata = table.schema.metadata
-    if not metadata:
-        if has_native_geo:
-            # Native geo types but no metadata suggests parquet-geo-only
-            if verbose:
-                debug("Detected parquet-geo-only format from native geo types")
-            return "parquet-geo-only"
-        return None
-
-    if b"geo" not in metadata:
-        if has_native_geo:
-            # Native geo types but no geo metadata = parquet-geo-only
-            if verbose:
-                debug("Detected parquet-geo-only format (native types, no geo metadata)")
-            return "parquet-geo-only"
-        return None
-
-    # Guarded, not truthiness-checked: a non-string version crashed `.split`
-    # here on the write path too -- `write_geoparquet_table` resolves auto-mode
-    # through this function (#979).
-    version = carried_version(sanitized_carried_geo(metadata).get("version"))
-    parts = version.split(".") if version else []
-    if len(parts) < 2:
-        return None
-    if parts[0] == "2":
-        if verbose:
-            debug("Detected GeoParquet version 2.0 from table metadata")
-        return "2.0"
-    # Upgrade all 1.x versions to 1.1 (backwards compatible)
-    if parts[0] == "1":
-        if verbose:
-            debug("Detected GeoParquet version 1.x from table metadata")
-        return "1.1"
-    return None
 
 
 def _table_bbox_struct_ok(table, column_name: str) -> bool:
@@ -815,19 +752,17 @@ def _apply_geoparquet_metadata(
     Returns:
         pa.Table: Table with GeoParquet metadata applied
     """
-    # Auto-detect version from table schema metadata if not specified
-    effective_version = geoparquet_version
-    if effective_version is None:
-        effective_version = _detect_version_from_table(table, verbose)
-
-    version_config = GEOPARQUET_VERSIONS.get(
-        effective_version, GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]
+    # Auto mode: the facade decides from the table's own schema.
+    effective_version = resolve_output_geoparquet_version(
+        geoparquet_version, table=table, verbose=verbose
     )
+
+    version_config = GEOPARQUET_VERSIONS[effective_version]
     metadata_version = version_config["metadata_version"]
     should_add_geo_metadata = effective_version != "parquet-geo-only"
 
     if verbose:
-        debug(f"Applying GeoParquet metadata for version: {effective_version or 'default (1.1)'}")
+        debug(f"Applying GeoParquet metadata for version: {effective_version}")
 
     # Check if geometry column exists in table
     if geometry_column not in table.column_names:

@@ -50,7 +50,6 @@ from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.streaming import (
     apply_geoarrow_extension_type,
     apply_metadata_to_table,
-    detect_version_for_output,
     is_stdin,
     read_arrow_stream,
     should_stream_output,
@@ -466,11 +465,11 @@ def _write_file_output(
     extra_kv_metadata: dict[str, str] | None = None,
     memory_limit: str | None = None,
 ) -> None:
-    """Write output to Parquet file."""
-    # Auto-detect version from input metadata if not explicitly provided
-    if geoparquet_version is None:
-        geoparquet_version = detect_version_for_output(original_metadata)
+    """Write output to Parquet file.
 
+    An auto-mode ``geoparquet_version`` (None) is decided by the funnel, from
+    ``original_metadata``, through ``parquet_writer.resolve_output_geoparquet_version``.
+    """
     write_parquet_with_metadata(
         con,
         query,

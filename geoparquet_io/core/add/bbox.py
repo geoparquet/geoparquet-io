@@ -17,6 +17,7 @@ from geoparquet_io.core.duckdb_utils import get_duckdb_connection, query_schema,
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
 from geoparquet_io.core.geo_metadata import (
+    GEOPARQUET_VERSIONS,
     _bbox_claimed_by_another_column,
     bbox_struct_child_names_match,
     build_bbox_covering,
@@ -31,6 +32,10 @@ from geoparquet_io.core.geometry_detection import (
 )
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, progress, success, warn
+from geoparquet_io.core.parquet_writer import (
+    declared_geoparquet_version,
+    resolve_output_geoparquet_version,
+)
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
@@ -52,8 +57,7 @@ def _bbox_metadata_advice(parquet_file: str, declare_by_name: str | None = None)
     sending the user to a command that would report no bbox column at all.
     """
 
-    geo_meta = sanitized_carried_geo_of_file(parquet_file)
-    version = geo_meta.get("version", "")
+    version = declared_geoparquet_version(sanitized_carried_geo_of_file(parquet_file))
     if covering_supported(version):
         if check_bbox_structure(parquet_file).get("covering_problem"):
             return "The existing column cannot carry a 'covering'; use --force to rewrite it."
@@ -290,26 +294,21 @@ def _write_options_requested(
     )
 
 
-def _passthrough_version(metadata: dict | None, geoparquet_version: str | None) -> str | None:
-    """The version to write for a stream that is being copied, not rewritten.
+def _version_a_copy_would_miss(input_parquet: str) -> str | None:
+    """The facade's version for this input, when a verbatim copy would declare another.
 
-    The normal streaming write upgrades a 1.0 input to 1.1, which is right for a
-    file gpio actually rewrote but wrong for a pass-through: nothing about the
-    data changed, so nothing about its declared version should either. An
-    explicitly requested version still wins.
+    A copy keeps whatever version the input declares, so it can answer this
+    run only where that already is the facade's answer: a 1.0 input writes
+    1.1, and a native-geo-only one (no ``geo`` key) writes 2.0, like every
+    other command (approved change 7 of #1367: the facade decides).
     """
-    if geoparquet_version is not None:
-        return geoparquet_version
-    if not metadata or b"geo" not in metadata:
+    target = resolve_output_geoparquet_version(None, input_file=input_parquet)
+    declared = declared_geoparquet_version(
+        sanitized_carried_geo_of_file(input_parquet), default=None
+    )
+    if GEOPARQUET_VERSIONS[target]["metadata_version"] == declared:
         return None
-
-    version = sanitized_carried_geo(metadata).get("version")
-    if not isinstance(version, str):
-        return None
-    parts = version.split(".")
-    if len(parts) < 2:
-        return None
-    return f"{parts[0]}.{parts[1]}"
+    return target
 
 
 def _make_add_bbox_query(
@@ -482,14 +481,11 @@ def _add_bbox_streaming(
             row_group_rows=row_group_rows,
             verbose=verbose,
             profile=profile,
-            # A covering gpio did not compute must not be declared, and a copy is
-            # not a rewrite, so it does not upgrade the input's version either.
+            # A covering gpio did not compute must not be declared. The version
+            # is the facade's, pass-through or not: a 1.0 stream writes 1.1 like
+            # every other command (approved change 7).
             custom_metadata=None if passed_through else _bbox_covering_metadata(bbox_column_name),
-            geoparquet_version=(
-                _passthrough_version(metadata, geoparquet_version)
-                if passed_through
-                else geoparquet_version
-            ),
+            geoparquet_version=geoparquet_version,
             memory_limit=memory_limit,
         )
 
@@ -601,6 +597,13 @@ def _add_bbox_file_based(
         # A copy cannot carry a write setting the input does not already have,
         # and with no OUTPUT_FILE there is nothing to write it to either.
         write_options_requested=write_options_requested and output_parquet is not None,
+        # Nor a version other than the one it declares: a 1.0 input writes 1.1
+        # like every other command (approved change 7 of #1367).
+        version_upgrade=(
+            _version_a_copy_would_miss(input_parquet)
+            if output_parquet is not None and not write_options_requested
+            else None
+        ),
         dry_run=dry_run,
     )
     if done:
@@ -669,6 +672,7 @@ def _handle_existing_bbox(
     verbose: bool,
     write_options_requested: bool = False,
     dry_run: bool = False,
+    version_upgrade: str | None = None,
 ) -> tuple[bool, str | None]:
     """Decide what a bbox column the input already has means for this run.
 
@@ -711,6 +715,16 @@ def _handle_existing_bbox(
         progress(
             f"File already has bbox column '{existing_bbox_col}', but the requested "
             "output settings need a rewrite, so it is recomputed rather than copied."
+        )
+        return False, existing_bbox_col
+
+    if version_upgrade:
+        # A verbatim copy keeps the version the input declares, and auto mode
+        # writes a different one (1.0 -> 1.1), so the copy cannot answer either.
+        progress(
+            f"File already has bbox column '{existing_bbox_col}', but the output is "
+            f"written at GeoParquet {version_upgrade}, a version the input does not "
+            "declare, so it is recomputed rather than copied."
         )
         return False, existing_bbox_col
 

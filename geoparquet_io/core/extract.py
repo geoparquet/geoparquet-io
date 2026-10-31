@@ -1162,8 +1162,8 @@ def _advise_spatial_stats_on_merge(
     if bbox_col and bbox_col in selected_columns:
         return
 
-    effective_version = (
-        resolve_output_geoparquet_version(geoparquet_version, input_file=input_parquet) or "1.1"
+    effective_version = resolve_output_geoparquet_version(
+        geoparquet_version, input_file=input_parquet
     )
     if should_skip_bbox(effective_version):
         return

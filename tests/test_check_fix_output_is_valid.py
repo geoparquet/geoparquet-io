@@ -43,7 +43,7 @@ class Shape:
     The two ``*_version``/``*_covering`` pairs differ on purpose: the rewrite
     fixes (compression, row-group, spatial) let the write facade pick the output
     version from the input, while ``check all`` names it explicitly from its own
-    checks (``get_geoparquet_version_from_check_results``). Where the two
+    checks (``resolve_output_geoparquet_version(..., preserve_input=True)``). Where the two
     disagree that is a fact about gpio, so it is written down rather than
     papered over.
     """

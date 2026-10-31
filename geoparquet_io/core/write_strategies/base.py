@@ -40,9 +40,9 @@ from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
     compose_geo_block,
     read_raw_geo,
-    sanitized_carried_geo,
     strip_unsupported_covering,
 )
+from geoparquet_io.core.parquet_writer import carried_geoparquet_version
 
 if TYPE_CHECKING:
     import duckdb
@@ -237,8 +237,7 @@ def build_geo_metadata(
         dict: Complete geo metadata structure ready for embedding in Parquet
     """
 
-    version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
-    metadata_version = version_config.get("metadata_version", "1.1.0")
+    metadata_version = GEOPARQUET_VERSIONS[geoparquet_version]["metadata_version"]
 
     # Encoding (required by GeoParquet spec), when the carried block names none:
     # for 1.1-geoarrow, preserve the input encoding (native type) from
@@ -506,7 +505,7 @@ def needs_metadata_rewrite(
         True if metadata rewrite is needed
     """
 
-    version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
+    version_config = GEOPARQUET_VERSIONS[geoparquet_version]
 
     if geoparquet_version == "parquet-geo-only":
         # For parquet-geo-only, we need to strip any existing geo metadata
@@ -520,9 +519,8 @@ def needs_metadata_rewrite(
         # A carried block needs the rewrite unless it already vouches for a 2.x
         # version. An undecodable or non-object one reads as `{}` and so cannot
         # vouch (a raw json.loads here once aborted the write instead).
-        input_version = sanitized_carried_geo(original_metadata).get("version")
-        if isinstance(input_version, str) and input_version.startswith("2."):
+        if carried_geoparquet_version(original_metadata) == "2.0":
             return False
         return read_raw_geo(original_metadata).present
 
-    return version_config.get("rewrite_metadata", True)
+    return version_config["rewrite_metadata"]

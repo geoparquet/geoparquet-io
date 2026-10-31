@@ -24,7 +24,6 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import (
     _canonicalize_wkb_columns,
-    _detect_version_from_table,
     table_geometry_info,
 )
 from geoparquet_io.core.compression import ResolvedCodec, resolve_codec
@@ -51,7 +50,10 @@ from geoparquet_io.core.geo_metadata import (
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
-from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_query
+from geoparquet_io.core.parquet_writer import (
+    resolve_output_geoparquet_version,
+    resolve_row_group_rows_for_query,
+)
 from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
@@ -570,10 +572,10 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             )
             return
 
-        # Auto-detect version from table schema metadata if not specified
-        effective_version = geoparquet_version
-        if effective_version is None:
-            effective_version = _detect_version_from_table(table, verbose)
+        # Auto mode: the facade decides from the table's own schema.
+        effective_version = resolve_output_geoparquet_version(
+            geoparquet_version, table=table, verbose=verbose
+        )
 
         # DuckDB registers a `geoarrow.wkb` column as GEOMETRY, and the COPY then
         # writes it as a native Parquet GEOMETRY logical type. That is right for

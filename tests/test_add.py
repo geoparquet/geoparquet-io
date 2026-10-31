@@ -190,16 +190,21 @@ class TestAddCommands:
         assert column_names.count("bbox") == 1
         assert "bbox_1" not in column_names
 
-    def test_add_bbox_without_write_options_still_copies(self, places_test_file, temp_output_file):
-        """The plain form is unchanged: no explicit write option, so still a copy."""
+    def test_add_bbox_on_a_1_0_input_is_rewritten_at_1_1(self, places_test_file, temp_output_file):
+        """No write option, but a copy would keep 1.0 where auto mode writes 1.1.
+
+        Approved change 7 of #1367: ``add bbox`` follows the common version rule
+        like every other command, so the existing column is recomputed and the
+        output declares 1.1 (copies of inputs already at 1.1 stay copies:
+        tests/test_output_version_table.py).
+        """
         runner = CliRunner()
         result = runner.invoke(add, ["bbox", places_test_file, temp_output_file])
         assert result.exit_code == 0, result.output
-        assert "Copied" in result.output
+        assert "Copied" not in result.output
 
-        # A verbatim copy keeps the input's 1.0 version, covering key and all.
         geo = _read_geo_metadata(temp_output_file)
-        assert geo["version"].startswith("1.0"), geo["version"]
+        assert geo["version"] == "1.1.0", geo["version"]
 
     def test_add_bbox_dry_run_previews_the_copy_instead_of_sql(
         self, places_with_covering_file, temp_output_file
@@ -221,8 +226,9 @@ class TestAddCommands:
         """stdin -> file must honour the same contract as file -> file (#798 review).
 
         The input already carries a bbox column gpio did not compute, so the
-        stream is passed through unchanged: no covering may be declared for it,
-        and the input's declared version must survive the copy.
+        stream is passed through rather than recomputed. Its version is the
+        facade's: the 1.0 input writes 1.1 (approved change 7 of #1367), where
+        the writer treats the conventional ``bbox`` column as any 1.1 write does.
         """
         import io
         import logging
@@ -251,9 +257,7 @@ class TestAddCommands:
             add_bbox_column("-", output)
 
         geo = _read_geo_metadata(output)
-        primary = geo["primary_column"]
-        assert "covering" not in geo["columns"][primary], geo["columns"][primary]
-        assert geo["version"].startswith("1.0"), geo["version"]
+        assert geo["version"] == "1.1.0", geo["version"]
 
         # And it must not claim to have added anything.
         assert "not recomputed" in caplog.text
@@ -1238,75 +1242,6 @@ class TestAddBboxMetadataPreservesFileProperties:
             assert "Remote URLs are not supported" in str(exc_info.value), (
                 f"Expected clear error for {url}, got: {exc_info.value}"
             )
-
-
-class TestPassthroughVersion:
-    """Unit tests for `_passthrough_version`'s branches (#798 diff-cover gap).
-
-    A pass-through copy must declare the version the *input* already had, not
-    whatever the streaming writer would default to -- see `_passthrough_version`
-    in geoparquet_io/core/add/bbox.py for the reasoning.
-    """
-
-    def test_explicit_geoparquet_version_wins(self):
-        """An explicitly requested version is returned outright, metadata unread."""
-        from geoparquet_io.core.add.bbox import _passthrough_version
-
-        assert _passthrough_version(None, "1.1") == "1.1"
-
-    def test_no_metadata_returns_none(self):
-        """No file metadata at all: nothing to derive a version from."""
-        from geoparquet_io.core.add.bbox import _passthrough_version
-
-        assert _passthrough_version(None, None) is None
-
-    def test_metadata_without_geo_key_returns_none(self):
-        """Metadata present but missing the 'geo' key: still nothing to derive from."""
-        from geoparquet_io.core.add.bbox import _passthrough_version
-
-        assert _passthrough_version({b"other": b"value"}, None) is None
-
-    def test_unparseable_geo_json_returns_none(self):
-        """Malformed JSON under 'geo' must not raise -- just fall back to None."""
-        from geoparquet_io.core.add.bbox import _passthrough_version
-
-        assert _passthrough_version({b"geo": b"{not valid json"}, None) is None
-
-    def test_geo_metadata_not_a_dict_returns_none(self):
-        """'geo' that parses to something other than an object is not usable."""
-        import json
-
-        from geoparquet_io.core.add.bbox import _passthrough_version
-
-        metadata = {b"geo": json.dumps(["unexpected", "list"]).encode("utf-8")}
-        assert _passthrough_version(metadata, None) is None
-
-    def test_non_string_version_returns_none(self):
-        """A 'version' field that is not a string cannot be parsed further."""
-        import json
-
-        from geoparquet_io.core.add.bbox import _passthrough_version
-
-        metadata = {b"geo": json.dumps({"version": 11}).encode("utf-8")}
-        assert _passthrough_version(metadata, None) is None
-
-    def test_version_without_minor_component_returns_none(self):
-        """A version string with no '<major>.<minor>' shape can't be truncated to one."""
-        import json
-
-        from geoparquet_io.core.add.bbox import _passthrough_version
-
-        metadata = {b"geo": json.dumps({"version": "1"}).encode("utf-8")}
-        assert _passthrough_version(metadata, None) is None
-
-    def test_valid_version_is_truncated_to_major_minor(self):
-        """A well-formed patch version is truncated to its major.minor form."""
-        import json
-
-        from geoparquet_io.core.add.bbox import _passthrough_version
-
-        metadata = {b"geo": json.dumps({"version": "1.1.0"}).encode("utf-8")}
-        assert _passthrough_version(metadata, None) == "1.1"
 
 
 class TestStreamingGeometryColumnFallback:

@@ -22,7 +22,6 @@ from geoparquet_io.core.arrow_geo_metadata import (
     _bbox_column_to_declare,
     _canonicalize_wkb_columns,
     _compute_geometry_types,
-    _detect_version_from_table,
     table_geometry_info,
 )
 from geoparquet_io.core.compression import ResolvedCodec, resolve_codec
@@ -51,6 +50,7 @@ from geoparquet_io.core.geoarrow_encoding import (
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.parquet_writer import (
     apply_output_kv_metadata,
+    resolve_output_geoparquet_version,
     resolve_row_group_rows_for_query,
     resolve_row_group_rows_for_table,
     without_geometry_dictionary,
@@ -335,7 +335,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             )
             return
 
-        version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
+        version_config = GEOPARQUET_VERSIONS[geoparquet_version]
 
         # Check geometry type and prepare SQL
         _, final_sql = _check_geometry_type(con, query, geometry_column, verbose)
@@ -751,12 +751,12 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             self._write_plain_parquet_from_table(table, output_path, codec, batch_size, verbose)
             return
 
-        # Auto-detect version from table schema metadata if not specified
-        effective_version = geoparquet_version
-        if effective_version is None:
-            effective_version = _detect_version_from_table(table, verbose)
+        # Auto mode: the facade decides from the table's own schema.
+        effective_version = resolve_output_geoparquet_version(
+            geoparquet_version, table=table, verbose=verbose
+        )
 
-        version_config = GEOPARQUET_VERSIONS.get(effective_version, GEOPARQUET_VERSIONS["1.1"])
+        version_config = GEOPARQUET_VERSIONS[effective_version]
         metadata_version = version_config["metadata_version"]
 
         # This entry point gets no `geometry_info`, so the table's own schema is

@@ -216,7 +216,11 @@ class TestFixRowGroups:
 
 
 class TestFixBboxRemoval:
-    """Tests for fix_bbox_removal function."""
+    """Tests for fix_bbox_removal function.
+
+    A removal is a repair, so it keeps the input's own version (the facade's
+    preserve policy): the 1.0 places fixture stays 1.0 (#1367 T2b audit).
+    """
 
     def test_removes_bbox_column(self, places_test_file, temp_output_dir):
         """Test removing bbox column from file."""
@@ -240,7 +244,7 @@ class TestFixBboxRemoval:
         # Verify column removed
         result_table = pq.read_table(output_file)
         assert "bbox" not in result_table.column_names
-        assert_places_output_is_sound(output_file, version="1.1", covering=False)
+        assert_places_output_is_sound(output_file, version="1.0", covering=False)
 
     def test_with_verbose(self, places_test_file, temp_output_dir):
         """Test bbox removal with verbose output."""
@@ -257,7 +261,7 @@ class TestFixBboxRemoval:
         )
 
         assert fix_result["success"] is True
-        assert_places_output_is_sound(output_file, version="1.1", covering=False)
+        assert_places_output_is_sound(output_file, version="1.0", covering=False)
 
 
 class TestFixBboxRemovalSqlInjection:
@@ -315,7 +319,7 @@ class TestFixBboxRemovalSqlInjection:
         assert result_cols == ["geometry", "filler"]
         # Escaping the identifier is only half the requirement: the file the
         # rewrite leaves behind still has to be a valid GeoParquet file.
-        assert_places_output_is_sound(out, version="1.1", covering=False)
+        assert_places_output_is_sound(out, version="1.0", covering=False)
 
     def test_bbox_name_with_embedded_quote_is_escaped(self, places_test_file, temp_output_dir):
         """A payload carrying a literal double quote must have it doubled, not
@@ -346,71 +350,95 @@ class TestFixBboxRemovalSqlInjection:
         assert "pwn2" not in result_cols
         assert payload not in result_cols
         assert result_cols == ["geometry"]
-        assert_places_output_is_sound(out, version="1.1", covering=False)
+        assert_places_output_is_sound(out, version="1.0", covering=False)
 
 
-class TestGetGeoparquetVersionFromCheckResults:
-    """Tests for get_geoparquet_version_from_check_results function."""
+class TestPreservedVersionFromCheckResults:
+    """The repair policy fed from check results: ``resolve_output_geoparquet_version(..., preserve_input=True)``."""
 
     def test_v2_detection(self):
         """Test detecting GeoParquet v2."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {"bbox": {"file_type": "geoparquet_v2", "version": "2.0.0"}}
 
-        version = get_geoparquet_version_from_check_results(check_results)
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
+            preserve_input=True,
+        )
 
         assert version == "2.0"
 
     def test_parquet_geo_only_detection(self):
         """Test detecting parquet-geo-only files."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {"bbox": {"file_type": "parquet_geo_only"}}
 
-        version = get_geoparquet_version_from_check_results(check_results)
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
+            preserve_input=True,
+        )
 
         assert version == "parquet-geo-only"
 
     def test_v1_0_detection(self):
         """Test detecting GeoParquet v1.0."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {"bbox": {"file_type": "geoparquet_v1", "version": "1.0.0"}}
 
-        version = get_geoparquet_version_from_check_results(check_results)
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
+            preserve_input=True,
+        )
 
         assert version == "1.0"
 
     def test_v1_1_detection(self):
         """Test detecting GeoParquet v1.1."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {"bbox": {"file_type": "geoparquet_v1", "version": "1.1.0"}}
 
-        version = get_geoparquet_version_from_check_results(check_results)
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
+            preserve_input=True,
+        )
 
         assert version == "1.1"
 
-    def test_unknown_defaults_to_none(self):
-        """Test unknown file type defaults to None."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+    def test_unknown_takes_the_default(self):
+        """A file the check could not type has nothing to preserve: the default."""
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {"bbox": {"file_type": "unknown"}}
 
-        version = get_geoparquet_version_from_check_results(check_results)
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
+            preserve_input=True,
+        )
 
-        assert version is None
+        assert version == "1.1"
 
     def test_missing_bbox_result(self):
-        """Test handling missing bbox result."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+        """No bbox result: nothing to preserve, so the default."""
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {}
 
-        version = get_geoparquet_version_from_check_results(check_results)
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
+            preserve_input=True,
+        )
 
-        assert version is None
+        assert version == "1.1"
 
 
 class TestFixSpatialOrdering:
@@ -702,3 +730,9 @@ class TestRowGroupFixIdempotency:
         assert result["row_status"] != "optimal"
         # Should offer fix
         assert result["fix_available"] is True
+
+
+def _detected(check_results):
+    """The bbox check's file-type answer, in ``detect_geoparquet_file_type``'s shape."""
+    bbox = check_results.get("bbox", {})
+    return {"file_type": bbox.get("file_type"), "geo_version": bbox.get("version")}

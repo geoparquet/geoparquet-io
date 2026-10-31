@@ -19,10 +19,7 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.arrow_geo_metadata import (
-    _detect_version_from_table,
-    table_geometry_info,
-)
+from geoparquet_io.core.arrow_geo_metadata import table_geometry_info
 from geoparquet_io.core.common import compute_geometry_types_via_sql
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
@@ -45,6 +42,7 @@ from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import (
     apply_output_kv_metadata,
     output_schema_metadata,
+    resolve_output_geoparquet_version,
     resolve_row_group_rows_for_query,
     write_arrow_table,
 )
@@ -333,10 +331,10 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                     upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
             return
 
-        # Auto-detect version from table schema metadata if not specified
-        effective_version = geoparquet_version
-        if effective_version is None:
-            effective_version = _detect_version_from_table(table, verbose)
+        # Auto mode: the facade decides from the table's own schema.
+        effective_version = resolve_output_geoparquet_version(
+            geoparquet_version, table=table, verbose=verbose
+        )
 
         con = get_duckdb_connection(load_httpfs=False)
         try:

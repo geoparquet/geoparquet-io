@@ -52,6 +52,7 @@ from geoparquet_io.core.geo_metadata import (
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, info, success, warn
+from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.remote import (
     needs_httpfs,
     remote_write_context,
@@ -663,15 +664,8 @@ def reproject_impl(
         # lines there (#601). Untransformed columns keep theirs.
         drop_edges_columns = _edges_columns_to_drop(read_source, target_crs, geom_col, con)
 
-        # Auto version mode: match convert's contract (todo 040) — preserve the
-        # input's GeoParquet version and upgrade native-geo-only inputs to 2.0
-        # instead of silently stripping native types to 1.1 WKB.
-        if geoparquet_version is None:
-            from geoparquet_io.core.common import resolve_geoparquet_version_from_file
-
-            geoparquet_version = resolve_geoparquet_version_from_file(read_source, verbose)
-            if verbose and geoparquet_version:
-                debug(f"Auto-detected GeoParquet version from input: {geoparquet_version}")
+        # Auto version mode (todo 040): the funnel below decides it from
+        # `input_file=read_source`, through the facade, like every other write.
 
         # Handle in-place overwrite
         is_overwrite = str(out_path) == str(Path(input_parquet).resolve())
@@ -873,10 +867,10 @@ def _reproject_streaming(
             metadata, _ = get_parquet_metadata(working_file, verbose=False)
 
             # Auto version mode: same contract as the file-based path (todo 040).
-            if geoparquet_version is None:
-                from geoparquet_io.core.common import resolve_geoparquet_version_from_file
-
-                geoparquet_version = resolve_geoparquet_version_from_file(working_file, False)
+            # The stream funnel only sees the metadata, so the file is asked here.
+            geoparquet_version = resolve_output_geoparquet_version(
+                geoparquet_version, input_file=working_file, original_metadata=metadata
+            )
 
             # Update metadata with target CRS
             if metadata and b"geo" in metadata:

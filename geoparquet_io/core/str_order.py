@@ -35,9 +35,9 @@ from geoparquet_io.core.geometry_detection import (
 # `sort hilbert` command and this project keeps cross-cutting refactors in their
 # own PR.
 from geoparquet_io.core.hilbert_order import (
+    _advised_output_version,
     _cleanup_temp_file,
     _prepare_working_file,
-    _resolve_output_version,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success, warn
 from geoparquet_io.core.parquet_writer import (
@@ -274,7 +274,7 @@ def str_order(
     row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
     tile_size = DEFAULT_STR_TILE_SIZE if row_group_rows is None else row_group_rows
     _validate_tile_size(tile_size)
-    effective_version = _resolve_output_version(input_parquet, geoparquet_version, verbose, profile)
+    effective_version = _advised_output_version(input_parquet, geoparquet_version, verbose, profile)
     if effective_version == "1.1":
         warn(
             "STR sorting to GeoParquet v1.1 provides no spatial filter pushdown benefit. "

@@ -173,8 +173,6 @@ def test_the_residue_is_the_named_stage_c_list():
         "compute_geometry_types_via_sql",
         "get_dataset_bounds",
         "get_parquet_metadata",
-        "resolve_geoparquet_version_from_file",
-        "resolve_geoparquet_version_from_table",
         "should_skip_bbox",
         "split_zm_suffix",
         "zm_suffix_sql",
@@ -190,17 +188,16 @@ PRIVATE_NAMES_CEILING = frozenset(
         "_DUCKDB_TO_SPEC_TYPE",
         "_DUCKDB_ZMFLAG_TO_GEOARROW_DIM",
         "_build_bounds_query",
-        "_declares_geoarrow_encoding",
-        "_resolve_auto_version",
     }
 )
 
 #: Sizes measured on the tree G5 landed on: 789 lines (778 after T2a, 772 after
-#: T2e), 15 module-level functions and classes. These are pins, not ceilings: growth fails, and so
+#: T2e, 704 after T2b moved version resolution to parquet_writer), 15
+#: module-level functions and classes (11 after T2b). These are pins, not ceilings: growth fails, and so
 #: does shrinking until the number here is lowered to match, so slack left by a
 #: deletion never becomes a budget for the next helper (T0b audit).
-LINE_PIN = 772
-DEF_PIN = 15
+LINE_PIN = 704
+DEF_PIN = 11
 
 
 def _private_names(common: Path = COMMON) -> set[str]:

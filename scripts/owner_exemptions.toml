@@ -282,6 +282,14 @@ reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 "is_geographic*" = ["geoparquet_io/core/crs_utils.py"]
 "*crs_equal*" = ["geoparquet_io/core/crs_utils.py"]
 "resolve_*version*" = ["geoparquet_io/core/parquet_writer.py"]
+# T2b audit: the rest of the output-version family. `*_geoparquet_version*`
+# rather than `*geoparquet_version*`: the bare name is the public
+# `Table.geoparquet_version` property and `geoparquet_version_option` is the CLI
+# flag, neither a decision, and the rules allow no new exemption for them.
+"*_geoparquet_version*" = ["geoparquet_io/core/parquet_writer.py"]
+"version_for_*" = ["geoparquet_io/core/parquet_writer.py"]
+"_version_of_*" = ["geoparquet_io/core/parquet_writer.py"]
+"*version_upgrade*" = ["geoparquet_io/core/parquet_writer.py"]
 # Covering *builders* only. The wider *covering* also caught 19 checks,
 # predicates, lookups and repairs that read a covering and are not copies of
 # build_bbox_covering (T0b audit), so the family is narrowed to the builder shapes.
@@ -376,25 +384,9 @@ path = "geoparquet_io/core/arrow_geo_metadata.py"
 name = "_compute_bbox_from_data"
 reason = "stats twin of geo_metadata's; T3b"
 [[G2.exemptions]]
-path = "geoparquet_io/core/arrow_geo_metadata.py"
-name = "_detect_version_from_table"
-reason = "version resolver copy (approved change 10); T2b"
-[[G2.exemptions]]
 path = "geoparquet_io/core/carto.py"
 name = "_fetch_with_retry"
 reason = "permanent: caller-specific classify wrapper over run_with_retry, accepted by the T4a audit"
-[[G2.exemptions]]
-path = "geoparquet_io/core/common.py"
-name = "_resolve_auto_version"
-reason = "version resolver copy; T2b"
-[[G2.exemptions]]
-path = "geoparquet_io/core/common.py"
-name = "resolve_geoparquet_version_from_file"
-reason = "version resolver copy; T2b"
-[[G2.exemptions]]
-path = "geoparquet_io/core/common.py"
-name = "resolve_geoparquet_version_from_table"
-reason = "version resolver copy; T2b"
 [[G2.exemptions]]
 path = "geoparquet_io/core/convert.py"
 name = "_suffixed_to_unique"
@@ -415,10 +407,6 @@ reason = "parse_bbox copy; T5c"
 path = "geoparquet_io/core/format_writers.py"
 name = "_normalize_bbox"
 reason = "parse_bbox copy; T5c"
-[[G2.exemptions]]
-path = "geoparquet_io/core/hilbert_order.py"
-name = "_resolve_output_version"
-reason = "re-derives the DEFAULT_GEOPARQUET_VERSION fallback beside the owner call; T2b"
 [[G2.exemptions]]
 path = "geoparquet_io/core/inspect_utils.py"
 name = "_crs_are_equivalent"
@@ -447,14 +435,6 @@ reason = "parse_bbox copy; T5c"
 path = "geoparquet_io/core/process/aggregate/common.py"
 name = "_unique_name"
 reason = "copy of column_selection's; T5a"
-[[G2.exemptions]]
-path = "geoparquet_io/core/streaming.py"
-name = "extract_version_from_metadata"
-reason = "version resolver copy; T2b"
-[[G2.exemptions]]
-path = "geoparquet_io/core/streaming.py"
-name = "detect_version_for_output"
-reason = "version resolver copy; T2b"
 [[G2.exemptions]]
 path = "geoparquet_io/core/validate.py"
 name = "_crs_equals"

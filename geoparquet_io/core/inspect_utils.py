@@ -50,6 +50,7 @@ from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.metadata_utils import (
     extract_bbox_from_row_group_stats,
 )
+from geoparquet_io.core.parquet_writer import declared_geoparquet_version
 from geoparquet_io.core.remote import is_remote_url, needs_httpfs
 from geoparquet_io.core.sizing import format_size
 
@@ -343,7 +344,7 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
     # Extract GeoParquet metadata
     geoparquet_info = {}
     if geo_meta:
-        version = geo_meta.get("version")
+        version = declared_geoparquet_version(geo_meta, default=None)
         primary_column = geo_meta.get("primary_column", "geometry")
         columns_meta = geo_meta.get("columns", {})
 
@@ -943,7 +944,7 @@ def _print_geo_metadata_section(console: Console, geo_info: dict[str, Any]) -> N
 
     if geo_info["has_geo_metadata"]:
         if geo_info.get("version"):
-            console.print(f"GeoParquet Version: [cyan]{geo_info['version']}[/cyan]")
+            console.print(f"GeoParquet Version: [cyan]{geo_info.get('version')}[/cyan]")
         _print_geo_info(console, geo_info)
     elif parquet_type in ("Geometry", "Geography"):
         console.print("[dim]No GeoParquet metadata (using Parquet geo type)[/dim]")
@@ -1333,7 +1334,7 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
 
         # Track GeoParquet version
         if geo_info.get("version"):
-            geoparquet_versions.add(geo_info["version"])
+            geoparquet_versions.add(geo_info.get("version"))
 
         # Merge bbox. A GeoParquet bbox interleaves its dimensions -- the 6- and
         # 8-element forms read [xmin, ymin, zmin, ...], so indices 2 and 3 are
@@ -1686,7 +1687,7 @@ def format_markdown_output(
 
     if geo_info["has_geo_metadata"]:
         if geo_info.get("version"):
-            lines.append(f"- **GeoParquet Version:** {geo_info['version']}")
+            lines.append(f"- **GeoParquet Version:** {geo_info.get('version')}")
 
         crs_display = _format_crs_for_display(geo_info["crs"])
         lines.append(f"- **CRS:** {crs_display}")

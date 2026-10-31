@@ -310,8 +310,8 @@ def test_list_shaped_block_reads_absent_and_warns_on_the_write_path_readers(tmp_
     """The four write/transform readers of the fifth pass read sanitized: a
     list-shaped block warns once with the path and decides as absent."""
     from geoparquet_io.core.add.bbox import _explicitly_named_bbox_struct
-    from geoparquet_io.core.common import _declares_geoarrow_encoding
     from geoparquet_io.core.derive_geo_from_file import _secondary_geometry_names
+    from geoparquet_io.core.parquet_writer import _declares_geoarrow_encoding
     from geoparquet_io.core.reproject import _warn_carried_bbox_structs
 
     path = _parquet_with_list_block(tmp_path)

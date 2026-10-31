@@ -505,6 +505,8 @@
     "WRITER_VECTOR_ROWS",
     "align_to_writer_vector",
     "apply_output_kv_metadata",
+    "carried_geoparquet_version",
+    "declared_geoparquet_version",
     "dictionary_columns",
     "estimate_row_size",
     "geoparquet_copy_options",
@@ -517,6 +519,7 @@
     "resolve_row_group_rows_for_rewrite",
     "resolve_row_group_rows_for_table",
     "without_geometry_dictionary",
+    "writable_geoparquet_version",
     "write_arrow_table"
   ],
   "geoparquet_io.core.remote": [

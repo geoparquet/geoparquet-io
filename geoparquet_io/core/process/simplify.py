@@ -521,7 +521,7 @@ def simplify_table(
 #: Output versions the streaming writer can produce faithfully: plain WKB
 #: columns plus a ``geo`` footer key. 2.0/native outputs convert the column
 #: to Parquet's geometry logical type, which only the in-memory funnel does.
-_STREAMABLE_VERSIONS = (None, "1.0", "1.1")
+_STREAMABLE_VERSIONS = ("1.0", "1.1")
 
 #: Geometry-type names by shapely type id, spelled as the GeoParquet spec
 #: (and the funnel's geoarrow-based computation) spells them.

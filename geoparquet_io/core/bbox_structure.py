@@ -24,7 +24,6 @@ from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.duckdb_utils import free_column_name
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.geo_metadata import (
-    DEFAULT_GEOPARQUET_VERSION,
     SELF_EVIDENT_BBOX_COLUMN,
     _bbox_claimed_by_another_column,
     _declared_bbox_column,
@@ -383,7 +382,7 @@ def resolve_bbox_name(column_names, geoparquet_version, requested="bbox", announ
     if bbox_name == requested or not announce:
         return bbox_name
     taken = next(str(name) for name in column_names if str(name).lower() == requested.lower())
-    if covering_supported(geoparquet_version or DEFAULT_GEOPARQUET_VERSION):
+    if covering_supported(geoparquet_version):
         outcome = "and declaring the covering over it"
     else:
         outcome = f"(GeoParquet {geoparquet_version} has no covering metadata to declare it)"

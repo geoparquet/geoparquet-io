@@ -58,6 +58,7 @@ from geoparquet_io.core.geo_metadata import (
     BBOX_COVERING_FIELD_ORDERS,
     GEOARROW_ENCODINGS,
     GEOGRAPHY_EDGE_ALGORITHMS,
+    GEOPARQUET_VERSIONS,
     covering_lacks_bbox,
     is_covering_path,
     read_raw_geo,
@@ -76,6 +77,7 @@ from geoparquet_io.core.parquet_schema import (
     schema_direct_children,
     schema_entry_is_group,
 )
+from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.remote import is_remote_url, needs_httpfs
 
 
@@ -4342,14 +4344,16 @@ def _determine_version(file_type_info: dict) -> str:
     file_type = file_type_info.get("file_type", "unknown")
     geo_version = file_type_info.get("geo_version")
 
-    if file_type == "parquet_geo_only":
-        return "parquet-geo-only"
-    elif file_type == "geoparquet_v1":
+    if file_type == "geoparquet_v1":
         return geo_version or "1.x"
-    elif file_type == "geoparquet_v2":
-        return geo_version or "2.0"
-    else:
-        return "unknown"
+    if file_type == "geoparquet_v2" and geo_version:
+        return geo_version
+    if file_type in ("geoparquet_v2", "parquet_geo_only"):
+        # The label is the version a repair would keep: the facade's preserve policy.
+        return resolve_output_geoparquet_version(
+            None, file_type=file_type_info, preserve_input=True
+        )
+    return "unknown"
 
 
 def _versions_match(detected: str, target: str, file_type_info: dict) -> bool:
@@ -4534,7 +4538,9 @@ def _run_geoparquet_checks(
 
     # A missing version is reported by _check_version_present above; guard the
     # string comparisons below against None so validation never crashes on it.
-    geo_version = file_type_info.get("geo_version") or "1.0.0"
+    geo_version = (
+        file_type_info.get("geo_version") or GEOPARQUET_VERSIONS["1.0"]["metadata_version"]
+    )
 
     # Column metadata checks for each geometry column
     for col_name, col_meta in columns.items():

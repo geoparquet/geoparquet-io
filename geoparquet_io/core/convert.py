@@ -66,6 +66,7 @@ from geoparquet_io.core.geometry_repair import (
     repair_query_geometry,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
+from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
     get_remote_error_hint,
@@ -3287,14 +3288,9 @@ def convert_to_geoparquet(
         # Auto version mode: preserve a parquet input's GeoParquet version
         # (and upgrade native-geo-only inputs to 2.0) instead of silently
         # falling back to the 1.1 default and stripping native types (#587).
-        if geoparquet_version is None and is_parquet:
-            from geoparquet_io.core.common import resolve_geoparquet_version_from_file
-
-            geoparquet_version = resolve_geoparquet_version_from_file(input_file, verbose)
-            if geoparquet_version:
-                debug(f"Auto-detected GeoParquet version from input: {geoparquet_version}")
-            else:
-                debug("Could not detect input GeoParquet version; using writer default")
+        geoparquet_version = resolve_output_geoparquet_version(
+            geoparquet_version, input_file=input_file if is_parquet else None, verbose=verbose
+        )
 
         # A plain Parquet file with WKT or lat/lon columns converts like a CSV
         # would: same detection, same query, same user-supplied CRS. The

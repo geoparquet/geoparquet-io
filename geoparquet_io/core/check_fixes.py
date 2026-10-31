@@ -23,7 +23,6 @@ from geoparquet_io.core.duckdb_utils import (
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import GeoParquetError, RemoteAccessError
-from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import is_same_file_path, resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     bbox_column_to_declare,
@@ -42,6 +41,7 @@ from geoparquet_io.core.parquet_footer import (
 )
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
+    resolve_output_geoparquet_version,
     resolve_row_group_rows_for_rewrite,
 )
 from geoparquet_io.core.remote import (
@@ -454,16 +454,11 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
 
     raw_url = resolve_file_url(parquet_file, verbose)
 
-    # Detect file type to determine output version
-    file_type_info = detect_geoparquet_file_type(parquet_file, verbose)
-
-    # Determine GeoParquet version for output
-    if file_type_info["file_type"] == "parquet_geo_only":
-        gp_version = "parquet-geo-only"
-    elif file_type_info["geo_version"] and file_type_info["geo_version"].startswith("2."):
-        gp_version = "2.0"
-    else:
-        gp_version = "1.1"  # Fallback, shouldn't happen for removal
+    # A repair keeps the file's own version (2.0, or no geo key for a
+    # native-geo-only file): the facade's preserve policy.
+    gp_version = resolve_output_geoparquet_version(
+        None, input_file=parquet_file, preserve_input=True, verbose=verbose
+    )
 
     # Select all columns EXCEPT the bbox column. The column name is read from
     # the file's own schema (see ``_detect_bbox_column_from_table``), so it is
@@ -621,35 +616,6 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geopa
     )
 
     return {"fix_applied": "Optimized row groups", "success": True}
-
-
-def get_geoparquet_version_from_check_results(check_results):
-    """Determine the GeoParquet version to use based on check results.
-
-    This helper ensures we preserve the original file's version when fixing.
-
-    Args:
-        check_results: Dict containing results from check functions
-
-    Returns:
-        str: GeoParquet version string (1.0, 1.1, 2.0, parquet-geo-only) or None for default
-    """
-    bbox_result = check_results.get("bbox", {})
-    file_type = bbox_result.get("file_type", "unknown")
-
-    if file_type == "geoparquet_v2":
-        return "2.0"
-    elif file_type == "parquet_geo_only":
-        return "parquet-geo-only"
-    elif file_type == "geoparquet_v1":
-        # Check the specific version from metadata
-        version = bbox_result.get("version", "1.1.0")
-        if version and version.startswith("1.0"):
-            return "1.0"
-        return "1.1"
-    else:
-        # Unknown or no geo metadata - default to 1.1
-        return None
 
 
 def _apply_covering_fix(check_results, current_file, temp_files, verbose, profile):
@@ -857,13 +823,21 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
     current_file = parquet_file
     temp_files = []
 
-    geoparquet_version = get_geoparquet_version_from_check_results(check_results)
+    # A repair keeps the input's own version (the facade's preserve policy),
+    # read off the bbox check, which already detected the file type.
+    bbox_result = check_results.get("bbox", {})
+    geoparquet_version = resolve_output_geoparquet_version(
+        None,
+        file_type={
+            "file_type": bbox_result.get("file_type"),
+            "geo_version": bbox_result.get("version"),
+        },
+        preserve_input=True,
+    )
     if verbose and geoparquet_version:
         debug(f"Preserving GeoParquet version: {geoparquet_version}")
 
     try:
-        bbox_result = check_results.get("bbox", {})
-
         # Step 0: Drop a covering the spec does not allow (#1173)
         current_file, fixes = _apply_covering_fix(
             check_results, current_file, temp_files, verbose, profile
