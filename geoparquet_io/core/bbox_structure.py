@@ -496,7 +496,7 @@ def get_bbox_advice(
     return result
 
 
-def dataset_bounds(parquet_file, geometry_column=None, verbose=False):
+def dataset_bounds(parquet_file, geometry_column=None, verbose=False, *, advise=True):
     """``(xmin, ymin, xmax, ymax)`` of a Parquet file's geometry, or None.
 
     Reads the primary geometry's bbox covering column when the file has one
@@ -505,6 +505,9 @@ def dataset_bounds(parquet_file, geometry_column=None, verbose=False):
     and its degenerate-geometry policy. None for nothing to measure (no rows,
     every geometry NULL or EMPTY) or an unreadable file; an infinite coordinate
     raises :class:`~geoparquet_io.core.exceptions.GeometryError`.
+
+    ``advise=False`` drops the "no bbox column, add one" advice, for a caller
+    whose bounds only feed its own diagnostics.
     """
     from geoparquet_io.core.exceptions import GeometryError
     from geoparquet_io.core.file_utils import resolve_file_url
@@ -518,7 +521,7 @@ def dataset_bounds(parquet_file, geometry_column=None, verbose=False):
     bbox_column = bbox_info["bbox_column_name"] if bbox_info["has_bbox_column"] else None
     if bbox_column:
         debug(f"Using bbox column '{bbox_column}' for fast bounds calculation")
-    else:
+    elif advise:
         warn(
             f"⚠️  No bbox column found - calculating bounds from geometry column "
             f"'{geometry_column}' (this may be slow)"

@@ -39,7 +39,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import has_glob_pattern, resolve_file_url
-from geoparquet_io.core.geo_metadata import bounds_of
+from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success, warn
@@ -858,11 +858,16 @@ def _result_geo_bbox(con, result) -> list[float] | None:
     min/max over that reads as global coverage. Best-effort: a bbox is metadata,
     so a failure here leaves it to the writer rather than losing the output.
     """
+    # Measured on the caller's connection, under its memory settings.
+    con.register("__agg_result", result)
     try:
-        return bounds_of(result, "geometry", antimeridian=True)
+        source = QuerySource(con, "SELECT geometry FROM __agg_result")
+        return bounds_of(source, "geometry", antimeridian=True)
     except duckdb.Error as exc:  # pragma: no cover - defensive
         debug(f"Could not compute an antimeridian-aware bbox: {exc}")
         return None
+    finally:
+        con.unregister("__agg_result")
 
 
 def aggregate_grid_file(

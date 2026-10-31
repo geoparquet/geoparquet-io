@@ -257,16 +257,16 @@ def hilbert_order_table(
             con.execute(f"SELECT COUNT(*) FROM {source_ref} WHERE __g IS NULL OR ST_IsEmpty(__g)")
         )
         bbox = bounds_of(QuerySource(con, f"SELECT __g FROM {source_ref}"), "__g")
-        xmin, ymin, xmax, ymax = bbox if bbox else (None, None, None, None)
 
         if empty_count > 0:
             warn(
                 f"Found {empty_count} empty/null geometries. "
                 "These will be placed at the end of the sorted output."
             )
-        if any(v is None for v in (xmin, ymin, xmax, ymax)):
+        if bbox is None:
             warn("All geometries are empty or null. Returning table without Hilbert ordering.")
             return table
+        xmin, ymin, xmax, ymax = bbox
 
         # Sorted row indices: non-empty geometries in Hilbert order, then the
         # empty/NULL rows (a NULL key, sorted last); the index breaks every tie.
@@ -474,7 +474,7 @@ def _hilbert_order_streaming(
         bounds_result = bounds_of(QuerySource(con, f"SELECT * FROM {source}"), geom_col)
 
         # If all geometries are empty/null, pass through unchanged
-        if not bounds_result or any(v is None for v in bounds_result):
+        if bounds_result is None:
             warn("All geometries are empty or null. Writing file without Hilbert ordering.")
             # Pass through data unchanged
             passthrough_query = f"SELECT * FROM {source}"

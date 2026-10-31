@@ -189,29 +189,12 @@ class TestSkipInvalidOrdering:
 
 
 class TestNonFiniteBounds:
-    """A non-finite envelope must fall back to an unordered query (#1157).
+    """A non-finite coordinate never reaches ``ST_MakeEnvelope`` (#1157).
 
-    ``POINT(1e400 1)`` parses to an infinite coordinate, so the dataset bounds
-    come back as ``inf``; interpolated as a Python float that renders as the
-    bare token ``inf`` inside ``ST_MakeEnvelope`` and fails binding. (The
-    later geo-stats pass still cannot digest such a geometry — a separate,
-    pre-existing failure — so the guard is tested at the query level.)
+    ``POINT(1e400 1)`` parses to an infinite coordinate. The bounds owner
+    refuses it where it is measured (#1165), so convert's own non-finite
+    fallback is gone; only "nothing to measure" falls back to unordered.
     """
-
-    def test_nonfinite_bounds_warn_and_are_discarded(self, caplog):
-        import logging
-
-        from geoparquet_io.core.convert import _usable_bounds
-
-        with caplog.at_level(logging.WARNING):
-            assert _usable_bounds((1.0, 1.0, float("inf"), 5.0)) is None
-        # The no-bounds warning ends the same way; name the non-finite one.
-        assert "NaN or infinite" in caplog.text
-
-        caplog.clear()
-        with caplog.at_level(logging.WARNING):
-            assert _usable_bounds((float("nan"), 1.0, 5.0, 5.0)) is None
-        assert "NaN or infinite" in caplog.text
 
     def test_finite_bounds_pass_through_silently(self, caplog):
         import logging

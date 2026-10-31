@@ -20,7 +20,7 @@ from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.duckdb_utils import fetch_one, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
-from geoparquet_io.core.geo_metadata import bounds_of
+from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.logging_config import info as log_info
 from geoparquet_io.core.partition.auto_resolution import _register_quadkey_udf
@@ -226,16 +226,21 @@ def _overview_geo_bbox(con, table: pa.Table, info: AggregateInfo) -> list[float]
     A grid rollup regenerates parent geometry through the same seam-repairing
     builder the aggregate uses, so a parent cell can be a MultiPolygon cut at
     the antimeridian and needs the same bbox treatment (see
-    ``geo_metadata.bounds_of(..., antimeridian=True)``). Best-effort: a bbox is metadata, so a failure
-    leaves it to the writer rather than losing the level.
+    ``geo_metadata.bounds_of(..., antimeridian=True)``). Best-effort: a bbox is
+    metadata, so a failure leaves it to the writer rather than losing the level.
     """
     if info.out_geometry == "none":
         return None
+    # Measured on the caller's connection, under its memory settings.
+    con.register("__overview_result", table)
     try:
-        return bounds_of(table, "geometry", antimeridian=True)
+        source = QuerySource(con, "SELECT geometry FROM __overview_result")
+        return bounds_of(source, "geometry", antimeridian=True)
     except duckdb.Error as exc:  # pragma: no cover - defensive
         debug(f"Could not compute an antimeridian-aware bbox: {exc}")
         return None
+    finally:
+        con.unregister("__overview_result")
 
 
 def create_overviews(

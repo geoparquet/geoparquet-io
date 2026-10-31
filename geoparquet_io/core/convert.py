@@ -2,7 +2,6 @@
 
 import codecs
 import gc
-import math
 import os
 import re
 import time
@@ -1654,27 +1653,16 @@ _NO_BOUNDS_WARNING = (
     "writing without Hilbert ordering."
 )
 
-#: Warned when the envelope exists but cannot be rendered into SQL (#1157): a
-#: NaN/inf bound interpolated as a Python float becomes the bare token
-#: ``nan``/``inf`` inside ``ST_MakeEnvelope`` and fails binding.
-_NONFINITE_BOUNDS_WARNING = (
-    "Dataset bounds contain a NaN or infinite coordinate; writing without Hilbert ordering."
-)
-
 
 def _usable_bounds(bounds):
-    """``bounds`` when Hilbert ordering can use them, else None with a warning.
+    """``bounds``, or None with a warning when there was nothing to measure (#649).
 
-    None means there was nothing to measure (#649); a non-finite value would
-    fail binding once interpolated into ``ST_MakeEnvelope`` (#1157). Either
-    way the caller falls back to an unordered write.
+    The caller then falls back to an unordered write. A non-finite bound never
+    arrives: the bounds owner refuses an infinite coordinate and skips NaN
+    (EMPTY) geometries (#1157, #1165).
     """
     if bounds is None:
         warn(_NO_BOUNDS_WARNING)
-        return None
-    if not all(math.isfinite(v) for v in bounds):
-        warn(_NONFINITE_BOUNDS_WARNING)
-        return None
     return bounds
 
 

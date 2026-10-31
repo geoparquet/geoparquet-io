@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.bbox_structure import check_bbox_structure, dataset_bounds
 from geoparquet_io.core.column_selection import (
     reject_blank_column_entries,
     split_column_list,
@@ -56,7 +56,6 @@ from geoparquet_io.core.file_utils import (
 )
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
-    bounds_of,
     carried_geometry_column,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
@@ -184,13 +183,8 @@ def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | No
 
 
 def _get_data_bounds(input_parquet: str, geometry_col: str) -> tuple | None:
-    """Actual data bounds of the file, from the bounds owner; None if unmeasurable."""
-    try:
-        bbox = bounds_of(input_parquet, geometry_col)
-    except Exception:
-        # Bounds extraction is optional - used only for warning messages
-        return None
-    return tuple(bbox) if bbox else None
+    """The file's data bounds through the one file entry point (covering first), or None."""
+    return dataset_bounds(input_parquet, geometry_col, advise=False)
 
 
 def _warn_if_crs_mismatch(

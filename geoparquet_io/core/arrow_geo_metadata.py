@@ -34,8 +34,8 @@ from geoparquet_io.core.geo_metadata import (
     _bbox_claimed_by_another_column,
     _self_evident_bbox_column,
     bbox_column_to_declare,
-    bounds_of,
     create_geo_metadata,
+    geometry_stats_of,
     geometry_types_of,
     sanitized_carried_geo,
     strip_absent_covering,
@@ -768,13 +768,19 @@ def _apply_geoparquet_metadata(
         return _strip_geo_metadata_key(table, verbose)
 
     # Stats are read off the written data, so they are filled in after step 2.
+    # One owner call measures whatever is missing, in one pass when both are.
     col_meta = geo_meta["columns"][geometry_column]
-    if "geometry_types" not in col_meta:
-        col_meta["geometry_types"] = geometry_types_of(table, geometry_column, verbose=verbose)
-
-    computed_bbox = geo_bbox or bounds_of(table, geometry_column, verbose=verbose)
-    if computed_bbox:
-        col_meta["bbox"] = computed_bbox
+    need_types = "geometry_types" not in col_meta
+    if geo_bbox:
+        if need_types:
+            col_meta["geometry_types"] = geometry_types_of(table, geometry_column, verbose=verbose)
+        col_meta["bbox"] = geo_bbox
+    else:
+        stats = geometry_stats_of(table, geometry_column, verbose=verbose)
+        if need_types:
+            col_meta["geometry_types"] = stats.geometry_types
+        if stats.bbox:
+            col_meta["bbox"] = stats.bbox
 
     return _assemble_and_apply_geo_metadata(table, geo_meta, metadata_version, verbose)
 
