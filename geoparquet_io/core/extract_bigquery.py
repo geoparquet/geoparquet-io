@@ -41,6 +41,7 @@ from geoparquet_io.core.logging_config import (
     warn,
 )
 from geoparquet_io.core.memory_limits import bound_open_connection
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.write_funnels import write_geoparquet_table, write_plain_parquet_table
 
 # Regex patterns for GCP resource validation
@@ -1356,14 +1357,9 @@ def extract_bigquery(
         limit=limit,
         show_sql=show_sql,
         output_parquet=output_parquet,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        geoparquet_version=geoparquet_version,
+        write=WriteOptions.pick(locals()),
         verbose=verbose,
         repair_geometry=repair_geometry,
-        memory_limit=memory_limit,
     )
 
 
@@ -1435,14 +1431,9 @@ def _execute_bigquery_extraction(
     limit: int | None,
     show_sql: bool,
     output_parquet: str | None,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    geoparquet_version: str | None,
+    write: WriteOptions,
     verbose: bool,
     repair_geometry: bool = True,
-    memory_limit: str | None = None,
 ) -> pa.Table | None:
     """Execute the BigQuery extraction with the given parameters."""
     debug("Connecting to BigQuery...")
@@ -1453,8 +1444,8 @@ def _execute_bigquery_extraction(
         # The BigQuery scan is what actually consumes memory here (the result is
         # materialised as an Arrow table before the PyArrow write), so the
         # user's limit -- and the thread cap it affords -- bound this connection.
-        if memory_limit is not None:
-            bound_open_connection(con, memory_limit, verbose=True)
+        if write.memory_limit is not None:
+            bound_open_connection(con, write.memory_limit, verbose=True)
 
         # --sql is its own relation. Building it once here means every step
         # below -- the DESCRIBE, the geometry detection, the read -- is
@@ -1575,13 +1566,9 @@ def _execute_bigquery_extraction(
                     result,
                     output_parquet,
                     geometry_column=final_geom_col,
-                    compression=compression,
-                    compression_level=compression_level,
-                    row_group_size_mb=row_group_size_mb,
-                    row_group_rows=row_group_rows,
-                    geoparquet_version=geoparquet_version,
                     verbose=verbose,
                     edges=final_edges,
+                    **write.funnel_kwargs(exclude=("memory_limit",)),
                 )
             else:
                 # No geometry: plain Parquet through the geometry-free funnel,
@@ -1594,11 +1581,8 @@ def _execute_bigquery_extraction(
                 write_plain_parquet_table(
                     result,
                     output_parquet,
-                    compression=compression,
-                    compression_level=compression_level,
-                    row_group_size_mb=row_group_size_mb,
-                    row_group_rows=row_group_rows,
                     verbose=verbose,
+                    **write.funnel_kwargs(exclude=("memory_limit", "geoparquet_version")),
                 )
 
             success(f"Extracted {row_count:,} rows to {output_parquet}")

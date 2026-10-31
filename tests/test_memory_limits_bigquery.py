@@ -16,6 +16,7 @@ import pytest
 
 from geoparquet_io.core import extract_bigquery
 from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.parquet_writer import WriteOptions
 
 
 class _StopAfterLimits(Exception):
@@ -63,13 +64,8 @@ def _run(memory_limit):
             limit=None,
             show_sql=False,
             output_parquet=None,
-            compression="ZSTD",
-            compression_level=None,
-            row_group_size_mb=None,
-            row_group_rows=None,
-            geoparquet_version=None,
+            write=WriteOptions(compression="ZSTD", memory_limit=memory_limit),
             verbose=False,
-            memory_limit=memory_limit,
         )
 
 

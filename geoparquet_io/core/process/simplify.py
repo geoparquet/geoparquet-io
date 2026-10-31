@@ -40,6 +40,7 @@ from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_mat
 from geoparquet_io.core.logging_config import debug, info, warn
 from geoparquet_io.core.optional_deps import load_module, require_coarsen
 from geoparquet_io.core.parquet_writer import (
+    WriteOptions,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
     without_geometry_dictionary,
@@ -552,6 +553,9 @@ def _footer_kv_via_funnel(
     geoparquet_version: str | None,
     compression: str | None,
     compression_level: int | None,
+    types: set,
+    bbox: list,
+    write: WriteOptions,
 ) -> dict[str, str]:
     """The streamed file's footer metadata, produced by the real funnel.
 
@@ -590,9 +594,9 @@ def _footer_kv_via_funnel(
             empty,
             tmp_path,
             geometry_column=geom_col,
-            compression=compression,
-            compression_level=compression_level,
-            geoparquet_version=geoparquet_version,
+            compression=write.compression,
+            compression_level=write.compression_level,
+            geoparquet_version=write.geoparquet_version,
         )
         footer = pq.ParquetFile(tmp_path).schema_arrow.metadata or {}
     finally:
@@ -608,10 +612,7 @@ def _simplify_file_streaming(
     preserve_topology: bool,
     threads: int | None,
     geom_col: str,
-    compression: str | None,
-    compression_level: int | None,
-    row_group_rows: int | None,
-    geoparquet_version: str | None,
+    write: WriteOptions,
     drop_empty: bool,
     simplify_crs: str | None,
     verbose: bool,
@@ -628,7 +629,7 @@ def _simplify_file_streaming(
         schema = pa.schema(
             [f for f in schema if f.name not in drop_columns], metadata=schema.metadata
         )
-    rows = resolve_row_group_rows(row_group_rows, None)
+    rows = resolve_row_group_rows(write.row_group_rows, None)
     writer_schema = schema.with_metadata(None)
     batch_stats: list[GeometryStats] = []
     # The output keeps the input's CRS, which decides how the batch extents fold.
@@ -658,7 +659,7 @@ def _simplify_file_streaming(
         actual_output,
         is_remote,
     ):
-        writer_kwargs = _rewrite_writer_kwargs(compression, compression_level)
+        writer_kwargs = _rewrite_writer_kwargs(write.compression, write.compression_level)
         # A local write streams into a pid-scoped sibling and is published by
         # os.replace only once the footer is complete: pyarrow's writer
         # finalizes a readable file even when the loop raises, and a mid-run
@@ -716,6 +717,9 @@ def _simplify_file_streaming(
                         geoparquet_version,
                         compression,
                         compression_level,
+                        types,
+                        bbox,
+                        write,
                     )
                 )
             if not is_remote:
@@ -736,24 +740,13 @@ def _simplify_file_in_memory(
     input_parquet: str,
     output_parquet: str,
     tolerance: float,
+    write: WriteOptions,
     drop_columns: list[str] | None = None,
     **kwargs,
 ) -> None:
     table = pq.read_table(input_parquet)
     if drop_columns:
         table = table.drop_columns(drop_columns)
-    write_args = {
-        k: kwargs[k]
-        for k in (
-            "geometry_column",
-            "compression",
-            "compression_level",
-            "row_group_size_mb",
-            "row_group_rows",
-            "geoparquet_version",
-            "verbose",
-        )
-    }
     result = simplify_table(
         table,
         tolerance,
@@ -766,7 +759,13 @@ def _simplify_file_in_memory(
         simplify_crs=kwargs["simplify_crs"],
         verbose=kwargs["verbose"],
     )
-    write_geoparquet_table(result, output_parquet, **write_args)
+    write_geoparquet_table(
+        result,
+        output_parquet,
+        geometry_column=kwargs["geometry_column"],
+        verbose=kwargs["verbose"],
+        **write.funnel_kwargs(exclude=("memory_limit",)),
+    )
 
 
 def simplify_file(
@@ -814,27 +813,8 @@ def simplify_file(
     # streaming writer would otherwise inherit pyarrow's default of 1 and the
     # funnel the global 15, from one unset argument (#1299).
     compression_level = resolve_process_compression_level(compression, compression_level)
-    if refresh_metrics:
-        _simplify_then_refresh_metrics(
-            input_parquet,
-            output_parquet,
-            tolerance,
-            coverage=coverage,
-            preserve_topology=preserve_topology,
-            simplify_boundary=simplify_boundary,
-            threads=threads,
-            geometry_column=geometry_column,
-            drop_empty=drop_empty,
-            simplify_crs=simplify_crs,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            geoparquet_version=geoparquet_version,
-            verbose=verbose,
-        )
-        return
-    kwargs = {
+    write = WriteOptions.pick(locals())
+    options = {
         "coverage": coverage,
         "preserve_topology": preserve_topology,
         "simplify_boundary": simplify_boundary,
@@ -842,21 +822,38 @@ def simplify_file(
         "geometry_column": geometry_column,
         "drop_empty": drop_empty,
         "simplify_crs": simplify_crs,
-        "compression": compression,
-        "compression_level": compression_level,
-        "row_group_size_mb": row_group_size_mb,
-        "row_group_rows": row_group_rows,
-        "geoparquet_version": geoparquet_version,
         "verbose": verbose,
     }
-    if coverage or row_group_size_mb is not None:
+    if refresh_metrics:
+        _simplify_then_refresh_metrics(input_parquet, output_parquet, tolerance, write, options)
+        return
+    _simplify_file(input_parquet, output_parquet, tolerance, write, options, _drop_columns)
+
+
+def _simplify_file(
+    input_parquet: str,
+    output_parquet: str,
+    tolerance: float,
+    write: WriteOptions,
+    kwargs: dict,
+    _drop_columns: list[str] | None = None,
+) -> None:
+    """simplify_file's body, below the level resolution and the refresh dispatch."""
+    coverage, geometry_column = kwargs["coverage"], kwargs["geometry_column"]
+    preserve_topology, threads = kwargs["preserve_topology"], kwargs["threads"]
+    drop_empty, simplify_crs, verbose = (
+        kwargs["drop_empty"],
+        kwargs["simplify_crs"],
+        kwargs["verbose"],
+    )
+    if coverage or write.row_group_size_mb is not None:
         _simplify_file_in_memory(
-            input_parquet, output_parquet, tolerance, drop_columns=_drop_columns, **kwargs
+            input_parquet, output_parquet, tolerance, write, drop_columns=_drop_columns, **kwargs
         )
         return
     with pq.ParquetFile(input_parquet, pre_buffer=False) as pf:
         resolved = resolve_output_geoparquet_version(
-            geoparquet_version,
+            write.geoparquet_version,
             input_file=input_parquet,
             original_metadata=pf.schema_arrow.metadata,
             verbose=verbose,
@@ -865,7 +862,12 @@ def simplify_file(
         if not _can_stream(pf, geom_col, resolved):
             pf.close()
             _simplify_file_in_memory(
-                input_parquet, output_parquet, tolerance, drop_columns=_drop_columns, **kwargs
+                input_parquet,
+                output_parquet,
+                tolerance,
+                write,
+                drop_columns=_drop_columns,
+                **kwargs,
             )
             return
         # The in-memory branches run simplify_table, which warns itself.
@@ -877,10 +879,7 @@ def simplify_file(
             preserve_topology=preserve_topology,
             threads=threads,
             geom_col=geom_col,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_rows=row_group_rows,
-            geoparquet_version=geoparquet_version,
+            write=write,
             drop_empty=drop_empty,
             simplify_crs=simplify_crs,
             verbose=verbose,
@@ -892,14 +891,8 @@ def _simplify_then_refresh_metrics(
     input_parquet: str,
     output_parquet: str,
     tolerance: float,
-    *,
-    geoparquet_version: str | None,
-    verbose: bool,
-    compression: str | None,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    **simplify_kwargs,
+    write: WriteOptions,
+    options: dict,
 ) -> None:
     """Simplify, then recompute vecorel metric columns from the result.
 
@@ -922,44 +915,17 @@ def _simplify_then_refresh_metrics(
             "--refresh-metrics: input has no metrics:area/metrics:perimeter "
             "columns; nothing to refresh (use 'gpio add geometry-metrics' to add them)"
         )
-        simplify_file(
-            input_parquet,
-            output_parquet,
-            tolerance,
-            geoparquet_version=geoparquet_version,
-            verbose=verbose,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            **simplify_kwargs,
-        )
+        _simplify_file(input_parquet, output_parquet, tolerance, write, options)
         return
     tmp_path = f"{output_parquet}.refresh-{os.getpid()}.tmp.parquet"
     try:
-        simplify_file(
-            input_parquet,
-            tmp_path,
-            tolerance,
-            geoparquet_version=geoparquet_version,
-            verbose=verbose,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            _drop_columns=present,
-            **simplify_kwargs,
-        )
+        _simplify_file(input_parquet, tmp_path, tolerance, write, options, present)
         add_geometry_metrics(
             tmp_path,
             output_parquet,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            geoparquet_version=geoparquet_version,
             overwrite=True,
-            verbose=verbose,
+            verbose=options["verbose"],
+            **write.funnel_kwargs(),
         )
     finally:
         if os.path.exists(tmp_path):
