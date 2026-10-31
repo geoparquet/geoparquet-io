@@ -325,6 +325,7 @@
     "is_geodesic",
     "is_nonplanar",
     "logical_type_edges",
+    "representative_point_sql",
     "requested_edges",
     "restore_edges",
     "set_edges",

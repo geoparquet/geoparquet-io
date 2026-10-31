@@ -353,6 +353,7 @@ reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 "logical_type_edges" = ["geoparquet_io/core/edges.py"]
 "*_type_edges" = ["geoparquet_io/core/edges.py"]
 "*spherical_edge_type*" = ["geoparquet_io/core/edges.py"]
+"representative_point*" = ["geoparquet_io/core/edges.py"]
 # The row-group policy (T2c): one resolver family, one MB -> rows measurement,
 # one vector snap. write_strategies/row_group_sizing.py carried a second
 # `_resolve_row_group_rows*` pair with its parameters swapped (#1030).

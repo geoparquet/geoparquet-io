@@ -19,7 +19,9 @@ This module owns:
 * the key's readers and writers on a column entry (:func:`edges_of`,
   :func:`declares_edges`, :func:`set_edges`, :func:`without_edges`) and the
   strip/restore pair a rewrite runs on a block (:func:`strip_edges`,
-  :func:`restore_edges`).
+  :func:`restore_edges`);
+* the point a planar-only operation (a cell key) takes for non-planar
+  geometry (:func:`representative_point_sql`).
 
 It is a leaf: it imports nothing from gpio but the exceptions and the logger,
 so every layer can ask it, from ``duckdb_utils`` up. Reading a file or a table
@@ -274,3 +276,60 @@ def agree_across_files(per_file: Mapping[str, Mapping[str, str]]) -> dict[str, s
                 "them to one edges declaration first."
             )
     return dict(answers[0][1])
+
+
+# ---------------------------------------------------------------------------
+# A representative point for planar-only operations
+# ---------------------------------------------------------------------------
+
+
+def _unit_vector_sql(point: str) -> str:
+    lon, lat = f"radians(ST_X({point}))", f"radians(ST_Y({point}))"
+    return f"[cos({lat}) * cos({lon}), cos({lat}) * sin({lon}), sin({lat})]"
+
+
+def _weighted_midpoints_sql() -> str:
+    """Each segment of the vertex-vector list ``v`` as its normalised midpoint
+    scaled by its arc length (the angle between its ends)."""
+    chord = "sqrt(list_sum(list_transform(range(1, 4), lambda k: pow(v[i][k] - v[i + 1][k], 2))))"
+    angle = f"2 * asin(least(1.0, {chord} / 2))"
+    norm = "greatest(sqrt(list_sum(list_transform(s, lambda y: y * y))), 1e-300)"
+    mid = "list_transform(range(1, 4), lambda k: v[i][k] + v[i + 1][k])"
+    return (
+        f"list_transform(range(1, len(v)), lambda i: list_transform([{mid}], "
+        f"lambda s: list_transform(s, lambda x: x * {angle} / {norm}))[1])"
+    )
+
+
+def representative_point_sql(geom: str, edges: object) -> str:
+    """The SQL point a planar-only operation (a cell key) takes for ``geom``.
+
+    Planar edges: ``ST_Centroid``, as before. Non-planar edges: a point on the
+    sphere (#1293) -- the direction of the sum of unit vectors, each segment
+    contributing its great-circle midpoint weighted by its length; a polygon
+    contributes its exterior rings, points themselves. So a line's point is
+    its great-circle midpoint, a polar cap's is the pole and a line across the
+    antimeridian stays on it, none of which a planar centroid gets. Ellipsoidal
+    algorithms take the same spherical point (a cell is far coarser than the
+    difference). Empty geometry gives NULL. ``geom`` is a SQL expression for a
+    lon/lat GEOMETRY, evaluated once.
+    """
+    if not is_nonplanar(edges):
+        return f"ST_Centroid({geom})"
+    vertices = f"list_transform(ST_Dump(ST_Points(c)), lambda d: {_unit_vector_sql('d.geom')})"
+    segments = f"list_transform([{vertices}], lambda v: {_weighted_midpoints_sql()})[1]"
+    lines = (
+        "CASE ST_Dimension(g) WHEN 2 THEN list_transform(ST_Dump(g), lambda c: "
+        "ST_ExteriorRing(c.geom)) ELSE list_transform(ST_Dump(g), lambda c: c.geom) END"
+    )
+    points = f"list_transform(ST_Dump(ST_Points(g)), lambda d: {_unit_vector_sql('d.geom')})"
+    vectors = (
+        f"CASE WHEN ST_Dimension(g) = 0 THEN {points} "
+        f"ELSE flatten(list_transform({lines}, lambda c: {segments})) END"
+    )
+    total = f"list_transform(range(1, 4), lambda k: list_sum(list_transform({vectors}, lambda w: w[k])))"
+    point = (
+        f"list_transform([{total}], lambda s: ST_Point(degrees(atan2(s[2], s[1])), "
+        "degrees(atan2(s[3], sqrt(s[1] * s[1] + s[2] * s[2])))))[1]"
+    )
+    return f"list_transform([{geom}], lambda g: {point})[1]"

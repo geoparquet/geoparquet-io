@@ -19,13 +19,17 @@ from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
     register_arrow,
 )
+from geoparquet_io.core.edges import representative_point_sql
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
-from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
+from geoparquet_io.core.geometry_repair import (
+    nonplanar_edges_of_arrow_table,
+    nonplanar_edges_of_file,
+)
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import execute_transform
@@ -77,7 +81,8 @@ def add_a5_table(
         # Load A5 extension
         load_community_extension(con, "a5")
 
-        warn_planar_math("add_a5", table, geom_col)
+        # Keyed from a point on the sphere when the edges are not planar (#1293).
+        edges = nonplanar_edges_of_arrow_table(table, geom_col)
         registered = register_arrow(con, "__input_table", table)
 
         # Check if geometry column is BLOB (needs conversion)
@@ -101,9 +106,10 @@ def add_a5_table(
 
         # Build A5 column query (reproject to lon/lat when source is non-CRS84)
         geom_ref = transform_geom_sql(quote_identifier(geom_col), source_crs)
+        point = representative_point_sql(geom_ref, edges)
         a5_expr = f"""a5_lonlat_to_cell(
-            ST_X(ST_Centroid({geom_ref})),
-            ST_Y(ST_Centroid({geom_ref})),
+            ST_X({point}),
+            ST_Y({point}),
             {resolution}
         )"""
 
@@ -143,16 +149,19 @@ def _make_add_a5_query(
     a5_column_name: str,
     resolution: int,
     source_crs: str | None = None,
+    edges: str | None = None,
 ) -> str:
     """Build query to add A5 column to a source.
 
     ``source_crs`` reprojects a non-CRS84 input to lon/lat before centroid keying
-    (#525); ``None`` (CRS84 / CRS-less) leaves the geometry untouched.
+    (#525); ``None`` (CRS84 / CRS-less) leaves the geometry untouched. ``edges``
+    is the column's: non-planar keys from a point on the sphere (#1293).
     """
     geom_ref = transform_geom_sql(quote_identifier(geometry_column), source_crs)
+    point = representative_point_sql(geom_ref, edges)
     a5_expr = f"""a5_lonlat_to_cell(
-        ST_X(ST_Centroid({geom_ref})),
-        ST_Y(ST_Centroid({geom_ref})),
+        ST_X({point}),
+        ST_Y({point}),
         {resolution}
     )"""
     return f"SELECT *, {a5_expr} AS {quote_identifier(a5_column_name)} FROM {source}"
@@ -210,8 +219,6 @@ def add_a5_column(
     if not 0 <= a5_resolution <= 30:
         raise InvalidParameterError("resolution", f"must be between 0 and 30, got {a5_resolution}")
 
-    warn_planar_math_for_file("add_a5", input_parquet)
-
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
@@ -247,10 +254,12 @@ def add_a5_column(
         quote_identifier(geom_col), source_crs_string(input_parquet, verbose, geom_col)
     )
 
-    # Define the A5 SQL expression
+    # Define the A5 SQL expression, keyed from a point on the sphere when the
+    # edges are not planar (#1293).
+    point = representative_point_sql(geom_ref, nonplanar_edges_of_file(input_parquet, geom_col))
     sql_expression = f"""a5_lonlat_to_cell(
-        ST_X(ST_Centroid({geom_ref})),
-        ST_Y(ST_Centroid({geom_ref})),
+        ST_X({point}),
+        ST_Y({point}),
         {a5_resolution}
     )"""
 
@@ -330,7 +339,8 @@ def _add_a5_streaming(
         if verbose:
             debug(f"Using geometry column: {geom_col}")
 
-        return _make_add_a5_query(source, geom_col, a5_column_name, resolution, source_crs)
+        edges = nonplanar_edges_of_file(input_path, geom_col)
+        return _make_add_a5_query(source, geom_col, a5_column_name, resolution, source_crs, edges)
 
     execute_transform(
         input_path,

@@ -369,10 +369,6 @@ def test_wkb_conversion_keeps_the_geometry_in_place():
 
 PLANAR_MATH = {
     "add_bbox": lambda t: t.add_bbox(),
-    "add_quadkey": lambda t: t.add_quadkey(),
-    "add_h3": lambda t: t.add_h3(),
-    "add_a5": lambda t: t.add_a5(),
-    "add_s2": lambda t: t.add_s2(),
     "add_kdtree": lambda t: t.add_kdtree(iterations=2),
     "simplify": lambda t: t.simplify(0.01),
     "reproject": lambda t: t.reproject("EPSG:3857"),
@@ -407,6 +403,21 @@ def test_pass_through_op_does_not_warn(op, table, caplog):
     assert _planar_warnings(caplog) == []
 
 
+#: The cell keys: a non-planar column keys from a point on the sphere (#1293),
+#: so they no longer run planar math and say nothing.
+CELL_KEYS = ["add_quadkey", "add_h3", "add_a5", "add_s2"]
+CELL_KEYS_CLI = {op: ["add", op.removeprefix("add_")] for op in CELL_KEYS}
+
+
+@pytest.mark.parametrize("op", CELL_KEYS)
+def test_cell_keys_on_spherical_data_do_not_warn(op, table, caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        PASS_THROUGH[op](table)
+    assert _planar_warnings(caplog) == []
+
+
 def test_planar_data_does_not_warn(rows, tmp_path, caplog):
     import logging
 
@@ -433,10 +444,6 @@ def test_the_warning_does_not_change_the_result(table):
 
 PLANAR_MATH_CLI = {
     "add_bbox": ["add", "bbox"],
-    "add_quadkey": ["add", "quadkey"],
-    "add_h3": ["add", "h3"],
-    "add_s2": ["add", "s2"],
-    "add_a5": ["add", "a5"],
     "add_kdtree": ["add", "kdtree", "--partitions", "4"],
     "simplify": ["process", "simplify", "--tolerance", "0.01"],
     "reproject": ["convert", "reproject", "--dst-crs", "EPSG:3857"],
@@ -462,6 +469,13 @@ def test_planar_only_cli_on_spherical_file_warns_once(op, native_geography, tmp_
     assert len(messages) == 1, result.output
     assert f"{op} uses planar math" in messages[0]
     assert "spherical" in messages[0]
+
+
+@pytest.mark.parametrize("op", sorted(CELL_KEYS_CLI))
+def test_cell_key_cli_on_spherical_file_does_not_warn(op, native_geography, tmp_path):
+    result = _run_cli(CELL_KEYS_CLI[op], native_geography, tmp_path / "out.parquet")
+    assert result.exit_code == 0, result.output
+    assert PLANAR_MARKER not in result.output
 
 
 @pytest.mark.parametrize("op", ["add_bbox", "simplify", "aggregate"])

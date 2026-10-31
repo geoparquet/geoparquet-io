@@ -126,6 +126,40 @@ def test_the_key_readers():
     assert owner.logical_type_edges({"algorithm": "karney"}) == "karney"
 
 
+@pytest.mark.parametrize(
+    ("wkt", "lon", "lat"),
+    [
+        ("LINESTRING(-30 60, 30 60)", 0.0, 63.43494882292201),  # #1293's arc
+        ("LINESTRING(170 10, -170 10)", 180.0, 10.151081711048134),  # across the antimeridian
+        ("POINT(5 6)", 5.0, 6.0),
+        ("MULTIPOINT(0 0, 90 0)", 45.0, 0.0),
+    ],
+)
+def test_the_representative_point_of_spherical_geometry(wkt, lon, lat):
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute("LOAD spatial")
+    expr = owner.representative_point_sql("ST_GeomFromText(wkt)", "spherical")
+    x, y = con.execute(
+        f"SELECT ST_X(p), ST_Y(p) FROM (SELECT {expr} AS p FROM (SELECT ? AS wkt))", [wkt]
+    ).fetchall()[0]
+    assert abs(abs(x) - abs(lon)) < 1e-9 and abs(y - lat) < 1e-9
+
+
+def test_the_representative_point_of_a_polar_cap_is_the_pole():
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute("LOAD spatial")
+    expr = owner.representative_point_sql(
+        "ST_GeomFromText('POLYGON((0 80, 90 80, 180 80, -90 80, 0 80))')", "spherical"
+    )
+    assert abs(con.execute(f"SELECT ST_Y({expr})").fetchall()[0][0] - 90.0) < 1e-9
+    assert owner.representative_point_sql("geometry", "planar") == "ST_Centroid(geometry)"
+    assert owner.representative_point_sql("geometry", None) == "ST_Centroid(geometry)"
+
+
 # ---------------------------------------------------------------------------
 # Every write path agrees
 # ---------------------------------------------------------------------------
@@ -341,12 +375,22 @@ def _cell(op, table):
     return result.column(name).to_pylist()
 
 
-@pytest.mark.xfail(strict=True, reason="#1293")
 @pytest.mark.parametrize("op", sorted(CELL_OPS))
 def test_1293_a_spherical_line_gets_the_cell_of_its_great_circle_midpoint(op):
-    """The cell builders call ``ST_Centroid``, a planar centroid ((0, 60) here).
-    Still open: the fix is the cell builders' SQL in ``core/add/{h3,s2,a5,
-    quadkey}.py``, outside T3d's files, so it is a T3d hand-off, with the owner
-    function it needs drafted and tested in the T3d record."""
+    """The cell builders keyed every geometry from ``ST_Centroid``, a planar
+    centroid ((0, 60) here). Non-planar edges now key from the owner's
+    ``representative_point_sql``, a point on the sphere."""
     expected = _cell(op, _line_table([ARC_MIDPOINT], "planar"))
     assert _cell(op, _line_table(ARC, "spherical")) == expected
+
+
+@pytest.mark.parametrize("lat", [90.0, -90.0, 89.9999999])
+def test_1293_a_polar_point_keys_to_the_edge_row(lat):
+    """A spherical polar cap's point is the pole, where mercantile raises; it
+    keys to the edge row every latitude past Web Mercator's edge already does."""
+    import mercantile
+
+    from geoparquet_io.core.add.quadkey import _lat_lon_to_quadkey
+
+    edge = 89.0 if lat > 0 else -89.0
+    assert _lat_lon_to_quadkey(lat, 10.0, 12) == mercantile.quadkey(mercantile.tile(10.0, edge, 12))
