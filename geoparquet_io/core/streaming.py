@@ -25,7 +25,7 @@ import pyarrow.compute as pc
 import pyarrow.ipc as ipc
 
 from geoparquet_io.core.crs_utils import _crs_from_geoarrow_field, geoarrow_crs_to_projjson
-from geoparquet_io.core.edges import EDGES
+from geoparquet_io.core.edges import EDGES, geoarrow_edge_type
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
     carried_geometry_column,
@@ -420,7 +420,7 @@ def apply_geoarrow_extension_type(
         if crs:
             new_type = wkb_arr.type.with_crs(crs)
         if edges in EDGES:
-            new_type = new_type.with_edge_type(ga.EdgeType[edges.upper()])
+            new_type = new_type.with_edge_type(geoarrow_edge_type(edges))
         # PyArrow extension equality ignores the serialized CRS and edges.
         # Rewrap whenever either was supplied, even when the types compare equal.
         if crs or edges in EDGES:

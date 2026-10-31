@@ -856,7 +856,10 @@ from the table. Non-planar edges are kept too. A native GEOGRAPHY table writes
 as a GEOGRAPHY at 2.0 and as `edges: spherical` in a 1.x `geo` block
 ([#1253](https://github.com/geoparquet/geoparquet-io/issues/1253)). A
 `1.1-geoarrow` output also names the edges in its GeoArrow type, so an Arrow
-reader sees the same answer. No WKB geometry column, primary or secondary,
+reader sees the same answer. Every algorithm survives that GeoArrow type
+(`spherical` and the four ellipsoidal ones), and planar is written by leaving
+the `edges` key out of the block. `Table.metadata` reports `edges` as the
+block states it, `None` when it states none. No WKB geometry column, primary or secondary,
 is dictionary-encoded, on any `write_strategy` and any `geoparquet_version`
 ([#1122](https://github.com/geoparquet/geoparquet-io/issues/1122)).
 

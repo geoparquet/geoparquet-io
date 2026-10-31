@@ -79,6 +79,7 @@ from geoparquet_io.core.geo_metadata import (
     carried_geometry_column,
     declare_carried_bbox_column,
     gate_illegal_bbox_covering,
+    is_geoparquet_1x,
     prune_geo_metadata_to_columns,
     read_raw_geo,
     sanitized_carried_geo,
@@ -120,7 +121,6 @@ from geoparquet_io.core.parquet_writer import (
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
     resolve_row_group_rows_for_query,
-    writable_geoparquet_version,
     write_arrow_table,
 )
 from geoparquet_io.core.remote import remote_write_context, upload_if_remote
@@ -203,7 +203,7 @@ def apply_nonplanar_edges(
     as straight lines over the same bytes -- so both carriers are restored:
 
     * the ``geo`` block's ``edges``, mapped to what the block's version can
-      say (:func:`~geoparquet_io.core.geo_metadata.edges_for_version`);
+      say (:func:`~geoparquet_io.core.edges.edges_for_version`);
     * the Parquet logical type, retyped from GEOMETRY to GEOGRAPHY with the
       same CRS and the edge algorithm (#999). Restoring only the block left a
       2.0 output whose block said spherical over a planar column, which
@@ -235,9 +235,9 @@ def apply_nonplanar_edges(
         return
 
     geo_meta = pending_geo if pending_geo is not None else _read_geo_key(output_file)
-    geo_version = str((geo_meta or {}).get("version") or "")
+    geoparquet_1x = is_geoparquet_1x((geo_meta or {}).get("version"))
     edges_by_col = {
-        name: edges_for_version(edges, geo_version) for name, edges in edges_by_col.items()
+        name: edges_for_version(edges, geoparquet_1x) for name, edges in edges_by_col.items()
     }
     geography = _geography_candidates(output_file, edges_by_col)
     targets = {**_block_bbox_targets(geo_meta, edges_by_col, geography), **geography}
@@ -253,7 +253,7 @@ def apply_nonplanar_edges(
     )
     # A 1.x output has no GEOGRAPHY type to carry the edges, so a GeoArrow
     # column's embedded Arrow schema is stamped instead, or it says planar.
-    arrow_edges = edges_by_col if writable_geoparquet_version(geo_version) == "1.1" else None
+    arrow_edges = edges_by_col if geoparquet_1x else None
 
     try:
         retyped = patch_footer(
@@ -1602,14 +1602,17 @@ def declared_nonplanar_edges(
 ) -> dict[str, str]:
     """Map geometry column -> non-planar edges an input declares, from either carrier.
 
-    Prefers the input file, which sees native GEOGRAPHY logical types as well as
-    the ``geo`` block; falls back to the input's KV metadata dict when the file
-    says nothing or there is no re-readable file (an Arrow stream read from
-    stdin passes ``input_file=None``). One answer serves both the planar-repair
-    gate (#1287) and the edges a write restores (#588).
+    The input file when there is one, which sees native GEOGRAPHY logical types
+    as well as the ``geo`` block; the input's KV metadata dict only when there
+    is no re-readable file (an Arrow stream read from stdin passes
+    ``input_file=None``). One carrier, never a fall-through: a planar file is
+    planar whatever a metadata dict beside it says. Each carrier is decided by
+    ``edges.detect_edges``. One answer serves the planar-repair gate (#1287),
+    the edges a write restores (#588) and the cell keys of a stream (#1293).
     """
-    edges_by_col = collect_nonplanar_edges(input_file) if input_file else {}
-    return edges_by_col or _collect_nonplanar_edges_from_metadata(original_metadata)
+    if input_file:
+        return collect_nonplanar_edges(input_file)
+    return _collect_nonplanar_edges_from_metadata(original_metadata)
 
 
 def _edges_to_restore(
@@ -1717,7 +1720,7 @@ def write_geoparquet_table(
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0)
         verbose: Whether to print verbose output
         profile: AWS profile name (S3 only, optional)
-        edges: Edge interpretation, "spherical" or "planar" (default None = planar).
+        edges: Edge interpretation, one of ``edges.EDGES`` (default None = planar).
                Use "spherical" for data from BigQuery or other S2-based sources.
         geo_bbox: Pre-computed [xmin, ymin, xmax, ymax] for the geometry column.
                Pass the RFC 7946 5.2 wrap form (xmin > xmax) for data that

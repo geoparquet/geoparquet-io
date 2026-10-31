@@ -36,7 +36,15 @@ from geoparquet_io.core.duckdb_utils import (
     query_schema,
     quote_identifier,
 )
-from geoparquet_io.core.edges import SPHERICAL, edges_for_version, set_edges, strip_edges
+from geoparquet_io.core.edges import (
+    SPHERICAL,
+    declares_edges,
+    edges_for_version,
+    edges_of,
+    is_nonplanar,
+    set_edges,
+    strip_edges,
+)
 from geoparquet_io.core.logging_config import debug, warn
 
 if TYPE_CHECKING:
@@ -737,6 +745,17 @@ def _add_bbox_covering(
         debug(f"Added bbox covering metadata for column '{bbox_info['bbox_column_name']}'")
 
 
+def is_geoparquet_1x(geo_version: object) -> bool:
+    """Whether ``geo_version`` is a GeoParquet 1.x version: the edges gate.
+
+    The write facade's answer, ``parquet_writer.writable_geoparquet_version(v)
+    == "1.1"`` (a string whose first dotted part is ``1``), asked from below it
+    so ``edges.edges_for_version`` gets it on every path. A missing or
+    unparsable version is not 1.x, so it gates nothing (#1367 concept 6).
+    """
+    return isinstance(geo_version, str) and geo_version.startswith("1.")
+
+
 def covering_supported(version: str | None) -> bool:
     """Whether a GeoParquet version may carry the ``covering`` column key.
 
@@ -1377,7 +1396,7 @@ def create_geo_metadata(
         custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         verbose: Whether to print verbose output
         version: GeoParquet version string (e.g., "1.0.0", "1.1.0", "2.0.0")
-        edges: Edge interpretation, "spherical" or "planar" (default None = planar).
+        edges: Edge interpretation, one of ``edges.EDGES`` (default None = planar).
                Use "spherical" for data from BigQuery or other S2-based sources.
         encoding: The primary's ``encoding`` when the carried block names none.
         strip_bboxless: Run :func:`strip_bboxless_covering` here. ``False`` for
@@ -1393,10 +1412,21 @@ def create_geo_metadata(
     if "encoding" not in geo_meta["columns"][geom_col]:
         geo_meta["columns"][geom_col]["encoding"] = encoding
 
+    # A carried entry's edges, as every writer says them: a non-planar algorithm
+    # stays; "planar" is said by leaving the key out (the one spell-or-omit rule,
+    # ``set_edges``), and a value outside the vocabulary says nothing (#1288),
+    # so it is not carried either -- the file reader already dropped it.
+    for entry in geo_meta["columns"].values():
+        if declares_edges(entry):
+            carried = edges_of(entry)
+            set_edges(entry, carried if is_nonplanar(carried) else None)
+
     # Add edges if specified (for spherical geometry from BigQuery, etc.), in
     # what the block's version can say.
     if edges:
-        set_edges(geo_meta["columns"][geom_col], edges_for_version(edges, version))
+        set_edges(
+            geo_meta["columns"][geom_col], edges_for_version(edges, is_geoparquet_1x(version))
+        )
         # When spherical, orientation should be counterclockwise per GeoParquet
         # spec. Keyed off the request, so an ellipsoidal algorithm a 1.x block
         # degrades to spherical does not gain an orientation it never stated.

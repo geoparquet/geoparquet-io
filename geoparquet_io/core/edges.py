@@ -12,12 +12,17 @@ This module owns:
 
 * the vocabulary (:data:`PLANAR`, :data:`SPHERICAL`, the ellipsoidal names, and
   the tuples built from them, in parquet.thrift's enum order);
-* the version gate, :func:`edges_for_version` (what a 1.x block may say);
+* the version gate, :func:`edges_allowed` / :func:`edges_for_version` (what
+  a 1.x block may say; whether a version *is* 1.x is
+  ``geo_metadata.is_geoparquet_1x``, the version owners' answer);
+* the GeoArrow carrier: one reader for either shape of the extension
+  (:func:`geoarrow_type_edges`) and one writer (:func:`geoarrow_edge_type`);
 * the one precedence, :func:`detect_edges` -- an explicit request, then the
   carried ``geo`` block, then the native type -- and its cross-file form,
   :func:`agree_across_files`, for a glob that must describe one column;
 * the key's readers and writers on a column entry (:func:`edges_of`,
-  :func:`declares_edges`, :func:`set_edges`, :func:`without_edges`) and the
+  :func:`declared_edges`, :func:`declares_edges`, :func:`set_edges`, which
+  omits planar, :func:`state_edges` for a report, :func:`without_edges`) and the
   strip/restore pair a rewrite runs on a block (:func:`strip_edges`,
   :func:`restore_edges`);
 * the point a planar-only operation (a cell key) takes for non-planar
@@ -32,6 +37,7 @@ answers mean is this module's.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Collection, Mapping, MutableMapping
 from typing import TypeGuard
 
@@ -77,12 +83,20 @@ def is_ellipsoidal(edges: object) -> bool:
 
 
 def is_geodesic(edges: object) -> bool:
-    """Whether ``edges`` says anything but planar (``None`` is planar).
+    """Whether ``edges`` says anything but planar (absent, ``None`` and ``""`` are planar).
 
     Wider than :func:`is_nonplanar`: an unknown value counts. For the checks
     that compare a bbox with a planar envelope, which must not claim a
     planar comparison for a column that does not say it is planar."""
-    return edges is not None and edges != PLANAR
+    return declared_edges({_KEY: edges}) != PLANAR
+
+
+def normalized_edges(edges: object) -> object:
+    """``edges`` in the vocabulary's case: a string lowercased, anything else as is.
+
+    The one case fold, for carriers that spell the value in another case (a
+    GeoArrow ``EdgeType`` name, a hand-written block)."""
+    return edges.lower() if isinstance(edges, str) else edges
 
 
 def requested_edges(edges: str | None) -> str | None:
@@ -97,21 +111,42 @@ def requested_edges(edges: str | None) -> str | None:
     )
 
 
-def edges_for_version(edges: str, geo_version: str | None) -> str:
+def edges_allowed(geoparquet_1x: bool) -> tuple[str, ...]:
+    """The edges values a block may state: the 1.x pair, or all of :data:`EDGES`.
+
+    ``geoparquet_1x`` is ``geo_metadata.is_geoparquet_1x(version)``: a missing
+    or unparsable version is not 1.x, so it gates nothing."""
+    return GEOPARQUET_1X_EDGES if geoparquet_1x else EDGES
+
+
+def edges_for_version(edges: str, geoparquet_1x: bool) -> str:
     """Map an edges value to one the output's spec version can say.
 
     GeoParquet 1.x allows only ``planar`` and ``spherical``; an ellipsoidal
     algorithm (from a 2.0 or native GEOGRAPHY input) degrades to ``spherical``
-    there, with a warning. 2.0, and a write with no block (``None``), keep the
-    algorithm. A value outside :data:`EDGES` is refused here, once.
+    there, with a warning. 2.0, and a write with no block (no version), keep
+    the algorithm. ``geoparquet_1x`` is ``geo_metadata.is_geoparquet_1x`` of the
+    block's version. A value outside :data:`EDGES` is refused here, once.
     """
     requested_edges(edges)
-    if not str(geo_version).startswith("1."):
-        return edges
-    if edges in GEOPARQUET_1X_EDGES:
+    if edges in edges_allowed(geoparquet_1x):
         return edges
     warn(f"edges algorithm '{edges}' is not representable in GeoParquet 1.x; writing 'spherical'")
     return SPHERICAL
+
+
+#: A Parquet GEOGRAPHY logical type's edge-algorithm parameter, in any case.
+_ALGORITHM_PARAM_RE = re.compile(rf"algorithm=({'|'.join(EDGES)})", re.IGNORECASE)
+
+
+def logical_type_algorithm(params: str) -> str | None:
+    """The edge algorithm a GEOGRAPHY logical type's parameter text names, lowercase.
+
+    The full parquet.thrift vocabulary, not just the 1.x pair: an ellipsoidal
+    algorithm read as "no algorithm" degraded to spherical in every caller's
+    fallback (#1272). ``None`` when the text names none."""
+    match = _ALGORITHM_PARAM_RE.search(params)
+    return match.group(1).lower() if match else None
 
 
 def logical_type_edges(parsed: Mapping | None) -> str:
@@ -124,13 +159,32 @@ def logical_type_edges(parsed: Mapping | None) -> str:
     return (parsed or {}).get("algorithm") or SPHERICAL
 
 
-def geoarrow_type_edges(arrow_type) -> str | None:
-    """The edges a resolved GeoArrow extension type declares, lowercase.
+def geoarrow_type_edges(arrow_type, extension_metadata: Mapping | None = None) -> str | None:
+    """The edges a GeoArrow column declares, lowercase, in either carrier.
 
-    ``None`` for a type without an edge type (not GeoArrow, or unresolved).
+    pyarrow resolves the type when ``geoarrow.pyarrow`` is imported: its
+    ``edge_type`` answers. Otherwise the field holds storage plus the
+    extension's JSON, whose parsed ``extension_metadata`` answers; planar is
+    GeoArrow's default there, so a planar column says ``None``. ``None`` too
+    for a field that is not GeoArrow.
     """
     name = getattr(getattr(arrow_type, "edge_type", None), "name", "")
-    return name.lower() or None
+    if name:
+        return name.lower()
+    edges = normalized_edges(edges_of(extension_metadata))
+    return edges if isinstance(edges, str) else None
+
+
+def geoarrow_edge_type(edges: object):
+    """The ``geoarrow.pyarrow.EdgeType`` for an edges value, the one writer.
+
+    Every GeoParquet algorithm has its own member; planar, ``None`` and a
+    value outside the vocabulary (a typo says nothing) are ``PLANAR``.
+    """
+    import geoarrow.pyarrow as ga
+
+    edges = normalized_edges(edges)
+    return ga.EdgeType[edges.upper()] if is_nonplanar(edges) else ga.EdgeType.PLANAR
 
 
 # ---------------------------------------------------------------------------
@@ -147,14 +201,37 @@ def edges_of(entry: object) -> object:
     return entry.get(_KEY) if isinstance(entry, Mapping) else None
 
 
+def declared_edges(entry: object) -> object:
+    """What ``entry`` states, ``planar`` when it states nothing (absent, null, empty).
+
+    A value outside the vocabulary is returned as written, for the checks that
+    report it."""
+    return edges_of(entry) or PLANAR
+
+
 def declares_edges(entry: object) -> bool:
     """Whether ``entry`` has an ``edges`` key at all (absent means planar)."""
     return isinstance(entry, Mapping) and _KEY in entry
 
 
 def set_edges(entry: MutableMapping, edges: object) -> None:
-    """Set ``entry``'s ``edges`` to ``edges``."""
-    entry[_KEY] = edges
+    """Set ``entry``'s ``edges`` to ``edges``, omitting planar.
+
+    The one spell-or-omit rule for a written column entry (a ``geo`` block
+    column, a GeoArrow extension's JSON): planar is the spec default, so it is
+    said by leaving the key out, and ``None`` or ``planar`` removes it."""
+    if edges is None or edges == PLANAR:
+        entry.pop(_KEY, None)
+    else:
+        entry[_KEY] = edges
+
+
+def state_edges(report: MutableMapping, edges: object) -> None:
+    """Put ``edges`` on a report (an inspect or check result), as given.
+
+    A report always carries the key, ``None`` and ``planar`` included: it
+    says what was read, not what a file should store."""
+    report[_KEY] = edges
 
 
 def without_edges(entry: Mapping) -> dict:

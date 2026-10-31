@@ -34,7 +34,13 @@ if TYPE_CHECKING:
     import duckdb
     import pyarrow as pa
 
-from geoparquet_io.core.edges import PLANAR, edges_of, without_edges
+from geoparquet_io.core.edges import (
+    PLANAR,
+    geoarrow_edge_type,
+    geoarrow_type_edges,
+    is_geodesic,
+    without_edges,
+)
 from geoparquet_io.core.exceptions import ExtensionUnavailableError, ValidationError
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns
@@ -2527,7 +2533,7 @@ _EXT_NAME = b"ARROW:extension:name"
 _EXT_META = b"ARROW:extension:metadata"
 
 
-def _geoarrow_extension(field) -> tuple[str | None, dict]:
+def geoarrow_extension(field) -> tuple[str | None, dict]:
     """A field's GeoArrow extension name and parsed metadata, in either carrier.
 
     pyarrow resolves the type when ``geoarrow.pyarrow`` is imported and leaves
@@ -2550,23 +2556,6 @@ def _geoarrow_extension(field) -> tuple[str | None, dict]:
     return name, parsed if isinstance(parsed, dict) else {}
 
 
-def geoarrow_field_edges(field) -> str | None:
-    """The edges a GeoArrow field declares, lower-case, in either carrier.
-
-    ``None`` when the field is not GeoArrow or declares no edges (planar is
-    the GeoArrow default, so a planar type serializes without the key). The
-    one reader of a field's edges: ``arrow_geo_metadata`` re-exports it.
-
-    The type only, by design. DuckDB never reads a ``geo`` block, so which
-    columns it refuses is a type question, and the register path relabels on
-    this answer even when a block says planar or the value is a typo. What a
-    table declares once its block is weighed is
-    ``write_funnels.table_nonplanar_edges``.
-    """
-    edges = edges_of(_geoarrow_extension(field)[1])
-    return edges.lower() if isinstance(edges, str) else None
-
-
 def _storage(column):
     """A column's storage chunks, whether or not its extension type is resolved."""
     import pyarrow as pa
@@ -2587,9 +2576,7 @@ def _planar_column(field, column, name: str, parsed: dict) -> tuple:
     import pyarrow as pa
 
     if hasattr(field.type, "with_edge_type"):
-        import geoarrow.pyarrow as ga
-
-        target = field.type.with_edge_type(ga.EdgeType.PLANAR)
+        target = field.type.with_edge_type(geoarrow_edge_type(PLANAR))
         chunks = [pa.ExtensionArray.from_storage(target, c.storage) for c in column.chunks]
         return field.with_type(target), pa.chunked_array(chunks, target)
     storage = _storage(column)
@@ -2611,9 +2598,12 @@ def _planar_view(table, columns: Iterable[str] | None = None) -> tuple:
     for index, field in enumerate(table.schema):
         if wanted is not None and field.name not in wanted:
             continue
-        if geoarrow_field_edges(field) in (None, PLANAR):
+        # The type only, by design: DuckDB never reads a ``geo`` block, so which
+        # columns it refuses is a type question, relabelled even when a block
+        # says planar or the value is a typo.
+        name, parsed = geoarrow_extension(field)
+        if not is_geodesic(geoarrow_type_edges(field.type, parsed)):
             continue
-        name, parsed = _geoarrow_extension(field)
         originals[field.name] = field
         planar_field, column = _planar_column(field, table.column(index), name, parsed)
         table = table.set_column(index, planar_field, column)
@@ -2638,7 +2628,11 @@ class RegisteredArrow:
     @property
     def edges(self) -> dict[str, str]:
         """``{column: edges}`` for every column that was registered as planar."""
-        return {col: geoarrow_field_edges(field) or PLANAR for col, field in self.fields.items()}
+        return {
+            col: edges
+            for col, field in self.fields.items()
+            if (edges := geoarrow_type_edges(field.type, geoarrow_extension(field)[1]))
+        }
 
     def restore_edges(self, result, columns: Iterable[str] | None = None):
         """``result`` with each pass-through geometry column given its input field back.

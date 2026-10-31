@@ -53,11 +53,12 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.edges import (
     GEOGRAPHY_EDGE_ALGORITHMS,
-    GEOPARQUET_1X_EDGES,
     PLANAR,
     SPHERICAL,
-    declares_edges,
+    declared_edges,
+    edges_allowed,
     edges_of,
+    is_geodesic,
     logical_type_edges,
 )
 from geoparquet_io.core.exceptions import GeometryError, GeoParquetError
@@ -73,6 +74,7 @@ from geoparquet_io.core.geo_metadata import (
     covering_lacks_bbox,
     geometry_types_of,
     is_covering_path,
+    is_geoparquet_1x,
     read_raw_geo,
     row_group_geometry_stats,
     split_zm_suffix,
@@ -162,8 +164,6 @@ _GEOARROW_ENCODING_TYPE = {
 }
 ORIENTATION_COUNTERCLOCKWISE = "counterclockwise"
 VALID_ORIENTATIONS = [ORIENTATION_COUNTERCLOCKWISE]
-VALID_EDGES_GEOPARQUET = list(GEOPARQUET_1X_EDGES)
-VALID_EDGES_PARQUET_GEO = list(GEOGRAPHY_EDGE_ALGORITHMS)
 VALID_GEOMETRY_TYPES = [
     "Point",
     "LineString",
@@ -564,9 +564,7 @@ def _check_edges_valid(
             category="column_metadata",
         )
 
-    valid_edges = list(VALID_EDGES_GEOPARQUET)
-    if _version_at_least(geo_version, 2, 0):
-        valid_edges += [e for e in VALID_EDGES_PARQUET_GEO if e not in valid_edges]
+    valid_edges = list(edges_allowed(is_geoparquet_1x(geo_version)))
 
     is_valid = edges in valid_edges
     return ValidationCheck(
@@ -596,7 +594,7 @@ def _check_edges_spherical_on_projected_crs(
     """
 
     edges = edges_of(col_meta)
-    if not edges or edges == PLANAR:
+    if not is_geodesic(edges):
         return None
 
     # An absent or null CRS means "OGC:CRS84 default" / "unknown"; neither is a
@@ -1524,7 +1522,7 @@ def _check_orientation_matches_data(
         if not rows:
             return _result(CheckStatus.SKIPPED, "no polygons to check against declared orientation")
         violations, checked = _polygon_orientation_violations(
-            [bytes(r[0]) for r in rows], geodesic=edges != PLANAR
+            [bytes(r[0]) for r in rows], geodesic=is_geodesic(edges)
         )
     except Exception as e:
         return _result(CheckStatus.FAILED, f"failed to validate orientation: {e}")
@@ -2255,7 +2253,7 @@ def _check_geography_edges_valid(schema_info: list, geom_col: str) -> Validation
                 )
 
             algorithm = logical_type_edges(parsed)
-            if algorithm in VALID_EDGES_PARQUET_GEO:
+            if algorithm in GEOGRAPHY_EDGE_ALGORITHMS:
                 return ValidationCheck(
                     name=f"geography_edges_valid_{geom_col}",
                     status=CheckStatus.PASSED,
@@ -2266,7 +2264,7 @@ def _check_geography_edges_valid(schema_info: list, geom_col: str) -> Validation
             return ValidationCheck(
                 name=f"geography_edges_valid_{geom_col}",
                 status=CheckStatus.FAILED,
-                message=f"GEOGRAPHY edges must be one of {VALID_EDGES_PARQUET_GEO}",
+                message=f"GEOGRAPHY edges must be one of {list(GEOGRAPHY_EDGE_ALGORITHMS)}",
                 details=f"Found: {algorithm}",
                 category="parquet_geo_types",
             )
@@ -3450,7 +3448,7 @@ def _check_v2_edges_consistency(
 ) -> ValidationCheck:
     """Check V2-5: edges in metadata must match algorithm in Parquet GEOGRAPHY type."""
     col_meta = geo_meta.get("columns", {}).get(geom_col, {})
-    metadata_edges = edges_of(col_meta) if declares_edges(col_meta) else PLANAR
+    metadata_edges = declared_edges(col_meta)
 
     is_geography, is_planar_geometry, schema_algorithm = _edges_schema_facts(schema_info, geom_col)
 
@@ -4539,7 +4537,7 @@ def _run_geoparquet_checks(
                     con,
                     sample_size,
                     encoding,
-                    edges_of(col_meta) or PLANAR,
+                    declared_edges(col_meta),
                 )
             )
 
