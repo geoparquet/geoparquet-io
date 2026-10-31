@@ -391,20 +391,57 @@ def test_partition_wrap_note_follows_the_predicate(geographic, noted):
     assert _combined_bbox_wrap_note([500000.0, 0.0, 400000.0, 1.0], geographic) == ""
 
 
-def test_aggregate_bbox_center_asks_the_one_wrap_rule():
-    """grid_common's per-row centre reads a wrap through crosses_antimeridian_sql."""
-    import duckdb
+def test_the_cell_point_of_a_bbox_row_asks_the_one_wrap_rule():
+    """index_point's per-row bbox midpoint reads a wrap through crosses_antimeridian_sql."""
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from geoparquet_io.core.index_ops import index_point
 
-    from geoparquet_io.core.process.aggregate.grid_common import _bbox_center_lon_sql
-
-    sql = _bbox_center_lon_sql("b", None)  # no CRS: geographic (OGC:CRS84)
+    sql = index_point(None, None, "b")  # no CRS: geographic (OGC:CRS84)
     rows = {
         (179.0, -179.0): 180.0,  # the wrap: centre on the antimeridian, not lon 0
         (10.0, 20.0): 15.0,
         (200.0, 190.0): 195.0,  # reversed but no longitude: not a wrap, plain midpoint
     }
-    for (xmin, xmax), centre in rows.items():
-        got = duckdb.sql(
-            f"SELECT {sql} FROM (SELECT {{'xmin': {xmin}::DOUBLE, 'xmax': {xmax}::DOUBLE}} AS b)"
-        ).fetchall()[0][0]
-        assert got == pytest.approx(centre)
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+    try:
+        for (xmin, xmax), centre in rows.items():
+            box = f"{{'xmin': {xmin}::DOUBLE, 'xmax': {xmax}::DOUBLE, 'ymin': 0.0, 'ymax': 0.0}}"
+            got = con.sql(f"SELECT ST_X({sql}) FROM (SELECT {box} AS b)").fetchall()[0][0]
+            assert got == pytest.approx(centre)
+    finally:
+        con.close()
+
+
+def test_add_quadkey_keys_a_wrapped_bbox_row_on_the_antimeridian(tmp_path):
+    """A bbox column crossing the antimeridian (xmin > xmax) keys the cell at its
+    wrapped midpoint, lon -179, as aggregate always did, not near lon 0."""
+    import json
+
+    import mercantile
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import shapely
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    src, out = tmp_path / "fiji.parquet", tmp_path / "keyed.parquet"
+    box = {"xmin": 178.0, "ymin": 10.0, "xmax": -176.0, "ymax": 10.0}
+    table = pa.table(
+        {
+            "geometry": pa.array([shapely.to_wkb(shapely.Point(178.0, 10.0))], pa.binary()),
+            "bbox": pa.array([box]),
+        }
+    )
+    covering = {"bbox": {k: ["bbox", k] for k in box}}
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "geometry_types": [], "covering": covering}},
+    }
+    pq.write_table(table.replace_schema_metadata({b"geo": json.dumps(geo).encode()}), src)
+
+    result = CliRunner().invoke(cli, ["add", "quadkey", str(src), str(out), "--resolution", "10"])
+    assert result.exit_code == 0, result.output
+    expected = mercantile.quadkey(mercantile.tile(-179.0, 10.0, 10))
+    assert pq.read_table(out).column("quadkey").to_pylist() == [expected]

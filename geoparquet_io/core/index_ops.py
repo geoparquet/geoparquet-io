@@ -14,9 +14,11 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from geoparquet_io.core.bbox_parse import crosses_antimeridian_sql
 from geoparquet_io.core.bbox_structure import get_bbox_advice
 from geoparquet_io.core.crs_utils import (
     crs_string_from_table,
+    is_geographic_crs,
     source_crs_string,
     transform_geom_sql,
 )
@@ -146,25 +148,46 @@ def load_index(con, spec, verbose=False, *, feature=None):
         spec.register(con)
 
 
-def index_point(geom_sql, source_crs=None, bbox_col=None, edges=None) -> tuple[str, str]:
-    """The ``(lon, lat)`` SQL every cell key takes, for the driver and the probe.
+def _bbox_midpoint_lon(qbox: str, source_crs) -> str:
+    """Longitude of a bbox row's midpoint, wrapped across the antimeridian.
 
-    A bbox midpoint when ``bbox_col`` is set (see :func:`_keys_from_bbox`);
-    otherwise ``edges.representative_point_sql`` of ``geom_sql`` (a GEOMETRY
-    expression in the input CRS) reprojected to lon/lat, with the column's
-    ``edges``, which the caller read once per input (#1293).
+    A covering encodes a crossing as ``xmin > xmax`` (Fiji: 179.9 / -179.9),
+    whose plain midpoint lands near lon 0. A crossing row, by the one wrap rule
+    (``bbox_parse.crosses_antimeridian_sql``), takes the +360-shifted midpoint
+    wrapped back into (-180, 180]. Only a geographic CRS can encode a crossing,
+    so a projected one keeps the plain midpoint.
+    """
+    plain = f"({qbox}.xmin + {qbox}.xmax) / 2.0"
+    if not is_geographic_crs(source_crs):
+        return plain
+    shifted = f"(({qbox}.xmin + {qbox}.xmax + 360.0) / 2.0)"
+    wrapped = f"CASE WHEN {shifted} > 180.0 THEN {shifted} - 360.0 ELSE {shifted} END"
+    crosses = crosses_antimeridian_sql(f"{qbox}.xmin", f"{qbox}.xmax", geographic=True)
+    return f"CASE WHEN {crosses} THEN {wrapped} ELSE {plain} END"
+
+
+def index_point(geom_sql, source_crs=None, bbox_col=None, edges=None) -> str:
+    """The lon/lat POINT SQL every cell key takes: the driver, the probe, aggregate.
+
+    With ``bbox_col``, the bbox row's midpoint (antimeridian-aware, see
+    :func:`_bbox_midpoint_lon`), reprojected from ``source_crs`` like the
+    geometry it covers. Otherwise ``edges.representative_point_sql`` of
+    ``geom_sql`` (a GEOMETRY expression in the input CRS) reprojected to
+    lon/lat, with the column's ``edges``, which the caller read once per input
+    (#1293).
     """
     if bbox_col:
-        bbox = quote_identifier(bbox_col)
-        return f"(({bbox}.xmin + {bbox}.xmax) / 2.0)", f"(({bbox}.ymin + {bbox}.ymax) / 2.0)"
-    point = representative_point_sql(transform_geom_sql(geom_sql, source_crs), edges)
-    return f"ST_X({point})", f"ST_Y({point})"
+        qbox = quote_identifier(bbox_col)
+        lon = _bbox_midpoint_lon(qbox, source_crs)
+        point = f"ST_Point({lon}, ({qbox}.ymin + {qbox}.ymax) / 2.0)"
+        return transform_geom_sql(point, source_crs)
+    return representative_point_sql(transform_geom_sql(geom_sql, source_crs), edges)
 
 
 def index_expression(spec, geom_col, resolution, source_crs=None, bbox_col=None, edges=None):
     """The one cell expression: ``spec.expression`` keyed from :func:`index_point`."""
-    lon, lat = index_point(quote_identifier(geom_col), source_crs, bbox_col, edges)
-    return spec.expression(lon, lat, resolution)
+    point = index_point(quote_identifier(geom_col), source_crs, bbox_col, edges)
+    return spec.expression(f"ST_X({point})", f"ST_Y({point})", resolution)
 
 
 def file_key_inputs(spec, input_parquet, geom_col, source_crs, use_centroid=False, verbose=False):

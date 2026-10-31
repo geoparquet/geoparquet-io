@@ -110,7 +110,7 @@ def _probe_distinct_cell_counts(
     con,
     url: str,
     index_type: str,
-    point: tuple[str, str],
+    point: str,
     sample_clause: str,
     resolutions: list[int],
     where: str | None = None,
@@ -124,10 +124,11 @@ def _probe_distinct_cell_counts(
     see a contiguous slice of the extent and badly underestimate the non-empty
     cell count -- the exact failure mode this probe exists to prevent (#524).
 
-    ``point`` is the ``(lon, lat)`` SQL from ``index_ops.index_point``, the one
+    ``point`` is the lon/lat POINT SQL from ``index_ops.index_point``, the one
     the IndexSpec driver keys each row from (a planar bbox column's midpoint for
     a quadkey, otherwise the reprojected geometry's representative point for its
-    edges, #1293), so the probe counts the cells the partition writes.
+    edges, #1293), so the probe counts the cells the partition writes. It is
+    computed once per sampled row and reused for lon and lat.
 
     ``where`` restricts the probe to the rows the aggregation will see. The
     filter is nested *beneath* the sample: a WHERE sitting next to ``USING
@@ -136,11 +137,8 @@ def _probe_distinct_cell_counts(
     over-resolve (gpio #612). Nesting also keeps the clause away from the top
     level of the statement, where it could otherwise chain a second one.
     """
-    lon, lat = point
-    filtered = (
-        f"(SELECT {lon} AS lon, {lat} AS lat FROM {sql_path(url)}{where_sql_fragment(where)})"
-    )
-    sample_cte = f"SELECT lon, lat FROM {filtered}{sample_clause}"
+    filtered = f"(SELECT {point} AS c FROM {sql_path(url)}{where_sql_fragment(where)})"
+    sample_cte = f"SELECT ST_X(c) AS lon, ST_Y(c) AS lat FROM {filtered}{sample_clause}"
     spec = get_index_spec(index_type)
     if spec.prefix_partition:
         # A level-r quadkey is the length-r prefix of a finer one, so compute the
