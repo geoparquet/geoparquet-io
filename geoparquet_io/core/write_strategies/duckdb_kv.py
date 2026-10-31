@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from dataclasses import replace
 from pathlib import Path
 
 import duckdb
@@ -60,10 +59,10 @@ from geoparquet_io.core.parquet_writer import (
 from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
-    geoarrow_input_encoding,
     resolve_geometry_columns,
     type_crs_for,
     wrap_query_with_secondary_crs,
+    written_block_encoding,
 )
 
 
@@ -411,22 +410,23 @@ class DuckDBKVStrategy(BaseWriteStrategy):
     ) -> None:
         """Write with geo metadata (v1.0, v1.1, v2.0)."""
 
-        source = QuerySource(con, query, original_metadata)
-        options = GeoBlockOptions(
-            geometry_column=geometry_column,
-            version=geoparquet_version,
-            custom_metadata=custom_metadata,
-            encoding=geoarrow_input_encoding(geometry_info, geometry_column, geoparquet_version),
-            crs=input_crs,
-            geometry_info=geometry_info,
-            verbose=verbose,
-        )
         # The carried stats stand; the ones the block lacks are measured from
-        # the query (one scan per column) and composed in.
-        geo_meta = compose_geo_block(source, options)
-        stats = self._missing_stats(con, query, geometry_column, geo_meta, verbose)
-        if stats:
-            geo_meta = compose_geo_block(source, replace(options, stats=stats))
+        # the query (one scan per column) inside the one composition.
+        geo_meta = compose_geo_block(
+            QuerySource(con, query, original_metadata),
+            GeoBlockOptions(
+                geometry_column=geometry_column,
+                version=geoparquet_version,
+                custom_metadata=custom_metadata,
+                encoding=written_block_encoding(geoparquet_version),
+                crs=input_crs,
+                geometry_info=geometry_info,
+                measure_missing=lambda block: self._missing_stats(
+                    con, query, geometry_column, block, verbose
+                ),
+                verbose=verbose,
+            ),
+        )
 
         # For v1.x: Cast to BLOB so DuckDB writes plain binary WKB. EVERY geometry
         # column, not just the primary: validation applies the same per-version

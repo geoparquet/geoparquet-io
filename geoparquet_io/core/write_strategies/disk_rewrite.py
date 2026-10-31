@@ -11,7 +11,6 @@ Speed: Slower (reads file twice, writes twice)
 
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 from typing import TYPE_CHECKING
@@ -33,6 +32,7 @@ from geoparquet_io.core.geo_metadata import (
     compose_geo_block,
     geometry_stats_of,
     sanitized_carried_geo,
+    with_geo_key,
 )
 from geoparquet_io.core.geoarrow_encoding import native_wkb_type
 from geoparquet_io.core.geometry_detection import create_geometry_view
@@ -50,8 +50,8 @@ from geoparquet_io.core.remote import is_remote_url, remote_write_context, uploa
 from geoparquet_io.core.write_strategies.arrow_streaming import to_geoarrow_column
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
-    geoarrow_input_encoding,
     native_geometry_crs,
+    written_block_encoding,
 )
 
 if TYPE_CHECKING:
@@ -218,9 +218,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                     geometry_column=geometry_column,
                     version=geoparquet_version,
                     custom_metadata=custom_metadata,
-                    encoding=geoarrow_input_encoding(
-                        geometry_info, geometry_column, geoparquet_version
-                    ),
+                    encoding=written_block_encoding(geoparquet_version),
                     crs=input_crs,
                     stats={geometry_column: measured},
                     geometry_info=geometry_info,
@@ -480,7 +478,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         # before the merge, so the caller's extras still have the last word.
         metadata = dict(schema.metadata or {})
         if geo_meta is not None:
-            metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+            metadata = with_geo_key(metadata, geo_meta)
         new_meta = output_schema_metadata(
             metadata,
             None if geo_meta is not None else "parquet-geo-only",

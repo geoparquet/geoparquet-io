@@ -76,7 +76,7 @@ EXPECTED_COUNTS = {
     "G1.retry_status_sets": 2,
     "G1.retry_after": 0,
     "G1.retry_wrappers": 0,
-    "G1.json_dumps": 28,
+    "G1.json_dumps": 23,
     "G1.parquet_metadata": 0,
     "G1.row_group_policy": 2,
     "G1.scheme_test": 0,
@@ -2260,48 +2260,161 @@ def _subscript_keys(node: ast.AST) -> list[ast.AST]:
     return keys[::-1]
 
 
-def _mutates_a_column_entry(node: ast.AST) -> bool:
-    """``x["columns"][col][key] = ...`` (or augmented, annotated, ``del``)."""
-    if isinstance(node, (ast.Assign, ast.Delete)):
-        targets = node.targets
-    elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
-        targets = [node.target]
-    else:
-        return False
-    for target in targets:
-        keys = _subscript_keys(target)
-        for i, key in enumerate(keys):
-            if isinstance(key, ast.Constant) and key.value == "columns" and len(keys) - i >= 3:
+#: The keys that make a dict a ``geo`` block, not a report.
+_BLOCK_KEYS = frozenset({"version", "columns", "primary_column"})
+#: Methods that edit the dict they are called on.
+_EDITING_METHODS = frozenset({"pop", "popitem", "update", "setdefault", "clear", "__setitem__"})
+
+
+def _is_str(node: ast.AST, values) -> bool:
+    return isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in values
+
+
+def _traces_to_columns(node: ast.AST, aliases: set[str]) -> bool:
+    """Whether ``node`` is a block's ``columns`` (or something inside it).
+
+    ``x["columns"]``, ``x.get("columns")``, ``x.setdefault("columns", ...)``, a
+    subscript or ``.get``/``.setdefault`` of one, an ``or`` over one, or a local
+    name bound to any of these.
+    """
+    if isinstance(node, ast.Name):
+        return node.id in aliases
+    if isinstance(node, ast.BoolOp):
+        return any(_traces_to_columns(v, aliases) for v in node.values)
+    if isinstance(node, ast.Subscript):
+        return _is_str(node.slice, {"columns"}) or _traces_to_columns(node.value, aliases)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        if node.func.attr in {"get", "setdefault"}:
+            if node.args and _is_str(node.args[0], {"columns"}):
                 return True
+            return _traces_to_columns(node.func.value, aliases)
     return False
 
 
+def _is_copy_call(node: ast.AST) -> bool:
+    """``copy.deepcopy(x)``, ``copy.copy(x)``, ``deepcopy(x)``, ``dict(x)`` or ``x.copy()``."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id in {"deepcopy", "dict"} and len(node.args) == 1 and not node.keywords
+    if isinstance(func, ast.Attribute):
+        if func.attr == "deepcopy":
+            return True
+        return func.attr == "copy" and (
+            not node.args or (isinstance(func.value, ast.Name) and func.value.id == "copy")
+        )
+    return False
+
+
+def _walk_scope(scope: ast.AST) -> Iterator[ast.AST]:
+    """``ast.walk`` of one scope's own code: nested functions are scopes of their own."""
+    stack = list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            stack.extend(ast.iter_child_nodes(node))
+
+
+def _bound_names(scope: ast.AST, pred) -> set[str]:
+    """Local names some assignment in ``scope`` binds to a value ``pred`` accepts."""
+    names: set[str] = set()
+    for _ in range(3):  # a fixpoint over alias chains, order-blind on purpose
+        for node in _walk_scope(scope):
+            if isinstance(node, ast.Assign) and pred(node.value, names):
+                names |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+                if pred(node.value, names) and isinstance(node.target, ast.Name):
+                    names.add(node.target.id)
+    return names
+
+
+def _store_targets(node: ast.AST) -> list[ast.AST]:
+    if isinstance(node, (ast.Assign, ast.Delete)):
+        return list(node.targets)
+    if isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+        return [node.target]
+    return []
+
+
+def _edits_by_store(node: ast.AST, aliases: set[str], copies: set[str]) -> bool:
+    for target in _store_targets(node):
+        if not isinstance(target, ast.Subscript):
+            continue
+        if _traces_to_columns(target.value, aliases):
+            return True  # a store into columns or into a column entry
+        if (
+            isinstance(target.value, ast.Name)
+            and target.value.id in copies
+            and _is_str(target.slice, _BLOCK_KEYS)
+        ):
+            return True  # a copied block given a version/columns/primary
+    return False
+
+
+def _edits_by_call(node: ast.AST, aliases: set[str]) -> bool:
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+        return False
+    receiver, method = node.func.value, node.func.attr
+    if method not in _EDITING_METHODS:
+        return False
+    if method != "setdefault" and _traces_to_columns(receiver, aliases):
+        return True  # .pop/.update/... on columns or a column entry
+    return method == "update" and bool(
+        {k.arg for k in node.keywords} & _BLOCK_KEYS
+        or any(isinstance(a, ast.Dict) and _dict_str_keys(a) & _BLOCK_KEYS for a in node.args)
+    )  # a block .update(columns=...)
+
+
+def _block_edits(tree: ast.AST) -> Iterator[ast.AST]:
+    """The nodes that edit a ``geo`` block outside the composer, scope by scope."""
+    scopes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    for scope in [tree, *scopes]:
+        aliases = _bound_names(scope, _traces_to_columns)
+        copies = _bound_names(scope, lambda v, _names: _is_copy_call(v))
+        for node in _walk_scope(scope):
+            if _edits_by_store(node, aliases, copies) or _edits_by_call(node, aliases):
+                yield node
+            elif isinstance(node, ast.Dict) and node.keys and node.keys[0] is None:
+                if _dict_str_keys(node) & _BLOCK_KEYS:
+                    yield node  # a carried block re-stated over a splat
+
+
 def _find_geo_compose(m: _Module) -> Iterator[Hit]:
-    """A ``geo`` block composed outside ``geo_metadata.compose_geo_block`` (#1367
-    concept 4): a dict literal naming ``"version"`` beside ``"columns"``, or beside
-    ``"primary_column"`` with a ``**`` splat (a carried block re-stated), or a
-    ``dict(version=..., columns=...)`` call.
+    """A ``geo`` block composed or edited outside ``geo_metadata.compose_geo_block``
+    (#1367 concept 4).
 
-    Would have caught the eleven hand-built blocks #1367 found -- the extractors'
-    (arcgis, carto, wfs), raster's, simplify's two, the stream's, the derived 2.0
-    block, the empty-table one -- each with its own version fallback
-    (``"1.0.0"``, ``"1.1.0"``, ``"2.0.0"``) and its own subset of the gates.
-    A report dict that only *mentions* a version and a primary column (``inspect``'s
-    summaries) has neither ``columns`` nor a splat, and is not a hit.
+    Composed: a dict literal naming ``"version"`` beside ``"columns"``, or a
+    ``dict(version=..., columns=...)`` call. Would have caught the eleven
+    hand-built blocks #1367 found -- the extractors' (arcgis, carto, wfs),
+    raster's, simplify's two, the stream's, the derived 2.0 block, the
+    empty-table one -- each with its own version fallback and its own subset of
+    the gates. A report dict that only *mentions* a version and a primary column
+    (``inspect``'s summaries) has no ``columns`` and no splat, and is not a hit.
 
-    Also a block mutated after composition: an assignment (or ``del``) to
-    ``block["columns"][col][key]``. Would have caught ``overview_file``'s
-    ``geometry_types`` patch, the streaming schema's, and ``add bbox-metadata``'s
-    hand-set ``covering`` -- each a second composer writing one key the owner
-    never gated.
+    Edited (:func:`_block_edits`): a dict over a leading splat that re-states ``version``,
+    ``columns`` or ``primary_column``; any store, ``del``, ``.pop``,
+    ``.update`` or ``.setdefault(...)[k] =`` whose receiver traces to a block's
+    ``columns`` -- through a local alias too (``col = geo["columns"][p];
+    col["covering"] = b``); a ``.update(columns=...)`` on a block; and a
+    ``version``/``columns``/``primary_column`` store on a ``deepcopy``/``dict``
+    copy. Would have caught ``overview_file``'s ``geometry_types`` patch, the
+    streaming schema's, ``check --fix``'s supplied ``covering`` (a deepcopy then
+    ``setdefault("covering", {})["bbox"] =``), ``add bbox``'s splat re-statement
+    and reproject's CRS pop -- each a second composer writing one key the owner
+    never gated. (``add bbox-metadata`` composes its block; it is not an edit.)
     """
-    for node in ast.walk(m.tree):
-        if _mutates_a_column_entry(node):
+    seen: set[int] = set()
+    for node in _block_edits(m.tree):
+        if id(node) not in seen:
+            seen.add(id(node))
             yield m.hit(node)
-        elif isinstance(node, ast.Dict):
-            keys = _dict_str_keys(node)
-            splat = any(k is None for k in node.keys)
-            if "version" in keys and ("columns" in keys or ("primary_column" in keys and splat)):
+    for node in ast.walk(m.tree):
+        if id(node) in seen:
+            continue
+        if isinstance(node, ast.Dict):
+            if {"version", "columns"} <= _dict_str_keys(node):
                 yield m.hit(node)
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if node.func.id == "dict" and {"version", "columns"} <= {k.arg for k in node.keywords}:
@@ -3863,6 +3976,58 @@ G1_AUDIT_SHAPES = [
         "a composed block patched after the fact",
         'def patch(geo, g, types):\n    geo["columns"][g]["geometry_types"] = types\n',
     ),
+    # The T3e audit's ten (pass 1, finding 18): every way a block is edited
+    # outside the composer that the subscript form above does not reach.
+    (
+        "geo_compose",
+        "a dict() copy of a carried block given new columns",
+        'def f(carried, g):\n    block = dict(carried)\n    block["columns"] = {g: {}}\n    return block\n',
+    ),
+    (
+        "geo_compose",
+        "a splat with a new version",
+        'def f(geo, v):\n    return {**geo, "version": v}\n',
+    ),
+    (
+        "geo_compose",
+        "a block .update(columns=...)",
+        "def f(geo, cols):\n    geo.update(columns=cols)\n",
+    ),
+    (
+        "geo_compose",
+        "setdefault(covering) then a store",
+        'def f(geo, p, b):\n    geo["columns"][p].setdefault("covering", {})["bbox"] = b\n',
+    ),
+    (
+        "geo_compose",
+        "a store through an alias of a column entry",
+        'def f(geo, p, b):\n    col = geo["columns"][p]\n    col["covering"] = b\n',
+    ),
+    (
+        "geo_compose",
+        "a column entry .update(...)",
+        'def f(geo, p, crs):\n    geo["columns"][p].update(crs=crs)\n',
+    ),
+    (
+        "geo_compose",
+        "a column entry .pop(...)",
+        'def f(geo, p):\n    geo["columns"][p].pop("bbox")\n',
+    ),
+    (
+        "geo_compose",
+        "a new entry through setdefault(columns)",
+        'def f(geo, p):\n    geo.setdefault("columns", {})[p] = {"encoding": "WKB"}\n',
+    ),
+    (
+        "geo_compose",
+        "a deepcopy of a block given a version",
+        'import copy\ndef f(geo):\n    b = copy.deepcopy(geo)\n    b["version"] = "1.1.0"\n    return b\n',
+    ),
+    (
+        "geo_compose",
+        "a column entry key stored by subscript",
+        'def f(geo, p):\n    geo["columns"][p]["crs"] = None\n',
+    ),
 ]
 
 #: Shapes close to the above that are not the pattern.
@@ -3899,9 +4064,14 @@ G1_AUDIT_NEAR_MISSES = [
     ),
     (
         "geo_compose",
-        "a read of a column entry's key, and a write one level up",
+        "reads of a column entry, through an alias and .get",
         'def types(geo, g):\n    t = geo["columns"][g]["geometry_types"]\n'
-        '    geo["columns"][g] = {}\n    return t\n',
+        '    col = geo.get("columns", {}).get(g) or {}\n    return t, col.get("crs"), len(geo["columns"])\n',
+    ),
+    (
+        "geo_compose",
+        "a copy of a report dict given a version",
+        'def f(report):\n    out = dict(report)\n    out["count"] = 1\n    return {**out, "rows": 2}\n',
     ),
 ]
 

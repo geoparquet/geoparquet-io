@@ -173,18 +173,14 @@ def wrap_query_with_secondary_crs(
     return f"SELECT * REPLACE ({', '.join(replacements)}) FROM ({query})"
 
 
-def geoarrow_input_encoding(
-    geometry_info: dict | None, geometry_column: str, geoparquet_version: str
-) -> str | None:
-    """The primary's input encoding a 1.1-geoarrow write preserves, else None.
+def written_block_encoding(geoparquet_version: str) -> str | None:
+    """The primary's encoding a DuckDB-written file actually has, for the composer.
 
-    1.1-geoarrow keeps the input's native GeoArrow encoding; every other v1.x
-    version converts geometry to a WKB blob, so the composer's own rule (the
-    carried encoding, or WKB) decides.
+    DuckDB writes the geometry as WKB (a BLOB for 1.x, native Parquet GEOMETRY
+    for 2.0), so that is the writer's answer; for 1.1-geoarrow it keeps the
+    input's native encoding and leaves the composer's step 3 to name it.
     """
-    if not geometry_info or geoparquet_version != "1.1-geoarrow":
-        return None
-    return geometry_info.get("metadata", {}).get(geometry_column, {}).get("encoding")
+    return None if geoparquet_version == "1.1-geoarrow" else "WKB"
 
 
 class WriteStrategy(str, Enum):

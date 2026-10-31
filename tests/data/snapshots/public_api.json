@@ -476,6 +476,7 @@
     "covering_lacks_bbox",
     "covering_supported",
     "declared_version",
+    "declares_covering_member",
     "geoarrow_dimension",
     "geoarrow_primary_encoding",
     "geoarrow_wkb_codes",

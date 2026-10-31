@@ -73,7 +73,6 @@ _.list_strategies  # unused method (geoparquet_io/core/write_strategies/__init__
 is_azure_url  # unused function (geoparquet_io/core/remote.py:71) -- dead: T0e deletes (no package caller; only tests)
 is_gcs_url  # unused function (geoparquet_io/core/remote.py:84) -- dead: T0e deletes (no package caller; only tests)
 _.sort_hilbert  # unused method (geoparquet_io/api/table.py:1903) -- dynamic: public Python API (docs/api/python-api.md)
-apply_geo_metadata  # unused function (geoparquet_io/core/streaming.py:189) -- dead: T0e deletes (no package caller; only tests)
 verbose_logging  # unused function (geoparquet_io/core/logging_config.py:194) -- dead: T0e deletes (no package caller; only tests)
 __getattr__  # unused function (geoparquet_io/__init__.py:72) -- dynamic: PEP 562 module hook / module class swap
 sort_hilbert  # unused function (geoparquet_io/api/ops.py:293) -- dynamic: public Python API (docs/api/python-api.md)

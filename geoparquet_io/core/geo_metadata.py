@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cache, lru_cache
 from typing import TYPE_CHECKING
@@ -720,11 +720,9 @@ def strip_unsupported_covering(geo_meta: dict, version: str | None, verbose: boo
     also catches coverings carried in from a 1.1 source file or supplied through
     ``custom_metadata`` (h3/s2/a5/quadkey).
 
-    Never mutates its input. The assembled metadata still aliases the caller's
-    column dicts through the shallow copy in ``_initialize_geo_metadata``, and
-    partition loops reuse one ``original_metadata`` dict across many writes, so
-    popping in place would strip the shared dict permanently and silently cost a
-    later 1.1 write its covering.
+    Never mutates its input: partition loops reuse one ``original_metadata``
+    dict across many writes, so popping in place would strip the shared dict
+    permanently and silently cost a later 1.1 write its covering.
     """
     if covering_supported(version):
         return geo_meta
@@ -808,9 +806,9 @@ def strip_bboxless_covering(geo_meta: dict, verbose: bool = False) -> dict:
     indexes ``covering["bbox"]["xmin"][0]`` unguarded, so ``partition quadkey``
     wrote a dataset ``geopandas.read_parquet`` could not open at all (#954).
 
-    Single gate shared by every write path, applied after metadata assembly and
-    after the bbox-declaring steps (``_add_bbox_covering``,
-    the composer's bbox-covering step) have had their chance to supply the member.
+    Step 13 of :func:`compose_geo_block`, the last gate: it runs after the
+    composer's bbox-covering step (step 9) has had its chance to supply the
+    member.
 
     Never mutates its input, for the same aliasing reason as
     :func:`strip_unsupported_covering`: partition loops reuse one metadata dict
@@ -841,24 +839,16 @@ def _with_covering(col_meta: dict, remaining: dict) -> dict:
 def strip_illegal_bbox_covering(geo_meta: dict, schema: pa.Schema) -> dict:
     """Return ``geo_meta`` without any ``covering.bbox`` naming a struct the spec forbids.
 
-    The *drop* half of :func:`bbox_column_to_declare`'s rule 2, for the write
-    paths that build their block from an Arrow schema. The DuckDB paths get it
-    from the composer's bbox-covering step (:func:`compose_geo_block`), which probes the output query for
-    a schema and pops the same member on the same verdict; this asks the same
-    question of a schema the caller already has.
-
-    Without it those paths asked the gate only "may I declare this column?",
-    acted on the "no" by not declaring anything, and then wrote the entry the
-    *input* had already declared -- warning "so it is not written" first (#1172).
+    The *drop* half of :func:`bbox_column_to_declare`'s rule 2: step 12 of
+    :func:`compose_geo_block`, over the source's output schema. A write that
+    may not declare a column must not write the entry the *input* had already
+    declared either (#1172).
 
     Only the ``bbox`` member goes: an ``h3``/``quadkey`` entry beside it is not
-    what the validator rejected, and :func:`strip_bboxless_covering` -- the gate
-    every path runs after this one -- decides whether what is left may stand
-    alone (#954). A covering naming a column the schema does not have is somebody
-    else's question: :func:`prune_geo_metadata_to_columns` on the DuckDB funnel,
-    which prunes the carried block before any strategy sees it, and
-    :func:`strip_absent_covering` immediately before this gate on the Arrow table
-    funnel, which that prune never reached.
+    what the validator rejected, and :func:`strip_bboxless_covering` (step 13)
+    decides whether what is left may stand alone (#954). A covering naming a
+    column the schema does not have is step 11's question
+    (:func:`strip_absent_covering`).
 
     Never mutates its input, for the aliasing reason
     :func:`strip_unsupported_covering` gives.
@@ -1364,6 +1354,10 @@ class GeoBlockOptions:
     ``geometry_column`` is named. ``geometry_column`` is the column the
     options describe, which a write of a transformed secondary (``process
     simplify --geometry-column``) does not make the primary.
+    ``measure_missing`` is called with the block once steps 1-8 have applied
+    every carried and given stat; the stats it returns (``{column: {bbox,
+    geometry_types}}``, for what the block still lacks) are applied as step 8
+    is -- so a writer that measures only the gaps composes once.
     """
 
     geometry_column: str
@@ -1380,6 +1374,7 @@ class GeoBlockOptions:
     covering_provenance: Mapping | None = None
     describe: bool = False
     primary_column: str | None = None
+    measure_missing: Callable[[dict], Mapping] | None = None
     verbose: bool = False
 
 
@@ -1554,11 +1549,19 @@ def _covering_gates(geo_meta: dict, view: _SourceView, version, verbose: bool) -
     return strip_bboxless_covering(geo_meta, verbose)
 
 
+def declares_covering_member(col_meta: object, member: str | None = None) -> bool:
+    """Is this column's ``covering`` an object (with a ``member`` key, when named)?
+
+    A string ``covering`` satisfies ``"bbox" in covering`` too (#1062), so the
+    object test comes first; ``covering_is_object`` reports that shape.
+    """
+    covering = col_meta.get("covering") if isinstance(col_meta, dict) else None
+    return isinstance(covering, dict) and (member is None or member in covering)
+
+
 def _declares_a_covering(geo_meta: dict, member: str | None = None) -> bool:
     return any(
-        isinstance(col_meta, dict)
-        and isinstance(col_meta.get("covering"), dict)
-        and (member is None or member in col_meta["covering"])
+        declares_covering_member(col_meta, member)
         for col_meta in (geo_meta.get("columns") or {}).values()
     )
 
@@ -1667,6 +1670,8 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
             geo_meta["columns"][column].setdefault(key, value)
     _apply_stats(geo_meta, secondaries.stats)
     _apply_stats(geo_meta, options.stats)
+    if options.measure_missing is not None:
+        _apply_stats(geo_meta, options.measure_missing(geo_meta))
     provenance = geo_meta if carried else sanitized_carried_geo(options.covering_provenance)
     _declare_bbox_covering(
         geo_meta, col_meta, options.covering, view, version, provenance, options.verbose

@@ -76,6 +76,7 @@ from geoparquet_io.core.geo_metadata import (
     bbox_xy,
     bounds_of,
     covering_lacks_bbox,
+    declares_covering_member,
     geometry_types_of,
     is_covering_path,
     is_geoparquet_1x,
@@ -1813,17 +1814,6 @@ def _cover_verdict(check_name: str, status: CheckStatus, message: str) -> Valida
     )
 
 
-def _declares_bbox_cover(col_meta: dict) -> bool:
-    """``covering`` is an object with a ``bbox`` key.
-
-    A string ``covering`` satisfies ``"bbox" in covering`` too (#1062);
-    ``covering_is_object`` reports it, every other covering check treats the
-    column as declaring none.
-    """
-    covering = col_meta.get("covering")
-    return isinstance(covering, dict) and "bbox" in covering
-
-
 @dataclass(frozen=True)
 class _BboxCoverRef:
     """What a column's ``covering.bbox`` says, parsed once for the four checks."""
@@ -1843,7 +1833,7 @@ def _resolve_bbox_cover(col_meta: dict) -> _BboxCoverRef:
     a string path passes every length test and reads character-wise, which is
     how a verdict once named a column ``"b"`` the file never mentions (#1062).
     """
-    if not _declares_bbox_cover(col_meta):
+    if not declares_covering_member(col_meta, "bbox"):
         return _BboxCoverRef(declared=False)
     paths = col_meta["covering"]["bbox"]
     if not isinstance(paths, dict):
@@ -4598,7 +4588,7 @@ def _run_geoparquet_checks(
             checks.append(_check_cover_has_bbox(col_meta, col_name))
 
             # Only run bbox covering checks if covering is defined
-            if _declares_bbox_cover(col_meta):
+            if declares_covering_member(col_meta, "bbox"):
                 checks.append(_check_cover_bbox_paths(col_meta, col_name))
                 checks.append(_check_cover_bbox_column_exists(col_meta, col_name, schema_info))
                 checks.append(_check_cover_bbox_structure(col_meta, col_name, schema_info))

@@ -137,3 +137,28 @@ class TestTheForcedRewriteSaysWhy:
         assert carried is None
         assert needs_rewrite is True
         assert "Taking the metadata rewrite" in caplog.text
+
+    def test_a_bboxless_block_with_types_still_declines_the_carry(self):
+        """Only ``bbox`` gone (the T3e verifier's case): still (None, True).
+
+        ``geometry_types`` survives a filter that drops the ``bbox``; the block
+        is worth keeping (its covering) but a verbatim carry would ship no
+        file bbox, so the rewrite measures it.
+        """
+        block = {
+            "version": "2.0.0",
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {
+                    "encoding": "WKB",
+                    "geometry_types": ["Polygon"],
+                    "covering": {"bbox": build_bbox_covering("bbox")},
+                }
+            },
+        }
+        carried, needs_rewrite = _fast_path_geo_decision(
+            {"geo": json.dumps(block)}, "geometry", "2.0", **fast_path_query("bbox")
+        )
+
+        assert carried is None
+        assert needs_rewrite is True

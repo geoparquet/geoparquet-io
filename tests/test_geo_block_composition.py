@@ -14,6 +14,11 @@ input's block un-upgraded); T3e routed each to the composer's rule.
 Source kinds: a 1.1 file declaring a covering over its bbox struct and a
 projected CRS; a 1.0 file with an undeclared conventional ``bbox`` column; a
 1.1 file declaring ``edges: spherical``; a GeoJSON file (no carried block).
+
+What this table asserts is *agreement*: every path writes the block ``extract``
+writes. It does not say what that block should contain -- a defect every path
+shared would pass here. The block's content (each step, each gate, each input)
+is pinned by ``tests/test_compose_geo_block.py``.
 """
 
 from __future__ import annotations
@@ -202,3 +207,37 @@ def _diff(got, want, prefix="") -> str:
         return ""
     short = lambda v: v.get("id", "projjson") if isinstance(v, dict) and "type" in v else v  # noqa: E731
     return f"{prefix}: {short(got)!r} != {short(want)!r}"
+
+
+@pytest.mark.parametrize("strategy", ["duckdb-kv", "disk-rewrite", "in-memory", "streaming"])
+def test_a_non_covering_custom_key_lands_on_the_block_for_every_strategy(
+    strategy, test_data_dir, tmp_path
+):
+    """One rule for where ``custom_metadata``'s other keys live: the block's top level.
+
+    Output change (#1367 T3e): the DuckDB strategies used to put them on the
+    primary's column entry while the Arrow ones put them on top. No gpio
+    command passes such a key (every caller sends only ``covering``), so only a
+    direct ``write_parquet_with_metadata`` caller sees the move.
+    """
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+    from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+
+    src = str(test_data_dir / "buildings_test.parquet")
+    out = str(tmp_path / "out.parquet")
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+    try:
+        write_parquet_with_metadata(
+            con,
+            f"SELECT * FROM read_parquet({sql_path(src)})",
+            out,
+            original_metadata=pq.read_schema(src).metadata,
+            custom_metadata={"note": "x"},
+            geoparquet_version="1.1",
+            write_strategy=strategy,
+        )
+    finally:
+        con.close()
+    geo = _geo(Path(out))
+    assert geo["note"] == "x"
+    assert "note" not in geo["columns"][geo["primary_column"]]

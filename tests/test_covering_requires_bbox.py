@@ -316,7 +316,7 @@ def test_add_kdtree_writes_no_bboxless_covering(buildings_test_file, tmp_path):
 
 
 def test_a_secondary_columns_bboxless_covering_is_gated_on_the_arrow_path():
-    """Secondary entries merge in after create_geo_metadata; the gate runs again."""
+    """Secondary entries go through the composer's steps; its gates judge them too."""
     import pyarrow as pa
 
     from geoparquet_io.core.arrow_geo_metadata import _build_geo_block

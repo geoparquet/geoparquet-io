@@ -38,7 +38,7 @@ from geoparquet_io.core.logging_config import configure_verbose, debug, error, i
 from geoparquet_io.core.parquet_schema import root_schema_columns, schema_direct_children
 
 
-def _covering_bbox_refs(col_info) -> dict | None:
+def covering_bbox_refs(col_info) -> dict | None:
     """One column's validated ``covering.bbox`` refs, or ``None``.
 
     All four bounds must be present and every ref must be a well-formed
@@ -75,7 +75,7 @@ def _bbox_column_from_covering(geo_meta) -> str | None:
     # Non-None means the walk above found the primary's entry, its ``covering``
     # and a ``bbox`` inside it, all objects; the shape of the four axis paths is
     # what is still open, and only a complete, well-formed one is a pointer.
-    refs = _covering_bbox_refs(geo_meta["columns"][geo_meta["primary_column"]])
+    refs = covering_bbox_refs(geo_meta["columns"][geo_meta["primary_column"]])
     return cast("str", refs["xmin"][0]) if refs is not None else None
 
 
@@ -91,7 +91,7 @@ def bbox_covering_column_for(geo_meta, geometry_column: str) -> str | None:
     columns = geo_meta.get("columns", {})
     if not isinstance(columns, dict):
         return None
-    refs = _covering_bbox_refs(columns.get(geometry_column))
+    refs = covering_bbox_refs(columns.get(geometry_column))
     return cast("str", refs["xmin"][0]) if refs is not None else None
 
 
@@ -212,29 +212,23 @@ def _check_bbox_metadata_covering(geo_meta, has_bbox_column, verbose, bbox_colum
     columns = geo_meta.get("columns")
     if isinstance(columns, dict):
         for _col_name, col_info in columns.items():
-            covering = col_info.get("covering") if isinstance(col_info, dict) else None
-            if isinstance(covering, dict) and covering.get("bbox"):
-                bbox_refs = covering["bbox"]
-                # Check if the bbox covering has the required structure
-                if (
-                    isinstance(bbox_refs, dict)
-                    and bbox_struct_child_names_match(bbox_refs)
-                    and all(is_covering_path(ref) for ref in bbox_refs.values())
-                ):
-                    referenced_bbox_column = bbox_refs["xmin"][0]
-                    if bbox_column_name is not None and referenced_bbox_column != bbox_column_name:
-                        if verbose:
-                            debug(
-                                f"Covering references column '{referenced_bbox_column}', "
-                                f"but the file's bbox column is '{bbox_column_name}' - "
-                                "treating the bbox column as undeclared"
-                            )
-                        continue
-                    if verbose:
-                        debug(
-                            f"Found bbox covering in metadata referencing column: {referenced_bbox_column}"
-                        )
-                    return True
+            bbox_refs = covering_bbox_refs(col_info)
+            if bbox_refs is None:
+                continue
+            referenced_bbox_column = bbox_refs["xmin"][0]
+            if bbox_column_name is not None and referenced_bbox_column != bbox_column_name:
+                if verbose:
+                    debug(
+                        f"Covering references column '{referenced_bbox_column}', "
+                        f"but the file's bbox column is '{bbox_column_name}' - "
+                        "treating the bbox column as undeclared"
+                    )
+                continue
+            if verbose:
+                debug(
+                    f"Found bbox covering in metadata referencing column: {referenced_bbox_column}"
+                )
+            return True
 
     return False
 

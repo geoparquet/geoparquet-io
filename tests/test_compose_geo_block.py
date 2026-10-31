@@ -291,3 +291,43 @@ def test_never_mutates_the_source_metadata():
 
 def test_detect_is_the_default_covering_request():
     assert GeoBlockOptions("geometry").covering is DETECT_BBOX_COLUMN
+
+
+def test_a_carried_block_without_the_column_gets_its_entry():
+    """Step 1: a carried block naming no entry for the column still gets one (was
+    ``TestInitializeGeoMetadata.test_adds_missing_geometry_column``)."""
+    carried = {"version": "1.1.0", "primary_column": "geometry", "columns": {}}
+    block = _compose(_table(bbox_type=None, geo=carried), version="1.1")
+    assert block["columns"]["geometry"]["encoding"] == "WKB"
+    assert block["primary_column"] == "geometry"
+
+
+def test_a_requested_bbox_column_name_is_declared():
+    """A named covering request declares that column (was
+    ``TestAddBboxCovering.test_custom_bbox_column_name``)."""
+    bounds = {"xmin": 0.0, "ymin": 0.0, "xmax": 1.0, "ymax": 1.0}
+    table = _table(bbox_type=None, geo=None, extra={"bounds": pa.array([bounds], BBOX_TYPE)})
+    block = _compose(table, version="1.1", covering="bounds")
+    assert block["columns"]["geometry"]["covering"] == {"bbox": build_bbox_covering("bounds")}
+
+
+def test_measure_missing_fills_only_what_the_block_lacks():
+    """A writer measuring the gaps composes once: its stats land as step 8's do."""
+    seen = []
+
+    def measure(block):
+        seen.append(copy.deepcopy(block["columns"]["geometry"]))
+        return {"geometry": {"bbox": [0.0, 0.0, 1.0, 1.0]}}
+
+    block = _compose(_table(), version="1.1", measure_missing=measure)
+    assert block["columns"]["geometry"]["bbox"] == [0.0, 0.0, 1.0, 1.0]
+    assert block["columns"]["geometry"]["geometry_types"] == ["Point"]
+    assert all("bbox" not in entry for entry in seen)
+
+
+def test_column_crs_resolves_another_columns_crs():
+    carried = copy.deepcopy(CARRIED)
+    carried["columns"]["other"] = {"encoding": "WKB", "geometry_types": [], "crs": None}
+    table = _table(geo=carried, extra={"other": pa.array([b"\x01"], pa.binary())})
+    block = _compose(table, version="1.1", column_crs={"other": "OGC:CRS84"})
+    assert "crs" not in block["columns"]["other"]  # the default, by omission

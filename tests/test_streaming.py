@@ -18,7 +18,7 @@ import pyarrow.ipc as ipc
 import pytest
 
 from geoparquet_io.core.duckdb_utils import fetch_one
-from geoparquet_io.core.geo_metadata import read_raw_geo
+from geoparquet_io.core.geo_metadata import read_raw_geo, with_geo_block
 from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.streaming import (
     STREAM_MARKER,
@@ -26,7 +26,6 @@ from geoparquet_io.core.streaming import (
     _rebatch_wkb_under_byte_limit,
     _split_array_under_byte_limit,
     _wkb_chunk_data_nbytes,
-    apply_geo_metadata,
     apply_geoarrow_extension_type,
     apply_metadata_to_table,
     extract_crs_from_table,
@@ -224,10 +223,10 @@ class TestMetadataHandling:
         table = pa.table({"id": [1, 2]})
         assert read_raw_geo(table.schema.metadata).value is None
 
-    def test_apply_geo_metadata(self, geo_metadata):
-        """Test applying geo metadata to table."""
+    def test_with_geo_block(self, geo_metadata):
+        """The one block attacher (``geo_metadata.with_geo_block``) keeps the block as given."""
         table = pa.table({"id": [1, 2]})
-        result = apply_geo_metadata(table, geo_metadata)
+        result = with_geo_block(table, geo_metadata)
 
         # Verify metadata was applied
         assert b"geo" in result.schema.metadata
@@ -254,7 +253,7 @@ class TestMetadataHandling:
         """Test that geo metadata survives Arrow IPC roundtrip."""
         # Create table with metadata
         table = pa.table({"id": [1, 2], "geometry": [b"wkb1", b"wkb2"]})
-        table = apply_geo_metadata(table, geo_metadata)
+        table = with_geo_block(table, geo_metadata)
 
         # Write to buffer
         buffer = io.BytesIO()

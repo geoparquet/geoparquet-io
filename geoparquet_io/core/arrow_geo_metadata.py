@@ -15,8 +15,6 @@ module-private helpers -- ``_build_geo_block``, ``_crs_as_projjson`` and the
 like -- are not re-exported, and nothing outside this module reached them).
 """
 
-import json
-
 from geoparquet_io.core.arrow_types import _rebuild_array_with_type
 from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
 from geoparquet_io.core.crs_utils import (
@@ -34,17 +32,18 @@ from geoparquet_io.core.edges import (
     set_edges,
 )
 from geoparquet_io.core.geo_metadata import (
+    DETECT_BBOX_COLUMN,
     GEOPARQUET_VERSIONS,
     GeoBlockOptions,
     SchemaSource,
     _bbox_claimed_by_another_column,
     _self_evident_bbox_column,
-    bbox_column_to_declare,
     compose_geo_block,
     geometry_stats_of,
     geometry_types_of,
     is_bbox_struct_field,
     sanitized_carried_geo,
+    with_geo_key,
 )
 from geoparquet_io.core.geoarrow_encoding import (
     is_geoarrow_extension_field,
@@ -115,25 +114,6 @@ def _detect_bbox_column_from_table(table, verbose: bool = False) -> str | None:
             debug(f"Not reading '{name}' as the primary's bbox: another column's covering names it")
         return None
     return name
-
-
-def _bbox_column_to_declare(
-    table, verbose: bool = False, original_metadata: dict | None = None
-) -> str | None:
-    """The bbox column this write may put in a ``covering``: the shared gate, on a table.
-
-    Stricter than :func:`_detect_bbox_column_from_table`, which is also a
-    read-side probe (``process aggregate --bucket-point bbox`` reads ``xmin`` by
-    name, which works in any field order).
-
-    Provenance is the input's own block when the caller has one: a table DuckDB
-    built from a query carries no schema metadata at all, so reading only that
-    would forget which column the primary declared (#953).
-    """
-    geo_meta = sanitized_carried_geo(original_metadata) or sanitized_carried_geo(
-        table.schema.metadata
-    )
-    return bbox_column_to_declare(table.schema, geo_meta, verbose=verbose)
 
 
 def _strip_geoarrow_to_plain_wkb(table, geometry_column: str, verbose: bool):
@@ -470,8 +450,7 @@ def _assemble_and_apply_geo_metadata(
     # `ARROW:schema` and `geo:overviews` go, while a sidecar whose name only
     # starts with "geo" stays. The `geo` key itself is replaced just below.
     new_metadata = output_schema_metadata(table.schema.metadata, metadata_version)
-    new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
-    table = table.replace_schema_metadata(new_metadata)
+    table = table.replace_schema_metadata(with_geo_key(new_metadata, geo_meta))
 
     if verbose:
         debug(f"Applied geo metadata with version {metadata_version}")
@@ -814,7 +793,8 @@ def _build_geo_block(
         GeoBlockOptions(
             geometry_column=geometry_column,
             version=effective_version,
-            covering=_bbox_column_to_declare(table, verbose, original_metadata),
+            covering=DETECT_BBOX_COLUMN,
+            covering_provenance=table.schema.metadata,
             custom_metadata=custom_metadata,
             edges=edges,
             crs=input_crs,

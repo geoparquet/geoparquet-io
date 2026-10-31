@@ -206,7 +206,7 @@ def derive_secondary_geometry_info(
     Every geometry column the input carries beyond ``primary_column`` — native
     Parquet ``GEOMETRY``/``GEOGRAPHY`` logical types, plus anything the input's
     own ``geo`` block declares — becomes a secondary, so
-    ``merge_secondary_geometry_metadata`` finally learns it exists (#1000). What
+    the composer's secondary steps finally learn it exists (#1000). What
     a native column's type adds is described in :func:`_native_secondary_meta`.
     Derived stats are otherwise absent: for a declared column they flow through
     ``original_metadata``, where the caller's invalidation (#934) has already

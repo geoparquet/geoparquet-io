@@ -12,14 +12,12 @@ Speed: Slightly slower due to batch overhead
 from __future__ import annotations
 
 import itertools
-import json
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import (
-    _bbox_column_to_declare,
     _canonicalize_wkb_columns,
     table_geometry_info,
 )
@@ -31,6 +29,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.edges import edges_of
 from geoparquet_io.core.geo_metadata import (
+    DETECT_BBOX_COLUMN,
     NATIVE_GEOMETRY_VERSIONS,
     GeoBlockOptions,
     QuerySource,
@@ -39,6 +38,7 @@ from geoparquet_io.core.geo_metadata import (
     geometry_stats_of,
     geometry_types_of,
     sanitized_carried_geo,
+    with_geo_key,
 )
 from geoparquet_io.core.geoarrow_encoding import (
     WKB_EXTENSION_NAMES,
@@ -764,7 +764,8 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             GeoBlockOptions(
                 geometry_column=geometry_column,
                 version=effective_version,
-                covering=_bbox_column_to_declare(table, verbose),
+                covering=DETECT_BBOX_COLUMN,
+                covering_provenance=table.schema.metadata,
                 custom_metadata=custom_metadata,
                 encoding=geoarrow_encoding or "WKB",
                 crs=input_crs,
@@ -899,7 +900,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
 
         if geo_meta is not None:
             # The composer measured ``geometry_types``; the block is written as composed.
-            schema_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+            schema_metadata = with_geo_key(schema_metadata, geo_meta)
 
         if extra_kv_metadata:
             for key, value in extra_kv_metadata.items():

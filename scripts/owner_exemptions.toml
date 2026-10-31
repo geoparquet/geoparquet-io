@@ -113,10 +113,6 @@ path = "geoparquet_io/core/arcgis.py"
 count = "*"
 reason = "metadata serialization, not a report: geo block and a staged ArcGIS JSON document"
 [[G1.json_dumps]]
-path = "geoparquet_io/core/arrow_geo_metadata.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
 path = "geoparquet_io/core/bbox_structure.py"
 count = "*"
 reason = "metadata serialization, not a report: debug dump of the geo block"
@@ -185,25 +181,13 @@ path = "geoparquet_io/core/stac.py"
 count = "*"
 reason = "metadata serialization, not a report: STAC item/collection JSON file"
 [[G1.json_dumps]]
-path = "geoparquet_io/core/streaming.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
 path = "geoparquet_io/core/write_funnels.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/write_strategies/arrow_streaming.py"
 count = "*"
 reason = "metadata serialization, not a report: geo block"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/write_strategies/base.py"
 count = "*"
 reason = "metadata serialization, not a report: PROJJSON literal for SQL"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/write_strategies/disk_rewrite.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/write_strategies/duckdb_kv.py"
 count = "*"

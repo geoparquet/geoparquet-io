@@ -32,6 +32,7 @@ from geoparquet_io.core.geo_metadata import (
     covering_supported,
     declared_version,
     sanitized_carried_geo,
+    with_geo_key,
 )
 from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
@@ -164,8 +165,7 @@ def add_bbox_metadata_table(
     )
 
     # Metadata-only change, not a cast
-    schema_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
-    return table.replace_schema_metadata(schema_metadata)
+    return table.replace_schema_metadata(with_geo_key(schema_metadata, geo_meta))
 
 
 def _validate_requested_bbox_column(
