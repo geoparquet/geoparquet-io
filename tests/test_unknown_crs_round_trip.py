@@ -135,7 +135,7 @@ def assert_unknown(path, version: str) -> None:
 #: one of the unknown spellings; the spellings are spread across the paths, and
 #: that every spelling *reads* as unknown is the owner's question
 #: (``test_source_crs_is_unknown_for_every_unknown_input``) (#1402).
-CLI_SOURCES = {"sort-hilbert": "v20_null_srid0", "extract-geoparquet": "pgo_srid0"}
+CLI_SOURCES = {"sort-hilbert": "v11_null", "extract-geoparquet": "pgo_srid0"}
 STRATEGY_SOURCES = {
     "duckdb-kv": "pgo_srid0",
     "in-memory": "v11_null",

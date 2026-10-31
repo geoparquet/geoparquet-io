@@ -418,6 +418,7 @@ class TestOneFailureAmongMany:
         assert "Fixed 2 files:" in result.output
         assert digest(files[1]) == before[files[1]]
         for path in (files[0], files[2]):
+            assert digest(path) != before[path], f"{path.name} was not rewritten"
             assert_austria_output_is_sound(path)
 
     def test_an_interrupt_stops_the_run_and_still_lists_what_was_rewritten(

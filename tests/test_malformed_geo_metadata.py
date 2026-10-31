@@ -2160,17 +2160,13 @@ def test_check_fix_version_resolution_survives_a_non_string_version(case, bad, t
 
 
 # =============================================================================
-# One command per group: a malformed block reaches the owner, not a traceback
+# One command per distinct reader: malformed blocks never cause a traceback
 # =============================================================================
 #
-# The sweep that found #979 ran every shape against every command (390 CLI
-# runs). The owner now answers for every shape (``sanitize_geo_metadata`` and
-# the per-shape families above), the G1 ``geo_parse`` arm in
-# ``tests/test_owner_guards.py`` fails the build on a decode outside it, and
-# ``tests/test_cli_error_boundary.py`` pins the #983 DuckDB refusal on the CLI
-# boundary. What is left to show is routing: each command group, handed every
-# routing shape, ends in an error line or a write -- never a raw
-# ``TypeError``/``AttributeError`` or an untranslated ``duckdb.Error`` (#1402).
+# Owner families cover every shape. This sweep routes seven shapes through
+# each distinct downstream reader, including readers indexing decoded output.
+# G1 ``geo_parse`` separately guards against decoding outside the owner;
+# ``tests/test_cli_error_boundary.py`` pins the #983 DuckDB refusal boundary.
 
 GROUP_COMMANDS: list[tuple[str, list[str]]] = [
     ("check", ["check", "all", "{in}"]),
@@ -2180,6 +2176,12 @@ GROUP_COMMANDS: list[tuple[str, list[str]]] = [
     ("convert", ["convert", "geoparquet", "{in}", "{out}"]),
     ("extract", ["extract", "geoparquet", "{in}", "{out}"]),
     ("publish", ["publish", "stac", "{in}", "--output", "{out_json}"]),
+    ("inspect-summary", ["inspect", "summary", "{in}"]),
+    ("convert-geojson", ["convert", "geojson", "{in}", "{out_json}"]),
+    ("add-geometry-metrics", ["add", "geometry-metrics", "{in}", "{out}"]),
+    ("sort-str", ["sort", "str", "{in}", "{out}"]),
+    ("check-optimization", ["check", "optimization", "{in}"]),
+    ("check-spatial", ["check", "spatial", "{in}"]),
 ]
 
 #: The routing shapes plus the two that only a CLI run reaches: #983's
