@@ -1682,7 +1682,7 @@ def write_parquet_with_metadata(
     # to do with the geo block.
     #
     # The fast path is no longer thinner than the rewrite: DuckDB regenerates
-    # the `geo` key, but `_geo_block_to_carry_on_fast_path` substitutes the
+    # the `geo` key, but `_fast_path_geo_decision` substitutes the
     # input's own block -- `epoch`, `orientation`, a declared `covering`, plus
     # one auto-declared for a conventional bbox column the output carries -- so
     # for the same input, and absent `custom_metadata`, both paths write the

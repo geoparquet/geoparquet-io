@@ -197,7 +197,12 @@ def _classify_columns(columns: list[tuple[str, str]], cell_column: str, scheme: 
             continue
         rollups.append(
             RollupColumn(
-                name, func, cast_to_bigint=(func == "sum" and duckdb_type_is_integer(dtype))
+                name,
+                func,
+                # HUGEINT sums must retain their width rather than narrow to BIGINT.
+                cast_to_bigint=(
+                    func == "sum" and duckdb_type_is_integer(dtype) and "HUGE" not in dtype
+                ),
             )
         )
     return tuple(rollups), tuple(dropped)

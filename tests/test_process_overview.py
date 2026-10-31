@@ -1013,7 +1013,8 @@ class TestAdminRollup:
         with pytest.raises(InvalidParameterError, match="country"):
             create_overviews(str(src), levels="province")
 
-    def test_country_cache_path_with_single_quote(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("as_url", [False, True])
+    def test_country_cache_path_with_single_quote(self, tmp_path, monkeypatch, as_url):
         """The country cache path must be SQL-escaped like every other path
         (home dirs can contain apostrophes)."""
         import shutil
@@ -1026,8 +1027,20 @@ class TestAdminRollup:
         monkeypatch.setattr(
             OvertureAdminDataset,
             "get_source_for_level",
-            lambda self, level, no_cache=False: str(quoted_cache),
+            lambda self, level, no_cache=False: (
+                "file://" + str(quoted_cache) if as_url else str(quoted_cache)
+            ),
         )
+
+        if as_url:
+            from geoparquet_io.core.admin_datasets import CurrentAdminDataset
+            from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+
+            # The no-options owner form is a bare quoted URL; DuckDB reads it directly.
+            ref = CurrentAdminDataset().table_reference("file://" + str(quoted_cache))
+            with get_duckdb_connection() as con:
+                countries = con.execute(f"SELECT DISTINCT country FROM {ref}").fetchall()
+            assert {row[0] for row in countries} == {"US", "FR"}
 
         src = tmp_path / "by_region.parquet"
         _write_admin_region_aggregate(src)

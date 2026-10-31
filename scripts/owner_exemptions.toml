@@ -237,6 +237,31 @@ path = "geoparquet_io/core/wfs.py"
 name = "_probe_properties_type"
 reason = "the GeoJSON properties column's type (unnest a STRUCT), not a geometry read kind"
 
+[[G1.schema_probe]]
+path = "geoparquet_io/core/carto.py"
+count = 1
+reason = "permanent: remote CARTO SQL API probe"
+[[G1.schema_probe]]
+path = "geoparquet_io/core/convert.py"
+count = 1
+reason = "permanent: ST_Read column bind detects non-UTF-8 names"
+[[G1.spatial_filter]]
+path = "geoparquet_io/core/carto.py"
+count = 1
+reason = "permanent: constant geometry filter, not a spatial join"
+[[G1.spatial_filter]]
+path = "geoparquet_io/core/extract.py"
+count = 2
+reason = "permanent: constant geometry filter, not a spatial join"
+[[G1.spatial_filter]]
+path = "geoparquet_io/core/extract_bigquery.py"
+count = 2
+reason = "permanent: constant geometry filter, not a spatial join"
+[[G1.spatial_filter]]
+path = "geoparquet_io/core/wfs.py"
+count = 1
+reason = "permanent: constant geometry filter, not a spatial join"
+
 # ---------------------------------------------------------------------------
 # G2: owner-only definitions (scripts/check_owner_defs.py)
 # ---------------------------------------------------------------------------
@@ -523,28 +548,3 @@ reason = "The findings vulture reported at 60 when the level dropped from 80 (#1
 # G5: core/common.py (tests/test_common_split_guards.py)
 # ---------------------------------------------------------------------------
 # No exemptions: the pinned name sets and the size ceilings live in the test.
-
-[[G1.schema_probe]]
-path = "geoparquet_io/core/carto.py"
-count = 1
-reason = "permanent: remote CARTO SQL API probe"
-[[G1.schema_probe]]
-path = "geoparquet_io/core/convert.py"
-count = 1
-reason = "permanent: ST_Read column bind detects non-UTF-8 names"
-[[G1.spatial_filter]]
-path = "geoparquet_io/core/carto.py"
-count = 1
-reason = "permanent: constant geometry filter, not a spatial join"
-[[G1.spatial_filter]]
-path = "geoparquet_io/core/extract.py"
-count = 2
-reason = "permanent: constant geometry filter, not a spatial join"
-[[G1.spatial_filter]]
-path = "geoparquet_io/core/extract_bigquery.py"
-count = 2
-reason = "permanent: constant geometry filter, not a spatial join"
-[[G1.spatial_filter]]
-path = "geoparquet_io/core/wfs.py"
-count = 1
-reason = "permanent: constant geometry filter, not a spatial join"

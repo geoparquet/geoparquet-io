@@ -5583,9 +5583,6 @@ def test_g12_pylint_missing_fails(tmp_path):
     assert "pylint failed to run" in result.stderr
 
 
-# --- guard: no duckdb.__version__ read outside the owner ----------------------
-
-
 # --- guard: version-dependent facts are read in the owner only ---------------------
 
 

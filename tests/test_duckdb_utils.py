@@ -843,3 +843,10 @@ class TestNoCommunityExtensionBypass:
             "these modules install a community extension directly instead of "
             f"calling load_community_extension(): {offenders}"
         )
+
+
+def test_integer_predicate_includes_huge_integers():
+    from geoparquet_io.core.duckdb_utils import duckdb_type_is_integer
+
+    assert duckdb_type_is_integer("HUGEINT")
+    assert duckdb_type_is_integer(" uhugeint ")

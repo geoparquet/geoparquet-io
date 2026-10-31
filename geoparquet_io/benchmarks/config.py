@@ -39,8 +39,6 @@ FULL_OPERATIONS: list[str] = (
     + CHAIN_OPERATIONS
 )
 
-# Default regression thresholds
-
 # Base URL for benchmark data on source.coop
 BENCHMARK_DATA_URL = "https://data.source.coop/cholmes/gpio-test/benchmark"
 

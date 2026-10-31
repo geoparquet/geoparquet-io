@@ -222,8 +222,7 @@ def configure_verbose(verbose: bool) -> None:
     all of which default to ``verbose=False``. Lowering the level on a
     non-verbose call would (a) truncate an outer ``--verbose`` run the moment it
     reached a nested default call, and (b) stamp gpio's idea of a level onto an
-    embedding application's logger on every single default call. Use
-    :func:`verbose_logging` when a raise has to be undone again.
+    embedding application's logger on every single default call.
 
     Args:
         verbose: If True, set logger to DEBUG level

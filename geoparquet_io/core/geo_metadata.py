@@ -1225,7 +1225,10 @@ def _prune_geo_dict_to_columns(geo_dict: dict, columns: set[str], repoint_primar
             return _DROP_GEO
         from geoparquet_io.core.geometry_detection import primary_geometry_column
 
-        geo_dict["primary_column"] = primary_geometry_column(list(columns), geo=geo_dict)
+        resolved = primary_geometry_column(list(columns), geo=geo_dict)
+        if resolved not in col_entries:
+            resolved = primary_geometry_column(list(col_entries), geo=geo_dict)
+        geo_dict["primary_column"] = resolved
 
     return strip_absent_covering(geo_dict, columns)
 

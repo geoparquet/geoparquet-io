@@ -614,17 +614,17 @@ def check_spatial_pushdown_readiness(
         debug(f"Using bbox column: {bbox_col_name}")
 
     row_group_bboxes = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
-    num_rgs = len(row_group_bboxes)
+    num_rgs = get_file_metadata(parquet_file)["num_row_groups"]
 
     if verbose:
-        debug(f"Found {num_rgs} row groups with bbox stats")
+        debug(f"Found {len(row_group_bboxes)} row groups with bbox stats out of {num_rgs}")
 
     if num_rgs <= 1:
         if verbose:
             debug("Only 0 or 1 row groups, skip rate is trivially 0.0")
         return {
             "has_geo_bbox": True,
-            "num_row_groups": get_file_metadata(parquet_file)["num_row_groups"],
+            "num_row_groups": num_rgs,
             "estimated_skip_rate": 0.0,
             "avg_bbox_area_ratio": 0.0,
             "passed": False,  # Can't skip any row groups with only 0-1 row groups
@@ -632,13 +632,18 @@ def check_spatial_pushdown_readiness(
             "recommendations": ["Consider using smaller row groups for spatial queries"],
         }
 
-    avg_area_ratio, avg_skip_rate = _compute_locality_metrics(
-        row_group_bboxes,
-        num_samples=num_samples,
-        query_fraction=query_fraction,
-        seed=seed,
-        geographic=column_is_geographic(parquet_file),
-    )
+    if row_group_bboxes:
+        avg_area_ratio, avg_skip_rate = _compute_locality_metrics(
+            row_group_bboxes,
+            num_samples=num_samples,
+            query_fraction=query_fraction,
+            seed=seed,
+            geographic=column_is_geographic(parquet_file),
+        )
+        # Missing statistics cannot prove a row group is skippable.
+        avg_skip_rate *= len(row_group_bboxes) / num_rgs
+    else:
+        avg_area_ratio, avg_skip_rate = 0.0, 0.0
 
     if verbose:
         debug(f"Average bbox area ratio: {avg_area_ratio:.4f}")
@@ -664,7 +669,7 @@ def check_spatial_pushdown_readiness(
 
     return {
         "has_geo_bbox": True,
-        "num_row_groups": get_file_metadata(parquet_file)["num_row_groups"],
+        "num_row_groups": num_rgs,
         "estimated_skip_rate": avg_skip_rate,
         "avg_bbox_area_ratio": avg_area_ratio,
         "passed": passed,

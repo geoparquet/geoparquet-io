@@ -891,7 +891,7 @@ def get_column_statistics(
 
     Args:
         parquet_file: Path to the parquet file
-        columns_info: Column information from extract_columns_info
+        columns_info: Column dictionaries containing name, type, and geometry flags
 
     Returns:
         dict: Statistics per column

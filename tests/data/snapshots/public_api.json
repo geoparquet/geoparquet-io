@@ -72,6 +72,13 @@
     "read",
     "read_partition"
   ],
+  "geoparquet_io.benchmarks": [
+    "BENCHMARK_DATA_URL",
+    "BENCHMARK_FILES",
+    "CHAIN_OPERATIONS",
+    "CORE_OPERATIONS",
+    "FULL_OPERATIONS"
+  ],
   "geoparquet_io.cli.commands.check": [
     "MultiFileCheckRunner",
     "T",

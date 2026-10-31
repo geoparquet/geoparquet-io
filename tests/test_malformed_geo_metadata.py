@@ -2232,3 +2232,19 @@ def test_inspect_readers_treat_a_non_object_geo_block_as_absent(tmp_path, block)
     # dict assumption no longer raises AttributeError ahead of that clean refusal.
     with pytest.raises(duckdb.InvalidInputException):
         get_preview_data(path, head=1)
+
+
+def test_prune_repoint_requires_exact_surviving_metadata_key():
+    from geoparquet_io.core.geo_metadata import prune_geo_metadata_to_columns
+
+    block = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"GEOMETRY": {"encoding": "WKB"}, "other": {"encoding": "WKB"}},
+    }
+    result = prune_geo_metadata_to_columns(
+        {b"geo": json.dumps(block).encode()}, ["geometry", "other"], repoint_primary=True
+    )
+    geo = json.loads(result[b"geo"])
+    assert geo["primary_column"] == "other"
+    assert geo["primary_column"] in geo["columns"]

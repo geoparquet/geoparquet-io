@@ -263,7 +263,7 @@ def select_files_to_check(
     verbose: bool = False,
     fix: bool = False,
 ) -> tuple[list[str], str, int]:
-    """:func:`get_files_to_check`, plus how many files the input matched.
+    """Select files to check, a selection description, and the total matched count.
 
     The count is what lets a sampled run say its verdict covers only part of
     the input. A remote glob, which cannot be enumerated, counts as the one
