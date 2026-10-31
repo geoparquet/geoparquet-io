@@ -464,6 +464,42 @@ def resolve_row_group_rows_for_sample(
     )
 
 
+def sized_stream(chunks, row_group_rows: int | None, row_group_size_mb: float | None, schema):
+    """``(chunks, rows)`` for :func:`regroup`: a stream and its row-group count.
+
+    The one buffering loop for a streamed write. An explicit count (or none at
+    all) resolves at once and the stream passes through untouched. A byte
+    target is measured on the stream's leading rows: chunks are buffered until
+    :func:`resolve_row_group_rows_for_sample` answers (``final=False``), or the
+    stream ends (``final=True`` on what was buffered, or on an empty table of
+    ``schema``), and the buffered chunks go back in front of the rest, in
+    order. ``chunks`` are record batches or tables, as :func:`regroup` takes.
+    """
+    import itertools
+
+    import pyarrow as pa
+
+    rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
+    if rows is not None:
+        return chunks, rows
+
+    def joined(head):
+        if isinstance(head[0], pa.Table):
+            return pa.concat_tables(head)
+        return pa.Table.from_batches(head)
+
+    chunks = iter(chunks)
+    head: list = []
+    for chunk in chunks:
+        head.append(chunk)
+        rows = resolve_row_group_rows_for_sample(joined(head), None, row_group_size_mb, final=False)
+        if rows is not None:
+            return itertools.chain(head, chunks), rows
+    sample = joined(head) if head else schema.empty_table()
+    rows = resolve_row_group_rows_for_sample(sample, None, row_group_size_mb)
+    return itertools.chain(head, chunks), rows
+
+
 def resolve_row_group_rows_for_query(
     con: duckdb.DuckDBPyConnection,
     query: str,

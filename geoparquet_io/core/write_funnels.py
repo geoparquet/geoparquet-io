@@ -33,7 +33,6 @@ Split out of ``common.py`` unchanged; every name is still importable from there.
 import contextlib
 import copy
 import functools
-import itertools
 import json
 import os
 import shutil
@@ -134,8 +133,8 @@ from geoparquet_io.core.parquet_writer import (
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
     resolve_row_group_rows_for_query,
-    resolve_row_group_rows_for_sample,
     resolve_row_group_rows_for_table,
+    sized_stream,
     without_geometry_dictionary,
     write_arrow_table,
 )
@@ -996,35 +995,6 @@ def rewrite_file_through_funnel(
             con.close()
 
 
-def _rewrite_groups(
-    pf: pq.ParquetFile, row_group_rows: int | None, row_group_size_mb: float | None
-) -> tuple[Iterator, int]:
-    """``(batches, rows)`` for a streamed rewrite of *pf*, cut by ``regroup``.
-
-    A row count is read in batches of that size. A byte target is measured the
-    way every streamed write measures one: the leading batches are buffered
-    until the facade's ``resolve_row_group_rows_for_sample`` answers (its
-    bounded sample, whatever row groups the input had), and go back in front
-    of the rest, in order. Memory stays bounded by one row group (#1155).
-    """
-    rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
-    if rows is not None:
-        return pf.iter_batches(batch_size=rows), rows
-    batches = pf.iter_batches()
-    head: list[pa.RecordBatch] = []
-    for batch in batches:
-        head.append(batch)
-        rows = resolve_row_group_rows_for_sample(
-            pa.Table.from_batches(head), None, row_group_size_mb, final=False
-        )
-        if rows is not None:
-            break
-    if rows is None:
-        sample = pa.Table.from_batches(head) if head else pf.schema_arrow.empty_table()
-        rows = resolve_row_group_rows_for_sample(sample, None, row_group_size_mb)
-    return itertools.chain(head, batches), rows
-
-
 def _footer_keys(pf: pq.ParquetFile) -> dict[bytes, bytes]:
     """*pf*'s footer keys, in the order its Arrow schema lists them.
 
@@ -1057,8 +1027,7 @@ def rewrite_footer_kv(
     * the codec and level, from ``write`` through ``compression.resolve_codec``
       (unset: the facade's ZSTD 15);
     * the row groups, from ``write``'s row count or byte target through
-      ``parquet_writer.resolve_row_group_rows`` /
-      ``resolve_row_group_rows_for_sample`` (unset: the facade's default);
+      ``parquet_writer.sized_stream`` (unset: the facade's default);
     * the footer keys, by the facade's one rule
       (``parquet_writer.output_schema_metadata``): every key the input carries
       survives with the keys ``updates`` names set or removed, except the
@@ -1106,10 +1075,15 @@ def rewrite_footer_kv(
                 with pq.ParquetWriter(
                     staged, schema, **without_geometry_dictionary(write_kwargs, schema)
                 ) as writer:
-                    batches, rows = _rewrite_groups(
-                        pf, write.row_group_rows, write.row_group_size_mb
+                    # Read at the row count when there is one, so each batch
+                    # is one group; a byte target is sized by the facade on
+                    # the leading batches (sized_stream).
+                    count = resolve_row_group_rows(write.row_group_rows, write.row_group_size_mb)
+                    batches = pf.iter_batches(batch_size=count) if count else pf.iter_batches()
+                    chunks, rows = sized_stream(
+                        batches, write.row_group_rows, write.row_group_size_mb, pf.schema_arrow
                     )
-                    for group in regroup(batches, rows):
+                    for group in regroup(chunks, rows):
                         writer.write_table(pa.Table.from_batches([group]), row_group_size=rows)
         upload_if_remote(local, destination, profile=write.profile, verbose=verbose)
 

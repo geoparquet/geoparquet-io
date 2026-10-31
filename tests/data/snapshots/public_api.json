@@ -603,6 +603,7 @@
     "resolve_row_group_rows_for_rewrite",
     "resolve_row_group_rows_for_sample",
     "resolve_row_group_rows_for_table",
+    "sized_stream",
     "without_geometry_dictionary",
     "writable_geoparquet_version",
     "write_arrow_table"

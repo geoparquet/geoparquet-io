@@ -12,7 +12,6 @@ Docs: docs/guide/process-simplify.md
 
 from __future__ import annotations
 
-import itertools
 import json
 import os
 from typing import Any
@@ -45,7 +44,7 @@ from geoparquet_io.core.parquet_writer import (
     regroup,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
-    resolve_row_group_rows_for_sample,
+    sized_stream,
     without_geometry_dictionary,
 )
 from geoparquet_io.core.remote import is_remote_url
@@ -621,10 +620,9 @@ def _simplify_file_streaming(
         )
     # Batches are read at the facade's row count (an explicit one, else the
     # default). The written groups follow the facade's answer for the whole
-    # pair: a byte target (rows is None) is measured on the leading simplified
-    # rows by resolve_row_group_rows_for_sample, the facade's bounded sample.
+    # pair: a byte target is measured on the leading simplified rows by
+    # parquet_writer.sized_stream, the facade's one buffering loop.
     read_rows = resolve_row_group_rows(write.row_group_rows, None)
-    rows = resolve_row_group_rows(write.row_group_rows, write.row_group_size_mb)
     writer_schema = schema.with_metadata(None)
     batch_stats: list[GeometryStats] = []
     # The output keeps the input's CRS, which decides how the batch extents fold.
@@ -711,7 +709,11 @@ def _simplify_file_streaming(
                 store_schema=False,
                 **without_geometry_dictionary(writer_kwargs, schema, [geom_col]),
             ) as writer:
-                for group in regroup(*_groups_of(simplified(), rows, write, schema)):
+                for group in regroup(
+                    *sized_stream(
+                        simplified(), write.row_group_rows, write.row_group_size_mb, schema
+                    )
+                ):
                     writer.write_table(group, row_group_size=group.num_rows)
                 writer.add_key_value_metadata(
                     _footer_kv_via_funnel(
@@ -733,29 +735,6 @@ def _simplify_file_streaming(
     if dropped:
         info(f"dropped {dropped} empty geometries")
     debug(f"streamed simplify in {read_rows}-row batches to {output_parquet}")
-
-
-def _groups_of(tables, rows: int | None, write: WriteOptions, schema: pa.Schema):
-    """``(tables, rows)`` for :func:`~geoparquet_io.core.parquet_writer.regroup`.
-
-    With a byte target (``rows`` is None) the leading simplified tables are
-    buffered until the facade's ``resolve_row_group_rows_for_sample`` answers;
-    they go back in front of the rest, in order.
-    """
-    if rows is not None:
-        return tables, rows
-    head: list[pa.Table] = []
-    for table in tables:
-        head.append(table)
-        rows = resolve_row_group_rows_for_sample(
-            pa.concat_tables(head), None, write.row_group_size_mb, final=False
-        )
-        if rows is not None:
-            break
-    if rows is None:
-        sample = pa.concat_tables(head) if head else schema.empty_table()
-        rows = resolve_row_group_rows_for_sample(sample, None, write.row_group_size_mb)
-    return itertools.chain(head, tables), rows
 
 
 def _simplify_file_in_memory(

@@ -390,3 +390,67 @@ def test_an_mb_target_is_measured_on_the_facades_sample_not_the_first_row_group(
         assert md.num_rows == n
 
     assert groups["one_group.parquet"] == groups["small_first.parquet"], groups
+
+
+def test_both_streamed_writers_size_a_byte_target_through_one_helper(tmp_path):
+    """The footer rewrite and the streaming simplify writer ask the facade's one
+    buffering helper (``parquet_writer.sized_stream``), so the same rows and
+    target get the same row-group answer on both."""
+    import pyarrow as pa
+
+    from geoparquet_io.core import parquet_writer, write_funnels
+    from geoparquet_io.core.parquet_writer import WriteOptions, sized_stream
+    from geoparquet_io.core.process import simplify
+
+    assert simplify.sized_stream is parquet_writer.sized_stream
+    assert write_funnels.sized_stream is parquet_writer.sized_stream
+
+    n = 30_000
+    table = pa.table({"id": list(range(n)), "payload": ["y" * 50] * n})
+    src = tmp_path / "src.parquet"
+    pq.write_table(table, str(src), row_group_size=1_000)
+    path = tmp_path / "in.parquet"
+    pq.write_table(table, str(path), row_group_size=1_000)
+    write_funnels.rewrite_footer_kv(
+        str(path), str(path), {"k": "v"}, write=WriteOptions(row_group_size_mb=1)
+    )
+    landed = pq.read_metadata(str(path)).row_group(0).num_rows
+
+    # simplify streams tables, the rewrite record batches; fed the same rows in
+    # the same chunks, the one helper answers the same.
+    def read():
+        return pq.ParquetFile(str(src)).iter_batches()
+
+    _, from_batches = sized_stream(read(), None, 1, table.schema)
+    _, from_tables = sized_stream(
+        (pa.Table.from_batches([b]) for b in read()), None, 1, table.schema
+    )
+    assert landed == from_tables == from_batches, (landed, from_tables, from_batches)
+
+
+def test_only_the_facade_buffers_a_stream_for_a_row_group_answer():
+    """``resolve_row_group_rows_for_sample(..., final=False)`` is the buffering
+    loop's question; outside ``parquet_writer`` it means a second copy of the
+    loop (#1367 T2d: one lived in the footer rewrite, one in simplify)."""
+    import ast
+
+    root = Path(__file__).resolve().parents[1] / "geoparquet_io"
+    owner = root / "core" / "parquet_writer.py"
+    copies = []
+    for path in root.rglob("*.py"):
+        if path == owner:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and getattr(node.func, "id", getattr(node.func, "attr", None))
+                == "resolve_row_group_rows_for_sample"
+                and any(
+                    kw.arg == "final"
+                    and isinstance(kw.value, ast.Constant)
+                    and kw.value.value is False
+                    for kw in node.keywords
+                )
+            ):
+                copies.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert copies == [], copies
