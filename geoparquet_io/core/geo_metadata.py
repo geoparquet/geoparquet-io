@@ -1005,7 +1005,7 @@ def compose_carried_geo(
         if not isinstance(primary, str) or primary not in (geo.get("columns") or {}):
             return geo
         return compose_geo_block(
-            SchemaSource(schema, {b"geo": json.dumps(geo).encode("utf-8")}),
+            SchemaSource(schema, with_geo_key(None, geo)),
             GeoBlockOptions(geometry_column=primary, version=version, verbose=verbose),
         )
 

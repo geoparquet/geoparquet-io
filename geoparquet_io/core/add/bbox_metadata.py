@@ -41,6 +41,7 @@ from geoparquet_io.core.geometry_detection import (
 )
 from geoparquet_io.core.logging_config import debug, success
 from geoparquet_io.core.parquet_footer import patch_or_rewrite
+from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.remote import is_remote_url
 from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
@@ -328,9 +329,18 @@ def add_bbox_metadata(
     # The block is re-composed with the covering declared on the primary: the
     # composer creates a missing or non-object ``columns`` entry and runs every
     # covering gate, so the one key this command writes is the owner's answer.
+    # It is written, so it is never a description: it takes the facade's repair
+    # policy version (the file's own, in its metadata form).
     geo_meta = compose_geo_block(
         SchemaSource(schema, with_geo_key(None, geo_meta)),
-        GeoBlockOptions(geometry_column=primary_col, covering=target_column, verbose=verbose),
+        GeoBlockOptions(
+            geometry_column=primary_col,
+            covering=target_column,
+            version=resolve_output_geoparquet_version(
+                None, original_metadata=metadata, preserve_input=True
+            ),
+            verbose=verbose,
+        ),
     )
 
     if verbose:

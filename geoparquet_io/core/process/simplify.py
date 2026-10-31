@@ -367,7 +367,7 @@ def _with_carried_edges(table: pa.Table, geometry_column: str, edges: str | None
             version=version_to_describe(table.schema),
             describe=True,
             covering=None,
-            edges=edges,
+            column_edges={geometry_column: edges},
         ),
     )
     return with_geo_block(table, geo)
