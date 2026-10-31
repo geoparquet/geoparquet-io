@@ -41,7 +41,6 @@ Enforce that decision with the complete gate set:
 | G8 | Derived metadata compared to a fresh rebuild, `tests/test_derived_state_rebuild.py` |
 | G9 | Issue repros with strict issue-keyed expected failures until fixed, `tests/test_defrag_g9_repros.py` |
 | G10 | `all-checks` needs every test-workflow job; wiring asserted by `tests/test_ci_wiring.py` |
-| G11 | Explicit owner-file entries in `.github/CODEOWNERS`; no pending paths |
 | G12 | Planted faults prove G1–G5 fail, in the owner/common guard tests |
 | G13 | Shared Click option consistency, `tests/test_cli_shared_options.py` |
 

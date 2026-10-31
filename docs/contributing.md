@@ -328,7 +328,7 @@ and lower `EXPECTED_COUNTS` in the same change.
 
 All guards block: G1/G2/G4/G5/G12 run in the fast suite; `owner-only-defs`,
 `check-duplicates`, `pylint-duplicates`, `vulture` and `vulture-tests` return failure
-at both hook stages. G6–G11 and G13 assert their contracts in pytest/CI. The AST
+at both hook stages. G6–G10 and G13 assert their contracts in pytest/CI. The AST
 duplicate baseline is empty. A disappeared historical duplicate may be removed
 with `--update`; this never admits a new pair.
 

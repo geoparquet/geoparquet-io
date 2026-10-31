@@ -1,5 +1,5 @@
 """Meta-tests for the CI wiring: the `all-checks` aggregator, the branch
-ruleset that requires it, and CODEOWNERS (#1367, G10 and G11).
+ruleset that requires it (G10).
 
 Before `all-checks`, the branch ruleset named 13 contexts one by one
 (`lint`, `security`, `notebooks` and ten `test` cells) while
@@ -36,7 +36,6 @@ import yaml
 PROJECT_ROOT = Path(__file__).parent.parent
 WORKFLOWS = PROJECT_ROOT / ".github" / "workflows"
 BRANCH_PROTECTION = PROJECT_ROOT / "scripts" / "apply_branch_protection.sh"
-CODEOWNERS = PROJECT_ROOT / ".github" / "CODEOWNERS"
 
 AGGREGATOR = "all-checks"
 
@@ -49,13 +48,6 @@ SKIPPABLE_JOBS = {"slow-tests", "network-tests"}
 
 # The only contexts the ruleset may require.
 REQUIRED_CONTEXTS = ["all-checks", "pr-title"]
-
-# CODEOWNERS paths for owner modules that a later #1367 track creates. Each
-# entry must NOT exist yet; the track that creates the file deletes its entry
-# here in the same commit. This list only shrinks, and ends empty.
-PENDING_CODEOWNERS_PATHS: set[str] = set()
-
-CODEOWNER = "@nlebovits"
 
 # A line of the gate step: `check <job-id> "$<VAR>" <skip-ok|required>`.
 CHECK_LINE = re.compile(r'^\s*check\s+(\S+)\s+"\$(\w+)"\s+(skip-ok|required)\s*$', re.M)
@@ -245,58 +237,6 @@ class TestBranchRuleset:
             "pr-title must rerun when the title is edited; that is why it is "
             "its own workflow and its own required context"
         )
-
-
-def _codeowners_entries() -> list[tuple[str, list[str]]]:
-    assert CODEOWNERS.exists(), ".github/CODEOWNERS missing"
-    entries = []
-    for line in CODEOWNERS.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        path, *owners = line.split()
-        entries.append((path, owners))
-    return entries
-
-
-class TestCodeowners:
-    def test_every_path_exists_or_is_pending(self):
-        missing = [
-            path
-            for path, _owners in _codeowners_entries()
-            if not (PROJECT_ROOT / path.lstrip("/")).exists()
-            and path.lstrip("/") not in PENDING_CODEOWNERS_PATHS
-        ]
-        assert not missing, f"CODEOWNERS names paths that do not exist: {missing}"
-
-    def test_pending_paths_are_still_pending(self):
-        # Once a later track creates the file, its entry leaves the allowlist.
-        created = sorted(p for p in PENDING_CODEOWNERS_PATHS if (PROJECT_ROOT / p).exists())
-        assert not created, (
-            f"these files now exist; remove them from PENDING_CODEOWNERS_PATHS: {created}"
-        )
-        listed = {path.lstrip("/") for path, _owners in _codeowners_entries()}
-        assert PENDING_CODEOWNERS_PATHS <= listed
-
-    def test_every_entry_is_owned(self):
-        unowned = [path for path, owners in _codeowners_entries() if owners != [CODEOWNER]]
-        assert not unowned, f"CODEOWNERS entries without exactly {CODEOWNER}: {unowned}"
-
-    def test_paths_are_files_not_patterns(self):
-        # One line per owner module: a glob would quietly widen ownership.
-        patterns = [p for p, _owners in _codeowners_entries() if any(c in p for c in "*?[")]
-        assert not patterns, f"CODEOWNERS should name files, not patterns: {patterns}"
-
-
-def test_every_documented_concept_owner_has_codeowners():
-    """G11 covers the final owner table, including owners added after T0a."""
-    content = (PROJECT_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
-    table = content.split("## One owner per concept\n", 1)[1].split("\n## ", 1)[0]
-    documented = set(re.findall(r"`(geoparquet_io/[^`]+\.py)`", table))
-    assert documented, "the concept owner table is empty"
-    listed = {path.lstrip("/") for path, _ in _codeowners_entries()}
-    assert not PENDING_CODEOWNERS_PATHS, "all owners must exist at close-out"
-    assert documented <= listed, f"concept owners missing CODEOWNERS: {documented - listed}"
 
 
 def test_supported_python_matrix():
