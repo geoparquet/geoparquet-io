@@ -1773,6 +1773,25 @@ def _calls_patch_or_rewrite(m: _Module, body: list[ast.stmt]) -> bool:
     )
 
 
+_BROAD_CATCHES = frozenset({"Exception", "BaseException"})
+
+
+def _answers_the_refusal(handler: ast.ExceptHandler) -> bool:
+    """A handler that catches the refusal's base, or anything broader, and does
+    not re-raise: a second answer to what ``patch_or_rewrite`` already decided.
+    A cleanup that ends in a bare ``raise`` hands the error on and is not one."""
+    caught = set(_caught_names(handler))
+    if "GeoParquetError" in caught:
+        return True
+    broad = handler.type is None or bool(caught & _BROAD_CATCHES)
+    reraises = any(
+        isinstance(sub, ast.Raise) and sub.exc is None
+        for stmt in handler.body
+        for sub in ast.walk(stmt)
+    )
+    return broad and not reraises
+
+
 def _find_footer_patch(m: _Module) -> Iterator[Hit]:
     """The patch-else-rewrite decision spelled outside ``core/parquet_footer.py``
     (#1367 concept 2). ``parquet_footer.patch_or_rewrite`` owns it; six callers
@@ -1784,8 +1803,12 @@ def _find_footer_patch(m: _Module) -> Iterator[Hit]:
       as an attribute, or fetched by ``getattr``;
     * a refusal (``FooterPatchUnsupported``/``FooterPatchRaced``) imported from
       the owner, or caught -- bare, as an attribute, or in a tuple;
-    * ``except GeoParquetError`` around a ``patch_or_rewrite`` call: the
-      refusal's base class, caught to answer it a second way.
+    * ``except GeoParquetError``, ``except Exception``/``BaseException`` or a
+      bare ``except:`` around a ``patch_or_rewrite`` call that does not
+      re-raise: the refusal caught to answer it a second way;
+    * a direct call of the fallback, ``rewrite_footer_kv(...)``: a caller
+      that rewrites without asking whether the footer could be patched. Callers
+      hand it to ``patch_or_rewrite`` as a reference.
     """
     for node in ast.walk(m.tree):
         if isinstance(node, ast.ImportFrom) and node.module == _FOOTER_PATCH_OWNER_MODULE:
@@ -1803,8 +1826,13 @@ def _find_footer_patch(m: _Module) -> Iterator[Hit]:
                 yield m.hit(node)
         elif isinstance(node, ast.Try) and _calls_patch_or_rewrite(m, node.body):
             for handler in node.handlers:
-                if "GeoParquetError" in set(_caught_names(handler)):
+                if _answers_the_refusal(handler):
                     yield m.hit(handler)
+        elif (
+            isinstance(node, ast.Call)
+            and (m.dotted(node.func) or "").rsplit(".", 1)[-1] == "rewrite_footer_kv"
+        ):
+            yield m.hit(node)
 
 
 @dataclass(frozen=True)
@@ -2667,6 +2695,30 @@ FOOTER_PATCH_SHAPES = {
         "    except (OSError, FooterPatchUnsupported):\n        return None\n",
         1,
     ),
+    "everything caught around the owner": (
+        "from geoparquet_io.core.parquet_footer import patch_or_rewrite\n\n"
+        "def add(p, rewrite):\n    try:\n"
+        '        patch_or_rewrite(p, {"k": "v"}, rewrite=rewrite)\n'
+        "    except Exception:\n        return None\n",
+        1,
+    ),
+    "a bare except around the owner": (
+        "from geoparquet_io.core.parquet_footer import patch_or_rewrite\n\n"
+        "def add(p, rewrite):\n    try:\n"
+        '        patch_or_rewrite(p, {"k": "v"}, rewrite=rewrite)\n'
+        "    except:  # noqa: E722\n        return None\n",
+        1,
+    ),
+    "the fallback called directly": (
+        "from geoparquet_io.core.write_funnels import rewrite_footer_kv\n\n"
+        'def add(p):\n    rewrite_footer_kv(p, p, {"k": "v"})\n',
+        1,
+    ),
+    "the fallback called as a module attribute": (
+        "from geoparquet_io.core import write_funnels as wf\n\n"
+        'def add(p):\n    wf.rewrite_footer_kv(p, p, {"k": "v"}, compression="GZIP")\n',
+        1,
+    ),
     "refusal's base caught around the owner": (
         "from geoparquet_io.core.exceptions import GeoParquetError\n"
         "from geoparquet_io.core.parquet_footer import patch_or_rewrite\n\n"
@@ -2690,6 +2742,19 @@ FOOTER_PATCH_NEAR_MISSES = {
         "def add(p, rewrite, tmp):\n    try:\n"
         '        patch_or_rewrite(p, {"k": "v"}, output_file=tmp, rewrite=rewrite)\n'
         "    except BaseException:\n        tmp.unlink()\n        raise\n"
+    ),
+    "the fallback handed to the owner": (
+        "import functools\n\n"
+        "from geoparquet_io.core.parquet_footer import patch_or_rewrite\n"
+        "from geoparquet_io.core.write_funnels import rewrite_footer_kv\n\n"
+        "def add(p):\n"
+        '    return patch_or_rewrite(p, {"k": "v"}, rewrite=rewrite_footer_kv)\n\n'
+        "def add_gzip(p):\n"
+        '    fallback = functools.partial(rewrite_footer_kv, compression="GZIP")\n'
+        '    return patch_or_rewrite(p, {"k": "v"}, rewrite=fallback)\n'
+    ),
+    "Exception caught around something else": (
+        "def add(p, f):\n    try:\n        f(p)\n    except Exception:\n        return None\n"
     ),
     "GeoParquetError caught around something else": (
         "from geoparquet_io.core.exceptions import GeoParquetError\n\n"
