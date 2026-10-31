@@ -30,11 +30,6 @@ import pytest
 from tests.docs_examples.parser import Block, iter_blocks, strip_prompts
 from tests.docs_examples.seeder import seed_workdir
 
-#: Pages whose blocks run in the fast suite. Everything else lands in the slow
-#: lane. Deliberately small: the fast subset is a smoke test that the core
-#: commands in the docs still work, not a second full run.
-FAST_PAGES = frozenset({"sort.md", "piping.md", "check.md"})
-
 #: Wall-clock ceiling for a single example. Generous — it exists to stop a
 #: prompting or hanging command from wedging CI, not to police runtimes.
 BLOCK_TIMEOUT_SECONDS = 120
@@ -97,8 +92,8 @@ class DocExampleItem(pytest.Item):
         self.add_marker(pytest.mark.docs_example)
         if directives.network:
             self.add_marker(pytest.mark.network)
-        if _is_slow(self.block):
-            self.add_marker(pytest.mark.slow)
+        # Whole-pipeline examples are slow, including fast directives (#1402).
+        self.add_marker(pytest.mark.slow)
         if directives.skip:
             reason = directives.skip_reason or "marked skip by a doctest directive"
             self.add_marker(pytest.mark.skip(reason=reason))
@@ -304,15 +299,6 @@ def block_timeout(block: Block) -> int:
     if block.directives.network:
         return NETWORK_BLOCK_TIMEOUT_SECONDS
     return BLOCK_TIMEOUT_SECONDS
-
-
-def _is_slow(block: Block) -> bool:
-    """Fast lane membership. Directives win over the page default."""
-    if block.directives.fast:
-        return False
-    if block.directives.slow:
-        return True
-    return block.path.name not in FAST_PAGES
 
 
 def _subprocess_env() -> dict[str, str]:
