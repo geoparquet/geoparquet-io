@@ -14,6 +14,7 @@ from geoparquet_io.core.common import add_computed_column
 from geoparquet_io.core.duckdb_metadata import get_schema_info, get_usable_column_names
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
+    get_duckdb_connection,
     query_schema,
     quote_identifier,
 )
@@ -40,6 +41,7 @@ from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
     require_geometry_column,
     resolve_geometry_column,
+    resolve_geometry_read,
 )
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, progress, success, warn
@@ -49,6 +51,7 @@ from geoparquet_io.core.parquet_writer import (
     version_to_describe,
 )
 from geoparquet_io.core.partition.reader import require_single_file
+from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
     is_stdin,
@@ -471,7 +474,7 @@ def _add_bbox_file_based(
 ) -> None:
     """Handle file-based add_bbox operation."""
     # Check if output file exists and handle overwrite (fixes issue #278)
-    handle_output_overwrite(output_parquet, overwrite, input_parquet)
+    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
 
     # Check for partition input (not supported)
     require_single_file(input_parquet, "add bbox")
@@ -533,8 +536,12 @@ def _add_bbox_file_based(
     )
 
     # Define the SQL expression (the only unique part)
-    quoted_geom_col = quote_identifier(geom_col)
-    sql_expression = bbox_struct_sql(quoted_geom_col, geom_col)
+    con = get_duckdb_connection(load_httpfs=needs_httpfs(input_parquet))
+    try:
+        read = resolve_geometry_read(con, input_parquet, geom_col)
+    finally:
+        con.close()
+    sql_expression = bbox_struct_sql(read.shape_expr, geom_col, read)
 
     # Build covering metadata for the bbox column (GeoParquet 1.1+ spec)
     covering_metadata = {"covering": {"bbox": build_bbox_covering(bbox_column_name)}}

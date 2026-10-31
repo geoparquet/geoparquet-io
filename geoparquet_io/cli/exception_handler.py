@@ -94,7 +94,7 @@ def cli_error_for(exc: BaseException, *, path: str | None = None) -> click.Click
     # command was reading when it knows it. A gpio error already carries the answer.
     if (
         not isinstance(exc, GeoParquetError)
-        and classify_failure(exc).kind is FailureKind.NOT_PARQUET
+        and classify_failure(exc, follow_chain=False).kind is FailureKind.NOT_PARQUET
     ):
         return click.ClickException(not_parquet_file_error(path).message)
 

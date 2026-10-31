@@ -753,9 +753,26 @@ def copy_file(source_path: str, dest_path: str, verbose: bool = False) -> None:
     # a plain GET of the URL verbatim, so a presigned query string survives and
     # nothing is percent-encoded a second time (#825).
     if source_is_remote and is_http_url(source_path):
-        from geoparquet_io.core.http_retry import run_with_retry
+        from geoparquet_io.core.http_retry import (
+            DEFAULT_CREDENTIALS_HINT,
+            DEFAULT_MAX_RETRIES,
+            _request_failure_types,
+            final_request_error,
+            run_with_retry,
+        )
 
-        run_with_retry(functools.partial(_copy_http_source, source_path, dest_path, dest_is_remote))
+        try:
+            run_with_retry(
+                functools.partial(_copy_http_source, source_path, dest_path, dest_is_remote)
+            )
+        except _request_failure_types() as exc:
+            error, cause = final_request_error(
+                source_path,
+                exc,
+                max_retries=DEFAULT_MAX_RETRIES,
+                credentials=DEFAULT_CREDENTIALS_HINT,
+            )
+            raise error from cause
         return
 
     import obstore as obs

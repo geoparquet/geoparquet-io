@@ -354,7 +354,7 @@ def _str_order_file_based(
     write: WriteOptions,
     overwrite: bool,
 ) -> None:
-    handle_output_overwrite(output_parquet, overwrite, input_parquet)
+    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
     require_single_file(input_parquet, "sort str")
     working_parquet, temp_file_created, temp_file = _prepare_working_file(
         input_parquet, add_bbox_flag, verbose

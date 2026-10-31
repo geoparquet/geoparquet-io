@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import math
 import shutil
+import struct
 from pathlib import Path
 
 import pyarrow as pa
@@ -149,10 +150,26 @@ def _run_cli(name: str, src: Path, out_dir: Path) -> Path:
 @pytest.fixture(scope="module")
 def source(tmp_path_factory) -> Path:
     path = tmp_path_factory.mktemp("g7") / "source.parquet"
+    table = grid_points_table(N_ROWS)
+    geometry = table["geometry"].to_pylist()
+    geometry[-1] = struct.pack("<BII", 1, 3, 0)  # POLYGON EMPTY still declares its type.
+    table = table.set_column(
+        table.schema.get_field_index("geometry"), "geometry", pa.array(geometry)
+    )
+    bbox = table["bbox"].to_pylist()
+    bbox[-1] = None
+    table = table.set_column(
+        table.schema.get_field_index("bbox"), "bbox", pa.array(bbox, type=table["bbox"].type)
+    )
     write_with_geo(
         path,
-        grid_points_table(N_ROWS),
-        geo_block(epoch=EPOCH, edges=EDGES, crs=json.loads(projjson(DYNAMIC_CRS_EPSG))),
+        table,
+        geo_block(
+            geometry_types=["Point", "Polygon"],
+            epoch=EPOCH,
+            edges=EDGES,
+            crs=json.loads(projjson(DYNAMIC_CRS_EPSG)),
+        ),
         extra_kv=SIDECAR_KEYS,
         compression="snappy",
         row_group_size=10_000,
@@ -302,6 +319,14 @@ def _check_primary_column(path: Path, source: Path, _tmp: Path) -> None:
     assert _geo(path)["primary_column"] == _geo(source)["primary_column"] == "geometry"
 
 
+def _check_geometry_types(path: Path, source: Path, _tmp: Path) -> None:
+    assert (
+        set(_primary_column_meta(path)["geometry_types"])
+        == set(_primary_column_meta(source)["geometry_types"])
+        == {"Point", "Polygon"}
+    )
+
+
 def _check_spec(path: Path, _source: Path, _tmp: Path) -> None:
     result = CliRunner().invoke(cli, ["check", "spec", str(path)])
     assert result.exit_code == 0, result.output[-2000:]
@@ -326,17 +351,22 @@ INVARIANTS = {
     "edges": _check_edges,
     "primary_column": _check_primary_column,
     "check_spec": _check_spec,
+    "geometry_types": _check_geometry_types,
     "level": _check_level,
 }
 #: Invariants about the geo block, the geometry column or the spec, which a
 #: geometry-free output cannot have. For those paths the facade rule is that
 #: no ``geo`` key is written at all, asserted instead.
-GEO_INVARIANTS = {"epoch", "edges", "primary_column", "check_spec", "level"}
+GEO_INVARIANTS = {"epoch", "edges", "primary_column", "check_spec", "level", "geometry_types"}
 
 
 def _cases():
     for path in PATHS:
         for invariant in INVARIANTS:
+            # Partitioning selects a cell's rows; the unlocated EMPTY need not
+            # belong to the first output cell. Rewrites must retain its type.
+            if path == "partition_h3" and invariant == "geometry_types":
+                continue
             if path in GEOMETRY_FREE and invariant in GEO_INVARIANTS:
                 continue
             marks = []
@@ -375,3 +405,11 @@ def test_the_fixture_makes_every_invariant_observable(source):
     assert column["epoch"] == EPOCH and column["edges"] == EDGES
     assert "covering" not in column, "the bbox column must be undeclared for the fix paths"
     assert all(footer_kv(source).get(k) == v for k, v in SIDECAR_KEYS.items())
+
+
+@pytest.mark.parametrize("version", ["1.1", "2.0"])
+@pytest.mark.parametrize("strategy", STRATEGIES)
+def test_g7_empty_type_agrees_across_versions(source, tmp_path, version, strategy):
+    out = tmp_path / "empty_type.parquet"
+    gpio.read(str(source)).write(str(out), geoparquet_version=version, write_strategy=strategy)
+    assert set(_primary_column_meta(out)["geometry_types"]) == {"Point", "Polygon"}

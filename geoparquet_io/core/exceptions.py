@@ -545,10 +545,10 @@ _MALFORMED_RESPONSE_TYPES: tuple[type[BaseException], ...] = (
 )
 
 
-def classify_failure(exc: BaseException) -> FailureClass:
+def classify_failure(exc: BaseException, *, follow_chain: bool = True) -> FailureClass:
     """Classify a caught exception by its type and structured fields.
 
-    The exception and then its ``__cause__`` / ``__context__`` chain are walked
+    Unless ``follow_chain=False``, the exception and its ``__cause__`` / ``__context__`` chain are walked
     and the first recognised link decides, so a library error wrapped by
     another still classifies. Message text is read in two bounded places only:
     the Parquet-magic phrases (:attr:`FailureKind.NOT_PARQUET`) and the
@@ -563,7 +563,7 @@ def classify_failure(exc: BaseException) -> FailureClass:
         verdict = _classify_one(cur)
         if verdict.kind is not FailureKind.UNKNOWN:
             return verdict
-        cur = cur.__cause__ or cur.__context__
+        cur = (cur.__cause__ or cur.__context__) if follow_chain else None
     return FailureClass(FailureKind.UNKNOWN)
 
 
@@ -625,6 +625,11 @@ def not_parquet_file_error(path: str | None) -> GeoParquetError:
     ``check``) raises or returns this, so the wording is one, not one per place.
     """
     subject = f"The file '{path}'" if path else "This file"
+    if not path or not path.lower().endswith(".parquet"):
+        return GeoParquetError(
+            f"{subject} is not a Parquet file; this command reads .parquet files. "
+            "Use 'gpio convert' to create a proper GeoParquet file."
+        )
     return GeoParquetError(
         f"{subject} has a .parquet extension but is not a valid "
         f"Parquet file. It may be a different format (CSV, JSON, etc.) that was "
