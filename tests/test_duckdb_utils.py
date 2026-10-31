@@ -835,7 +835,7 @@ class TestNoCommunityExtensionBypass:
 
         package = Path(__file__).parent.parent / "geoparquet_io"
         offenders = [
-            path.relative_to(package.parent)
+            path.relative_to(package.parent).as_posix()
             for path in package.rglob("*.py")
             # encoding pinned: the default is cp1252 on Windows, and the
             # sources carry em dashes.

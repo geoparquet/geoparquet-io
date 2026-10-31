@@ -851,7 +851,7 @@ def _functions_calling(path: Path, name: str) -> list[str]:
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and _calls_named(
             ast.unparse(node), name
         ):
-            found.append(f"{path.relative_to(PACKAGE)}:{node.name}")
+            found.append(f"{path.relative_to(PACKAGE).as_posix()}:{node.name}")
     return found
 
 

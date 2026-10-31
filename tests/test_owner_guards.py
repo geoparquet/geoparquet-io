@@ -5945,7 +5945,7 @@ def cap__owner_only_reads(path: Path, root: Path = REPO) -> list[str]:
     found = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "core_geometry":
-            found.append(f"{path.relative_to(root)}:{node.lineno} core_geometry")
+            found.append(f"{path.relative_to(root).as_posix()}:{node.lineno} core_geometry")
         elif (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
@@ -5954,7 +5954,9 @@ def cap__owner_only_reads(path: Path, root: Path = REPO) -> list[str]:
             and isinstance(node.args[0], ast.Name)
             and node.args[0].id == "duckdb"
         ):
-            found.append(f"{path.relative_to(root)}:{node.lineno} {node.func.id}(duckdb)")
+            found.append(
+                f"{path.relative_to(root).as_posix()}:{node.lineno} {node.func.id}(duckdb)"
+            )
     return sorted(found)
 
 
@@ -6036,7 +6038,7 @@ def size__violations(root: Path = PACKAGE) -> list[str]:
     found = []
     for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        rel = path.relative_to(root)
+        rel = path.relative_to(root).as_posix()
         if path.resolve() != size_SIZING.resolve():
             found += [f"{rel}:{n} size parser/formatter" for n in size__size_function_defs(tree)]
             found += [f"{rel}:{n} size grammar" for n in size__size_regexes(tree)]

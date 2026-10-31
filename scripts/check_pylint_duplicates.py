@@ -96,7 +96,7 @@ def run_pylint(repo: Path, target: str) -> str:
             "--min-similarity-lines=8",
             *(
                 [
-                    str(p.relative_to(repo))
+                    p.relative_to(repo).as_posix()
                     for p in sorted((repo / target).rglob("*.py"), reverse=True)
                 ]
                 if (repo / target).is_dir()

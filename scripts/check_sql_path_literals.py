@@ -149,7 +149,9 @@ def main() -> int:
     counts = scan()
     if args.update:
         write_baseline(counts)
-        print(f"Wrote {BASELINE.relative_to(REPO_ROOT)} ({sum(counts.values())} occurrences).")
+        print(
+            f"Wrote {BASELINE.relative_to(REPO_ROOT).as_posix()} ({sum(counts.values())} occurrences)."
+        )
         return 0
 
     baseline = read_baseline()

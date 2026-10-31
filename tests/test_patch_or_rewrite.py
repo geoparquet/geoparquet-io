@@ -455,5 +455,5 @@ def test_only_the_facade_buffers_a_stream_for_a_row_group_answer():
                     for kw in node.keywords
                 )
             ):
-                copies.append(f"{path.relative_to(root)}:{node.lineno}")
+                copies.append(f"{path.relative_to(root).as_posix()}:{node.lineno}")
     assert copies == [], copies

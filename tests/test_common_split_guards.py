@@ -126,7 +126,7 @@ def test_nothing_imports_an_owned_name_through_common_in_an_embedded_program():
     """
     defined = _names_common_defines()
     routed_through = [
-        f"{path.relative_to(REPO)}:{lineno} {name}"
+        f"{path.relative_to(REPO).as_posix()}:{lineno} {name}"
         for path, lineno, name in _textual_imports_from_common()
         if name not in defined
     ]
@@ -147,7 +147,7 @@ def test_nothing_imports_an_owned_name_through_common():
     defined = _names_common_defines()
     assert defined, "common.py defines nothing? the walk is broken"
     routed_through = [
-        f"{path.relative_to(REPO)}:{lineno} {name}"
+        f"{path.relative_to(REPO).as_posix()}:{lineno} {name}"
         for path, lineno, name in _imports_from_common()
         if name not in defined
     ]

@@ -516,7 +516,7 @@ class Side:
 def _files(path: Path) -> dict[str, Path]:
     if path.is_file():
         return {"": path}
-    return {str(p.relative_to(path)): p for p in sorted(path.rglob("*")) if p.is_file()}
+    return {p.relative_to(path).as_posix(): p for p in sorted(path.rglob("*")) if p.is_file()}
 
 
 def _digest(path: Path) -> str:

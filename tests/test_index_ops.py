@@ -41,7 +41,7 @@ def _index_workflow_copies(path: Path, source: str) -> list[str]:
         }
         streaming_copy = node.name == "make_query" and bool(called & INDEX_ONLY_NAMES)
         if ensure_copy or streaming_copy:
-            copies.append(f"{path}:{node.name}")
+            copies.append(f"{path.as_posix()}:{node.name}")
     return copies
 
 
