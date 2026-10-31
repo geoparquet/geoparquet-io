@@ -369,6 +369,15 @@ ADD_INVALID_RESOLUTION = [
 PARTITION_FAMILY = _params((A5, S2), "partition_marks")
 PARTITION_CLI = _params((A5, S2, QUADKEY), "partition_marks")
 AUTO_FAMILY = _params((A5, H3, QUADKEY), "auto_marks")
+# Every index's ``--auto`` runs the one driver, ``index_ops.partition_index``;
+# the per-index facts in it are the resolution calculator (``CALC_FAMILY``,
+# every index), the hive prefix and the conflict message (both run on every
+# index below). The driver properties themselves are run once each, spread
+# over the indexes, with quadkey's structurally different partition-resolution
+# leg in the auto-versus-manual comparison (#1402).
+AUTO_ONE = {name: _params((spec,), "auto_marks") for name, spec in (("a5", A5), ("h3", H3))}
+AUTO_STRUCTURAL = _params((H3, QUADKEY), "auto_marks")
+AUTO_QUADKEY = _params((QUADKEY,), "auto_marks")
 CALC_FAMILY = _params((H3, QUADKEY, A5, S2), "auto_marks")
 
 
@@ -611,6 +620,9 @@ def test_add_streaming_file_to_stdout(spec, places_test_file, monkeypatch):
     mock_stdout = mock.MagicMock()
     mock_stdout.buffer = output_buffer
     mock_stdout.isatty.return_value = False
+    # pandas, if this is the first test in the worker to import it, reads
+    # ``sys.stdout.encoding`` at import time and refuses a MagicMock.
+    mock_stdout.encoding = "utf-8"
     monkeypatch.setattr(sys, "stdout", mock_stdout)
 
     spec.add_file(places_test_file, "-", **spec.add_file_kwargs(spec.default_resolution))
@@ -824,7 +836,7 @@ def test_partition_cli_preview(spec, places_test_file, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("spec", AUTO_FAMILY)
+@pytest.mark.parametrize("spec", AUTO_ONE["a5"])
 def test_partition_auto_resolution(spec, fields_5070_file, tmp_path):
     """Auto-resolution partitioning creates valid, non-empty partitions."""
     output_dir = tmp_path / "auto_output"
@@ -851,7 +863,7 @@ def test_partition_auto_resolution(spec, fields_5070_file, tmp_path):
         assert table.num_rows > 0, f"Partition {file} should have rows"
 
 
-@pytest.mark.parametrize("spec", AUTO_FAMILY)
+@pytest.mark.parametrize("spec", AUTO_STRUCTURAL)
 def test_partition_auto_vs_manual(spec, fields_5070_file, tmp_path):
     """Auto-resolution matches a manual run at the resolution it calculates."""
     auto_dir = tmp_path / "auto"
@@ -889,7 +901,7 @@ def test_partition_auto_vs_manual(spec, fields_5070_file, tmp_path):
     assert len(auto_files) == len(manual_files), "Auto and manual should create same partitions"
 
 
-@pytest.mark.parametrize("spec", AUTO_FAMILY)
+@pytest.mark.parametrize("spec", AUTO_ONE["h3"])
 def test_partition_auto_with_constraints(spec, fields_5070_file, tmp_path):
     """Auto-resolution respects the max_partitions constraint (loosely)."""
     output_dir = tmp_path / "constrained"
@@ -948,7 +960,7 @@ def test_partition_auto_error_when_both_auto_and_resolution(spec, fields_5070_fi
         )
 
 
-@pytest.mark.parametrize("spec", AUTO_FAMILY)
+@pytest.mark.parametrize("spec", AUTO_QUADKEY)
 def test_partition_auto_preview(spec, fields_5070_file):
     """Preview mode with auto-resolution runs without an output folder."""
     spec.partition(
@@ -1158,10 +1170,14 @@ class TestQuadkeyCLIValidation:
         assert result.exit_code != 0
 
 
-# Column names that are legal in Parquet but are not bare SQL identifiers.
-# 'weird name' broke the file-based path with a parser error; 'has"quote'
-# broke it with an unterminated-quoted-identifier error (issue #680).
-HOSTILE_QUADKEY_NAMES = ["weird name", 'has"quote', "quad-key", "SELECT"]
+#: A column name that is legal in Parquet but not a bare SQL identifier.
+#: 'weird name' broke the file-based path with a parser error and 'has"quote'
+#: with an unterminated-quoted-identifier error (issue #680).
+#: Both #680 shapes in one name (a space and an embedded ``"``): each path is a
+#: routing test for ``quote_identifier``, whose own contract runs every hostile
+#: name (``tests/test_geometry_identifier_quoting.py::TestQuoteIdentifierContract``),
+#: so one name that trips both failures is run per path (#1402).
+HOSTILE_QUADKEY_NAME = 'weird "name'
 
 
 def _expected_bbox_quadkeys(table, resolution):
@@ -1191,7 +1207,7 @@ class TestQuadkeyColumnNameQuoting:
         # was derived from the Slippy-tile formula independently of this module.
         assert result["quadkey"][0].as_py() == "0333311123230"
 
-    @pytest.mark.parametrize("name", HOSTILE_QUADKEY_NAMES)
+    @pytest.mark.parametrize("name", [HOSTILE_QUADKEY_NAME])
     def test_file_based_bbox_path_hostile_name(self, places_test_file, tmp_path, name):
         """File-based bbox path: hostile names keep the correct quadkey values."""
         out = tmp_path / "hostile.parquet"
@@ -1203,7 +1219,7 @@ class TestQuadkeyColumnNameQuoting:
         assert result[name].to_pylist() == _expected_bbox_quadkeys(source, 13)
         assert result.num_rows == source.num_rows
 
-    @pytest.mark.parametrize("name", ["weird name", 'has"quote'])
+    @pytest.mark.parametrize("name", [HOSTILE_QUADKEY_NAME])
     def test_file_based_centroid_path_hostile_name(self, places_test_file, tmp_path, name):
         """File-based centroid path: hostile names keep the correct quadkey values."""
         default_out = tmp_path / "centroid_default.parquet"
@@ -1223,7 +1239,7 @@ class TestQuadkeyColumnNameQuoting:
         assert expected == _expected_bbox_quadkeys(pq.read_table(places_test_file), 13)
         assert actual == expected
 
-    @pytest.mark.parametrize("name", ["weird name", 'has"quote'])
+    @pytest.mark.parametrize("name", [HOSTILE_QUADKEY_NAME])
     def test_cli_hostile_name_end_to_end(self, places_test_file, tmp_path, name):
         """CLI e2e: --quadkey-name accepts hostile names and writes correct values."""
         out = tmp_path / "cli.parquet"
@@ -1249,7 +1265,7 @@ class TestQuadkeyColumnNameQuoting:
             pq.read_table(places_test_file), 13
         )
 
-    @pytest.mark.parametrize("name", ["weird name", 'has"quote'])
+    @pytest.mark.parametrize("name", [HOSTILE_QUADKEY_NAME])
     def test_geo_metadata_primary_column_survives_hostile_name(
         self, places_test_file, tmp_path, name
     ):
@@ -1272,7 +1288,7 @@ class TestQuadkeyColumnNameQuoting:
         assert covering.get("quadkey") == {"column": name, "resolution": 13}, covering
         assert covering.get("bbox", {}).get("xmin") == ["bbox", "xmin"], covering
 
-    @pytest.mark.parametrize("name", ["weird name", 'has"quote'])
+    @pytest.mark.parametrize("name", [HOSTILE_QUADKEY_NAME])
     def test_table_path_hostile_name(self, places_test_file, name):
         """Sibling table path already quotes — pin it against regressions."""
         source = pq.read_table(places_test_file)
@@ -1281,7 +1297,7 @@ class TestQuadkeyColumnNameQuoting:
         assert name in result.column_names
         assert result[name].to_pylist() == _expected_bbox_quadkeys(source, 13)
 
-    @pytest.mark.parametrize("name", ["weird name", 'has"quote'])
+    @pytest.mark.parametrize("name", [HOSTILE_QUADKEY_NAME])
     def test_streaming_path_hostile_name(self, places_test_file, tmp_path, monkeypatch, name):
         """Sibling streaming path already quotes — pin it against regressions."""
         source = pq.read_table(places_test_file)

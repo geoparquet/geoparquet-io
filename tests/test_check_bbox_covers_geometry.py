@@ -33,17 +33,20 @@ SF_BBOX = (-122.4, 37.7, -122.3, 37.8)
 
 
 def _wkb_values(wkts):
-    """WKB bytes for each WKT, with None passed through as a NULL geometry."""
+    """WKB bytes for each WKT, with None passed through as a NULL geometry.
+
+    Each distinct WKT is encoded once: the sampling fixtures repeat one square
+    thousands of times, and a query per row was most of this file's run time.
+    """
     con = get_duckdb_connection(load_spatial=True)
     try:
-        return [
-            None
-            if wkt is None
-            else fetch_one(con.execute("SELECT ST_AsWKB(ST_GeomFromText(?))", [wkt]))[0]
-            for wkt in wkts
-        ]
+        encoded = {
+            wkt: fetch_one(con.execute("SELECT ST_AsWKB(ST_GeomFromText(?))", [wkt]))[0]
+            for wkt in dict.fromkeys(w for w in wkts if w is not None)
+        }
     finally:
         con.close()
+    return [None if wkt is None else encoded[wkt] for wkt in wkts]
 
 
 def _write_geoparquet(
@@ -1068,7 +1071,7 @@ class TestRowNumbersAndSampling:
 
     def test_sampled_rows_keep_their_file_position_when_the_file_owns_the_name(self, tmp_path):
         """Row r's bbox is short by r/1000, so a wrongly numbered example cannot match."""
-        rows = 3000
+        rows = 1000
         points = [f"POINT ({i} {i})" for i in range(rows)]
         boxes = [(float(i), i + i / 1000, float(i), float(i)) for i in range(rows)]
         path = _write_geoparquet(

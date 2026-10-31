@@ -131,10 +131,26 @@ def assert_unknown(path, version: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
+#: Each path is run at every output version (the rule differs per version) on
+#: one of the unknown spellings; the spellings are spread across the paths, and
+#: that every spelling *reads* as unknown is the owner's question
+#: (``test_source_crs_is_unknown_for_every_unknown_input``) (#1402).
+CLI_SOURCES = {"sort-hilbert": "v20_null_srid0", "extract-geoparquet": "pgo_srid0"}
+STRATEGY_SOURCES = {
+    "duckdb-kv": "pgo_srid0",
+    "in-memory": "v11_null",
+    "streaming": "v20_null_srid0",
+    "disk-rewrite": "v11_null",
+}
+
+
 @pytest.mark.parametrize("version", VERSIONS)
-@pytest.mark.parametrize("source", list(INPUTS))
 @pytest.mark.parametrize(
-    "command", [["sort", "hilbert"], ["extract", "geoparquet"]], ids=lambda c: "-".join(c)
+    ("command", "source"),
+    [
+        pytest.param(name.split("-"), source, id=f"{name}-{source}")
+        for name, source in CLI_SOURCES.items()
+    ],
 )
 def test_cli_rewrite_keeps_unknown(command, source, version, tmp_path):
     src = INPUTS[source](tmp_path)
@@ -150,8 +166,10 @@ def test_cli_rewrite_keeps_unknown(command, source, version, tmp_path):
 
 
 @pytest.mark.parametrize("version", VERSIONS)
-@pytest.mark.parametrize("strategy", STRATEGIES)
-@pytest.mark.parametrize("source", list(INPUTS))
+@pytest.mark.parametrize(
+    ("source", "strategy"),
+    [pytest.param(STRATEGY_SOURCES[s], s, id=f"{STRATEGY_SOURCES[s]}-{s}") for s in STRATEGIES],
+)
 def test_table_write_keeps_unknown(source, strategy, version, tmp_path):
     src = INPUTS[source](tmp_path)
     out = tmp_path / "out.parquet"

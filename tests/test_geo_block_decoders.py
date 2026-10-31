@@ -58,8 +58,14 @@ PAYLOADS = [
     ("invalid-utf8", b'\xff\xfe{"version": "1.1.0"}', {}, True, None, "not valid UTF-8"),
 ]  # fmt: skip
 
-KEYS = [pytest.param(b"geo", id="bytes-key"), pytest.param("geo", id="str-key")]
-ENCODINGS = [pytest.param(bytes, id="bytes-value"), pytest.param(str, id="str-value")]
+#: The key and the value are normalized before the payload is read, so the
+#: payload table runs on the all-bytes and the all-str shapes; every mixed
+#: shape is ``tests/test_malformed_geo_metadata.py::
+#: test_strategy_base_reader_sanitizes_every_key_shape`` (#1402).
+SHAPES = [
+    pytest.param(b"geo", bytes, id="bytes-value-bytes-key"),
+    pytest.param("geo", str, id="str-value-str-key"),
+]
 
 
 def _value(raw: bytes, encoding):
@@ -82,8 +88,7 @@ def _fresh_warnings():
     reset_malformed_geo_warnings()
 
 
-@pytest.mark.parametrize("key", KEYS)
-@pytest.mark.parametrize("encoding", ENCODINGS)
+@pytest.mark.parametrize(("key", "encoding"), SHAPES)
 @pytest.mark.parametrize(
     ("case", "raw", "sanitized", "warns", "_raw_value", "_error"),
     PAYLOADS,
@@ -100,8 +105,7 @@ def test_sanitized_carried_geo_table(
     assert bool(_malformed(caplog.records)) is warns, caplog.text
 
 
-@pytest.mark.parametrize("key", KEYS)
-@pytest.mark.parametrize("encoding", ENCODINGS)
+@pytest.mark.parametrize(("key", "encoding"), SHAPES)
 @pytest.mark.parametrize(
     ("case", "raw", "_sanitized", "_warns", "raw_value", "error"),
     PAYLOADS,

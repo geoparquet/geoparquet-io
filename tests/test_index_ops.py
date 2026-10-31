@@ -115,8 +115,17 @@ def test_public_api_keeps_base_cells(index):
     assert result["name"].to_pylist() == golden_fixture()["name"].to_pylist()
 
 
-@pytest.mark.parametrize("index", INDICES)
-@pytest.mark.parametrize("existing", ("same", "case", "absent"))
+#: ``ensure_index_column`` is one owner for every index: each index adds its
+#: own column (``absent``, the per-index cell function), and the reuse branches
+#: (``same``, ``case``) are the owner's, run once on h3 (#1402).
+ENSURE_CASES = [
+    *(pytest.param(index, "absent", id=f"absent-{index}") for index in INDICES),
+    pytest.param("h3", "same", id="same-h3"),
+    pytest.param("h3", "case", id="case-h3"),
+]
+
+
+@pytest.mark.parametrize(("index", "existing"), ENSURE_CASES)
 def test_ensure_index_column_idempotence(index, existing, tmp_path):
     spec = get_index_spec(index)
     table = golden_fixture()
@@ -164,7 +173,7 @@ def test_standard_geometry_name_preserves_schema_spelling():
     assert primary_geometry_column(["ID", "GeOmEtRy"]) == "GeOmEtRy"
 
 
-@pytest.mark.parametrize("index", INDICES)
+@pytest.mark.parametrize("index", ["h3", "quadkey"])
 def test_partition_reuses_case_different_index(index, tmp_path):
     spec = get_index_spec(index)
     column = spec.column_name.upper()

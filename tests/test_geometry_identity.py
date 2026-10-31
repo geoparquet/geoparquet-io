@@ -112,12 +112,21 @@ def _table(names: list[str], geo) -> pa.Table:
 _SANITIZED_AWAY = {"legacy-list-block": "geometry"}
 
 
-@pytest.mark.parametrize(
-    "case, geo, names, expected",
-    RESOLVER_TABLE,
-    ids=[c[0] for c in RESOLVER_TABLE],
-)
-@pytest.mark.parametrize("kind", ["path", "str", "table", "schema", "names"])
+#: Every case on each distinct read step -- a file (``path``), an Arrow table
+#: (the sanitized carried decoder) and bare names (the rule itself). ``str`` is
+#: the same file read as ``path`` and ``schema`` the same decoder as ``table``,
+#: so each is run on the discriminating cases only: the block naming a column
+#: the schema lacks and a schema with no geometry-like column (#1402).
+_ALIAS_CASES = {"block-names-missing-column", "no-block-no-geometry", "legacy-list-block"}
+RESOLVER_CASES = [
+    pytest.param(kind, *row, id=f"{kind}-{row[0]}")
+    for kind in ("path", "str", "table", "schema", "names")
+    for row in RESOLVER_TABLE
+    if kind in ("path", "table", "names") or row[0] in _ALIAS_CASES
+]
+
+
+@pytest.mark.parametrize("kind, case, geo, names, expected", RESOLVER_CASES)
 def test_primary_geometry_column_table(kind, case, geo, names, expected, tmp_path):
     """One rule for every source form: a file, a table, a schema and its names agree."""
     want = expected
