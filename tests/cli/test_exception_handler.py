@@ -36,6 +36,7 @@ class TestExceptionHandler:
         exc = RemoteAccessError("s3://bucket/file", "Access denied")
         click_exc = handle_core_exception(exc)
         assert isinstance(click_exc, click.ClickException)
+        assert "Access denied" in click_exc.message
 
     def test_converts_geometry_error_to_click_exception(self):
         exc = GeometryError("No geometry column found")
@@ -53,6 +54,7 @@ class TestExceptionHandler:
         exc = ValidationError("Invalid GeoParquet")
         click_exc = handle_core_exception(exc)
         assert isinstance(click_exc, click.ClickException)
+        assert "Invalid GeoParquet" in click_exc.message
 
     def test_converts_base_geoparquet_error(self):
         exc = GeoParquetError("Generic error")

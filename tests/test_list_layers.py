@@ -154,7 +154,7 @@ class TestListLayersGeoPackage:
 
         # Should not raise SQL injection or parsing errors
         layers = list_layers_core(str(quoted_file))
-        assert layers is not None
+        assert set(layers) == {"buildings", "roads"}
 
 
 @pytest.mark.slow
@@ -326,7 +326,7 @@ class TestListLayersEdgeCases:
         from pathlib import Path
 
         result = list_layers_core(Path(multilayer_gpkg))
-        assert result is not None
+        assert set(result) == {"buildings", "roads"}
         assert isinstance(result, list)
 
     def test_corrupt_geopackage_raises_valueerror(self, tmp_path):
@@ -376,7 +376,7 @@ class TestListLayersEdgeCases:
         shutil.copy(multilayer_gpkg, unicode_file)
 
         result = list_layers_core(str(unicode_file))
-        assert result is not None
+        assert set(result) == {"buildings", "roads"}
 
     def test_relative_path_normalized(self, multilayer_gpkg):
         """Relative paths should be handled correctly."""

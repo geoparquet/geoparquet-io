@@ -67,11 +67,11 @@ class TestDetectParquetGeometryColumn:
         """Falls back to schema-based detection when no metadata."""
         # Most GeoParquet files have standard column names
         result = primary_geometry_column(places_test_file)
-        assert result is not None
+        assert result == "geometry"
 
     def test_verbose_mode(self, places_test_file, capsys):
         """Verbose mode logs detection info."""
-        primary_geometry_column(places_test_file, verbose=True)
+        assert primary_geometry_column(places_test_file, verbose=True) == "geometry"
         # Function uses debug() which may or may not output to stdout
         # Just verify no exception is raised
 
@@ -100,7 +100,7 @@ class TestFindPrimaryGeometryColumn:
     def test_returns_geometry_column_name(self, places_test_file):
         """Returns the primary geometry column name."""
         result = primary_geometry_column(places_test_file)
-        assert result is not None
+        assert result == "geometry"
         assert isinstance(result, str)
 
     def test_no_literal_fallback(self, tmp_path):
@@ -119,17 +119,17 @@ class TestFindPrimaryGeometryColumn:
     def test_v2_file_detection(self, fields_v2_file):
         """Detects geometry in GeoParquet 2.0 file."""
         result = primary_geometry_column(fields_v2_file)
-        assert result is not None
+        assert result == "geometry"
 
     def test_parquet_geo_only_detection(self, fields_geom_type_only_file):
         """Detects geometry in Parquet Geo Only file."""
         result = primary_geometry_column(fields_geom_type_only_file)
-        assert result is not None
+        assert result == "geometry"
 
     def test_verbose_output(self, places_test_file):
         """Verbose mode works without error."""
         result = primary_geometry_column(places_test_file, verbose=True)
-        assert result is not None
+        assert result == "geometry"
 
 
 # =============================================================================
@@ -211,7 +211,7 @@ class TestDetectGeometryFromQuery:
         """)
 
         query = "SELECT * FROM test_table"
-        _detect_geometry_from_query(spatial_con, query, verbose=True)
+        assert _detect_geometry_from_query(spatial_con, query, verbose=True) == "geometry"
         # Just verify no exception
 
     def test_case_insensitive_standard_names(self, spatial_con):
@@ -225,7 +225,7 @@ class TestDetectGeometryFromQuery:
         result = _detect_geometry_from_query(spatial_con, query)
 
         # Should match despite case difference
-        assert result is not None
+        assert result == "GEOMETRY"
 
     def test_with_multiple_geometry_columns(self, spatial_con):
         """With multiple geometry columns, returns first standard name match."""
@@ -268,20 +268,20 @@ class TestGeometryDetectionIntegration:
         first_file = get_first_parquet_file(country_partition_dir)
         if first_file:
             result = primary_geometry_column(first_file)
-            assert result is not None
+            assert result == "geometry"
 
     def test_different_file_formats(
         self, places_test_file, fields_v2_file, fields_geom_type_only_file
     ):
         """Detection works across different GeoParquet formats."""
         # GeoParquet 1.x
-        assert primary_geometry_column(places_test_file) is not None
+        assert primary_geometry_column(places_test_file) == "geometry"
 
         # GeoParquet 2.0
-        assert primary_geometry_column(fields_v2_file) is not None
+        assert primary_geometry_column(fields_v2_file) == "geometry"
 
         # Parquet Geo Only
-        assert primary_geometry_column(fields_geom_type_only_file) is not None
+        assert primary_geometry_column(fields_geom_type_only_file) == "geometry"
 
 
 # =============================================================================

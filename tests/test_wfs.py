@@ -5516,7 +5516,8 @@ class TestFetchWithSpatialTiles:
                 available_formats=["application/json"],
                 bbox=(3.0, 50.0, 7.0, 54.0),
             )
-            wfs_to_table("http://mock/wfs", "layer", auto_tile=True)
+            result = wfs_to_table("http://mock/wfs", "layer", auto_tile=True)
+            assert result.equals(mock_table)
 
         mock_tile.assert_called_once()
 

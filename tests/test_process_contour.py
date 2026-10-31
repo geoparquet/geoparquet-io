@@ -321,3 +321,6 @@ class TestContourNoMask:
             ["process", "contour", str(tif), str(out), "--interval", "30", "--no-mask"],
         )
         assert result.exit_code == 0, result.output
+        import pyarrow.parquet as pq
+
+        assert pq.read_table(out).num_rows > 0

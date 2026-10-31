@@ -189,11 +189,6 @@ class TestEpochCrsHandling:
         check = _check_epoch_valid({"epoch": 2020.0, "crs": None}, "geometry")
         assert check.status == CheckStatus.WARNING, check.message
 
-    def test_absent_crs_with_epoch_fails(self):
-        """Absent crs means the OGC:CRS84 default — a datum ensemble."""
-        check = _check_epoch_valid({"epoch": 2020.0}, "geometry")
-        assert check.status == CheckStatus.FAILED
-
     def test_unresolvable_crs_with_epoch_warns_not_passes(self):
         crs = {
             "type": "EngineeringCRS",

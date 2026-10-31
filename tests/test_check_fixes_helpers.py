@@ -126,12 +126,6 @@ class TestApplyCompressionFix:
         assert input_file.exists(), "the user's input was moved to the output path"
         assert input_file.read_text() == "test"
 
-    def test_compression_fix_only(self):
-        """Test when only compression fix is needed."""
-        # This will fail without real file, but tests the logic path
-        # The actual file operations are tested in integration tests
-        pass
-
 
 class TestFixBboxAll:
     """Tests for fix_bbox_all function.

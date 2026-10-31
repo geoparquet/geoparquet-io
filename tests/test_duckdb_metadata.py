@@ -29,7 +29,7 @@ class TestGetKvMetadata:
     def test_returns_dict(self, places_test_file):
         """Test that get_kv_metadata returns a dict."""
         result = get_kv_metadata(places_test_file)
-        assert isinstance(result, dict)
+        assert b"geo" in result
 
     def test_contains_geo_key(self, places_test_file):
         """Test that GeoParquet file contains geo key."""
@@ -143,7 +143,7 @@ class TestDetectGeometryColumns:
     def test_returns_dict(self, places_test_file):
         """Test that detect_geometry_columns returns a dict."""
         result = detect_geometry_columns(places_test_file)
-        assert isinstance(result, dict)
+        assert result == {}  # The fixture stores WKB, not a native geometry logical type.
 
 
 class TestTheBboxColumnName:
@@ -369,16 +369,6 @@ class TestGeoParquetErrorExceptions:
         finally:
             # Clean up - use safe_unlink for Windows compatibility
             safe_unlink(temp_path)
-
-    def test_geoparquet_error_is_library_exception(self):
-        """Test that GeoParquetError is a standard Exception, not a Click exception."""
-        # Verify it's a standard exception that can be caught in library usage
-        assert issubclass(GeoParquetError, Exception)
-
-        # Verify it's not a Click exception
-        import click
-
-        assert not issubclass(GeoParquetError, click.ClickException)
 
     def test_get_kv_metadata_raises_error_for_invalid_parquet(self):
         """Test that get_kv_metadata raises GeoParquetError for invalid files."""

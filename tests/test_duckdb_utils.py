@@ -206,7 +206,7 @@ class TestGetDuckdbConnection:
     def test_thread_limit(self):
         """Connection respects thread limit."""
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False, threads=1)
-        assert con is not None
+        assert fetch_one(con.execute("SELECT current_setting('threads')")) == (1,)
         con.close()
 
     def test_temp_directory_is_set(self, tmp_path):

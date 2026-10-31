@@ -410,6 +410,7 @@ class TestOutputInsideInputDataset:
             extract, [str(parts), str(parts / "merged.parquet"), "--dry-run"]
         )
         assert result.exit_code == 0, result.output
+        assert sorted(path.name for path in parts.iterdir()) == ["a.parquet"]
 
 
 class TestEmptyPartitionDirectory:

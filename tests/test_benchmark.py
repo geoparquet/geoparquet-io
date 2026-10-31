@@ -345,6 +345,7 @@ class TestCLI:
         result = runner.invoke(cli, ["benchmark", "compare", "/nonexistent/file.geojson"])
 
         assert result.exit_code != 0
+        assert "does not exist" in result.output
 
 
 class TestBenchmarkSuiteCLI:

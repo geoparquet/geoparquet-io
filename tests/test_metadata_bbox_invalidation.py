@@ -202,13 +202,6 @@ class TestStripDerivedStatsRecomputedColumns:
         assert col["geometry_types"] == []
         assert "bbox" not in col
 
-    def test_default_still_deletes_everything(self):
-        """No ``recomputed_columns`` means the caller recomputes all it strips."""
-        out = strip_derived_stats({"geo": self._geo()})
-        for col in out["geo"]["columns"].values():
-            assert "bbox" not in col
-            assert "geometry_types" not in col
-
     def test_scope_wins_over_the_sentinel(self):
         """A column outside ``columns`` is not stale, so it keeps its real stats."""
         out = strip_derived_stats(

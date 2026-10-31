@@ -197,7 +197,7 @@ class TestGetDuckDBConnection:
         con = get_duckdb_connection()
         # Should have spatial extension loaded
         result = fetch_one(con.execute("SELECT ST_AsText(ST_Point(0, 0))"))
-        assert result is not None
+        assert result == ("POINT (0 0)",)
         con.close()
 
     def test_get_connection_with_httpfs(self):
@@ -206,6 +206,9 @@ class TestGetDuckDBConnection:
 
         con = get_duckdb_connection(load_httpfs=True)
         # Should have httpfs loaded (can't easily test without actual S3 access)
+        assert fetch_one(
+            con.execute("SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'httpfs'")
+        ) == (True,)
         con.close()
 
     def test_get_connection_no_spatial(self):

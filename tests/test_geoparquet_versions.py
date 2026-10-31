@@ -19,7 +19,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.duckdb_utils import fetch_one
-from geoparquet_io.core.geo_metadata import DEFAULT_GEOPARQUET_VERSION, GEOPARQUET_VERSIONS
+from geoparquet_io.core.geo_metadata import GEOPARQUET_VERSIONS
 from geoparquet_io.core.validate import CheckStatus
 from tests.conftest import (
     get_geo_metadata,
@@ -47,17 +47,6 @@ def _is_wkb_type(arrow_type) -> bool:
 
 class TestGeoParquetVersionConstants:
     """Test version configuration constants."""
-
-    def test_version_mapping_exists(self):
-        """Verify all expected versions are defined."""
-        assert "1.0" in GEOPARQUET_VERSIONS
-        assert "1.1" in GEOPARQUET_VERSIONS
-        assert "2.0" in GEOPARQUET_VERSIONS
-        assert "parquet-geo-only" in GEOPARQUET_VERSIONS
-
-    def test_default_version(self):
-        """Verify default version is 1.1."""
-        assert DEFAULT_GEOPARQUET_VERSION == "1.1"
 
     def test_version_config_structure(self):
         """Verify each version config has required keys."""

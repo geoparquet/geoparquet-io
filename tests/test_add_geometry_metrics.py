@@ -141,6 +141,13 @@ class TestAddGeometryMetricsCli:
         runner = CliRunner()
         result = runner.invoke(add, ["geometry-metrics", buildings_test_file])
         assert result.exit_code == 0
+        import io
+
+        import pyarrow as pa
+
+        table = pa.ipc.open_stream(io.BytesIO(result.stdout_bytes)).read_all()
+        assert AREA_COLUMN in table.column_names
+        assert table.num_rows == pq.ParquetFile(buildings_test_file).metadata.num_rows
 
 
 class TestVecorelCompliance:

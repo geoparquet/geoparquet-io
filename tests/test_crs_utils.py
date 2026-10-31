@@ -260,15 +260,12 @@ class TestExtractCrsFromParquet:
         """Returns None for default CRS (4326/CRS84)."""
         crs = crs_of(places_test_file)
 
-        # Most test files are WGS84, which returns None
-        if crs is not None:
-            # If it does return something, it should be valid
-            assert isinstance(crs, dict)
+        assert crs is None
 
     def test_verbose_mode(self, fields_5070_file):
         """Verbose mode logs CRS info."""
         # Should not raise
-        crs_of(fields_5070_file, verbose=True)
+        assert crs_of(fields_5070_file, verbose=True)["id"]["code"] == 5070
 
     def test_parquet_geo_type_crs(self, fields_geom_type_only_5070_file):
         """Extracts CRS from Parquet native geo type."""

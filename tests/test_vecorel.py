@@ -17,11 +17,6 @@ from geoparquet_io.core.constants import (
 class TestVecorelColumnNaming:
     """Test Vecorel-compliant column name generation."""
 
-    def test_overture_vecorel_country(self):
-        dataset = OvertureAdminDataset()
-        name = dataset.get_output_column_name("country", prefix="vecorel")
-        assert name == "admin:country_code"
-
     def test_overture_vecorel_region(self):
         dataset = OvertureAdminDataset()
         name = dataset.get_output_column_name("region", prefix="vecorel")

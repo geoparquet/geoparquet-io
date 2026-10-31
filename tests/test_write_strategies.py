@@ -82,6 +82,7 @@ class TestWriteStrategyFactory:
         """Cache can be cleared."""
         WriteStrategyFactory.get_strategy(WriteStrategy.ARROW_MEMORY)
         WriteStrategyFactory.clear_cache()
+        assert WriteStrategyFactory.get_strategy.cache_info().currsize == 0
 
 
 class TestAtomicWrite:

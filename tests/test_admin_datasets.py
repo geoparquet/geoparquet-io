@@ -962,6 +962,7 @@ class TestGetCacheDir:
         """Test that get_cache_dir returns a Path object."""
         cache_dir = get_cache_dir()
         assert isinstance(cache_dir, Path)
+        assert cache_dir == Path.home() / ".geoparquet-io" / "cache" / "admin"
 
     def test_cache_dir_in_user_home(self):
         """Test that cache directory is in user's home directory."""
@@ -1251,7 +1252,7 @@ class TestGetOrCacheDataset:
                     expected_path = cache_dir / f"gaul-{dataset.get_version()}.parquet"
                     mock_download.return_value = expected_path
 
-                    get_or_cache_dataset(dataset)
+                    assert get_or_cache_dataset(dataset) == str(expected_path)
 
                     mock_download.assert_called_once()
 
@@ -1373,22 +1374,7 @@ class TestCacheMessaging:
                     get_or_cache_dataset(dataset, verbose=True)
 
                     # Should show cache hit message
-                    mock_debug.assert_called()
-
-
-class TestCacheCLIIntegration:
-    """Test CLI flag integration for caching."""
-
-    def test_no_cache_flag_exists(self):
-        """Test that --no-cache flag will be available on add admin-divisions."""
-        # This test documents the expected CLI interface
-        # Implementation will add the flag to main.py
-        pass  # Placeholder - actual CLI test in test_cli.py
-
-    def test_clear_cache_flag_exists(self):
-        """Test that --clear-cache flag will be available on add admin-divisions."""
-        # This test documents the expected CLI interface
-        pass  # Placeholder - actual CLI test in test_cli.py
+                    assert "Using cached dataset" in str(mock_debug.call_args)
 
 
 class TestCacheEdgeCases:
@@ -1442,22 +1428,17 @@ class TestCacheEdgeCases:
                 with patch.object(dataset, "_download_to_cache") as mock_download:
                     fresh_path = cache_dir / f"gaul-{dataset.get_version()}.parquet"
 
-                    def redownload():
+                    def redownload(cache_path):
+                        assert cache_path == fresh_path
                         fresh_path.write_bytes(b"fresh data")
                         return fresh_path
 
                     mock_download.side_effect = redownload
 
-                    get_or_cache_dataset(dataset)
+                    assert get_or_cache_dataset(dataset) == str(fresh_path)
 
                     # Should re-download when cache is corrupted
                     mock_download.assert_called_once()
-
-    def test_concurrent_cache_access(self):
-        """Test that concurrent access to cache is handled safely."""
-        # This is a placeholder for thread-safety testing
-        # The implementation should use atomic file operations
-        pass
 
 
 class TestDownloadToCache:

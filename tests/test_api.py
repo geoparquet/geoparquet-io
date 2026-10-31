@@ -65,6 +65,7 @@ class TestRead:
 
         table = read(PLACES_PARQUET)
         assert isinstance(table, Table)
+        assert table.num_rows == pq.ParquetFile(PLACES_PARQUET).metadata.num_rows
 
     def test_read_preserves_rows(self):
         """Test that read() preserves row count."""
@@ -2323,7 +2324,7 @@ class TestTableStats:
     def test_stats_returns_dict(self, sample_table):
         """Test stats() returns a dictionary."""
         result = sample_table.stats()
-        assert isinstance(result, dict)
+        assert set(result) == set(sample_table.column_names)
 
     def test_stats_has_all_columns(self, sample_table):
         """Test stats() includes all columns."""
@@ -2362,7 +2363,7 @@ class TestTableMetadata:
     def test_metadata_returns_dict(self, sample_table):
         """Test metadata() returns a dictionary."""
         result = sample_table.metadata()
-        assert isinstance(result, dict)
+        assert result["rows"] == sample_table.num_rows
 
     def test_metadata_has_basic_fields(self, sample_table):
         """Test metadata() includes basic fields."""
@@ -2674,7 +2675,7 @@ class TestTableCheck:
         """Test check() returns results dict."""
         result = sample_table.check()
         results_dict = result.to_dict()
-        assert isinstance(results_dict, dict)
+        assert "compression" in results_dict
 
     def test_check_compression_returns_check_result(self, sample_table):
         """Test check_compression() returns a CheckResult."""

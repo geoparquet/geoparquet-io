@@ -515,18 +515,18 @@ class TestCrsExtraction:
 
         # Standard EPSG
         result = _extract_crs_from_spatial_reference({"wkid": 4326})
-        assert result is not None
+        assert result["id"] == {"authority": "EPSG", "code": 4326}
 
         # Web Mercator special case
         result = _extract_crs_from_spatial_reference({"wkid": 102100})
-        assert result is not None
+        assert result["id"] == {"authority": "EPSG", "code": 3857}
 
     def test_default_crs(self):
         """Test default CRS when no spatial reference."""
         from geoparquet_io.core.arcgis import _extract_crs_from_spatial_reference
 
         result = _extract_crs_from_spatial_reference({})
-        assert result is not None  # Should default to WGS84
+        assert result["id"] == {"authority": "EPSG", "code": 4326}  # Should default to WGS84
 
     @pytest.mark.parametrize(
         ("spatial_ref", "expected_code"),

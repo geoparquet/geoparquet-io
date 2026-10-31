@@ -602,10 +602,13 @@ class TestRunTileJoin:
     def test_success_logs_stderr_when_verbose(self, monkeypatch):
         import geoparquet_io.core.tile_join as tj
 
+        messages = []
+        monkeypatch.setattr(tj, "debug", messages.append)
         monkeypatch.setattr(
             tj.subprocess, "run", lambda *a, **k: self._FakeProc(0, "joined 2 tilesets\n")
         )
-        tj._run_tile_join(["tile-join", "-o", "x"], verbose=True)  # must not raise
+        tj._run_tile_join(["tile-join", "-o", "x"], verbose=True)
+        assert "joined 2 tilesets" in messages
 
 
 class TestMergePyramidMetadata:
