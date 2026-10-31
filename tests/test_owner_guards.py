@@ -1667,7 +1667,9 @@ def _logical_type_concat(node: ast.AST) -> bool:
 
 #: Where a planar ``ST_Centroid(`` is a cell key: those sites take the
 #: owner's ``representative_point_sql``, which spells it for planar edges.
+#: ``index_ops.py`` is the IndexSpec driver, where add, sort and partition key.
 _CELL_KEY_DIRS = (
+    "geoparquet_io/core/index_ops.py",
     "geoparquet_io/core/add/",
     "geoparquet_io/core/partition/",
     "geoparquet_io/core/process/aggregate/",
@@ -3397,6 +3399,8 @@ CELL_KEY_PLANTS = {
     "geoparquet_io/core/add/some_cells.py": 'def f(g):\n    return f"h3_latlng_to_cell(ST_Y(ST_Centroid({g})), 0, 9)"\n',
     "geoparquet_io/core/partition/some_cells.py": 'SQL = "SELECT ST_Centroid(geometry) FROM t"\n',
     "geoparquet_io/core/process/aggregate/some_cells.py": 'def f(g):\n    return f"ST_Centroid({g})"\n',
+    # The IndexSpec driver, where every add/sort/partition cell key is built.
+    "geoparquet_io/core/index_ops.py": 'def f(g):\n    return f"ST_Y(ST_Centroid({g}))"\n',
 }
 
 
