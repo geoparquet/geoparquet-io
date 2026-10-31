@@ -151,9 +151,10 @@ def ellipsoid_for_crs(crs: Any) -> tuple[float, float]:
     if crs is None:
         return WGS84_ELLIPSOID
     try:
-        from pyproj import CRS
+        from geoparquet_io.core.crs_utils import load_crs
 
-        ellipsoid = CRS.from_user_input(crs).ellipsoid
+        loaded = load_crs(crs)
+        ellipsoid = loaded.ellipsoid if loaded is not None else None
         if ellipsoid is None:
             return WGS84_ELLIPSOID
         inverse = ellipsoid.inverse_flattening

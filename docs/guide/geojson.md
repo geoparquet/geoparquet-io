@@ -506,8 +506,9 @@ GeoJSON output is lon/lat (RFC 7946), so gpio reprojects any other input CRS fir
 | An `id` that is malformed or that PROJ does not know, next to a valid definition | Warns once and reprojects from the definition |
 | A PROJ string with an `init=` parameter | Fails without reading the file it names |
 | Anything PROJ cannot read | Fails and asks for an explicit source CRS |
+| Written as it is (absent, unknown or lon/lat CRS) but the extent lies outside lon/lat | Fails and suggests `--src-crs` on `convert reproject`; the extent is the `geo` block's `bbox`, else the bbox column or the geometry |
 
-`--keep-crs` skips all of this and writes the input coordinates unchanged. When the CRS cannot be read, reproject with an explicit source CRS first:
+`--keep-crs` skips all of this, the extent check included, and writes the input coordinates unchanged. When the CRS cannot be read, reproject with an explicit source CRS first:
 
 === "CLI"
 

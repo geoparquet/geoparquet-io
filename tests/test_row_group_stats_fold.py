@@ -206,7 +206,7 @@ def test_the_crs_mismatch_warning_reports_an_infinite_coordinate_and_goes_on(mon
         raise GeometryError("holds a geometry with a non-finite (infinite) coordinate")
 
     monkeypatch.setattr(extract, "dataset_bounds", boom)
-    monkeypatch.setattr(extract, "_get_crs_from_file", lambda *a: {"type": "ProjectedCRS"})
+    monkeypatch.setattr(extract, "crs_of", lambda *a, **k: "EPSG:3857")
     with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
         extract._warn_if_crs_mismatch((0.0, 0.0, 1.0, 1.0), "f.parquet", "geometry")
     assert "projected CRS" in caplog.text

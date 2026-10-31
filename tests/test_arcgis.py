@@ -499,10 +499,12 @@ class TestCrsParsing:
         assert _wkid_candidates(spatial_ref) == expected
 
     def test_normalize_wkid_maps_esri_legacy_codes(self):
-        from geoparquet_io.core.arcgis import _normalize_wkid
+        from geoparquet_io.core.crs_utils import canonical_crs_code
 
-        assert _normalize_wkid(102100) == 3857
-        assert _normalize_wkid(25830) == 25830
+        assert canonical_crs_code(102100) == 3857
+        assert canonical_crs_code(102113) == 3785
+        assert canonical_crs_code(900913) == 3857
+        assert canonical_crs_code(25830) == 25830
 
 
 class TestCrsExtraction:

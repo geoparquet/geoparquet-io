@@ -22,8 +22,7 @@ from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.column_selection import find_column, fold, same_column
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
-    extract_crs_from_parquet,
-    extract_crs_from_table,
+    crs_of,
 )
 from geoparquet_io.core.duckdb_utils import (
     as_wkb_sql,
@@ -958,7 +957,7 @@ def aggregate_grid_file(
     if options.bucket_point == BUCKET_POINT_BBOX:
         warn_planar_math_for_file("aggregate", input_parquet, geom_col)
     edges = collect_nonplanar_edges(input_parquet)
-    source_crs = extract_crs_from_parquet(input_parquet, verbose, geometry_column=geom_col)
+    source_crs = crs_of(input_parquet, verbose, geometry_column=geom_col)
 
     con = open_bounded_connection(
         load_spatial=True, load_httpfs=True, memory_limit=options.memory_limit, verbose=verbose
@@ -1076,7 +1075,7 @@ def aggregate_grid_table(
             warn_planar_math("aggregate", table, geom_col)
         edges = table_nonplanar_edges(table, geom_col, None)
         register_arrow(con, "__agg_input", table)
-        source_crs = extract_crs_from_table(table, geom_col)
+        source_crs = crs_of(table, geometry_column=geom_col)
         pt_expr, exclude = bucket_point_expr(
             con,
             "__agg_input",

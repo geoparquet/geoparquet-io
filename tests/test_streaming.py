@@ -17,6 +17,7 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 import pytest
 
+from geoparquet_io.core.crs_utils import crs_of
 from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.geo_metadata import read_raw_geo, with_geo_block
 from geoparquet_io.core.geometry_detection import primary_geometry_column
@@ -28,7 +29,6 @@ from geoparquet_io.core.streaming import (
     _wkb_chunk_data_nbytes,
     apply_geoarrow_extension_type,
     apply_metadata_to_table,
-    extract_crs_from_table,
     is_stdin,
     read_arrow_stream,
     should_stream_output,
@@ -949,7 +949,7 @@ _CRS_PAYLOADS: dict[bytes, object] = {}
 class _CrsCarrierType(pa.ExtensionType):
     """An Arrow extension type exposing an arbitrary value as ``.crs``.
 
-    Lets a test hand ``extract_crs_from_table`` exactly one CRS carrier shape
+    Lets a test hand ``crs_of`` exactly one CRS carrier shape
     with no dependence on import order or on what geoarrow chooses to wrap the
     value in -- the process state that made issue #816 intermittent.
     """
@@ -997,7 +997,7 @@ def _geoarrow_typed_table(crs, nrows: int = 1) -> pa.Table:
 
 
 class TestExtractCrsFromGeoArrowType:
-    """`extract_crs_from_table` must read a geoarrow CRS object, not stringify it.
+    """`crs_of` must read a geoarrow CRS object, not stringify it.
 
     Regression guard for issue #816. Once ``geoarrow.pyarrow`` is imported
     anywhere in the process, PyArrow resolves ``geoarrow.wkb`` fields into real
@@ -1011,7 +1011,7 @@ class TestExtractCrsFromGeoArrowType:
         """A ProjJsonCrs object comes back as PROJJSON, not as its repr."""
         table = _geoarrow_typed_table(OGC_CRS84_PROJJSON)
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert not isinstance(crs, str), f"stringified the CRS object: {crs!r}"
         assert isinstance(crs, dict)
@@ -1021,7 +1021,7 @@ class TestExtractCrsFromGeoArrowType:
         """A StringCrs object ("EPSG:3857") resolves through its PROJJSON accessor."""
         table = _geoarrow_typed_table("EPSG:3857")
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert crs is not None
         parsed = crs if isinstance(crs, dict) else json.loads(crs)
@@ -1033,7 +1033,7 @@ class TestExtractCrsFromGeoArrowType:
 
         table = _geoarrow_typed_table(OGC_CRS84_PROJJSON)
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert pyproj.CRS(crs).to_authority() == ("OGC", "CRS84")
 
@@ -1071,7 +1071,7 @@ class TestExtractCrsFromGeoArrowType:
             [pa.array([1]), pa.array([_wkb_polygon(4)], type=pa.binary())], schema=schema
         )
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert crs == OGC_CRS84_PROJJSON
 
@@ -1084,7 +1084,7 @@ class TestExtractCrsFromGeoArrowType:
         table = _table_with_crs_carrier(_OpaqueCrs())
 
         with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
-            crs = extract_crs_from_table(table, "geometry")
+            crs = crs_of(table, geometry_column="geometry")
 
         assert crs is None
         assert "_OpaqueCrs" in caplog.text
@@ -1094,7 +1094,7 @@ class TestExtractCrsFromGeoArrowType:
 class TestCrsCarrierShapes:
     """Every shape ``geom_type.crs`` can take, driven directly (#816).
 
-    These call ``extract_crs_from_table`` with one carrier shape each, with no
+    These call ``crs_of`` with one carrier shape each, with no
     dependence on whether ``geoarrow.pyarrow`` happened to be imported first --
     so each branch is exercised deterministically on every run.
     """
@@ -1105,7 +1105,7 @@ class TestCrsCarrierShapes:
 
         table = _table_with_crs_carrier(ProjJsonCrs(OGC_CRS84_PROJJSON))
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert isinstance(crs, dict)
         assert crs["id"] == {"authority": "OGC", "code": "CRS84"}
@@ -1116,7 +1116,7 @@ class TestCrsCarrierShapes:
 
         table = _table_with_crs_carrier(StringCrs("EPSG:3857"))
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert isinstance(crs, dict)
         assert crs["id"] == {"authority": "EPSG", "code": 3857}
@@ -1127,7 +1127,7 @@ class TestCrsCarrierShapes:
 
         table = _table_with_crs_carrier(pyproj.CRS("EPSG:4326"))
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert isinstance(crs, dict)
         assert crs["id"] == {"authority": "EPSG", "code": 4326}
@@ -1136,19 +1136,19 @@ class TestCrsCarrierShapes:
         """A type that already holds PROJJSON is returned unchanged."""
         table = _table_with_crs_carrier(OGC_CRS84_PROJJSON)
 
-        assert extract_crs_from_table(table, "geometry") == OGC_CRS84_PROJJSON
+        assert crs_of(table, geometry_column="geometry") == OGC_CRS84_PROJJSON
 
     def test_plain_string_identifier_passes_through(self):
         """A bare identifier string stays a string for the caller to normalise."""
         table = _table_with_crs_carrier("EPSG:3857")
 
-        assert extract_crs_from_table(table, "geometry") == "EPSG:3857"
+        assert crs_of(table, geometry_column="geometry") == "EPSG:3857"
 
     def test_utf8_bytes_are_decoded(self):
         """Bytes are decoded to text rather than stringified as ``b'...'``."""
         table = _table_with_crs_carrier(b"EPSG:3857")
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert crs == "EPSG:3857"
         assert not str(crs).startswith("b'")
@@ -1157,14 +1157,14 @@ class TestCrsCarrierShapes:
         """Bytes that are not UTF-8 are not a CRS; return None, never a repr."""
         table = _table_with_crs_carrier(b"\xff\xfe not utf-8")
 
-        assert extract_crs_from_table(table, "geometry") is None
+        assert crs_of(table, geometry_column="geometry") is None
 
     def test_failing_projjson_accessor_warns_and_returns_none(self, caplog):
         """An accessor that raises is reported, and yields None -- not a repr."""
         table = _table_with_crs_carrier(_ExplodingCrs())
 
         with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
-            crs = extract_crs_from_table(table, "geometry")
+            crs = crs_of(table, geometry_column="geometry")
 
         assert crs is None
         assert "_ExplodingCrs" in caplog.text
@@ -1183,7 +1183,7 @@ class TestCrsCarrierShapes:
         table = table.replace_schema_metadata({b"geo": json.dumps(geo).encode("utf-8")})
 
         with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
-            crs = extract_crs_from_table(table, "geometry")
+            crs = crs_of(table, geometry_column="geometry")
 
         assert crs == OGC_CRS84_PROJJSON
 

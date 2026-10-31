@@ -714,7 +714,7 @@ class TestPythonApi:
 #: A point's WKB header with a truncated body: parses as nothing.
 BAD_WKB = b"\x01\x01\x00\x00\x00garbage"
 
-#: A projected CRS, as far as ``is_geographic_crs`` reads one.
+#: A projected CRS, as far as ``is_geographic`` reads one.
 UTM_31N = {
     "type": "ProjectedCRS",
     "name": "WGS 84 / UTM zone 31N",

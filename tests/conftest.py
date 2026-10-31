@@ -222,6 +222,7 @@ PACKAGE_CACHES = (
     crs_utils._emit_null_crs_warning,
     crs_utils._emit_srid0_crs_warning,
     crs_utils._free_form_source,
+    crs_utils._load_crs_cached,
     crs_utils._projjson_from_authority,
     duckdb_utils.duckdb_capabilities,
     file_type.detect_geoparquet_file_type,
@@ -229,7 +230,6 @@ PACKAGE_CACHES = (
     geo_metadata._note_undeclarable_bbox_column,
     WriteStrategyFactory.get_strategy,
     wfs._bbox_axes,
-    wfs._request_pyproj_crs,
 )
 
 

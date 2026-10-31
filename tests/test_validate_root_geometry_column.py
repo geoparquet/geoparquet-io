@@ -104,7 +104,7 @@ def test_inspect_reads_the_root_columns_native_crs(tmp_path):
     plain = _written(
         tmp_path, "plain_only", "SELECT ST_Point(1, 2) AS geometry", "parquet-geo-only"
     )
-    assert extract_geo_info(plain)["crs"] is not None
+    assert extract_geo_info(plain)["crs"] is None  # the owner omits the default
     assert extract_geo_info(decoy)["crs"] == extract_geo_info(plain)["crs"]
 
 
@@ -169,8 +169,8 @@ def test_native_geography_edges_are_keyed_by_root_columns_only():
     assert [name for name, _ in _native_geography_edges(listing)] == ["geog"]
 
 
-def test_native_crs_of_a_file_is_the_root_columns_not_a_nested_childs():
-    from geoparquet_io.core.extract import _native_crs_from_schema
+def test_native_crs_of_a_file_is_the_root_columns_not_a_nested_childs(monkeypatch):
+    from geoparquet_io.core.crs_utils import _native_type_crs_value
 
     decoy = 'GeometryType(crs={"id": {"authority": "EPSG", "code": 3857}})'
     root = 'GeometryType(crs={"id": {"authority": "EPSG", "code": 4326}})'
@@ -179,7 +179,9 @@ def test_native_crs_of_a_file_is_the_root_columns_not_a_nested_childs():
         {"name": "geometry", "type": "BYTE_ARRAY", "num_children": 0, "logical_type": decoy},
         {"name": "geometry", "type": "BYTE_ARRAY", "num_children": 0, "logical_type": root},
     ]
-    assert _native_crs_from_schema(listing, "geometry") == {
+    monkeypatch.setattr("geoparquet_io.core.duckdb_metadata.get_schema_info", lambda _: listing)
+    assert _native_type_crs_value("unused", "geometry") == {
         "id": {"authority": "EPSG", "code": 4326}
     }
-    assert _native_crs_from_schema(listing[:2], "geometry") is None
+    del listing[2:]
+    assert _native_type_crs_value("unused", "geometry") is None

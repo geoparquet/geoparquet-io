@@ -20,9 +20,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.crs_utils import (
-    _projjson_from_authority,
+    AUTHORITY_CODE_CRS,
+    UnresolvableCRSError,
     column_is_geographic,
     geoarrow_crs_to_projjson,
+    projjson_for_label,
 )
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
@@ -681,46 +683,23 @@ def get_row_count(parquet_file: str, con=None) -> int:
 #: ``projjson:`` names a file-metadata key, not a CRS code.
 _PREFIXED_CRS_FORMS = ("projjson:", "srid:")
 
-#: A bare ``<authority>:<code>`` CRS, e.g. ``EPSG:32633`` or ``OGC:CRS84``.
-#:
-#: The Parquet geospatial spec permits it alongside ``srid:``, ``projjson:`` and
-#: inline PROJJSON, and geoarrow-based writers emit it whenever their CRS is a
-#: plain authority code. Deliberately narrow: an authority is an identifier and
-#: a code is alphanumeric, so neither ``<null>`` nor an empty ``crs=`` (what
-#: DuckDB emits for a type that declares no CRS) can match.
-_AUTHORITY_CODE_CRS = re.compile(r"^[A-Za-z][A-Za-z0-9_.\-]*:[A-Za-z0-9_.\-]+$")
-
-
-def _authority_code_crs(crs_value: Any) -> tuple[str, str] | None:
-    """The ``(authority, code)`` a bare ``<authority>:<code>`` CRS names, else None.
-
-    Returns None for the prefixed forms (``srid:``, ``projjson:``), which share
-    the shape but not the meaning, and for every value that is not that form.
-    """
-    if not isinstance(crs_value, str):
-        return None
-    token = crs_value.strip()
-    if token.lower().startswith(_PREFIXED_CRS_FORMS):
-        return None
-    if not _AUTHORITY_CODE_CRS.match(token):
-        return None
-    authority, code = token.split(":", 1)
-    return authority, code
-
 
 def resolve_authority_code_crs(crs_value: Any) -> Any:
-    """Resolve a bare ``<authority>:<code>`` CRS to PROJJSON, via pyproj.
+    """Resolve a bare ``<authority>:<code>`` CRS to PROJJSON, via the CRS owner.
 
-    Anything else -- another CRS form, an unknown authority, a code the PROJ
-    database does not carry -- is returned unchanged, so callers can keep
-    treating the value as opaque.
+    Anything else -- another CRS form, the prefixed ``srid:`` / ``projjson:``
+    forms, an unknown authority, a code the PROJ database does not carry -- is
+    returned unchanged, so callers can keep treating the value as opaque.
     """
-    pair = _authority_code_crs(crs_value)
-    if pair is None:
+    if not isinstance(crs_value, str):
         return crs_value
-
-    projjson = _projjson_from_authority(*pair)
-    return crs_value if projjson is None else json.loads(projjson)
+    token = crs_value.strip()
+    if token.lower().startswith(_PREFIXED_CRS_FORMS) or not AUTHORITY_CODE_CRS.match(token):
+        return crs_value
+    try:
+        return projjson_for_label(token)
+    except UnresolvableCRSError:
+        return crs_value
 
 
 #: The DuckDB spellings of "this geo logical type declares no CRS at all".
@@ -977,11 +956,8 @@ def resolve_crs_reference(parquet_file: str, crs_value: Any) -> Any:
             # `srid:0` is the type's spelling of an unknown CRS, not EPSG:0.
             return None
         try:
-            from pyproj import CRS
-
-            crs = CRS.from_authority("EPSG", int(srid))
-            return crs.to_json_dict()
-        except Exception:
+            return projjson_for_label(f"EPSG:{int(srid)}")
+        except (ValueError, UnresolvableCRSError):
             pass  # Fall through to return the original value
         return crs_value  # Return the srid string if resolution failed
 

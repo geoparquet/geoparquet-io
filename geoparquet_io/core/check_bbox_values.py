@@ -61,7 +61,7 @@ from geoparquet_io.core.check_verdict import (
     worst,
 )
 from geoparquet_io.core.column_selection import has_column
-from geoparquet_io.core.crs_utils import extract_crs_from_parquet, is_geographic_crs
+from geoparquet_io.core.crs_utils import crs_of, is_geographic
 from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.duckdb_utils import (
     disable_geoparquet_conversion,
@@ -674,9 +674,7 @@ def _check(
         return _empty_report("file has no geometry column to compare", bbox_column)
 
     column_meta = (geo_meta.get("columns") or {}).get(geometry_column) or {}
-    geographic = is_geographic_crs(
-        extract_crs_from_parquet(parquet_file, geometry_column=geometry_column)
-    )
+    geographic = is_geographic(crs_of(parquet_file, geometry_column=geometry_column))
     raw_url = resolve_file_url(parquet_file, verbose)
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
     try:

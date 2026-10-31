@@ -305,13 +305,14 @@ def test_sanitized_carried_geo_drops_an_unusable_block():
     assert sanitized_carried_geo({b"geo": raw}) == {}
 
 
-def test_extract_crs_from_table_survives_a_malformed_block():
+def test_declared_crs_of_a_table_survives_a_malformed_block():
     """``Table.write`` resolves the CRS before building metadata, through this reader."""
-    from geoparquet_io.core.streaming import extract_crs_from_table
+
+    from geoparquet_io.core.crs_utils import crs_of
 
     reset_malformed_geo_warnings()
-    assert extract_crs_from_table(_malformed_table({"geometry": "WKB"}), "geometry") is None
-    assert extract_crs_from_table(_malformed_table(None), "geometry") is None
+    for table in (_malformed_table({"geometry": "WKB"}), _malformed_table(None)):
+        assert crs_of(table, geometry_column="geometry") is None
 
 
 # =============================================================================
@@ -419,21 +420,21 @@ def _file_with_geo(tmp_path, name: str, geo_block, col: str = "geometry") -> str
 
 
 @pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
-def test_crs_utils_extract_crs_from_parquet_survives_a_malformed_block(col, case, block, tmp_path):
+def test_crs_utils_crs_of_survives_a_malformed_block(col, case, block, tmp_path):
     """``convert``/``reproject``/``aggregate`` resolve the input CRS through here."""
-    from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+    from geoparquet_io.core.crs_utils import crs_of
 
     reset_malformed_geo_warnings()
-    assert extract_crs_from_parquet(_file_with_geo(tmp_path, case, block, col=col)) is None
+    assert crs_of(_file_with_geo(tmp_path, case, block, col=col)) is None
 
 
 @pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
-def test_crs_utils_extract_crs_from_table_survives_a_malformed_block(col, case, block):
+def test_crs_of_a_table_survives_a_malformed_block(col, case, block):
     """The aggregate grid-keying reader (distinct from ``streaming``'s)."""
-    from geoparquet_io.core.crs_utils import extract_crs_from_table
+    from geoparquet_io.core.crs_utils import crs_of
 
     reset_malformed_geo_warnings()
-    assert extract_crs_from_table(_table_with_geo(block, col=col), col) is None
+    assert crs_of(_table_with_geo(block, col=col), geometry_column=col) is None
 
 
 @pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
@@ -446,12 +447,14 @@ def test_geoparquet_crs_is_null_survives_a_malformed_block(col, case, block, tmp
 
 
 @pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
-def test_crs_string_from_table_survives_a_malformed_block(col, case, block):
-    """The table-centric transform-string reader, via ``crs_string_from_geo_meta``."""
-    from geoparquet_io.core.crs_utils import crs_string_from_table
+def test_table_transform_source_survives_a_malformed_block(col, case, block):
+    """The table transform source is resolved through ``crs_of``."""
+    from geoparquet_io.core.crs_utils import crs_of, transform_source_crs
 
     reset_malformed_geo_warnings()
-    assert crs_string_from_table(_table_with_geo(block, col=col), col) is None
+    assert (
+        transform_source_crs(crs_of(_table_with_geo(block, col=col), geometry_column=col)) is None
+    )
 
 
 @pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
@@ -1101,15 +1104,15 @@ def test_aggregate_h3_keys_a_projected_file_the_same_way_with_or_without_the_blo
 
 
 @pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
-def test_extract_crs_from_parquet_finds_a_projected_crs_after_recovery(col, tmp_path):
+def test_crs_of_finds_a_projected_crs_after_recovery(col, tmp_path):
     """The unit under (b): the CRS is still found once ``primary_column`` is repaired."""
-    from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+    from geoparquet_io.core.crs_utils import crs_of
 
     reset_malformed_geo_warnings()
     src = _malformed_primary_file(
         tmp_path, "proj_bad_primary", col, {"encoding": "WKB", "crs": _crs_5070()}
     )
-    assert extract_crs_from_parquet(src) is not None
+    assert crs_of(src) is not None
 
 
 @pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
@@ -1150,9 +1153,9 @@ def test_an_empty_primary_column_keeps_the_projected_crs_through_a_write(col, tm
 
 
 @pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
-def test_extract_crs_from_table_finds_a_projected_crs_after_recovery(col):
+def test_crs_of_a_table_finds_a_projected_crs_after_recovery(col):
     """The table-centric sibling, used by ``process aggregate`` before grid keying."""
-    from geoparquet_io.core.crs_utils import extract_crs_from_table
+    from geoparquet_io.core.crs_utils import crs_of
 
     reset_malformed_geo_warnings()
     table = _table_with_geo(
@@ -1163,7 +1166,7 @@ def test_extract_crs_from_table_finds_a_projected_crs_after_recovery(col):
         },
         col=col,
     )
-    assert extract_crs_from_table(table) is not None
+    assert crs_of(table) is not None
 
 
 # =============================================================================
@@ -1235,9 +1238,9 @@ def test_geoparquet_crs_is_null_says_false_when_no_column_can_be_named(tmp_path)
     assert geoparquet_crs_is_null(src) is False
 
 
-def test_extract_crs_from_table_says_none_when_no_column_can_be_named():
+def test_crs_of_a_table_says_none_when_no_column_can_be_named():
     """No usable ``primary_column`` and no standard name in the schema: no CRS."""
-    from geoparquet_io.core.crs_utils import extract_crs_from_table
+    from geoparquet_io.core.crs_utils import crs_of
 
     reset_malformed_geo_warnings()
     table = pa.table({"id": [1], "footprint": pa.array([POINT_WKB], type=pa.binary())})
@@ -1252,7 +1255,7 @@ def test_extract_crs_from_table_says_none_when_no_column_can_be_named():
             ).encode("utf-8")
         }
     )
-    assert extract_crs_from_table(table) is None
+    assert crs_of(table) is None
 
 
 def test_detect_all_geometry_columns_on_a_non_parquet_input(tmp_path):
@@ -1294,7 +1297,7 @@ def test_detect_all_geometry_columns_on_a_non_parquet_input(tmp_path):
 #       common.write_geoparquet_table             (names the column, reads the CRS)
 #       add.bbox_metadata (table and file paths)  (rewrites the block)
 #       stac._add_projection_properties           (emits proj:* on a STAC Item)
-#       stream_io._extract_crs_from_metadata      (CRS of the streamed output)
+#       crs_utils.crs_of      (CRS of the streamed output)
 #
 #   validation-shared -- `gpio check bbox` reads through it and has to see the
 #     file as it really is, so it guards rather than sanitizes:
@@ -1445,16 +1448,19 @@ def test_stream_crs_reader_survives_a_malformed_block(col, case, block):
     ``columns: null`` raised ``argument of type 'NoneType' is not iterable``;
     the ``except`` beside it caught only the JSON errors.
     """
-    from geoparquet_io.core.stream_io import _extract_crs_from_metadata
+    from geoparquet_io.core.crs_utils import crs_of
 
     reset_malformed_geo_warnings()
     metadata = {b"geo": json.dumps(block).encode("utf-8")}
-    assert _extract_crs_from_metadata(metadata) is None
+    assert (
+        crs_of(pa.table({"geom": pa.array([], pa.binary())}).replace_schema_metadata(metadata))
+        is None
+    )
 
 
 def test_stream_crs_reader_still_finds_a_real_crs():
     """The sanitizing must not cost a well-formed file its CRS."""
-    from geoparquet_io.core.stream_io import _extract_crs_from_metadata
+    from geoparquet_io.core.crs_utils import crs_of
 
     crs = _crs_5070()
     block = {
@@ -1463,12 +1469,23 @@ def test_stream_crs_reader_still_finds_a_real_crs():
         "columns": {"geom": {"encoding": "WKB", "crs": crs}},
     }
     metadata = {b"geo": json.dumps(block).encode("utf-8")}
-    assert _extract_crs_from_metadata(metadata) == crs
+    assert (
+        crs_of(pa.table({"geom": pa.array([], pa.binary())}).replace_schema_metadata(metadata))
+        == crs
+    )
     # And for the column the stream is actually attaching it to, named by the
     # caller rather than guessed from a `primary_column` sanitizing may have
     # dropped.
-    assert _extract_crs_from_metadata(metadata, "geom") == crs
-    assert _extract_crs_from_metadata(metadata, "id") is None
+    assert (
+        crs_of(
+            pa.table({"geom": pa.array([], pa.binary())}).replace_schema_metadata(metadata),
+            geometry_column="geom",
+        )
+        == crs
+    )
+    assert (
+        crs_of(pa.table({"id": []}).replace_schema_metadata(metadata), geometry_column="id") is None
+    )
 
 
 @pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
@@ -1908,14 +1925,14 @@ def test_extract_to_stdout_survives_a_non_string_primary_column(col, tmp_path):
 
 
 @pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
-def test_extract_crs_from_table_reads_the_named_column_not_the_literal_one(col):
-    """`streaming.extract_crs_from_table` carried the same `"geometry"` default.
+def test_crs_of_a_table_reads_the_named_column_not_the_literal_one(col):
+    """The declared reader (``Table.crs``) carried the same `"geometry"` default.
 
     Reached only when the caller passes no `geometry_column`, which no caller
     does today -- but the default is wrong for a `geom` file either way, and
     #960 called the one it fixed "the one place still open to it".
     """
-    from geoparquet_io.core.streaming import extract_crs_from_table
+    from geoparquet_io.core.crs_utils import crs_of
 
     reset_malformed_geo_warnings()
     table = _table_with_geo(
@@ -1926,7 +1943,7 @@ def test_extract_crs_from_table_reads_the_named_column_not_the_literal_one(col):
         },
         col=col,
     )
-    crs = extract_crs_from_table(table)
+    crs = crs_of(table)
     assert isinstance(crs, dict) and crs["id"]["code"] == 5070
 
 

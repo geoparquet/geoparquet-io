@@ -12,6 +12,7 @@ import pystac
 
 from geoparquet_io.core.bbox_structure import dataset_bounds
 from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.crs_utils import authority_of
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
@@ -238,8 +239,9 @@ def _add_projection_properties(item: pystac.Item, geo_meta: dict | None, parquet
         crs = col_info["crs"]
         # Try to extract EPSG code
         if isinstance(crs, dict):
-            if "id" in crs and "code" in crs["id"]:
-                item.properties["proj:epsg"] = crs["id"]["code"]
+            identifier = authority_of(crs)
+            if identifier and identifier[0] == "EPSG":
+                item.properties["proj:epsg"] = int(identifier[1])
             # Store full CRS as PROJJSON
             item.properties["proj:projjson"] = crs
         elif isinstance(crs, str):

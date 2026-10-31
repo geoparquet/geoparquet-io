@@ -69,9 +69,9 @@ def read_band(
                     mask = valid
         crs = None
         if src.crs is not None:
-            from pyproj import CRS
+            from geoparquet_io.core.crs_utils import projjson_for_label
 
-            crs = CRS.from_wkt(src.crs.to_wkt()).to_json_dict()
+            crs = projjson_for_label(src.crs.to_wkt())
         transform = tuple(src.transform)[:6]
         debug(
             f"Read band {band} of {raster_path}: {array.shape}, "

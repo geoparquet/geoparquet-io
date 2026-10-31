@@ -665,7 +665,12 @@ Validates file structure and metadata against the GeoParquet specification:
   *both* places, so the output passes this check over coordinates that were
   never transformed. gpio warns when it does this, naming both CRSs and which
   one it used, but the warning is the only trace: fix whichever half is wrong
-  on the **input**, before the rewrite.
+  on the **input**, before the rewrite. An explicit `EPSG:4326` or `OGC:CRS84`
+  in the block is a CRS the block named, so it wins over a different logical
+  type like any other. The warning is deliberately conservative: it fires when
+  both sides resolve to an authority id and the ids differ, so a one-sided
+  `id` disagreement (a full PROJJSON of one CRS next to an id-less one of
+  another) is resolved to the block's answer without a warning.
 - **Datum-aware epoch validation** — a coordinate `epoch` on a datum ensemble
   (e.g. EPSG:4326, or the OGC:CRS84 default when `crs` is omitted) fails; on a
   specific static frame (e.g. GDA2020) it warns; on a dynamic frame (e.g. ITRF)

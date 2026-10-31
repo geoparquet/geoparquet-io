@@ -26,9 +26,11 @@ from geoparquet_io.core.column_selection import (
     split_column_list,
 )
 from geoparquet_io.core.crs_utils import (
+    UnresolvableCRSError,
     _extract_crs_identifier,
-    _projjson_from_authority,
-    parse_crs_string_to_projjson,
+    authority_of,
+    canonical_crs_code,
+    projjson_for_label,
     projjson_from_wkt,
 )
 from geoparquet_io.core.duckdb_utils import (
@@ -75,12 +77,6 @@ ARCGIS_ONLINE_TOKEN_URL = "https://www.arcgis.com/sharing/rest/generateToken"
 
 # Default page size for feature downloads (ArcGIS typical max is 2000)
 DEFAULT_PAGE_SIZE = 2000
-
-# Map ArcGIS WKID codes to EPSG codes for special cases
-WKID_TO_EPSG = {
-    102100: 3857,  # Web Mercator
-    102113: 3785,  # Legacy Web Mercator
-}
 
 
 @dataclass
@@ -953,11 +949,6 @@ def fetch_all_features(
             debug(f"Fetched {fetched} features total using {max_workers} workers")
 
 
-def _normalize_wkid(wkid: int) -> int:
-    """Map legacy Esri WKIDs to their EPSG equivalents (e.g. 102100 -> 3857)."""
-    return WKID_TO_EPSG.get(wkid, wkid)
-
-
 def _parse_crs_to_wkid(value: str) -> int:
     """Parse a CRS string to an integer WKID.
 
@@ -983,11 +974,12 @@ def _projjson_from_wkid(wkid: int) -> dict | None:
     Many layers advertise Esri-authority codes (102039) that are not EPSG codes;
     tagging those as EPSG would write a CRS no consumer can resolve.
     """
-    code = _normalize_wkid(wkid)
+    code = canonical_crs_code(wkid)
     for authority in ("EPSG", "ESRI"):
-        cached = _projjson_from_authority(authority, str(code))
-        if cached is not None:
-            return json.loads(cached)
+        try:
+            return projjson_for_label(f"{authority}:{code}")
+        except UnresolvableCRSError:
+            continue
     return None
 
 
@@ -1015,7 +1007,7 @@ def _wkid_candidates(spatial_ref: dict) -> list[int]:
         code = _coerce_wkid(spatial_ref.get(key))
         if code is None:
             continue
-        code = _normalize_wkid(code)
+        code = canonical_crs_code(code)
         if code not in candidates:
             candidates.append(code)
     return candidates
@@ -1031,7 +1023,7 @@ def _extract_crs_from_spatial_reference(spatial_ref: dict) -> dict | None:
     """
     if not spatial_ref:
         # ArcGIS's own default when a service says nothing is WGS84.
-        return parse_crs_string_to_projjson("EPSG:4326")
+        return projjson_for_label("EPSG:4326")
     for wkid in _wkid_candidates(spatial_ref):
         projjson = _projjson_from_wkid(wkid)
         if projjson is not None:
@@ -1061,9 +1053,7 @@ def _resolve_native_wkid(spatial_ref: dict) -> int:
     if code is not None:
         return code
 
-    from pyproj import CRS
-
-    authority = CRS.from_json_dict(projjson).to_authority()
+    authority = authority_of(projjson)
     if authority is None or not authority[1].isdigit():
         raise GeoParquetError(
             "--output-crs native could not match the layer's WKT spatial reference to an "
@@ -1119,7 +1109,7 @@ def _tag_output_crs(
         )
     if output_wkid is None:
         # f=geojson is WGS84 per RFC 7946, whatever the layer advertises.
-        crs = parse_crs_string_to_projjson("OGC:CRS84")
+        crs = projjson_for_label("OGC:CRS84")
     else:
         # A server that omitted spatialReference on every page is taken at its
         # word for the WKID it was asked for; it cannot be checked.
@@ -1650,7 +1640,7 @@ def arcgis_to_table(
     output_wkid: int | None = None
     if output_crs is not None and output_crs != "native":
         try:
-            output_wkid = _normalize_wkid(_parse_crs_to_wkid(output_crs))
+            output_wkid = canonical_crs_code(_parse_crs_to_wkid(output_crs))
         except ValueError as e:
             raise InvalidParameterError("output_crs", str(e)) from e
         # Parseable is not resolvable; checked before any request so a large

@@ -22,7 +22,11 @@ from geoparquet_io.core.column_selection import (
     resolve_columns_against_schema,
     split_column_list,
 )
-from geoparquet_io.core.crs_utils import _projjson_from_authority
+from geoparquet_io.core.crs_utils import (
+    UnresolvableCRSError,
+    canonical_crs_code,
+    projjson_for_label,
+)
 from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     get_duckdb_connection,
@@ -582,14 +586,6 @@ def _apply_column_exclusions(
 # _build_carto_query always selects.
 _CARTO_GEOMETRY_COLUMN = "the_geom"
 
-# PostGIS SRIDs read as a CRS other than ``EPSG:<srid>``. 4326 is CRS84 because
-# ST_AsGeoJSON writes it lon/lat; 900913 is the legacy Google Mercator code
-# older Carto accounts still carry. Every other SRID is looked up under EPSG.
-_SRID_CRS = {
-    4326: ("OGC", "CRS84"),
-    900913: ("EPSG", "3857"),
-}
-
 
 def _coerce_srid(raw: object) -> int | None:
     """An integer SRID out of a JSON value, or None when it is not one."""
@@ -653,9 +649,14 @@ def _crs_for_srid(srid: int) -> dict | None:
     """PROJJSON for a PostGIS SRID, or None when no authority defines it."""
     if srid <= 0:
         return None
-    authority, code = _SRID_CRS.get(srid, ("EPSG", str(srid)))
-    cached = _projjson_from_authority(authority, code)
-    return json.loads(cached) if cached is not None else None
+    try:
+        # 4326 is CRS84 because ST_AsGeoJSON writes it lon/lat; every other SRID
+        # is an EPSG code (the legacy Web Mercator 900913 is the owner's alias).
+        return projjson_for_label(
+            "OGC:CRS84" if srid == 4326 else f"EPSG:{canonical_crs_code(srid)}"
+        )
+    except UnresolvableCRSError:
+        return None
 
 
 def _crs84() -> dict:

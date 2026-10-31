@@ -16,21 +16,17 @@ Arrow IPC is used because:
 
 from __future__ import annotations
 
-import hashlib
 import sys
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.ipc as ipc
 
-from geoparquet_io.core.crs_utils import _crs_from_geoarrow_field, geoarrow_crs_to_projjson
 from geoparquet_io.core.edges import EDGES, geoarrow_edge_type
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
     prune_geo_metadata_to_columns,
-    sanitized_carried_geo,
 )
-from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.logging_config import debug
 
 # Marker for stdin/stdout in CLI arguments
@@ -409,78 +405,6 @@ def apply_geoarrow_extension_type(
             "Arrow's 32-bit binary layout; simplify very large geometries before "
             "streaming."
         ) from e
-
-
-def extract_crs_from_table(
-    table: pa.Table,
-    geometry_column: str | None = None,
-) -> dict | str | None:
-    """
-    Extract CRS from Arrow table.
-
-    Checks in order:
-    1. Geoarrow extension type CRS (``field.type.crs`` — the shape PyArrow
-       produces once ``geoarrow.pyarrow`` has registered its extension types)
-    2. GeoParquet geo metadata
-    3. The geometry field's raw ``ARROW:extension:metadata`` — the *other*
-       import state, where nothing registered the extension type and the CRS is
-       still sitting on the field. Without it a GeoArrow file with no ``geo``
-       block returned None and the write labelled projected data as the CRS84
-       default (issue #863).
-
-    Args:
-        table: PyArrow Table to inspect
-        geometry_column: Name of geometry column (auto-detect if None)
-
-    Returns:
-        CRS as PROJJSON dict, string, or None if not found
-    """
-
-    # Find geometry column if not specified
-    if geometry_column is None:
-        geometry_column = primary_geometry_column(table)
-
-    if geometry_column and geometry_column in table.column_names:
-        geom_type = table.column(geometry_column).type
-
-        # Check for geoarrow extension type with CRS
-        if hasattr(geom_type, "crs") and geom_type.crs is not None:
-            resolved = geoarrow_crs_to_projjson(geom_type.crs)
-            if resolved is not None:
-                return resolved
-            # Unreadable CRS object: fall through to the geo metadata rather
-            # than returning a value that isn't a CRS (issue #816).
-
-    # Fall back to geo metadata
-    if table.schema.metadata and b"geo" in table.schema.metadata:
-        from geoparquet_io.core.crs_utils import crs_is_explicitly_null, warn_null_crs_once
-
-        geo_bytes = table.schema.metadata[b"geo"]
-        # `Table.write()` resolves the CRS through here before it builds any
-        # metadata, so this reader sees a malformed carried block first and
-        # has to survive it too (#771).
-        geo_meta = sanitized_carried_geo(table.schema.metadata)
-        columns = geo_meta.get("columns", {})
-        # The literal `"geometry"` default named a column that does not
-        # exist on a file whose column is `geom`, and reported its CRS
-        # as absent (#887 review). Ask the table's schema instead — the
-        # shared recovery #960 shared out (#968).
-        geom_col_name = geometry_column or primary_geometry_column(table, geo=geo_meta)
-        if geom_col_name in columns:
-            if crs_is_explicitly_null(columns[geom_col_name]):
-                warn_null_crs_once(
-                    f"table:{hashlib.sha1(geo_bytes, usedforsecurity=False).hexdigest()}"
-                )
-            return columns[geom_col_name].get("crs")
-
-    # Last resort: a GeoArrow field whose extension type nothing registered, so
-    # the CRS is still in `ARROW:extension:metadata`. Reached only when the file
-    # has no `geo` block for this column at all — a `geo` block that declares a
-    # null CRS returns above, because "unknown" is an answer.
-    if geometry_column:
-        return _crs_from_geoarrow_field(table, geometry_column)
-
-    return None
 
 
 class StreamingError(Exception):

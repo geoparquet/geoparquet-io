@@ -18,12 +18,11 @@ from rich.text import Text
 
 from geoparquet_io.core.bbox_parse import BBox
 from geoparquet_io.core.crs_utils import (
-    CRS_ABSENT,
     _extract_crs_identifier,
-    _is_crs84_equivalent,
-    is_crs84_identifier,
+    crs_equal,
+    crs_of,
     is_default_crs,
-    is_geographic_crs,
+    is_geographic,
 )
 from geoparquet_io.core.duckdb_metadata import (
     detect_geometry_columns,
@@ -173,63 +172,6 @@ def _format_crs_for_display(crs_info: Any, include_default: bool = True) -> str:
 # tests that import from inspect_utils.
 
 
-def _crs_are_equivalent(crs1: Any, crs2: Any) -> bool:
-    """
-    Check if two CRS values are equivalent.
-
-    Compares by extracting authority and code from both values.
-    Falls back to pyproj semantic comparison for PROJJSON without authority ids.
-    Handles PROJJSON dicts, "EPSG:31287" strings, and URN formats.
-
-    Pass :data:`CRS_ABSENT` for a geometry column with no ``crs`` key (the
-    OGC:CRS84 default) and ``None`` for an explicit ``"crs": null`` (unknown
-    CRS). Extract both with
-    :func:`~geoparquet_io.core.crs_utils.crs_from_column_meta`.
-
-    Returns:
-        True if CRS values represent the same coordinate system
-    """
-    # An omitted crs key means the OGC:CRS84 default; an explicit null means the
-    # CRS is unknown and matches only another unknown. ``_is_crs84_equivalent``
-    # is the shared "is this the default?" predicate, called here and by
-    # ``validate._crs_equals`` so the two helpers cannot drift apart again — they
-    # once resolved this branch with different predicates and disagreed on
-    # id-less CRS84 PROJJSON and on the "SRID:4326" spelling. It answers False
-    # for None and for the value-less {} / "" shapes, which is what this branch
-    # needs.
-    if crs1 is CRS_ABSENT or crs2 is CRS_ABSENT:
-        if crs1 is CRS_ABSENT and crs2 is CRS_ABSENT:
-            return True
-        return _is_crs84_equivalent(crs2 if crs1 is CRS_ABSENT else crs1)
-
-    if crs1 is None or crs2 is None:
-        return crs1 is None and crs2 is None
-
-    id1 = _extract_crs_identifier(crs1)
-    id2 = _extract_crs_identifier(crs2)
-
-    if id1 is not None and id2 is not None:
-        # OGC:CRS84 and EPSG:4326 differ only in axis order, and GeoParquet
-        # fixes the stored order to (x, y), so they name the same CRS here.
-        # Checked before the id comparison, which would otherwise report the
-        # most common equivalent pair as a mismatch.
-        if is_crs84_identifier(id1) and is_crs84_identifier(id2):
-            return True
-        return id1 == id2
-
-    if isinstance(crs1, dict) and isinstance(crs2, dict):
-        try:
-            from pyproj import CRS
-
-            # ignore_axis_order for the same reason as above -- GeoParquet
-            # stores (x, y) whatever the CRS's own axis definition says.
-            return CRS.from_json_dict(crs1).equals(CRS.from_json_dict(crs2), ignore_axis_order=True)
-        except Exception:
-            return False
-
-    return False
-
-
 def _detect_metadata_mismatches(
     parquet_geo_info: dict[str, Any],
     geoparquet_info: dict[str, Any],
@@ -247,7 +189,7 @@ def _detect_metadata_mismatches(
     # Compare CRS - only warn if both are set and different
     if parquet_crs and geoparquet_crs:
         # Use semantic comparison (handles PROJJSON vs "EPSG:31287" etc.)
-        if not _crs_are_equivalent(parquet_crs, geoparquet_crs):
+        if not crs_equal(parquet_crs, geoparquet_crs):
             # Extract display strings for the warning message
             parquet_crs_display = _extract_crs_string(parquet_crs) or str(parquet_crs)
             geoparquet_crs_display = _extract_crs_string(geoparquet_crs) or str(geoparquet_crs)
@@ -387,7 +329,7 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
 
     # Determine effective CRS (prefer GeoParquet, fallback to Parquet type)
     # Keep as raw PROJJSON - display functions will handle default formatting
-    effective_crs = geoparquet_info.get("crs") or parquet_geo_info.get("crs")
+    effective_crs = crs_of(parquet_file, geometry_column=primary_column, quiet=True)
 
     # Determine effective bbox and geometry_types
     # Priority: GeoParquet metadata, then native geo stats, then bbox column stats
@@ -397,7 +339,7 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
     # Try native Parquet GeospatialStatistics for files with native geo types
     if parquet_type != "No Parquet geo logical type":
         native_stats = get_aggregated_native_geo_stats(
-            parquet_file, primary_column, con=con, geographic=is_geographic_crs(effective_crs)
+            parquet_file, primary_column, con=con, geographic=is_geographic(effective_crs)
         )
 
         # Use native bbox if GeoParquet bbox not available (the fold returns
@@ -1338,7 +1280,7 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
         xy = _bbox_xy(geo_info.get("bbox") or [])
         if xy:
             file_boxes.append(GeometryStats(list(xy), []))
-            all_geographic = all_geographic and is_geographic_crs(geo_info.get("crs"))
+            all_geographic = all_geographic and is_geographic(geo_info.get("crs"))
 
         # Check schema consistency
         from geoparquet_io.core.duckdb_metadata import get_usable_columns

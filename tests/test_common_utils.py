@@ -11,8 +11,6 @@ from geoparquet_io.core.crs_utils import (
     _wrap_query_with_crs,
     get_crs_display_name,
     is_default_crs,
-    is_geographic_crs,
-    parse_crs_string_to_projjson,
 )
 from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
@@ -392,54 +390,6 @@ class TestGetCrsDisplayName:
         """Test PROJJSON dict with no name or id."""
         crs = {"type": "GeographicCRS"}
         assert get_crs_display_name(crs) == "PROJJSON object"
-
-
-class TestIsGeographicCrs:
-    """Tests for is_geographic_crs function."""
-
-    def test_none_is_geographic(self):
-        """Test that None CRS is treated as geographic (default is OGC:CRS84)."""
-        assert is_geographic_crs(None) is True
-
-    def test_epsg_4326_is_geographic(self):
-        """Test that EPSG:4326 is detected as geographic."""
-        crs = {"id": {"authority": "EPSG", "code": 4326}}
-        assert is_geographic_crs(crs) is True
-
-    def test_geographic_crs_type(self):
-        """Test PROJJSON with GeographicCRS type."""
-        crs = {"type": "GeographicCRS", "name": "WGS 84"}
-        assert is_geographic_crs(crs) is True
-
-    def test_projected_crs_type(self):
-        """Test PROJJSON with ProjectedCRS type."""
-        crs = {"type": "ProjectedCRS", "name": "UTM Zone 10N"}
-        assert is_geographic_crs(crs) is False
-
-    def test_string_epsg_4326(self):
-        """Test string EPSG:4326 is geographic."""
-        assert is_geographic_crs("EPSG:4326") is True
-        assert is_geographic_crs("epsg:4326") is True
-
-    def test_string_crs84(self):
-        """Test string CRS84 is geographic."""
-        assert is_geographic_crs("OGC:CRS84") is True
-        assert is_geographic_crs("CRS84") is True
-
-    def test_string_utm_is_projected(self):
-        """Test string UTM is detected as projected."""
-        assert is_geographic_crs("UTM Zone 10N") is False
-        assert is_geographic_crs("EPSG:32610") is False  # UTM 10N
-
-    def test_name_with_wgs84(self):
-        """Test CRS with WGS84 in name is geographic."""
-        crs = {"name": "WGS 84"}
-        assert is_geographic_crs(crs) is True
-
-    def test_name_with_utm_is_projected(self):
-        """Test CRS with UTM in name is projected."""
-        crs = {"name": "WGS 84 / UTM zone 10N"}
-        assert is_geographic_crs(crs) is False
 
 
 class TestGetGeometryTypeName:
@@ -974,31 +924,6 @@ class TestIsPartitionPath:
         assert is_partition_path("/data/*.parquet") is True
         assert is_partition_path("/data/**/*.parquet") is True
         assert is_partition_path("s3://bucket/data/*.parquet") is True
-
-
-class TestParseCrsStringToProjjson:
-    """Tests for parse_crs_string_to_projjson function."""
-
-    def test_valid_epsg_code(self):
-        """Test parsing valid EPSG code to PROJJSON."""
-
-        result = parse_crs_string_to_projjson("EPSG:4326")
-        assert isinstance(result, dict)
-        # Should contain either full PROJJSON or at least id dict
-        assert "id" in result or "name" in result
-
-    def test_invalid_crs_string_returns_none(self):
-        """Test that invalid CRS string returns None."""
-
-        result = parse_crs_string_to_projjson("invalid")
-        assert result is None
-
-    def test_ogc_crs84(self):
-        """Test parsing OGC:CRS84."""
-
-        result = parse_crs_string_to_projjson("OGC:CRS84")
-        assert isinstance(result, dict)
-        assert "id" in result
 
 
 class TestRemoteHintSchemes:

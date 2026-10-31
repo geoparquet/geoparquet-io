@@ -43,6 +43,7 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
 from geoparquet_io.core.column_selection import matching_columns
 from geoparquet_io.core.compression import resolve_codec
+from geoparquet_io.core.crs_utils import crs_of
 from geoparquet_io.core.file_utils import atomic_write
 from geoparquet_io.core.geo_metadata import (
     OVERVIEW_LEVEL_COLUMN,
@@ -276,14 +277,13 @@ def _output_schema(
     geo_meta = sanitized_carried_geo(base_meta, source=str(base_path))
     geometry_column = primary_geometry_column(data_schema, geo=geo_meta)
     if geometry_column is not None:
-        col_meta = geo_meta.get("columns", {}).get(geometry_column, {})
         bbox, types = _union_geo(files, geometry_column)
         empty = _apply_geoparquet_metadata(
             empty,
             geometry_column=geometry_column,
             geoparquet_version=version,
             original_metadata=base_meta,
-            input_crs=col_meta.get("crs") if isinstance(col_meta, dict) else None,
+            input_crs=crs_of(base_path, geometry_column=geometry_column, quiet=True),
             verbose=verbose,
             geo_bbox=bbox,
             geo_types=types or None,

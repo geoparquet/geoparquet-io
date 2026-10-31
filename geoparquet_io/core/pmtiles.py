@@ -561,6 +561,40 @@ def _run_pipeline(
         raise
 
 
+def _addressed_tiles(archive_path: str) -> int | None:
+    """The tile count in a PMTiles archive's header, or None when it has no readable one."""
+    from pmtiles.tile import deserialize_header
+
+    try:
+        with open(archive_path, "rb") as handle:
+            raw = handle.read(127)
+        return int(deserialize_header(raw)["addressed_tiles_count"])
+    except (OSError, ValueError, KeyError, IndexError):
+        return None
+
+
+def _refuse_tileless_archive(input_path: str, output_path: str) -> None:
+    """Fail, and remove the archive, when tippecanoe wrote one with no tiles from rows.
+
+    Tippecanoe exits 0 after "More than half the features were clipped away at
+    zoom level 0. Is your data in the wrong projection?" and leaves a ~900 byte
+    archive whose only hint is that warning in stderr (#1258, #1263). An input
+    with no rows still makes an empty archive.
+    """
+    from geoparquet_io.core.duckdb_metadata import get_row_count
+
+    if _addressed_tiles(output_path) != 0 or get_row_count(input_path) == 0:
+        return
+    Path(output_path).unlink(missing_ok=True)
+    raise RuntimeError(
+        f"tippecanoe wrote {output_path} with no tiles from {input_path}, which has rows. "
+        "The usual cause is coordinates that are not lon/lat (an uncoded or wrongly "
+        "labelled projected CRS); name the CRS with --src-crs, for example "
+        "'--src-crs EPSG:3857'. If a --bbox or --where filter excluded every feature, "
+        "widen it."
+    )
+
+
 def create_pmtiles_from_geoparquet(
     input_path: str,
     output_path: str,
@@ -742,6 +776,7 @@ def create_pmtiles_from_geoparquet(
     )
 
     _run_pipeline(gpio_commands, tippecanoe_cmd, verbose, layer_by_column, scratch)
+    _refuse_tileless_archive(input_path, output_path)
 
     if verbose:
         success(f"Created {output_path}")

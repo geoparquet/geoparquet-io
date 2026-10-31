@@ -124,13 +124,13 @@ def test_a_compound_crs_is_not_its_horizontal_component_elsewhere():
     key, the inspect display names the CRS, and the GDAL export picks an SRS:
     all three must keep telling "WGS 84 + EGM2008 height" apart from EPSG:4326.
     """
-    from geoparquet_io.core.crs_utils import _extract_crs_identifier, is_default_crs
-    from geoparquet_io.core.inspect_utils import _crs_are_equivalent, _format_crs_for_display
+    from geoparquet_io.core.crs_utils import _extract_crs_identifier, crs_equal, is_default_crs
+    from geoparquet_io.core.inspect_utils import _format_crs_for_display
 
     assert _extract_crs_identifier(COMPOUND_CRS) is None
     assert _extract_crs_identifier(WGS84_PLUS_EGM2008) is None
     assert not is_default_crs(WGS84_PLUS_EGM2008)
-    assert not _crs_are_equivalent(COMPOUND_CRS, "EPSG:3301")
+    assert not crs_equal(COMPOUND_CRS, "EPSG:3301")
     assert _format_crs_for_display(COMPOUND_CRS) != "EPSG:3301"
 
 

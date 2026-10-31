@@ -68,7 +68,7 @@ from typing import TYPE_CHECKING, Any, cast, overload
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
     PARQUET_UNKNOWN_CRS,
-    extract_crs_from_parquet,
+    crs_of,
     source_crs_is_unknown,
 )
 from geoparquet_io.core.duckdb_utils import build_kv_metadata_clause
@@ -920,7 +920,7 @@ def resolve_input_crs(
     so before this the 1.1 rewrite of a native-geo-only file declared no CRS
     anywhere.
 
-    ``extract_crs_from_parquet`` returns ``None`` for the default CRS and for an
+    ``crs_of`` returns ``None`` for the default CRS and for an
     unknown one. The two are told apart here: an input whose CRS is unknown
     (``crs: null``, an empty value, or a ``srid:0`` type with no block) answers
     :data:`crs_utils.PARQUET_UNKNOWN_CRS`, so the output says "unknown" in the
@@ -938,11 +938,11 @@ def resolve_input_crs(
         return None
 
     try:
-        # RAW path: extract_crs_from_parquet escapes its own argument (#718).
+        # RAW path: crs_of escapes its own argument (#718).
         # The geometry column says which native column's CRS a block-less
         # (native-geo-only) input means: in schema order the first CRS can be
         # a secondary's.
-        crs = extract_crs_from_parquet(input_file, verbose=verbose, geometry_column=geometry_column)
+        crs = crs_of(input_file, verbose=verbose, geometry_column=geometry_column)
         if crs is None and source_crs_is_unknown(input_file, geometry_column):
             # An unknown CRS is a fact about the output too (#1276).
             return PARQUET_UNKNOWN_CRS

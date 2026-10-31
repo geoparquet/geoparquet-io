@@ -20,17 +20,18 @@ The edge-case matrix (``test_edge_case_verdicts``) pins reader 1's verdict on
 the shapes the five used to disagree about; the divergence #664 recorded
 (str keys invisible to one reader) is resolved by adopting reader-2 semantics.
 
-The CRS-equality trio (``_crs_equals`` / ``_is_crs84_equivalent`` /
-``_crs_are_equivalent``) used to be the other exception. #699 fixed it: the
-helpers now take :data:`~geoparquet_io.core.crs_utils.CRS_ABSENT` for an omitted
+The CRS-equality pair (``crs_equal`` / ``_is_crs84_equivalent``) used to be a
+trio with ``_crs_equal``, and the other exception. #699 fixed the
+disagreement and #1367 (concept 8) made the two binaries one function: the
+helpers take :data:`~geoparquet_io.core.crs_utils.CRS_ABSENT` for an omitted
 ``crs`` key (the OGC:CRS84 default) and ``None`` for an explicit ``"crs": null``
 (unknown CRS), and both binaries treat OGC:CRS84 and EPSG:4326 as the same CRS
 because GeoParquet fixes the stored coordinate order to (x, y). The three cells
-that this suite carried as ``xfail(strict=True)`` spec violations are now plain
-assertions, the two binary matrices are identical, and ``CRS_DECISIONS`` /
-``UNARY_DECISIONS`` are empty. They are kept as (empty) inventories because the
-guards that check them recompute the disagreement set by *calling* the helpers,
-so any fresh divergence fails loudly instead of accumulating silently.
+that this suite carried as ``xfail(strict=True)`` spec violations are plain
+assertions, and ``UNARY_DECISIONS`` is empty. It is kept as an (empty)
+inventory because the guard that checks it recomputes the disagreement set by
+*calling* the helpers, so any fresh divergence fails loudly instead of
+accumulating silently.
 """
 
 import json
@@ -41,13 +42,11 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.crs_utils import CRS_ABSENT, crs_from_column_meta
+from geoparquet_io.core.crs_utils import CRS_ABSENT, crs_equal, crs_from_column_meta
 from geoparquet_io.core.geo_metadata import raw_geo_of_file, read_raw_geo
-from geoparquet_io.core.inspect_utils import _crs_are_equivalent
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_crs_valid,
-    _crs_equals,
     _is_crs84_equivalent,
     _version_at_least,
 )
@@ -486,41 +485,17 @@ CRS_EQUALS = {
     },
 }
 
-# Identical to CRS_EQUALS since #699 — held as its own literal, not an alias, so
-# that a future divergence in either helper shows up as a concrete cell diff.
-CRS_ARE_EQUIVALENT = {
-    "absent": {"absent": True, "null": False, "crs84": True, "epsg4326": True, "epsg5070": False},
-    "null": {"absent": False, "null": True, "crs84": False, "epsg4326": False, "epsg5070": False},
-    "crs84": {"absent": True, "null": False, "crs84": True, "epsg4326": True, "epsg5070": False},
-    "epsg4326": {"absent": True, "null": False, "crs84": True, "epsg4326": True, "epsg5070": False},
-    "epsg5070": {
-        "absent": False,
-        "null": False,
-        "crs84": False,
-        "epsg4326": False,
-        "epsg5070": True,
-    },
-}
 
-# Cells where the two binary helpers disagree — empty since #699 unified them.
-# Kept as data so ``test_crs_helper_disagreement_inventory_is_exact`` fails if
-# the set changes in either direction: a new disagreement means a fresh
-# inconsistency has crept in. That guard recomputes the observed set by CALLING
-# both helpers — it must never derive it from the pinned matrices above, or it
-# degrades into a tautology over constants.
-CRS_DECISIONS: dict[tuple[str, str], str] = {}
-
-# The trio's largest split used to be between the unary helper and both
-# binaries: ``_is_crs84_equivalent(x)`` asks "is x the CRS84 default?" while
-# ``_crs_equals(x, crs84)`` / ``_crs_are_equivalent(x, crs84)`` ask "is x equal
-# to the CRS84 value?" Those are the same question, and #699 made them answer
-# alike for all five inputs. ``test_unary_vs_binary_disagreement_inventory_is_exact``
+# The largest split used to be between the unary helper and the binaries:
+# ``_is_crs84_equivalent(x)`` asks "is x the CRS84 default?" while
+# ``crs_equal(x, crs84)`` asks "is x equal to the CRS84 value?" Those are the
+# same question, and #699 made them answer alike for all five inputs. ``test_unary_vs_binary_disagreement_inventory_is_exact``
 # recomputes the split by CALLING the helpers, so this dict is never the source
 # the guard checks itself against.
 UNARY_DECISIONS: dict[str, str] = {}
 
-# Both binaries fall back to pyproj when a PROJJSON pair carries no ``id``, and
-# both now pass ``ignore_axis_order=True`` there, for the same spec reason the
+# ``crs_equal`` falls back to pyproj when a PROJJSON pair carries no ``id``, and
+# passes ``ignore_axis_order=True`` there, for the same spec reason the
 # fast path recognizes OGC:CRS84 == EPSG:4326. The 5x5 matrix cannot reach that
 # path — every value in it carries a complete ``id`` — so
 # ``test_id_less_projjson_axis_order_agrees`` covers it with id-less PROJJSON.
@@ -551,55 +526,16 @@ def test_is_crs84_equivalent_matrix(name):
 
 
 @pytest.mark.parametrize(("name_a", "name_b"), CRS_PAIRS)
-def test_crs_equals_matrix(name_a, name_b):
-    """Pin ``validate._crs_equals`` over the full 5x5 matrix."""
-    assert _crs_equals(crs_value(name_a), crs_value(name_b)) is CRS_EQUALS[name_a][name_b]
-
-
-@pytest.mark.parametrize(("name_a", "name_b"), CRS_PAIRS)
-def test_crs_are_equivalent_matrix(name_a, name_b):
-    """Pin ``inspect_utils._crs_are_equivalent`` over the full 5x5 matrix.
-
-    Identical to ``CRS_EQUALS`` since #699; any cell where the two helpers drift
-    apart also shows up in ``test_crs_helper_disagreement_inventory_is_exact``.
-    """
-    assert (
-        _crs_are_equivalent(crs_value(name_a), crs_value(name_b))
-        is CRS_ARE_EQUIVALENT[name_a][name_b]
-    )
-
-
-def test_crs_helper_disagreement_inventory_is_exact():
-    """The set of cells where the two binary helpers disagree must not drift.
-
-    Empty since #699 unified them, so this now asserts the two helpers agree on
-    all 25 cells. ``observed`` is built by CALLING both helpers, never by
-    reading the pinned matrices. Deriving it from the literals would make this a
-    tautology over constants that stays green through any production change —
-    the exact failure mode it exists to catch.
-
-    Scope: this covers the id fast path only, because every value in the matrix
-    carries a complete ``id``. The pyproj-fallback half is covered by
-    ``test_id_less_projjson_axis_order_agrees``.
-    """
-    observed = {
-        (a, b)
-        for a, b in product(CRS_NAMES, repeat=2)
-        if _crs_equals(crs_value(a), crs_value(b))
-        is not _crs_are_equivalent(crs_value(a), crs_value(b))
-    }
-    assert observed == set(CRS_DECISIONS), (
-        "CRS helper disagreements changed.\n"
-        f"  newly agreeing (drop from CRS_DECISIONS): {sorted(set(CRS_DECISIONS) - observed)}\n"
-        f"  newly disagreeing (add to CRS_DECISIONS): {sorted(observed - set(CRS_DECISIONS))}"
-    )
+def test_crs_equal_matrix(name_a, name_b):
+    """Pin ``crs_utils.crs_equal`` over the full 5x5 matrix."""
+    assert crs_equal(crs_value(name_a), crs_value(name_b)) is CRS_EQUALS[name_a][name_b]
 
 
 def test_unary_vs_binary_disagreement_inventory_is_exact():
     """ "Is x CRS84?" and "does x equal CRS84?" must give the same answer.
 
-    Empty since #699, so this asserts the unary helper and both binaries agree
-    for every input. ``observed`` comes from CALLING the three helpers, so a
+    Empty since #699, so this asserts the unary helper and the binary agree
+    for every input. ``observed`` comes from CALLING the helpers, so a
     regression forces an explicit update to UNARY_DECISIONS instead of passing
     silently over stale literals.
     """
@@ -607,8 +543,7 @@ def test_unary_vs_binary_disagreement_inventory_is_exact():
     observed = {
         name
         for name in CRS_NAMES
-        if _is_crs84_equivalent(crs_value(name)) is not _crs_equals(crs_value(name), crs84)
-        or _is_crs84_equivalent(crs_value(name)) is not _crs_are_equivalent(crs_value(name), crs84)
+        if _is_crs84_equivalent(crs_value(name)) is not crs_equal(crs_value(name), crs84)
     }
     assert observed == set(UNARY_DECISIONS), (
         "unary-vs-binary CRS84 disagreements changed.\n"
@@ -658,17 +593,13 @@ def test_absent_and_explicit_null_survive_the_helper_boundary():
 
 
 def test_id_less_projjson_axis_order_agrees():
-    """The binaries' pyproj fallbacks must both ignore axis order.
+    """The pyproj fallback ignores axis order.
 
-    This is the one behavioral difference between the two binary helpers that
-    the 5x5 matrix cannot reach: every matrix value carries a complete ``id``,
-    so both helpers return from their fast path and pyproj is never called.
-    Strip the ``id`` and the fallbacks run. They used to split::
-
-        validate._crs_equals              -> .equals(..., ignore_axis_order=True)
-        inspect_utils._crs_are_equivalent -> .equals(...)   # axis order MATTERS
-
-    #699 gave both ``ignore_axis_order=True``, for the same spec reason the id
+    The 5x5 matrix cannot reach the pyproj fallback: every matrix value carries
+    a complete ``id``, so ``crs_equal`` returns from its id path and pyproj is
+    never called. Strip the ``id`` and the fallback runs. The two copies it
+    replaced used to split on it (one ignored axis order, one did not); #699
+    gave both ``ignore_axis_order=True``, for the same spec reason the id
     fast path treats OGC:CRS84 and EPSG:4326 as one CRS: GeoParquet fixes the
     stored coordinate order to (x, y), so a lon/lat and a lat/lon declaration of
     WGS 84 describe the same coordinates.
@@ -689,11 +620,10 @@ def test_id_less_projjson_axis_order_agrees():
     assert "id" not in lon_lat and "id" not in lat_lon
     assert [axis["abbreviation"] for axis in lon_lat["coordinate_system"]["axis"]] == ["Lon", "Lat"]
     assert [axis["abbreviation"] for axis in lat_lon["coordinate_system"]["axis"]] == ["Lat", "Lon"]
-    # Both must be pyproj-parseable, else both helpers fail closed and "agree".
+    # Both must be pyproj-parseable, else the fallback fails closed.
     assert PyprojCRS.from_json_dict(lon_lat) and PyprojCRS.from_json_dict(lat_lon)
 
-    assert _crs_equals(lon_lat, lat_lon) is True
-    assert _crs_are_equivalent(lon_lat, lat_lon) is True
+    assert crs_equal(lon_lat, lat_lon) is True
 
 
 # =============================================================================

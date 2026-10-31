@@ -14,7 +14,7 @@ import pytest
 
 from geoparquet_io.core.crs_utils import (
     crs_is_explicitly_null,
-    extract_crs_from_parquet,
+    crs_of,
     geoparquet_crs_is_null,
     reset_null_crs_warnings,
 )
@@ -264,8 +264,8 @@ def test_warn_on_null_crs_emitted_once(null_crs_parquet, caplog):
 
     reset_null_crs_warnings()
     with caplog.at_level(logging.WARNING):
-        extract_crs_from_parquet(null_crs_parquet)
-        extract_crs_from_parquet(null_crs_parquet)
+        crs_of(null_crs_parquet)
+        crs_of(null_crs_parquet)
     assert len(_null_crs_warnings(caplog.records)) == 1
 
 
@@ -274,7 +274,7 @@ def test_no_warn_on_absent_crs(absent_crs_parquet, caplog):
 
     reset_null_crs_warnings()
     with caplog.at_level(logging.WARNING):
-        extract_crs_from_parquet(absent_crs_parquet)
+        crs_of(absent_crs_parquet)
     assert _null_crs_warnings(caplog.records) == []
 
 
@@ -296,8 +296,8 @@ def test_warn_on_two_distinct_null_files(null_crs_parquet, buildings_test_file, 
 
     reset_null_crs_warnings()
     with caplog.at_level(logging.WARNING):
-        extract_crs_from_parquet(null_crs_parquet)
-        extract_crs_from_parquet(second_path)
+        crs_of(null_crs_parquet)
+        crs_of(second_path)
     assert len(_null_crs_warnings(caplog.records)) == 2
 
 

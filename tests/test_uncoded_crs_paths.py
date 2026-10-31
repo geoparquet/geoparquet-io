@@ -148,8 +148,8 @@ def test_convert_geojson_stdin_warns_once_on_an_explicit_null_crs(tmp_path, capl
         patch("geoparquet_io.core.streaming.read_arrow_stream", return_value=table),
         caplog.at_level("WARNING"),
     ):
-        _convert_from_stream(output_path=str(tmp_path / "a.geojson"))
-        _convert_from_stream(output_path=str(tmp_path / "b.geojson"))
+        _convert_from_stream(output_path=str(tmp_path / "a.geojson"), keep_crs=True)
+        _convert_from_stream(output_path=str(tmp_path / "b.geojson"), keep_crs=True)
     warned = [r for r in caplog.records if r.getMessage().startswith("Input has an explicit null")]
     assert len(warned) == 1
 
@@ -235,7 +235,11 @@ def test_stream_transform_reads_the_stream_crs(fixtures):
         seen.append(crs)
         return "SELECT 1"
 
-    query = _build_transform_query(builder, "src", None, "-", metadata, True, input_aware=True)
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+
+    with get_duckdb_connection(load_spatial=True) as con:
+        con.register("src", pq.read_table(str(fixtures["geo-block"])))
+        query = _build_transform_query(builder, "src", con, "-", metadata, True, input_aware=True)
     assert query == "SELECT 1"
     assert seen[0].startswith("{")
 
@@ -281,9 +285,9 @@ def test_a_plain_builder_gets_the_source_and_connection_only(fixtures):
 
 
 def test_table_explicit_null_crs_is_not_read_from_the_field():
-    from geoparquet_io.core.crs_utils import extract_crs_from_table
+    from geoparquet_io.core.crs_utils import crs_of
 
-    assert extract_crs_from_table(_explicit_null_crs_table()) is None
+    assert crs_of(_explicit_null_crs_table()) is None
 
 
 # --------------------------------------------------------------------------- #

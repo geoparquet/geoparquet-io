@@ -283,14 +283,14 @@ class TestGeoArrowPyArrowCRSExtraction:
         assert "id" in crs, f"CRS missing 'id' key: {crs}"
         assert crs["id"]["code"] == 5070, f"Expected EPSG:5070, got {crs['id']}"
 
-    def test_extract_crs_from_parquet_with_geoarrow(self, fields_5070_file):
-        """Test extract_crs_from_parquet works when geoarrow-pyarrow is imported."""
+    def test_crs_of_with_geoarrow(self, fields_5070_file):
+        """Test crs_of works when geoarrow-pyarrow is imported."""
         # Import geoarrow to register extension types
         import geoarrow.pyarrow  # noqa: F401
 
-        from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+        from geoparquet_io.core.crs_utils import crs_of
 
-        crs = extract_crs_from_parquet(fields_5070_file)
+        crs = crs_of(fields_5070_file)
 
         assert crs is not None, "Failed to extract CRS"
         assert isinstance(crs, dict), f"CRS should be dict, got {type(crs)}"

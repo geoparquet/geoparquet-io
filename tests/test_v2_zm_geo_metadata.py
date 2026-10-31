@@ -325,9 +325,9 @@ def _wkb_source(path, wkt: str, crs) -> str:
 
 @pytest.fixture
 def epsg_25830():
-    from geoparquet_io.core.crs_utils import parse_crs_string_to_projjson
+    from geoparquet_io.core.crs_utils import projjson_for_label
 
-    return parse_crs_string_to_projjson("EPSG:25830")
+    return projjson_for_label("EPSG:25830")
 
 
 def _primary_col_meta(parquet_file: str) -> dict:
@@ -374,11 +374,11 @@ def test_v2_geo_crs_agrees_with_parquet_logical_type(dim, tmp_path, epsg_25830):
     out = tmp_path / f"out_{dim}.parquet"
     convert_to_geoparquet(src, str(out), skip_hilbert=True, geoparquet_version="2.0")
 
-    from geoparquet_io.core.validate import _crs_equals
+    from geoparquet_io.core.crs_utils import crs_equal
 
     schema_crs = _schema_crs(str(out))
     assert schema_crs is not None, f"{dim}: native logical type carries no CRS"
-    assert _crs_equals(_primary_col_meta(str(out))["crs"], schema_crs)
+    assert crs_equal(_primary_col_meta(str(out))["crs"], schema_crs)
 
 
 @pytest.mark.parametrize("dim", list(_PROJECTED_WKT))

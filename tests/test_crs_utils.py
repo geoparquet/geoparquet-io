@@ -12,11 +12,10 @@ from geoparquet_io.core.crs_utils import (
     _format_crs_display,
     _validate_projjson,
     _wrap_query_with_crs,
-    extract_crs_from_parquet,
+    crs_of,
     get_crs_display_name,
     is_default_crs,
-    is_geographic_crs,
-    parse_crs_string_to_projjson,
+    is_geographic,
 )
 
 # =============================================================================
@@ -240,7 +239,7 @@ class TestWrapQueryWithCrs:
 
 
 # =============================================================================
-# Tests for extract_crs_from_parquet()
+# Tests for crs_of()
 # =============================================================================
 
 
@@ -249,7 +248,7 @@ class TestExtractCrsFromParquet:
 
     def test_extracts_crs_from_geoparquet_metadata(self, fields_5070_file):
         """Extracts CRS from GeoParquet metadata."""
-        crs = extract_crs_from_parquet(fields_5070_file)
+        crs = crs_of(fields_5070_file)
 
         # File should have non-default CRS
         if crs:
@@ -259,7 +258,7 @@ class TestExtractCrsFromParquet:
 
     def test_returns_none_for_default_crs(self, places_test_file):
         """Returns None for default CRS (4326/CRS84)."""
-        crs = extract_crs_from_parquet(places_test_file)
+        crs = crs_of(places_test_file)
 
         # Most test files are WGS84, which returns None
         if crs is not None:
@@ -269,11 +268,11 @@ class TestExtractCrsFromParquet:
     def test_verbose_mode(self, fields_5070_file):
         """Verbose mode logs CRS info."""
         # Should not raise
-        extract_crs_from_parquet(fields_5070_file, verbose=True)
+        crs_of(fields_5070_file, verbose=True)
 
     def test_parquet_geo_type_crs(self, fields_geom_type_only_5070_file):
         """Extracts CRS from Parquet native geo type."""
-        crs = extract_crs_from_parquet(fields_geom_type_only_5070_file)
+        crs = crs_of(fields_geom_type_only_5070_file)
 
         # This file has EPSG:5070 stored in the geo type
         if crs:
@@ -366,109 +365,6 @@ class TestGetCrsDisplayName:
 
 
 # =============================================================================
-# Tests for is_geographic_crs()
-# =============================================================================
-
-
-class TestIsGeographicCrs:
-    """Test geographic vs projected CRS detection."""
-
-    def test_none_is_geographic(self):
-        """None CRS is considered geographic (WGS84 default)."""
-        assert is_geographic_crs(None) is True
-
-    def test_geographic_type(self):
-        """GeographicCRS type returns True."""
-        crs = {"type": "GeographicCRS"}
-        assert is_geographic_crs(crs) is True
-
-    def test_projected_type(self):
-        """ProjectedCRS type returns False."""
-        crs = {"type": "ProjectedCRS"}
-        assert is_geographic_crs(crs) is False
-
-    def test_epsg_4326_is_geographic(self):
-        """EPSG:4326 is geographic."""
-        crs = {"id": {"authority": "EPSG", "code": 4326}}
-        assert is_geographic_crs(crs) is True
-
-    def test_ogc_crs84_is_geographic(self):
-        """OGC:CRS84 is geographic."""
-        crs = {"id": {"authority": "OGC", "code": "CRS84"}}
-        assert is_geographic_crs(crs) is True
-
-    def test_utm_is_projected(self):
-        """UTM zones are projected."""
-        crs = {"name": "WGS 84 / UTM zone 18N"}
-        assert is_geographic_crs(crs) is False
-
-    def test_mercator_is_projected(self):
-        """Mercator projections are projected."""
-        crs = {"name": "Web Mercator"}
-        assert is_geographic_crs(crs) is False
-
-    def test_string_4326_is_geographic(self):
-        """String '4326' in name indicates geographic."""
-        assert is_geographic_crs("EPSG:4326") is True
-
-    def test_string_utm_is_projected(self):
-        """String with UTM is projected."""
-        assert is_geographic_crs("UTM Zone 10N") is False
-
-    def test_wgs84_name_is_geographic(self):
-        """WGS84 in name indicates geographic."""
-        crs = {"name": "WGS 84"}
-        assert is_geographic_crs(crs) is True
-
-
-# =============================================================================
-# Tests for parse_crs_string_to_projjson()
-# =============================================================================
-
-
-class TestParseCrsStringToProjjson:
-    """Test CRS string to PROJJSON conversion."""
-
-    def test_parses_epsg_code(self):
-        """Parses EPSG:4326 to PROJJSON dict."""
-        result = parse_crs_string_to_projjson("EPSG:4326")
-
-        assert result is not None
-        assert isinstance(result, dict)
-        # Should have at least an id
-        if "id" in result:
-            assert result["id"]["authority"] == "EPSG"
-            assert result["id"]["code"] == 4326
-
-    def test_parses_epsg_5070(self):
-        """Parses EPSG:5070 to PROJJSON dict."""
-        result = parse_crs_string_to_projjson("EPSG:5070")
-
-        assert result is not None
-        assert isinstance(result, dict)
-
-    def test_invalid_string_returns_none(self):
-        """Invalid CRS string returns None."""
-        result = parse_crs_string_to_projjson("not a crs")
-        assert result is None
-
-    def test_empty_string_returns_none(self):
-        """Empty string returns None."""
-        result = parse_crs_string_to_projjson("")
-        assert result is None
-
-    def test_with_duckdb_connection(self):
-        """Works with DuckDB connection parameter."""
-        import duckdb
-
-        con = duckdb.connect()
-        result = parse_crs_string_to_projjson("EPSG:4326", con=con)
-        con.close()
-
-        assert result is not None
-
-
-# =============================================================================
 # Integration Tests
 # =============================================================================
 
@@ -479,7 +375,7 @@ class TestCrsUtilsIntegration:
     def test_full_workflow_epsg_5070(self, fields_5070_file):
         """Full CRS extraction and formatting workflow."""
         # Extract CRS
-        crs = extract_crs_from_parquet(fields_5070_file)
+        crs = crs_of(fields_5070_file)
 
         if crs:
             # Get identifier
@@ -487,7 +383,7 @@ class TestCrsUtilsIntegration:
             assert identifier is not None
 
             # Check if projected
-            assert is_geographic_crs(crs) is False
+            assert is_geographic(crs) is False
 
             # Format for display
             display = get_crs_display_name(crs)
@@ -495,7 +391,7 @@ class TestCrsUtilsIntegration:
 
     def test_crs_projjson_reference_file(self, crs_projjson_file):
         """Tests CRS extraction from file with projjson: reference."""
-        crs = extract_crs_from_parquet(crs_projjson_file)
+        crs = crs_of(crs_projjson_file)
 
         # Should resolve the reference and return full PROJJSON
         if crs:
@@ -506,7 +402,7 @@ class TestCrsUtilsIntegration:
 
     def test_crs_srid_file(self, crs_srid_file):
         """Tests CRS extraction from file with srid: format."""
-        crs = extract_crs_from_parquet(crs_srid_file)
+        crs = crs_of(crs_srid_file)
 
         # Should resolve srid:5070 to EPSG:5070
         if crs:

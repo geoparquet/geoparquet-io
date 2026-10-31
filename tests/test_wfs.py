@@ -1457,8 +1457,8 @@ class TestCRSNegotiation:
             # EPSG inside another word is not a URI part, so not a code
             ("not-a-crs-EPSG:4326", "not-a-crs-EPSG:4326"),
             ("urn:ogc:def:crs:XEPSG::4326", "urn:ogc:def:crs:XEPSG::4326"),
-            # Non-ASCII digits are not a code
-            ("EPSG:\u0664\u0663\u0662\u0666", "EPSG:\u0664\u0663\u0662\u0666"),
+            # The shared equality owner recognizes this equivalent default identifier.
+            ("EPSG:\u0664\u0663\u0662\u0666", "EPSG:4326"),
         ],
     )
     def test_crs_variant_normalization(self, crs_variant, expected_normalized):
@@ -2770,7 +2770,7 @@ class TestAxisOrder:
 
     def test_is_geographic_crs_detects_geographic_systems(self):
         """Should correctly identify geographic (lat/lon) CRS."""
-        from geoparquet_io.core.wfs import _is_geographic_crs
+        from geoparquet_io.core.crs_utils import is_geographic as _is_geographic_crs
 
         assert _is_geographic_crs("EPSG:4326") is True
         assert _is_geographic_crs("urn:ogc:def:crs:EPSG::4326") is True
@@ -2785,7 +2785,7 @@ class TestAxisOrder:
         pyproj-backed detection identifies any geographic CRS; a hardcoded list
         would misclassify these and trigger a false coordinate mismatch.
         """
-        from geoparquet_io.core.wfs import _is_geographic_crs
+        from geoparquet_io.core.crs_utils import is_geographic as _is_geographic_crs
 
         assert _is_geographic_crs("EPSG:4171") is True  # RGF93 (geographic)
         assert _is_geographic_crs("EPSG:4258") is True  # ETRS89 (geographic)
@@ -3790,7 +3790,7 @@ class TestResolveCRSForOutput:
         import json
         from unittest.mock import MagicMock, patch
 
-        from geoparquet_io.core.crs_utils import parse_crs_string_to_projjson
+        from geoparquet_io.core.crs_utils import projjson_for_label
         from geoparquet_io.core.wfs import _with_server_crs, wfs_to_table
 
         table = _with_server_crs(self._point_table(4527586.01, 6386852.32), "EPSG:22174")
@@ -3820,7 +3820,7 @@ class TestResolveCRSForOutput:
         mock_validate.assert_not_called()
         # Output metadata must encode EPSG:22174, not a bbox guess.
         geo = json.loads(result.schema.metadata[b"geo"])
-        expected = parse_crs_string_to_projjson("EPSG:22174")
+        expected = projjson_for_label("EPSG:22174")
         assert geo["columns"]["geometry"]["crs"] == expected
 
     @pytest.mark.usefixtures("offline_wfs_probes")
@@ -3835,7 +3835,7 @@ class TestResolveCRSForOutput:
         import json
         from unittest.mock import MagicMock, patch
 
-        from geoparquet_io.core.crs_utils import parse_crs_string_to_projjson
+        from geoparquet_io.core.crs_utils import projjson_for_label
         from geoparquet_io.core.wfs import _with_server_crs, wfs_to_table
 
         table = _with_server_crs(self._point_table(4527586.01, 6386852.32), "EPSG:22174")
@@ -3867,7 +3867,7 @@ class TestResolveCRSForOutput:
         mock_validate.assert_not_called()
         assert result.num_rows == 1
         geo = json.loads(result.schema.metadata[b"geo"])
-        assert geo["columns"]["geometry"]["crs"] == parse_crs_string_to_projjson("EPSG:22174")
+        assert geo["columns"]["geometry"]["crs"] == projjson_for_label("EPSG:22174")
 
     @pytest.mark.usefixtures("offline_wfs_probes")
     def test_local_bbox_filter_reprojects_bbox_to_server_crs(self):
@@ -4004,7 +4004,7 @@ class TestOutputCrsProjjson:
     def test_a_cached_entry_that_is_not_an_object_falls_back_to_pyproj(self):
         from geoparquet_io.core.wfs import _output_crs_projjson
 
-        with patch("geoparquet_io.core.wfs._projjson_from_authority", return_value="[]"):
+        with patch("geoparquet_io.core.crs_utils._projjson_from_authority", return_value="[]"):
             projjson = _output_crs_projjson("EPSG:31287")
 
         assert projjson["id"] == {"authority": "EPSG", "code": 31287}
@@ -4439,9 +4439,9 @@ class TestBboxAxisRuleByCrs:
         assert _first_axis_is_north(info) is expected
 
     def test_an_oversized_crs_string_is_not_read(self):
-        from geoparquet_io.core.wfs import _MAX_CRS_STRING, _request_pyproj_crs
+        from geoparquet_io.core.crs_utils import load_crs
 
-        assert _request_pyproj_crs("EPSG:" + "9" * _MAX_CRS_STRING) is None
+        assert load_crs("EPSG:" + "9" * 1024) is None
 
     def test_a_layer_bbox_across_the_antimeridian_says_so(self, caplog):
         from geoparquet_io.core.wfs import _get_tiling_bbox

@@ -121,7 +121,7 @@ class TestCrsStringFromTable:
             """
             import sys
             import pyarrow.parquet as pq
-            from geoparquet_io.core.crs_utils import crs_string_from_table
+            from geoparquet_io.core.crs_utils import crs_of, transform_source_crs
 
             table = pq.read_table(sys.argv[1])
             field = table.schema.field("geometry")
@@ -136,7 +136,7 @@ class TestCrsStringFromTable:
                 "expected raw ARROW:extension:metadata on the geometry field"
             )
             assert "geoarrow.pyarrow" not in sys.modules
-            assert crs_string_from_table(table, "geometry") == "EPSG:5070"
+            assert transform_source_crs(crs_of(table, geometry_column="geometry")) == "EPSG:5070"
             """
         )
         result = subprocess.run(
@@ -152,10 +152,10 @@ class TestCrsStringFromTable:
         # Force the registered-extension-type carrier (Case 1).
         import geoarrow.pyarrow  # noqa: F401
 
-        from geoparquet_io.core.crs_utils import crs_string_from_table
+        from geoparquet_io.core.crs_utils import crs_of, transform_source_crs
 
         table = self._read_table(fields_5070_file)
-        assert crs_string_from_table(table, "geometry") == "EPSG:5070"
+        assert transform_source_crs(crs_of(table, geometry_column="geometry")) == "EPSG:5070"
 
 
 class TestHotPathUnchanged:
