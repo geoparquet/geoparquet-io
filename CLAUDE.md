@@ -164,6 +164,7 @@ both DuckDB 1.5.x and 2.0.
 
 | Old (crashes) | Correct |
 |---------------|---------|
+| `duckdb.__version__` | `duckdb_capabilities()` |
 | `.fetch_arrow_table()` | `con.sql(q).arrow().read_all()` |
 | `.to_arrow_table()` | `con.sql(q).arrow().read_all()` |
 | `con.execute(q).arrow()` (gone in 2.0) | `con.sql(q).arrow().read_all()` (`params=` for parameters) |
@@ -185,9 +186,7 @@ idempotent, so escape exactly once. Column names arrive from a file's own
 `geo.primary_column` and from `--column`/`--bbox-name`, so this is an injection
 surface, not a style nit.
 
-A path is escaped **either** by `safe_file_url()` (which also resolves remote
-URLs and checks existence; callers quote its bare result) **or** by `sql_path()`
-— never both. Handing an already-escaped path to a helper that escapes its own
+Escape a raw path exactly once with `sql_path()`. Handing an already-escaped path to a helper that escapes its own
 argument, or to a filesystem API, turns `o'brien` into `o''brien` and the file
 "disappears" (#718). A function takes a RAW path or a SQL-ready literal, never
 ambiguously both. `scripts/check_sql_path_literals.py` ratchets new
