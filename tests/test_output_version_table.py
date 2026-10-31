@@ -258,11 +258,11 @@ def test_a_non_string_declared_version_reads_as_none_everywhere(bad):
     import pyarrow as pa
 
     from geoparquet_io.api.table import Table
-    from geoparquet_io.core.parquet_writer import declared_geoparquet_version
+    from geoparquet_io.core.geo_metadata import declared_version
 
     geo = {"version": bad, "primary_column": "geometry", "columns": {"geometry": {}}}
-    assert declared_geoparquet_version(geo, default=None) is None
-    assert declared_geoparquet_version(geo) == ""
+    assert declared_version(geo, default=None) is None
+    assert declared_version(geo) == ""
     table = pa.table({"geometry": pa.array([b""], pa.binary())})
     table = table.replace_schema_metadata({b"geo": json.dumps(geo).encode()})
     assert Table(table).geoparquet_version is None

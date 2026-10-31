@@ -169,8 +169,8 @@ def _supply_or_strip_bbox_member(parquet_file, geo_meta, verbose):
     the one repaired block, through ``patch_or_rewrite``).
 
     Asks ``bbox_column_to_declare`` -- the gate ``_build_geo_block``
-    (``arrow_geo_metadata``) and ``declare_carried_bbox_column``
-    (``write_funnels``) ask -- so the footer patch and the funnel rewrite
+    (``arrow_geo_metadata``) and the composer's bbox-covering step
+    (``geo_metadata.compose_geo_block``) ask -- so the footer patch and the funnel rewrite
     cannot answer differently for one file, and an h3/s2/a5/quadkey/kdtree
     entry beside the supplied member is kept rather than thrown away.
 
@@ -208,7 +208,7 @@ def fix_bboxless_covering(parquet_file, output_file, verbose=False, profile=None
     :func:`_supply_or_strip_bbox_member`: the covering becomes usable and the
     index entry beside it survives. That is not this function's own policy but
     the write funnels': they do not simply drop, they run
-    ``declare_carried_bbox_column`` *before* ``strip_bboxless_covering``, so a
+    the composer's bbox-covering step *before* ``strip_bboxless_covering``, so a
     declarable column gets its chance first. Both arms below now ask that one
     gate (``bbox_column_to_declare``), which is what keeps them in step -- the
     footer patch used to hand down the stripped block while the fallback handed

@@ -18,8 +18,8 @@ from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.geo_metadata import (
     BBOX_REWRITE_HINT,
     bboxless_covering_columns,
-    carried_version,
     covering_supported,
+    declared_version,
     raw_geo_of_file,
 )
 from geoparquet_io.core.geometry_detection import primary_geometry_column
@@ -582,11 +582,7 @@ def _check_geoparquet_v1(
     # make (#979). That crash sat behind the `detect_geoparquet_file_type` one
     # `check bbox` hit a frame earlier, so it only becomes reachable once that
     # is guarded -- fix one without the other and the traceback just moves.
-    version = carried_version(
-        geo_meta.get("version") if geo_meta else None,
-        source=str(parquet_file),
-    )
-    version = version or "0.0.0"
+    version = declared_version(geo_meta, default="0.0.0", source=str(parquet_file))
     bbox_info = check_bbox_structure(parquet_file, verbose)
 
     # Build results

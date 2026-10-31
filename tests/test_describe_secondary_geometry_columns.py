@@ -4,7 +4,7 @@ Two halves of the same blind spot (#1000, #952) — the write path only really
 knew about the PRIMARY geometry column:
 
 * **#1000**: `add *` (and every caller that passes no ``geometry_info``) never
-  told ``build_geo_metadata`` a secondary existed, so a secondary NATIVE
+  told the strategy block builder (now ``compose_geo_block``) a secondary existed, so a secondary NATIVE
   geometry column was left out of ``geo.columns`` entirely — which GeoParquet
   2.0 requires for every geometry column in the file. The funnel now derives
   ``geometry_info`` from the ``input_file`` witness itself

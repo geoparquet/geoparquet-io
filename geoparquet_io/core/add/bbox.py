@@ -24,9 +24,10 @@ from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     _bbox_claimed_by_another_column,
-    bbox_struct_child_names_match,
     build_bbox_covering,
     covering_supported,
+    declared_version,
+    is_bbox_struct_field,
     sanitized_carried_geo,
     sanitized_carried_geo_of_file,
 )
@@ -40,7 +41,6 @@ from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_mat
 from geoparquet_io.core.logging_config import debug, progress, success, warn
 from geoparquet_io.core.parquet_writer import (
     WriteOptions,
-    declared_geoparquet_version,
     resolve_output_geoparquet_version,
 )
 from geoparquet_io.core.partition.reader import require_single_file
@@ -63,7 +63,7 @@ def _bbox_metadata_advice(parquet_file: str, declare_by_name: str | None = None)
     sending the user to a command that would report no bbox column at all.
     """
 
-    version = declared_geoparquet_version(sanitized_carried_geo_of_file(parquet_file))
+    version = declared_version(sanitized_carried_geo_of_file(parquet_file))
     if covering_supported(version):
         if check_bbox_structure(parquet_file).get("covering_problem"):
             return "The existing column cannot carry a 'covering'; use --force to rewrite it."
@@ -139,7 +139,7 @@ def _has_bbox_struct_column(con, source: str, bbox_column_name: str) -> bool:
     schema = query_schema(con, f"SELECT * FROM {source}")
     if bbox_column_name not in schema.names:
         return False
-    return _is_bbox_struct_field(schema.field(bbox_column_name))
+    return is_bbox_struct_field(schema.field(bbox_column_name))
 
 
 def add_bbox_table(
@@ -201,19 +201,6 @@ def add_bbox_table(
         con.close()
 
 
-def _is_bbox_struct_field(field) -> bool:
-    """Whether an Arrow field is a bbox covering struct rather than a column of that name.
-
-    Child names are matched as spelled, which is what the file-based detector
-    (``bbox_structure``) does: a ``bbox`` struct whose children are
-    ``XMIN/YMIN/XMAX/YMAX`` is the user's own data -- the folded-case test read
-    it as gpio's own and *destroyed* it (#1176).
-    """
-    if not pa.types.is_struct(field.type):
-        return False
-    return bbox_struct_child_names_match({child.name for child in field.type})
-
-
 def _prepare_table_bbox_column(table: pa.Table, bbox_column_name: str) -> tuple[pa.Table, str]:
     """``(table, name)``: drop the bbox struct being replaced, or move aside.
 
@@ -225,7 +212,7 @@ def _prepare_table_bbox_column(table: pa.Table, bbox_column_name: str) -> tuple[
     Resolution is case-insensitive because the computed column is aliased in SQL,
     where ``BBOX`` and ``bbox`` are one name.
     """
-    if bbox_column_name in table.column_names and _is_bbox_struct_field(
+    if bbox_column_name in table.column_names and is_bbox_struct_field(
         table.schema.field(bbox_column_name)
     ):
         return table.remove_column(table.column_names.index(bbox_column_name)), bbox_column_name
@@ -255,20 +242,6 @@ def _declare_computed_bbox(metadata, geometry_column: str, bbox_column_name: str
     return {**metadata, b"geo": json.dumps({**geo, "columns": columns}).encode("utf-8")}
 
 
-def _bbox_covering_metadata(bbox_column_name: str) -> dict:
-    """The GeoParquet 1.1+ ``covering`` block pointing at ``bbox_column_name``."""
-    return {
-        "covering": {
-            "bbox": {
-                "xmin": [bbox_column_name, "xmin"],
-                "ymin": [bbox_column_name, "ymin"],
-                "xmax": [bbox_column_name, "xmax"],
-                "ymax": [bbox_column_name, "ymax"],
-            }
-        }
-    }
-
-
 def _version_a_copy_would_miss(input_parquet: str) -> str | None:
     """The facade's version for this input, when a verbatim copy would declare another.
 
@@ -278,9 +251,7 @@ def _version_a_copy_would_miss(input_parquet: str) -> str | None:
     other command (approved change 7 of #1367: the facade decides).
     """
     target = resolve_output_geoparquet_version(None, input_file=input_parquet)
-    declared = declared_geoparquet_version(
-        sanitized_carried_geo_of_file(input_parquet), default=None
-    )
+    declared = declared_version(sanitized_carried_geo_of_file(input_parquet), default=None)
     if GEOPARQUET_VERSIONS[target]["metadata_version"] == declared:
         return None
     return target
@@ -440,7 +411,9 @@ def _add_bbox_streaming(
             # A covering gpio did not compute must not be declared. The version
             # is the facade's, pass-through or not: a 1.0 stream writes 1.1 like
             # every other command (approved change 7).
-            custom_metadata=None if passed_through else _bbox_covering_metadata(bbox_column_name),
+            custom_metadata=None
+            if passed_through
+            else {"covering": {"bbox": build_bbox_covering(bbox_column_name)}},
             **write.funnel_kwargs(),
         )
 
@@ -589,7 +562,7 @@ def _add_bbox_file_based(
     )"""
 
     # Build covering metadata for the bbox column (GeoParquet 1.1+ spec)
-    covering_metadata = _bbox_covering_metadata(bbox_column_name)
+    covering_metadata = {"covering": {"bbox": build_bbox_covering(bbox_column_name)}}
 
     # Use the generic helper for all boilerplate
     add_computed_column(

@@ -50,7 +50,6 @@ from geoparquet_io.core.arrow_geo_metadata import (
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
     _wrap_query_with_crs,
-    apply_output_crs,
     extract_crs_from_parquet,
     get_crs_display_name,
     is_geographic_crs,
@@ -87,16 +86,18 @@ from geoparquet_io.core.edges import (
 from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
 from geoparquet_io.core.file_utils import get_all_parquet_files, is_partition_path
 from geoparquet_io.core.geo_metadata import (
+    DETECT_BBOX_COLUMN,
     GEOPARQUET_VERSIONS,
     SELF_EVIDENT_BBOX_COLUMN,
-    declare_carried_bbox_column,
-    gate_illegal_bbox_covering,
+    GeoBlockOptions,
+    QuerySource,
+    compose_geo_block,
     is_geoparquet_1x,
+    merge_secondary_geometry_metadata,
     prune_geo_metadata_to_columns,
     read_raw_geo,
     sanitized_carried_geo,
     sanitized_carried_geo_of_file,
-    strip_bboxless_covering,
     strip_derived_stats,
     strip_nonplanar_edges,
 )
@@ -155,7 +156,6 @@ from geoparquet_io.core.write_strategies import (
 from geoparquet_io.core.write_strategies.base import (
     atomic_write,
     has_unknown_secondary,
-    merge_secondary_geometry_metadata,
     wrap_query_with_secondary_crs,
 )
 
@@ -1115,8 +1115,8 @@ def _geo_block_to_carry_on_fast_path(
     original_metadata: dict | None,
     geometry_column: str | None,
     effective_version: str,
-    con=None,
-    query: str | None = None,
+    con,
+    query: str,
     verbose: bool = False,
     input_crs=None,
     input_file: str | None = None,
@@ -1145,8 +1145,8 @@ def _fast_path_geo_decision(
     original_metadata: dict | None,
     geometry_column: str | None,
     effective_version: str,
-    con=None,
-    query: str | None = None,
+    con,
+    query: str,
     verbose: bool = False,
     input_crs=None,
     input_file: str | None = None,
@@ -1165,16 +1165,18 @@ def _fast_path_geo_decision(
     `--compression-level` is *not* among the costs: duckdb-kv passes
     COMPRESSION_LEVEL through to its own COPY.
 
-    The carried block goes through `apply_output_crs`, the single source of truth
-    for the null-vs-default CRS rule, so the fast path cannot write a `crs: null`
+    The carried block is composed by `geo_metadata.compose_geo_block`, whose CRS
+    step is `apply_output_crs`, the single source of truth for the
+    null-vs-default CRS rule, so the fast path cannot write a `crs: null`
     or an explicit CRS84 that the rewrite path would have stripped.
 
-    With `con` and `query`, a conventional `bbox` column the output still carries
-    is also declared as a covering, exactly as the rewrite path does. That is the
+    A conventional `bbox` column the output still carries (``query``'s schema
+    on ``con``) is also declared as a covering, exactly as the rewrite path does. That is the
     only covering gpio invents: `covering` asserts a relationship between a bbox
     column and the geometry that cannot be verified from a column name, so
-    `declare_carried_bbox_column` recognises the single universal convention and
-    checks the struct's fields before declaring anything. It runs *before* the
+    the composer's bbox-covering step recognises the single universal convention and
+    checks the struct's fields before declaring anything (the composer's
+    bbox-covering step). It runs *before* the
     "says more than DuckDB would" gate below, because for a plain 2.0 input with
     an undeclared bbox column the derived covering is the whole difference
     between the two paths (`tests/test_covering_v2.py::
@@ -1232,33 +1234,26 @@ def _fast_path_geo_decision(
     geo_dict = sanitized_carried_geo(original_metadata)
     if not geo_dict:
         return no_block
-    col_meta = (geo_dict.get("columns") or {}).get(geometry_column)
-    if not isinstance(col_meta, dict):
+    if not isinstance((geo_dict.get("columns") or {}).get(geometry_column), dict):
         return no_block
-    carried = copy.deepcopy(geo_dict)
-    carried["version"] = "2.0.0"
-    # Before the gate: a block whose only extra key was a default or null
-    # `crs` says nothing DuckDB would not write once that key is stripped.
-    apply_output_crs(carried["columns"][geometry_column], input_crs)
-    if con is not None and query is not None:
-        declare_carried_bbox_column(
-            con,
-            query,
-            carried["columns"][geometry_column],
-            verbose,
-            effective_version,
-            output_columns=output_columns,
-            geo_meta=carried,
-        )
-        # The declare above is primary-scoped, so a SECONDARY column's covering
-        # over an illegal struct reached the output verbatim and `gpio check
-        # spec` failed the file gpio had just written (#1172/#1035). Same gate
-        # the Arrow builders run, over every column.
-        carried = gate_illegal_bbox_covering(carried, con, query)
-    # After the declare above: a carried covering still without a bbox member
-    # (e.g. only a spatial-index entry) is one geopandas cannot read (#954),
-    # so it is not carried onto the output either.
-    carried = strip_bboxless_covering(carried, verbose)
+    # The carried block composed for the output like every other write's: the
+    # CRS by the output rule (so a default or null `crs` is gone before the
+    # gate below asks what is left), a conventional `bbox` column the output
+    # carries declared -- before that gate, because for a plain 2.0 input the
+    # derived covering is the whole difference between the two paths -- and
+    # every covering gate over every column (#1035/#1172/#954). Output columns
+    # known to hold no `bbox` settle the declare without a schema probe.
+    detect = output_columns is None or SELF_EVIDENT_BBOX_COLUMN in output_columns
+    carried = compose_geo_block(
+        QuerySource(con, query, original_metadata),
+        GeoBlockOptions(
+            geometry_column=geometry_column,
+            version=effective_version,
+            covering=DETECT_BBOX_COLUMN if detect else None,
+            crs=input_crs,
+            verbose=verbose,
+        ),
+    )
     if not _carries_more_than_duckdb_generates(carried):
         return None, False
     if any(

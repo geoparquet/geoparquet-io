@@ -70,7 +70,12 @@ from geoparquet_io.core.exceptions import (
     is_auth_status,
 )
 from geoparquet_io.core.file_utils import handle_output_overwrite
-from geoparquet_io.core.geo_metadata import bounds_of
+from geoparquet_io.core.geo_metadata import (
+    GeoBlockOptions,
+    SchemaSource,
+    bounds_of,
+    compose_geo_block,
+)
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
     DEFAULT_MAX_RETRIES,
@@ -3544,16 +3549,15 @@ def wfs_to_table(
 
     # Add CRS metadata to schema. A CRS that does not resolve is refused, never
     # omitted: an absent crs key means OGC:CRS84 (#1046).
-    geo_meta = {
-        "version": "1.0.0",
-        "primary_column": BUILT_GEOMETRY_COLUMN,
-        "columns": {
-            BUILT_GEOMETRY_COLUMN: {
-                "encoding": "WKB",
-                "crs": _output_crs_projjson(crs),
-            }
-        },
-    }
+    geo_meta = compose_geo_block(
+        SchemaSource(table.schema),
+        GeoBlockOptions(
+            geometry_column=BUILT_GEOMETRY_COLUMN,
+            version="1.0",
+            covering=None,
+            crs=_output_crs_projjson(crs),
+        ),
+    )
     existing_meta[b"geo"] = json.dumps(geo_meta).encode("utf-8")
 
     table = table.replace_schema_metadata(existing_meta)

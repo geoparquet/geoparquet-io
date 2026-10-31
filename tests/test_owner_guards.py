@@ -86,6 +86,7 @@ EXPECTED_COUNTS = {
     "G1.edges": 0,
     "G1.footer_patch": 0,
     "G1.geometry_identity": 9,
+    "G1.geo_compose": 0,
     "G2.exemptions": 12,
     "G3.pairs": 0,
     "G3.baseline": 0,
@@ -1148,7 +1149,7 @@ def _find_output_version(m: _Module) -> Iterator[Hit]:
     Reporting the *input's* declared version is not a write decision: ``gpio
     check`` reads it through ``read_raw_geo``/``raw_geo_of_file``, and ``gpio
     inspect`` or a write command naming it in a refusal or advice asks the
-    owner's ``declared_geoparquet_version``. WFS and stac-geoparquet protocol versions
+    owner's ``declared_version``. WFS and stac-geoparquet protocol versions
     pass too.
     A ``version`` inside a ``geo`` block literal (one with ``primary_column`` or
     ``columns``) is block composition, which T3e's arm owns.
@@ -2246,6 +2247,34 @@ def _geometry_identity_nodes(m: _Module) -> Iterator[ast.AST]:
             yield node
 
 
+def _dict_str_keys(node: ast.Dict) -> set[str]:
+    return {k.value for k in node.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+
+
+def _find_geo_compose(m: _Module) -> Iterator[Hit]:
+    """A ``geo`` block composed outside ``geo_metadata.compose_geo_block`` (#1367
+    concept 4): a dict literal naming ``"version"`` beside ``"columns"``, or beside
+    ``"primary_column"`` with a ``**`` splat (a carried block re-stated), or a
+    ``dict(version=..., columns=...)`` call.
+
+    Would have caught the eleven hand-built blocks #1367 found -- the extractors'
+    (arcgis, carto, wfs), raster's, simplify's two, the stream's, the derived 2.0
+    block, the empty-table one -- each with its own version fallback
+    (``"1.0.0"``, ``"1.1.0"``, ``"2.0.0"``) and its own subset of the gates.
+    A report dict that only *mentions* a version and a primary column (``inspect``'s
+    summaries) has neither ``columns`` nor a splat, and is not a hit.
+    """
+    for node in ast.walk(m.tree):
+        if isinstance(node, ast.Dict):
+            keys = _dict_str_keys(node)
+            splat = any(k is None for k in node.keys)
+            if "version" in keys and ("columns" in keys or ("primary_column" in keys and splat)):
+                yield m.hit(node)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id == "dict" and {"version", "columns"} <= {k.arg for k in node.keywords}:
+                yield m.hit(node)
+
+
 @dataclass(frozen=True)
 class Arm:
     finder: Callable[..., Iterator[Hit]]
@@ -2293,6 +2322,7 @@ ARMS = {
     "geometry_identity": Arm(
         _find_geometry_identity, ("geoparquet_io/core/geometry_detection.py",)
     ),
+    "geo_compose": Arm(_find_geo_compose, ("geoparquet_io/core/geo_metadata.py",)),
 }
 
 
@@ -2806,6 +2836,9 @@ G1_PLANTS = {
         "def add(path, rewrite):\n    try:\n        rewrite(path)\n"
         "    except parquet_footer.FooterPatchUnsupported:\n        rewrite(path)\n"
     ),
+    "geo_compose": (
+        'def block(g):\n    return {"version": "1.1.0", "primary_column": g, "columns": {g: {}}}\n'
+    ),
     "overwrite_check": (
         "import os\n\ndef check(out, force):\n"
         "    if os.path.exists(out) and not force:\n        raise ValueError(out)\n"
@@ -2851,6 +2884,10 @@ G1_CLEAN = {
         '    return f"s3://{bucket}/{rest}"\n'
     ),
     "output_version": ('def version(path):\n    return read_raw_geo(path).value.get("version")\n'),
+    "geo_compose": (
+        "def report(geo):\n"
+        '    return {"version": geo.get("version"), "primary_column": geo.get("primary_column")}\n'
+    ),
     "edges": (
         "from geoparquet_io.core.edges import is_nonplanar, edges_of\n\n"
         'def spherical(col):\n    return is_nonplanar(edges_of(col))  # not "spherical"\n'
@@ -3773,6 +3810,16 @@ G1_AUDIT_SHAPES = [
         "an index into sql_literal through the module",
         "from geoparquet_io.core import duckdb_utils\n"
         'def q(v):\n    return "\'" + duckdb_utils.sql_literal(v)[1:-1] + "\'"\n',
+    ),
+    (
+        "geo_compose",
+        "a carried block re-stated with a splat",
+        'def block(geo, g):\n    return {**geo, "version": geo.get("version", "2.0.0"), "primary_column": g}\n',
+    ),
+    (
+        "geo_compose",
+        "dict(version=..., columns=...)",
+        "def block(g):\n    return dict(version='1.0.0', primary_column=g, columns={})\n",
     ),
 ]
 

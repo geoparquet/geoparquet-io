@@ -2642,6 +2642,20 @@ class RegisteredArrow:
         self.name = name
         self.fields = fields
 
+    def read_back(self, con, query: str, metadata: dict | None):
+        """``query``'s rows as an Arrow table that passes the input's rows through.
+
+        For a query that reorders or filters the registered rows and keeps their
+        geometry (a sort): the result gets the caller's input ``metadata`` --
+        its ``geo`` key is the write facade's witness for the table, which
+        decides the output's block when it is written -- and every pass-through
+        geometry column its registered field back (:meth:`restore_edges`).
+        """
+        result = con.sql(query).arrow().read_all()
+        if metadata:
+            result = result.replace_schema_metadata(metadata)
+        return self.restore_edges(result)
+
     @property
     def edges(self) -> dict[str, str]:
         """``{column: edges}`` for every column that was registered as planar."""

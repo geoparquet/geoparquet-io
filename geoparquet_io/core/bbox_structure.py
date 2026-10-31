@@ -28,6 +28,7 @@ from geoparquet_io.core.geo_metadata import (
     _bbox_claimed_by_another_column,
     _declared_bbox_column,
     bbox_covering_problem,
+    bbox_struct_child_names_match,
     bounds_of,
     covering_supported,
     is_covering_path,
@@ -35,9 +36,6 @@ from geoparquet_io.core.geo_metadata import (
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, error, info, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns, schema_direct_children
-
-#: Struct fields a bbox covering column must expose.
-_BBOX_REQUIRED_FIELDS = frozenset({"xmin", "ymin", "xmax", "ymax"})
 
 
 def _covering_bbox_refs(col_info) -> dict | None:
@@ -52,7 +50,7 @@ def _covering_bbox_refs(col_info) -> dict | None:
     bbox_refs = covering.get("bbox") if isinstance(covering, dict) else None
     if (
         isinstance(bbox_refs, dict)
-        and _BBOX_REQUIRED_FIELDS.issubset(bbox_refs)
+        and bbox_struct_child_names_match(bbox_refs)
         and all(is_covering_path(ref) for ref in bbox_refs.values())
     ):
         return bbox_refs
@@ -126,7 +124,7 @@ def bbox_shaped_struct_columns(schema_info: list[dict]) -> list[str]:
     """Every root-level struct column that *looks* like a bbox covering column.
 
     Shape alone: a root column whose direct children cover
-    :data:`_BBOX_REQUIRED_FIELDS`, whatever it is called and whatever the ``geo``
+    :func:`~geoparquet_io.core.geo_metadata.bbox_struct_child_names_match`, whatever it is called and whatever the ``geo``
     block says about it. It is deliberately NOT a detector -- answering "which
     column is the primary geometry's bbox" from shape would reopen #1171 the way
     name matching did. It exists so a command can *mention* a struct it is about
@@ -138,7 +136,7 @@ def bbox_shaped_struct_columns(schema_info: list[dict]) -> list[str]:
     for column in root_schema_columns(schema_info):
         name = column.get("name") or ""
         children = _schema_struct_child_field_names(schema_info, name)
-        if children and _BBOX_REQUIRED_FIELDS.issubset(children):
+        if children and bbox_struct_child_names_match(children):
             names.append(name)
     return names
 
@@ -170,7 +168,7 @@ def _find_bbox_column_in_schema(schema_info, verbose, geo_meta=None):
         - Child fields appear as 'xmin', 'ymin', 'xmax', 'ymax' (not 'bbox.xmin')
     """
     children = _schema_struct_child_field_names(schema_info, SELF_EVIDENT_BBOX_COLUMN)
-    if not children or not _BBOX_REQUIRED_FIELDS.issubset(children):
+    if not children or not bbox_struct_child_names_match(children):
         return None
     if _bbox_claimed_by_another_column(geo_meta, SELF_EVIDENT_BBOX_COLUMN):
         if verbose:
@@ -220,7 +218,7 @@ def _check_bbox_metadata_covering(geo_meta, has_bbox_column, verbose, bbox_colum
                 # Check if the bbox covering has the required structure
                 if (
                     isinstance(bbox_refs, dict)
-                    and _BBOX_REQUIRED_FIELDS.issubset(bbox_refs)
+                    and bbox_struct_child_names_match(bbox_refs)
                     and all(is_covering_path(ref) for ref in bbox_refs.values())
                 ):
                     referenced_bbox_column = bbox_refs["xmin"][0]
@@ -310,7 +308,7 @@ def check_bbox_structure(parquet_file, verbose=False) -> BboxInfo:
     covering_column = _bbox_column_from_covering(geo_meta)
     if covering_column:
         children = _schema_struct_child_field_names(schema_info, covering_column)
-        if children and _BBOX_REQUIRED_FIELDS.issubset(children):
+        if children and bbox_struct_child_names_match(children):
             bbox_column_name = covering_column
             if verbose:
                 debug(f"Found bbox column from covering metadata: {covering_column}")

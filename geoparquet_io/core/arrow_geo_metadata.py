@@ -21,7 +21,6 @@ from geoparquet_io.core.arrow_types import _rebuild_array_with_type
 from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
 from geoparquet_io.core.crs_utils import (
     _format_crs_display,
-    apply_output_crs,
     field_type_crs_is_unknown,
     is_default_crs,
     is_empty_crs_value,
@@ -35,18 +34,18 @@ from geoparquet_io.core.edges import (
     set_edges,
 )
 from geoparquet_io.core.geo_metadata import (
-    DEFAULT_GEOPARQUET_VERSION,
     GEOPARQUET_VERSIONS,
+    KEEP_CRS,
+    GeoBlockOptions,
+    SchemaSource,
     _bbox_claimed_by_another_column,
     _self_evident_bbox_column,
     bbox_column_to_declare,
-    create_geo_metadata,
+    compose_geo_block,
     geometry_stats_of,
     geometry_types_of,
+    is_bbox_struct_field,
     sanitized_carried_geo,
-    strip_absent_covering,
-    strip_bboxless_covering,
-    strip_illegal_bbox_covering,
 )
 from geoparquet_io.core.geoarrow_encoding import (
     is_geoarrow_extension_field,
@@ -59,7 +58,6 @@ from geoparquet_io.core.parquet_writer import (
     resolve_output_geoparquet_version,
 )
 from geoparquet_io.core.write_strategies.base import (
-    merge_secondary_geometry_metadata,
     native_geometry_crs,
     resolve_geometry_columns,
 )
@@ -67,15 +65,11 @@ from geoparquet_io.core.write_strategies.base import (
 
 def _table_bbox_struct_ok(table, column_name: str) -> bool:
     """True when ``column_name`` is a struct column with the bbox fields."""
-    import pyarrow as pa
-
     try:
         field = table.schema.field(column_name)
     except KeyError:
         return False
-    return pa.types.is_struct(field.type) and {"xmin", "ymin", "xmax", "ymax"}.issubset(
-        {f.name for f in field.type}
-    )
+    return is_bbox_struct_field(field)
 
 
 def _detect_bbox_column_from_table(table, verbose: bool = False) -> str | None:
@@ -692,17 +686,17 @@ def _apply_geoparquet_metadata(
     # Built for parquet-geo-only too, which drops it again below: there the
     # logical type is the column's only geometry identity, so losing the CRS is
     # not a disagreement but a silent relabelling of projected coordinates.
-    geo_meta = _build_geo_block(
-        table,
+    block_args = (
         geometry_column,
         original_metadata,
         input_crs,
         custom_metadata,
-        metadata_version,
+        effective_version,
         edges,
         geometry_info,
         verbose,
     )
+    geo_meta = _build_geo_block(table, *block_args)
 
     # A column the block does not name falls back to what the input declared for
     # it: on the table entry points the block is built from `original_metadata`,
@@ -765,20 +759,22 @@ def _apply_geoparquet_metadata(
         # metadata, to match the other write paths.
         return _strip_geo_metadata_key(table, verbose)
 
-    # Stats are read off the written data, so they are filled in after step 2.
-    # One owner call measures whatever is missing, in one pass when both are.
-    col_meta = geo_meta["columns"][geometry_column]
-    need_types = "geometry_types" not in col_meta
+    # Stats are read off the written data, so the block is composed again once
+    # step 2 has retyped it. One owner call measures whatever is missing, in one
+    # pass when both are.
+    need_types = "geometry_types" not in geo_meta["columns"][geometry_column]
+    measured: dict = {}
     if geo_bbox:
+        measured["bbox"] = geo_bbox
         if need_types:
-            col_meta["geometry_types"] = geometry_types_of(table, geometry_column, verbose=verbose)
-        col_meta["bbox"] = geo_bbox
+            measured["geometry_types"] = geometry_types_of(table, geometry_column, verbose=verbose)
     else:
         stats = geometry_stats_of(table, geometry_column, verbose=verbose)
-        if need_types:
-            col_meta["geometry_types"] = stats.geometry_types
         if stats.bbox:
-            col_meta["bbox"] = stats.bbox
+            measured["bbox"] = stats.bbox
+        if need_types:
+            measured["geometry_types"] = stats.geometry_types
+    geo_meta = _build_geo_block(table, *block_args, stats={geometry_column: measured})
 
     return _assemble_and_apply_geo_metadata(table, geo_meta, metadata_version, verbose)
 
@@ -789,54 +785,40 @@ def _build_geo_block(
     original_metadata: dict | None,
     input_crs: dict | None,
     custom_metadata: dict | None,
-    metadata_version: str,
+    effective_version: str,
     edges: str | None,
     geometry_info: dict | None,
     verbose: bool,
+    stats: dict | None = None,
 ) -> dict:
-    """Build the output's ``geo`` block, with the primary column's CRS resolved.
+    """The output's ``geo`` block, composed over the table's schema.
 
-    Everything here reads the table's *schema* only -- the bbox-covering probe --
-    so it can run before the geometry columns are retyped, which is what lets the
-    native Parquet GEOMETRY types be built from the CRS this declares (#848).
-    The per-column stats that need the data (``geometry_types``, ``bbox``) are
-    filled in by the caller afterwards.
+    Composed before the geometry columns are retyped, which is what lets the
+    native Parquet GEOMETRY types be built from the CRS it declares (#848), and
+    again with the ``stats`` measured off the retyped data.
+
+    Covering provenance is the input's own block when the caller has one, the
+    table's otherwise: a table DuckDB built from a query carries no schema
+    metadata at all, so reading only that would forget which column the
+    primary declared (#953); a table entry point passes no
+    ``original_metadata``, so its own block is the provenance.
     """
-    bbox_column = _bbox_column_to_declare(table, verbose, original_metadata)
-    geo_meta = create_geo_metadata(
-        original_metadata,
-        geometry_column,
-        {"has_bbox_column": bbox_column is not None, "bbox_column_name": bbox_column},
-        custom_metadata,
-        verbose,
-        version=metadata_version,
-        edges=edges,
-    )
-
-    # Set/clear the geometry column's crs per the GeoParquet null-vs-default rule
-    # (shared helper is the single source of truth across all write paths).
-    columns = geo_meta.setdefault("columns", {})
-    apply_output_crs(columns.setdefault(geometry_column, {}), input_crs)
     if verbose and input_crs and not is_default_crs(input_crs):
         debug(f"Added CRS to geo metadata: {_format_crs_display(input_crs)}")
-
-    # Secondary entries are merged in here rather than after the stats pass, so
-    # each one's own `crs` is available to the native-type decision.
-
-    merge_secondary_geometry_metadata(geo_meta, geometry_info)
-    # Secondary entries arrive after create_geo_metadata's gate (#954).
-    #
-    # Before the shape gate, which judges the struct a covering names and so has
-    # nothing to say about one naming no column at all. The DuckDB funnel prunes
-    # the carried block against the output's columns before any strategy sees it;
-    # this funnel had no equivalent, so a table whose own block declared a
-    # covering over a column it does not carry wrote the entry verbatim.
-    geo_meta = strip_absent_covering(geo_meta, table.column_names)
-    # `bbox_column` above answers "may this write declare that column?"; a `no`
-    # over a struct the INPUT already declared also has to drop the entry it
-    # declared, or the warning the gate just printed is a lie (#1172).
-    geo_meta = strip_illegal_bbox_covering(geo_meta, table.schema)
-    return strip_bboxless_covering(geo_meta, verbose)
+    return compose_geo_block(
+        SchemaSource(table.schema, original_metadata),
+        GeoBlockOptions(
+            geometry_column=geometry_column,
+            version=effective_version,
+            covering=_bbox_column_to_declare(table, verbose, original_metadata),
+            custom_metadata=custom_metadata,
+            edges=edges,
+            crs=input_crs,
+            stats=stats,
+            geometry_info=geometry_info,
+            verbose=verbose,
+        ),
+    )
 
 
 def _normalize_arrow_large_types(table):
@@ -908,14 +890,15 @@ def describe_wkb_geometry(
     if b"geo" in metadata or geometry_column not in table.column_names:
         return table
 
-    column: dict = {"encoding": "WKB", "geometry_types": []}
-    if crs is not None:
-        column["crs"] = crs
-    set_edges(column, edges)
-    geo = {
-        "version": GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]["metadata_version"],
-        "primary_column": geometry_column,
-        "columns": {geometry_column: column},
-    }
+    geo = compose_geo_block(
+        SchemaSource(table.schema),
+        GeoBlockOptions(
+            geometry_column=geometry_column,
+            covering=None,
+            edges=edges,
+            crs=KEEP_CRS if crs is None else crs,
+            stats={geometry_column: {"geometry_types": []}},
+        ),
+    )
     metadata[b"geo"] = json.dumps(geo).encode("utf-8")
     return table.replace_schema_metadata(metadata)

@@ -21,6 +21,7 @@ from geoparquet_io.core.geo_metadata import (
     strip_illegal_bbox_covering,
 )
 from geoparquet_io.core.write_funnels import _fast_path_geo_decision
+from tests.conftest import fast_path_query
 
 BBOX_STRUCT = pa.struct(
     [("xmin", pa.float64()), ("ymin", pa.float64()), ("xmax", pa.float64()), ("ymax", pa.float64())]
@@ -130,7 +131,7 @@ class TestTheForcedRewriteSaysWhy:
 
         with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
             carried, needs_rewrite = _fast_path_geo_decision(
-                original, "geometry", "2.0", verbose=True
+                original, "geometry", "2.0", verbose=True, **fast_path_query("bbox")
             )
 
         assert carried is None

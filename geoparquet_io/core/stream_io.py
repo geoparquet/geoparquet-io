@@ -40,7 +40,10 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.edges import declared_edges, set_edges
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
+    ArrowTableSource,
+    GeoBlockOptions,
     backfill_derived_stats,
+    compose_geo_block,
     gate_carried_covering,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
@@ -214,14 +217,16 @@ def _stream_input_metadata(table: pa.Table) -> dict:
         # maps to the output's, so a 2.0 output keeps an ellipsoidal algorithm.
         set_edges(column, edges_by_col.get(name))
         columns[name] = column
-    metadata[b"geo"] = json.dumps(
-        {
-            **geo,
-            "version": geo.get("version", "2.0.0"),
-            "primary_column": primary,
-            "columns": columns,
-        }
-    ).encode("utf-8")
+    # The described columns, composed into the block as a description (the
+    # input's version, or 2.0 for native columns with no block): the composer
+    # owns the version and the covering gates, the stream only what each
+    # column's field and declaration say.
+    described = {**geo, "primary_column": primary, "columns": columns}
+    block = compose_geo_block(
+        ArrowTableSource(table.replace_schema_metadata({b"geo": json.dumps(described)})),
+        GeoBlockOptions(geometry_column=primary, covering=None),
+    )
+    metadata[b"geo"] = json.dumps(block).encode("utf-8")
     return metadata
 
 

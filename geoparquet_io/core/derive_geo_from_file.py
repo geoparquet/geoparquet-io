@@ -32,6 +32,9 @@ from geoparquet_io.core.duckdb_metadata import (
 )
 from geoparquet_io.core.edges import declares_edges, logical_type_edges, set_edges
 from geoparquet_io.core.geo_metadata import (
+    GeoBlockOptions,
+    SchemaSource,
+    compose_geo_block,
     read_raw_geo,
     row_group_geometry_stats,
     sanitized_carried_geo_of_file,
@@ -326,7 +329,19 @@ def derive_v2_geo_metadata(
             [(name, geo_cols_logical[name]) for name in sorted(columns)],
             geo={"primary_column": primary_column} if primary_column else None,
         )
-        return {"version": "2.0.0", "primary_column": primary, "columns": columns}
+        # Each column's entry -- the primary's included -- is what its logical
+        # type and statistics say, handed to the composer as the columns'
+        # declared metadata; the block names the primary first, and declares
+        # no covering: none is derivable from a logical type.
+        return compose_geo_block(
+            SchemaSource(pf.schema_arrow),
+            GeoBlockOptions(
+                geometry_column=primary,
+                version="2.0",
+                covering=None,
+                geometry_info={"secondary": list(columns), "metadata": columns},
+            ),
+        )
     finally:
         # Release the read handle before the caller writes to the file (Windows
         # refuses to replace a file that is still open).

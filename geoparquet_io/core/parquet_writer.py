@@ -37,7 +37,7 @@ two owners is what made that possible, so they are answered together.
 
 It deliberately does **not** own the rest of the write. The codec and level
 (``compression.resolve_codec``), the contents of the ``geo`` block
-(``write_strategies.base.build_geo_metadata``), the null-vs-default CRS rule
+(``geo_metadata.compose_geo_block``), the null-vs-default CRS rule
 (``crs_utils.apply_output_crs``), bbox coverings and geometry-type computation
 all already have a single owner each, and pulling them in here would turn a
 facade into a rewrite. The line is: this module decides what the paths were
@@ -737,19 +737,6 @@ def writable_geoparquet_version(
         return _declared_1x(declared) if preserve_input else "1.1"
     parts = declared.split(".") if declared else []
     return "2.0" if len(parts) >= 2 and parts[0] == "2" else None
-
-
-def declared_geoparquet_version(geo_meta: Mapping, default: str | None = "") -> str | None:
-    """The ``version`` string a decoded ``geo`` block declares (*default* when it gives none).
-
-    For reporting the *input's* version -- ``gpio inspect`` printing it,
-    ``Table.geoparquet_version``, ``add bbox-metadata`` refusing a 1.0 file,
-    ``add bbox``'s advice and its copy test; never for choosing the output's,
-    which is :func:`resolve_output_geoparquet_version`. A version that is not a
-    string is no version (``carried_version`` names it once, #979), so every
-    reader of a declared version gets the same answer for the same block.
-    """
-    return carried_version(geo_meta.get("version")) or default
 
 
 def _version_of_file_type(info: Mapping, preserve_input: bool = False) -> str | None:

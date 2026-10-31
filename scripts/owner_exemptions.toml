@@ -402,14 +402,6 @@ reason = "the GeoJSON properties column's type (unnest a STRUCT), not a geometry
 # it. count = how many defs of that name the file holds (default 1); the check
 # fails when the tree differs.
 [[G2.exemptions]]
-path = "geoparquet_io/core/add/bbox.py"
-name = "_bbox_covering_metadata"
-reason = "covering builder copy of build_bbox_covering; T3e"
-[[G2.exemptions]]
-path = "geoparquet_io/core/add/bbox_metadata.py"
-name = "_covering_for"
-reason = "covering builder copy of build_bbox_covering; T3e"
-[[G2.exemptions]]
 path = "geoparquet_io/core/add/quadkey.py"
 name = "_is_geographic_crs"
 reason = "is-geographic copy (approved change 8); T4c"
@@ -529,9 +521,6 @@ reason = "aggregation options (metric, breakdown, bucket-point, ...) forwarded t
 [[G3.pylint]]
 block = "core.process.raster.contour:contour_file|core.process.raster.polygonize:polygonize_file"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.sort_quadkey:sort_by_quadkey_table|core.str_order:str_order_table"
-reason = "sort result read back with the input's schema metadata carried verbatim (replace_schema_metadata), copied per sort; the version and geo handling of a sorted table is T2b/T3e's, not a row-group or raw-write question"
 
 # ---------------------------------------------------------------------------
 # G13: shared-option consistency (tests/test_cli_shared_options.py)

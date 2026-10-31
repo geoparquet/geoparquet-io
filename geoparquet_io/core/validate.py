@@ -54,6 +54,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.edges import (
+    COUNTERCLOCKWISE,
     GEOGRAPHY_EDGE_ALGORITHMS,
     PLANAR,
     SPHERICAL,
@@ -166,8 +167,7 @@ _GEOARROW_ENCODING_TYPE = {
     "multilinestring": "MultiLineString",
     "multipolygon": "MultiPolygon",
 }
-ORIENTATION_COUNTERCLOCKWISE = "counterclockwise"
-VALID_ORIENTATIONS = [ORIENTATION_COUNTERCLOCKWISE]
+VALID_ORIENTATIONS = [COUNTERCLOCKWISE]
 VALID_GEOMETRY_TYPES = [
     "Point",
     "LineString",
@@ -1490,7 +1490,7 @@ def _check_orientation_matches_data(
 
     if orientation is None:
         return _result(CheckStatus.SKIPPED, "no orientation specified, skipping check")
-    if orientation != ORIENTATION_COUNTERCLOCKWISE:
+    if orientation != COUNTERCLOCKWISE:
         return _result(CheckStatus.SKIPPED, f'unknown orientation "{orientation}", skipping check')
     if _is_geoarrow_encoding(encoding):
         return _result(

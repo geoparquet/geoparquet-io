@@ -16,6 +16,12 @@ import json
 
 import pyarrow as pa
 
+from geoparquet_io.core.geo_metadata import (
+    KEEP_CRS,
+    GeoBlockOptions,
+    SchemaSource,
+    compose_geo_block,
+)
 from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 
 
@@ -32,14 +38,14 @@ def finalize_raster_table(
     """
     rename = rename or {}
     table = table.rename_columns([rename.get(name, name) for name in table.column_names])
-    geo_column: dict = {"encoding": "WKB"}
-    if crs is not None:
-        geo_column["crs"] = crs
-    geo = {
-        "version": "1.1.0",
-        "primary_column": BUILT_GEOMETRY_COLUMN,
-        "columns": {BUILT_GEOMETRY_COLUMN: geo_column},
-    }
+    geo = compose_geo_block(
+        SchemaSource(table.schema),
+        GeoBlockOptions(
+            geometry_column=BUILT_GEOMETRY_COLUMN,
+            covering=None,
+            crs=KEEP_CRS if crs is None else crs,
+        ),
+    )
     target = pa.schema(
         [pa.field(f.name, f.type, nullable=f.nullable) for f in table.schema],
         metadata={b"geo": json.dumps(geo).encode("utf-8")},

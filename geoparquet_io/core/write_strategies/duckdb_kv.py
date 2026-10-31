@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 import duckdb
@@ -41,13 +42,12 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.geo_metadata import (
     NATIVE_GEOMETRY_VERSIONS,
+    GeoBlockOptions,
     QuerySource,
-    declare_carried_bbox_column,
-    gate_illegal_bbox_covering,
+    compose_geo_block,
     geometry_stats_of,
     geometry_types_of,
     sanitized_carried_geo,
-    strip_bboxless_covering,
 )
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
 from geoparquet_io.core.geometry_detection import GeometryRead
@@ -60,7 +60,7 @@ from geoparquet_io.core.parquet_writer import (
 from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
-    build_geo_metadata,
+    geoarrow_input_encoding,
     resolve_geometry_columns,
     type_crs_for,
     wrap_query_with_secondary_crs,
@@ -368,12 +368,15 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         # the block is still built, never written, to type every geometry column
         # the way a 2.0 write does. Typing the primary alone left an unknown
         # secondary unset, which reads as OGC:CRS84 (#1277 review).
-        geo_meta = build_geo_metadata(
-            geometry_column=geometry_column,
-            geoparquet_version="parquet-geo-only",
-            original_metadata=original_metadata,
-            input_crs=input_crs,
-            geometry_info=geometry_info,
+        geo_meta = compose_geo_block(
+            QuerySource(con, query, original_metadata),
+            GeoBlockOptions(
+                geometry_column=geometry_column,
+                version="parquet-geo-only",
+                covering=None,
+                crs=input_crs,
+                geometry_info=geometry_info,
+            ),
         )
         final_query = _native_typed_query(
             con, query, geometry_column, geo_meta, input_crs, "parquet-geo-only"
@@ -408,30 +411,22 @@ class DuckDBKVStrategy(BaseWriteStrategy):
     ) -> None:
         """Write with geo metadata (v1.0, v1.1, v2.0)."""
 
-        geo_meta = build_geo_metadata(
+        source = QuerySource(con, query, original_metadata)
+        options = GeoBlockOptions(
             geometry_column=geometry_column,
-            geoparquet_version=geoparquet_version,
-            original_metadata=original_metadata,
-            input_crs=input_crs,
+            version=geoparquet_version,
             custom_metadata=custom_metadata,
+            encoding=geoarrow_input_encoding(geometry_info, geometry_column, geoparquet_version),
+            crs=input_crs,
             geometry_info=geometry_info,
+            verbose=verbose,
         )
-
-        col_meta = geo_meta["columns"][geometry_column]
-        self._compute_missing_metadata(con, query, geometry_column, col_meta, verbose)
-        declare_carried_bbox_column(
-            con, query, col_meta, verbose, geoparquet_version, geo_meta=geo_meta
-        )
-        self._compute_missing_secondary_metadata(con, query, geometry_column, geo_meta, verbose)
-        # The declare above is primary-scoped, so a SECONDARY column's covering
-        # over an illegal struct reached the output verbatim and `gpio check
-        # spec` failed the file gpio had just written (#1172/#1035). Same gate
-        # the Arrow builders run, over every column.
-        geo_meta = gate_illegal_bbox_covering(geo_meta, con, query)
-        # After the declare above, so an undeclared conventional bbox column
-        # gets its chance to supply the one member the spec defines; a covering
-        # still without a bbox member is one geopandas cannot read (#954).
-        geo_meta = strip_bboxless_covering(geo_meta, verbose)
+        # The carried stats stand; the ones the block lacks are measured from
+        # the query (one scan per column) and composed in.
+        geo_meta = compose_geo_block(source, options)
+        stats = self._missing_stats(con, query, geometry_column, geo_meta, verbose)
+        if stats:
+            geo_meta = compose_geo_block(source, replace(options, stats=stats))
 
         # For v1.x: Cast to BLOB so DuckDB writes plain binary WKB. EVERY geometry
         # column, not just the primary: validation applies the same per-version
@@ -465,15 +460,15 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             pf = pq.ParquetFile(local_path)
             success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
 
-    def _compute_missing_metadata(
+    def _missing_stats(
         self,
         con: duckdb.DuckDBPyConnection,
         query: str,
         geometry_column: str,
-        col_meta: dict,
+        geo_meta: dict,
         verbose: bool,
-    ) -> None:
-        """Compute whichever of bbox/geometry_types the carried metadata lacks.
+    ) -> dict[str, dict]:
+        """The bbox/geometry_types each geometry column's block entry lacks, measured.
 
         Both come out of one scan, so a caller that invalidated both (a row
         filter, a reprojection, a multi-file merge) pays for a single pass.
@@ -485,60 +480,55 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         command ever recomputed it (#952). This path holds the rows, so it
         answers the question once; a genuinely empty result writes ``[]`` back
         and that is the end of it, with no warning and no second pass.
-        """
 
+        A SECONDARY column gets the same gap-fill (#952/#1000), keyed on the
+        spec-required ``geometry_types`` alone: a secondary whose types are known
+        is not rescanned for the optional ``bbox``. Only columns the query emits
+        as GEOMETRY (or a GeoArrow struct) can be measured; a secondary that
+        reaches the query as a plain BLOB -- an Arrow stream from a non-gpio
+        producer -- keeps its carried metadata, the same way the 1.x WKB wrap
+        leaves it alone; binding ST_* to it would abort the whole write.
+        """
+        columns = geo_meta["columns"]
+        stats = {}
+        primary = self._measure_gaps(con, query, geometry_column, columns[geometry_column], verbose)
+        if primary:
+            stats[geometry_column] = primary
+        gaps = sorted(
+            name
+            for name, meta in columns.items()
+            if name != geometry_column and isinstance(meta, dict)
+            if not meta.get("geometry_types")
+        )
+        if not gaps:
+            return stats
+        column_types = dict(describe_query(con, query))
+        for name in gaps:
+            type_ = column_types.get(name, "")
+            if GeometryRead.for_type(name, type_ or None).kind in ("native", "geoarrow"):
+                measured = self._measure_gaps(con, query, name, columns[name], verbose)
+                if measured:
+                    stats[name] = measured
+        return stats
+
+    @staticmethod
+    def _measure_gaps(con, query: str, column: str, col_meta: dict, verbose: bool) -> dict:
+        """``column``'s missing bbox and/or geometry_types, from one scan."""
         need_bbox = "bbox" not in col_meta
         need_types = not col_meta.get("geometry_types")
         if not (need_bbox or need_types):
-            return
+            return {}
 
         if verbose:
             debug("Computing bbox/geometry types via SQL...")
         source = QuerySource(con, query)
-        if need_bbox:
-            stats = geometry_stats_of(source, geometry_column)
-            if stats.bbox:
-                col_meta["bbox"] = stats.bbox
-            if need_types:
-                col_meta["geometry_types"] = stats.geometry_types
-        else:
-            col_meta["geometry_types"] = geometry_types_of(source, geometry_column)
-
-    def _compute_missing_secondary_metadata(
-        self,
-        con: duckdb.DuckDBPyConnection,
-        query: str,
-        geometry_column: str,
-        geo_meta: dict,
-        verbose: bool,
-    ) -> None:
-        """The same gap-fill for every SECONDARY geometry column (#952/#1000).
-
-        The primary's pass above ran for it alone, so a secondary carried with
-        the ``[]`` sentinel -- or freshly derived from the input's logical types
-        -- kept its gap forever. Only the spec-required ``geometry_types`` makes
-        a gap here: a secondary whose types are known is not rescanned for the
-        optional ``bbox`` (the scan that fills a gap fills the bbox too).
-
-        Only columns the query emits as GEOMETRY (or a GeoArrow struct) can be
-        measured. A secondary that reaches the query as a plain BLOB -- an Arrow
-        stream from a non-gpio producer -- keeps its carried metadata, the same
-        way the 1.x WKB wrap leaves it alone; binding ST_* to it would abort the
-        whole write.
-        """
-        gaps = {
-            name: meta
-            for name, meta in geo_meta["columns"].items()
-            if name != geometry_column and isinstance(meta, dict)
-            if not meta.get("geometry_types")
-        }
-        if not gaps:
-            return
-        column_types = dict(describe_query(con, query))
-        for name in sorted(gaps):
-            type_ = column_types.get(name, "")
-            if GeometryRead.for_type(name, type_ or None).kind in ("native", "geoarrow"):
-                self._compute_missing_metadata(con, query, name, gaps[name], verbose)
+        if not need_bbox:
+            return {"geometry_types": geometry_types_of(source, column)}
+        stats = geometry_stats_of(source, column)
+        measured = {"bbox": stats.bbox} if stats.bbox else {}
+        if need_types:
+            measured["geometry_types"] = stats.geometry_types
+        return measured
 
     def write_from_table(
         self,

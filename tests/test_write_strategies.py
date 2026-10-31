@@ -1919,7 +1919,7 @@ class TestMergeSecondaryGeometryMetadata:
 
     def test_an_undeclared_secondary_still_gets_the_required_encoding(self):
         """``encoding`` is required by the spec, so a column the input left bare gets WKB."""
-        from geoparquet_io.core.write_strategies.base import merge_secondary_geometry_metadata
+        from geoparquet_io.core.geo_metadata import merge_secondary_geometry_metadata
 
         geo_meta = {"columns": {"geometry": {"encoding": "WKB"}}}
 
@@ -1929,7 +1929,7 @@ class TestMergeSecondaryGeometryMetadata:
 
     def test_the_input_metadata_wins_over_the_default(self):
         """A declared secondary keeps its own crs and encoding -- what the native type reads."""
-        from geoparquet_io.core.write_strategies.base import merge_secondary_geometry_metadata
+        from geoparquet_io.core.geo_metadata import merge_secondary_geometry_metadata
 
         crs = {"id": {"authority": "EPSG", "code": 27700}}
         geo_meta = {"columns": {"geometry": {"encoding": "WKB"}}}

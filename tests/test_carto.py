@@ -380,7 +380,7 @@ class TestEmptyGeoparquetTable:
 
     def test_empty_table_respects_version(self):
         """Empty table uses specified GeoParquet version."""
-        table = _create_empty_geoparquet_table(geoparquet_version="1.0.0")
+        table = _create_empty_geoparquet_table(geoparquet_version="1.0")
         geo_meta = json.loads(table.schema.metadata[b"geo"])
         assert geo_meta["version"] == "1.0.0"
 

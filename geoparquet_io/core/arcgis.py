@@ -46,6 +46,9 @@ from geoparquet_io.core.exceptions import (
 )
 from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geo_metadata import (
+    GeoBlockOptions,
+    SchemaSource,
+    compose_geo_block,
     geometry_types_of,
     prune_geo_metadata_to_columns,
 )
@@ -1130,17 +1133,19 @@ def _tag_output_crs(
                 + _unresolvable_crs_message(returned_sr)
             )
 
-    geo_metadata = {
-        "version": "1.1.0",
-        "primary_column": BUILT_GEOMETRY_COLUMN,
-        "columns": {
-            BUILT_GEOMETRY_COLUMN: {
-                "encoding": "WKB",
-                "crs": crs,
-                "geometry_types": _resolve_geometry_types(table, geometry_type, verbose),
-            }
-        },
-    }
+    geo_metadata = compose_geo_block(
+        SchemaSource(table.schema),
+        GeoBlockOptions(
+            geometry_column=BUILT_GEOMETRY_COLUMN,
+            covering=None,
+            crs=crs,
+            stats={
+                BUILT_GEOMETRY_COLUMN: {
+                    "geometry_types": _resolve_geometry_types(table, geometry_type, verbose)
+                }
+            },
+        ),
+    )
     existing_metadata = table.schema.metadata or {}
     return table.replace_schema_metadata(
         {**existing_metadata, b"geo": json.dumps(geo_metadata).encode("utf-8")}

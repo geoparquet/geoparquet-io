@@ -46,6 +46,9 @@ from geoparquet_io.core.logging_config import warn
 
 PLANAR = "planar"
 SPHERICAL = "spherical"
+#: The one ``orientation`` value the spec defines (the winding a spherical
+#: edges declaration implies). Its owner, so no module spells it again.
+COUNTERCLOCKWISE = "counterclockwise"
 VINCENTY = "vincenty"
 THOMAS = "thomas"
 ANDOYER = "andoyer"
@@ -102,7 +105,7 @@ def implied_orientation(edges: object) -> str | None:
     for spherical, per the GeoParquet spec; nothing for any other value. Keyed
     off the request, so an ellipsoidal algorithm a 1.x block degrades to
     spherical does not gain an orientation it never stated."""
-    return "counterclockwise" if edges == SPHERICAL else None
+    return COUNTERCLOCKWISE if edges == SPHERICAL else None
 
 
 def normalized_edges(edges: object) -> object:

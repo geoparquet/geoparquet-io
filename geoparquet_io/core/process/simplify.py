@@ -23,14 +23,17 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.bbox_structure import bbox_covering_column_for
 from geoparquet_io.core.compression import resolve_codec, resolve_process_compression_level
 from geoparquet_io.core.crs_utils import is_geographic_crs
-from geoparquet_io.core.edges import set_edges
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
     InvalidParameterError,
 )
 from geoparquet_io.core.geo_metadata import (
+    ArrowTableSource,
+    GeoBlockOptions,
     GeometryStats,
+    SchemaSource,
+    compose_geo_block,
     geometry_stats_of,
     merged_geometry_stats,
     sanitized_carried_geo,
@@ -414,13 +417,10 @@ def _with_carried_edges(table: pa.Table, geometry_column: str, edges: str | None
     if not edges:
         return table
     metadata = dict(table.schema.metadata or {})
-    geo = sanitized_carried_geo(metadata) or {
-        "version": "1.1.0",
-        "primary_column": geometry_column,
-        "columns": {},
-    }
-    columns = geo.setdefault("columns", {})
-    set_edges(columns.setdefault(geometry_column, {"encoding": "WKB"}), edges)
+    geo = compose_geo_block(
+        ArrowTableSource(table),
+        GeoBlockOptions(geometry_column=geometry_column, covering=None, edges=edges),
+    )
     metadata[b"geo"] = json.dumps(geo).encode("utf-8")
     return table.replace_schema_metadata(metadata)
 
@@ -561,23 +561,19 @@ def _footer_kv_via_funnel(
     import tempfile
 
     metadata = dict(schema.metadata or {})
-    geo = sanitized_carried_geo(metadata)
-    if not geo:
-        geo = {"version": "1.1.0", "primary_column": geom_col, "columns": {}}
-    columns = geo.setdefault("columns", {})
-    col_meta = columns.setdefault(geom_col, {"encoding": "WKB"})
-    if stats.geometry_types:
-        col_meta["geometry_types"] = stats.geometry_types
-    else:
-        # Zero valid geometries: leave stats to the funnel's own empty-table
-        # behavior, same as the in-memory path.
-        col_meta.pop("geometry_types", None)
-    if stats.bbox is not None:
-        col_meta["bbox"] = stats.bbox
-    else:
-        # Nothing measurable (every geometry NULL or EMPTY): omit the key, as
-        # the bounds owner does for the in-memory path.
-        col_meta.pop("bbox", None)
+    # A description of the merged stats (``version=None`` keeps the input's
+    # version); the funnel composes the output's block from it. Zero valid
+    # geometries leave ``geometry_types`` to the funnel's own empty-table
+    # behavior, and nothing measurable (every geometry NULL or EMPTY) omits
+    # ``bbox``, as the bounds owner does for the in-memory path.
+    geo = compose_geo_block(
+        SchemaSource(schema, metadata),
+        GeoBlockOptions(
+            geometry_column=geom_col,
+            covering=None,
+            stats={geom_col: {"bbox": stats.bbox, "geometry_types": stats.geometry_types or None}},
+        ),
+    )
     metadata[b"geo"] = json.dumps(geo).encode("utf-8")
     empty = schema.with_metadata(metadata).empty_table()
     fd, tmp_path = tempfile.mkstemp(suffix=".parquet", prefix="gpio_simplify_footer_")
