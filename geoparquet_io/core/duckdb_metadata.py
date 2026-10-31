@@ -21,6 +21,7 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.crs_utils import (
     _projjson_from_authority,
+    column_is_geographic,
     geoarrow_crs_to_projjson,
 )
 from geoparquet_io.core.duckdb_utils import (
@@ -1334,10 +1335,13 @@ def get_native_geo_statistics(parquet_file: str, geometry_column: str, con=None)
     # bbox beside another's geometry types would be a dict that matches no row
     # group in the file.
     first = next((c for c in chunks if c["xmin"] is not None), chunks[0])
-    return aggregate_native_geo_stats([first]) or None
+    # One chunk folds to itself on either reading of the CRS.
+    return aggregate_native_geo_stats([first], geographic=True) or None
 
 
-def get_aggregated_native_geo_stats(parquet_file: str, geometry_column: str, con=None) -> dict:
+def get_aggregated_native_geo_stats(
+    parquet_file: str, geometry_column: str, con=None, *, geographic: bool | None = None
+) -> dict:
     """
     Get aggregated native Parquet GeospatialStatistics across all row groups.
 
@@ -1347,6 +1351,8 @@ def get_aggregated_native_geo_stats(parquet_file: str, geometry_column: str, con
         parquet_file: Path to the parquet file
         geometry_column: Name of the geometry column
         con: Optional existing DuckDB connection
+        geographic: Whether the column's CRS is geographic, when the caller has
+            already read it; None reads it (``crs_utils.column_is_geographic``)
 
     Returns:
         dict with 'bbox' (list of 4+ floats) and 'geometry_types' (list of strings)
@@ -1355,14 +1361,19 @@ def get_aggregated_native_geo_stats(parquet_file: str, geometry_column: str, con
         chunks = get_native_geo_stats_by_row_group(parquet_file, geometry_column, con)
     except Exception:
         return {}
-    return aggregate_native_geo_stats(chunks) if chunks else {}
+    if not chunks:
+        return {}
+    if geographic is None:
+        geographic = column_is_geographic(parquet_file, geometry_column)
+    return aggregate_native_geo_stats(chunks, geographic=geographic)
 
 
-def aggregate_native_geo_stats(chunks: list[dict]) -> dict:
+def aggregate_native_geo_stats(chunks: list[dict], *, geographic: bool) -> dict:
     """Per-column-chunk statistics as one ``{'bbox', 'geometry_types'}`` dict.
 
     A reader over ``geo_metadata.row_group_geometry_stats``, the one fold: X
-    merged on the circle (a chunk may wrap the antimeridian), Z over the chunks
+    merged on the circle when ``geographic`` (a chunk may wrap the
+    antimeridian), plainly for a projected CRS, Z over the chunks
     that carry it, the bbox in the spec's interleaved layout, and spec type
     names only (code 0 and unknown values dropped). A key is absent when
     nothing supplies it.
@@ -1370,7 +1381,7 @@ def aggregate_native_geo_stats(chunks: list[dict]) -> dict:
     Args:
         chunks: Output of :func:`get_native_geo_stats_by_row_group`
     """
-    folded = row_group_geometry_stats(chunks)
+    folded = row_group_geometry_stats(chunks, geographic=geographic)
     stats: dict = {}
     if folded.bbox is not None:
         stats["bbox"] = folded.bbox

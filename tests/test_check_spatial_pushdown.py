@@ -16,7 +16,7 @@ class TestComputeDataExtent:
     def test_single_row_group(self):
         """Extent of a single RG is just its bbox."""
         bboxes = [{"row_group_id": 0, "xmin": 1.0, "ymin": 2.0, "xmax": 3.0, "ymax": 4.0}]
-        extent = _compute_data_extent(bboxes)
+        extent = _compute_data_extent(bboxes, geographic=True)
         assert extent == {"xmin": 1.0, "ymin": 2.0, "xmax": 3.0, "ymax": 4.0}
 
     def test_multiple_row_groups(self):
@@ -26,13 +26,13 @@ class TestComputeDataExtent:
             {"row_group_id": 1, "xmin": 5.0, "ymin": 5.0, "xmax": 20.0, "ymax": 20.0},
             {"row_group_id": 2, "xmin": -5.0, "ymin": -5.0, "xmax": 3.0, "ymax": 3.0},
         ]
-        extent = _compute_data_extent(bboxes)
+        extent = _compute_data_extent(bboxes, geographic=True)
         assert extent == {"xmin": -5.0, "ymin": -5.0, "xmax": 20.0, "ymax": 20.0}
 
     def test_empty_list_raises(self):
         """Empty bbox list should raise ValueError."""
         with pytest.raises(ValueError, match="No row group bboxes"):
-            _compute_data_extent([])
+            _compute_data_extent([], geographic=True)
 
 
 class TestGenerateSampleQueryBboxes:
@@ -174,7 +174,7 @@ class TestCheckSpatialPushdownReadinessUnit:
             for i in range(10)
         ]
         # A query covering 10% of extent should skip ~90% of RGs
-        extent = _compute_data_extent(mock_bboxes)
+        extent = _compute_data_extent(mock_bboxes, geographic=True)
         samples = _generate_sample_query_bboxes(extent, num_samples=20, query_fraction=0.1, seed=42)
         skip_rates = [_compute_skip_rate_for_query(s, mock_bboxes) for s in samples]
         avg_skip = sum(skip_rates) / len(skip_rates)
@@ -189,7 +189,7 @@ class TestCheckSpatialPushdownReadinessUnit:
             for i in range(10)
         ]
         # Any query overlapping anything will hit all 10 RGs
-        extent = _compute_data_extent(mock_bboxes)
+        extent = _compute_data_extent(mock_bboxes, geographic=True)
         samples = _generate_sample_query_bboxes(extent, num_samples=20, query_fraction=0.1, seed=42)
         skip_rates = [_compute_skip_rate_for_query(s, mock_bboxes) for s in samples]
         avg_skip = sum(skip_rates) / len(skip_rates)

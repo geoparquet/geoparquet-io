@@ -734,7 +734,7 @@ class TestBatchStatsMerge:
         wkb = [shapely.to_wkb(shapely.Point(i, i)) for i in range(5000)]
         first = geometry_stats_of(_table(wkb), "geometry")
         second = geometry_stats_of(_table([shapely.to_wkb(_jagged(0, 0))]), "geometry")
-        merged = merged_geometry_stats([first, second])
+        merged = merged_geometry_stats([first, second], geographic=True)
         assert merged.geometry_types == ["Point", "Polygon"]
         assert merged.bbox[0] == 0.0
         assert merged.bbox[2] == 4999.0
@@ -750,13 +750,14 @@ class TestBatchStatsMerge:
     def test_no_batches_measure_nothing(self):
         from geoparquet_io.core.geo_metadata import GeometryStats, merged_geometry_stats
 
-        assert merged_geometry_stats([]) == GeometryStats(None, [])
+        assert merged_geometry_stats([], geographic=True) == GeometryStats(None, [])
 
     def test_a_batch_without_bounds_leaves_the_bbox_alone(self):
         from geoparquet_io.core.geo_metadata import GeometryStats, merged_geometry_stats
 
         merged = merged_geometry_stats(
-            [GeometryStats([1.0, 2.0, 3.0, 4.0], ["Point"]), GeometryStats(None, [])]
+            [GeometryStats([1.0, 2.0, 3.0, 4.0], ["Point"]), GeometryStats(None, [])],
+            geographic=True,
         )
         assert merged == GeometryStats([1.0, 2.0, 3.0, 4.0], ["Point"])
 

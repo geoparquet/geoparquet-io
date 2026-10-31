@@ -31,13 +31,14 @@ def _chunk(xmin, ymin, xmax, ymax, types=(), zmin=None, zmax=None):
 
 def test_the_fold_names_duckdb_dimension_strings_as_the_spec_does():
     stats = aggregate_native_geo_stats(
-        [_chunk(0, 0, 1, 1, ["polygon_z"]), _chunk(0, 0, 1, 1, ["multipolygon_zm", "point"])]
+        [_chunk(0, 0, 1, 1, ["polygon_z"]), _chunk(0, 0, 1, 1, ["multipolygon_zm", "point"])],
+        geographic=True,
     )
     assert stats["geometry_types"] == ["MultiPolygon ZM", "Point", "Polygon Z"]
 
 
 def test_the_fold_drops_type_codes_that_are_not_spec_types():
-    stats = aggregate_native_geo_stats([_chunk(0, 0, 1, 1, [0, 9, 3, 1003])])
+    stats = aggregate_native_geo_stats([_chunk(0, 0, 1, 1, [0, 9, 3, 1003])], geographic=True)
     assert stats["geometry_types"] == ["Polygon", "Polygon Z"]
 
 
@@ -46,7 +47,7 @@ def test_the_inspect_overall_bbox_reads_a_wrapping_row_group_on_the_circle():
         {"row_group": 0, "xmin": 170.0, "ymin": -10.0, "xmax": -170.0, "ymax": 10.0},
         {"row_group": 1, "xmin": 175.0, "ymin": -5.0, "xmax": 178.0, "ymax": 5.0},
     ]
-    assert _calculate_overall_bbox(rows) == {
+    assert _calculate_overall_bbox(rows, geographic=True) == {
         "xmin": 170.0,
         "ymin": -10.0,
         "xmax": -170.0,
@@ -80,7 +81,8 @@ def test_the_derived_block_folds_through_the_one_reader(tmp_path):
 
 def test_the_fold_returns_the_spec_interleaved_bbox_with_z():
     stats = aggregate_native_geo_stats(
-        [_chunk(0, 0, 4, 4, zmin=10, zmax=15), _chunk(10, 10, 12, 12, zmin=5, zmax=5)]
+        [_chunk(0, 0, 4, 4, zmin=10, zmax=15), _chunk(10, 10, 12, 12, zmin=5, zmax=5)],
+        geographic=True,
     )
     assert stats["bbox"] == [0, 0, 5, 12, 12, 15]
 
@@ -105,7 +107,7 @@ def test_the_one_fold_wraps_on_the_circle_and_plainly_for_projected_data():
         GeometryStats([170.0, -10.0, -170.0, 10.0], []),
         GeometryStats([175.0, 0, 178.0, 1], []),
     ]
-    assert merged_geometry_stats(parts).bbox == [170.0, -10.0, -170.0, 10.0]
+    assert merged_geometry_stats(parts, geographic=True).bbox == [170.0, -10.0, -170.0, 10.0]
     assert merged_geometry_stats(parts, geographic=False).bbox == [170.0, -10.0, 178.0, 10.0]
 
 
@@ -116,9 +118,96 @@ def test_the_spatial_order_extent_and_the_geodesic_whole_use_the_one_fold():
         {"xmin": 170.0, "ymin": -10.0, "xmax": -170.0, "ymax": 10.0},
         {"xmin": 175.0, "ymin": -5.0, "xmax": 178.0, "ymax": 5.0},
     ]
-    assert _compute_data_extent(rows) == {
+    assert _compute_data_extent(rows, geographic=True) == {
         "xmin": 170.0,
         "ymin": -10.0,
         "xmax": -170.0,
         "ymax": 10.0,
     }
+
+
+def test_every_fold_is_told_whether_the_coordinates_are_geographic():
+    # One policy, every fold: no default lets a projected file's inverted
+    # extent read as an antimeridian wrap (#886).
+    import pytest
+
+    from geoparquet_io.core.geo_metadata import merged_geometry_stats, row_group_geometry_stats
+
+    rows = [_chunk(170.0, -10.0, -170.0, 10.0), _chunk(175.0, 0, 178.0, 1)]
+    with pytest.raises(TypeError):
+        row_group_geometry_stats(rows)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        merged_geometry_stats([])  # type: ignore[call-arg]
+    assert row_group_geometry_stats(rows, geographic=True).bbox == [170.0, -10.0, -170.0, 10.0]
+    assert row_group_geometry_stats(rows, geographic=False).bbox == [170.0, -10.0, 178.0, 10.0]
+    assert aggregate_native_geo_stats(rows, geographic=False)["bbox"] == [170.0, -10.0, 178.0, 10.0]
+
+
+def test_a_projected_files_row_group_extent_is_folded_plainly(monkeypatch, tmp_path):
+    import geopandas as gpd
+    from shapely.geometry import Point
+
+    from geoparquet_io.core import duckdb_metadata
+    from geoparquet_io.core.crs_utils import column_is_geographic
+
+    path = tmp_path / "utm.parquet"
+    gpd.GeoDataFrame(geometry=[Point(500000, 0)], crs="EPSG:32631").to_parquet(path)
+    lonlat = tmp_path / "lonlat.parquet"
+    gpd.GeoDataFrame(geometry=[Point(1, 2)], crs="EPSG:4326").to_parquet(lonlat)
+    assert column_is_geographic(str(path), "geometry") is False
+    assert column_is_geographic(str(lonlat), "geometry") is True
+
+    rows = [_chunk(170.0, -10.0, -170.0, 10.0), _chunk(175.0, 0, 178.0, 1)]
+    monkeypatch.setattr(duckdb_metadata, "get_native_geo_stats_by_row_group", lambda *a: rows)
+    stats = duckdb_metadata.get_aggregated_native_geo_stats(str(path), "geometry")
+    assert stats["bbox"] == [170.0, -10.0, 178.0, 10.0]
+    wrapped = duckdb_metadata.get_aggregated_native_geo_stats(str(lonlat), "geometry")
+    assert wrapped["bbox"] == [170.0, -10.0, -170.0, 10.0]
+
+
+def test_one_reader_takes_xy_off_every_bbox_layout():
+    from geoparquet_io.core.geo_metadata import bbox_xy
+
+    assert bbox_xy([0, 1, 2, 3]) == (0.0, 1.0, 2.0, 3.0)
+    assert bbox_xy([0, 1, 9, 2, 3, 19]) == (0.0, 1.0, 2.0, 3.0)
+    assert bbox_xy([0, 1, 9, 7, 2, 3, 19, 17]) == (0.0, 1.0, 2.0, 3.0)
+
+
+def test_one_dimension_table_for_geoarrow():
+    from geoparquet_io.core import geoarrow_encoding
+    from geoparquet_io.core.geo_metadata import geoarrow_dimension
+
+    assert [geoarrow_dimension(s) for s in ("", " Z", " M", " ZM")] == [1, 2, 3, 4]
+    assert not hasattr(geoarrow_encoding, "_SUFFIX_TO_GEOARROW_DIM")
+    assert not hasattr(geoarrow_encoding, "_normalize_base_name")
+
+
+def test_the_query_stats_drop_a_non_spec_type_name():
+    import duckdb
+
+    from geoparquet_io.core.geo_metadata import QuerySource, geometry_types_of
+
+    con = duckdb.connect()
+    con.execute("INSTALL spatial; LOAD spatial")
+    q = "SELECT ST_GeomFromText('POINT (1 2)') AS g"
+    assert geometry_types_of(QuerySource(con, q), "g") == ["Point"]
+    from geoparquet_io.core import geo_metadata
+
+    assert not hasattr(geo_metadata, "_spec_type_name")
+
+
+def test_the_crs_mismatch_warning_reports_an_infinite_coordinate_and_goes_on(monkeypatch, caplog):
+    import logging
+
+    from geoparquet_io.core import extract
+    from geoparquet_io.core.exceptions import GeometryError
+
+    def boom(*a, **k):
+        raise GeometryError("holds a geometry with a non-finite (infinite) coordinate")
+
+    monkeypatch.setattr(extract, "dataset_bounds", boom)
+    monkeypatch.setattr(extract, "_get_crs_from_file", lambda *a: {"type": "ProjectedCRS"})
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        extract._warn_if_crs_mismatch((0.0, 0.0, 1.0, 1.0), "f.parquet", "geometry")
+    assert "projected CRS" in caplog.text
+    assert "non-finite" in caplog.text

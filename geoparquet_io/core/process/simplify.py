@@ -22,6 +22,7 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.bbox_structure import bbox_covering_column_for
 from geoparquet_io.core.compression import resolve_process_compression_level
+from geoparquet_io.core.crs_utils import is_geographic_crs
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
@@ -629,6 +630,10 @@ def _simplify_file_streaming(
     rows = resolve_row_group_rows(row_group_rows, None)
     writer_schema = schema.with_metadata(None)
     batch_stats: list[GeometryStats] = []
+    # The output keeps the input's CRS, which decides how the batch extents fold.
+    geographic = is_geographic_crs(
+        sanitized_carried_geo(schema.metadata).get("columns", {}).get(geom_col, {}).get("crs")
+    )
     collapsed = 0
     dropped = 0
     forward = inverse = None
@@ -706,7 +711,7 @@ def _simplify_file_streaming(
                     _footer_kv_via_funnel(
                         schema,
                         geom_col,
-                        merged_geometry_stats(batch_stats),
+                        merged_geometry_stats(batch_stats, geographic=geographic),
                         geoparquet_version,
                         compression,
                         compression_level,

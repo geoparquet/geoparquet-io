@@ -311,13 +311,15 @@ class TestNativeGeoStatsWrap:
 
     def test_aggregate_keeps_a_wrapping_extent(self):
         stats = aggregate_native_geo_stats(
-            [_chunk(175.0, 0.0, -175.0, 5.0), _chunk(178.0, 1.0, 179.0, 2.0)]
+            [_chunk(175.0, 0.0, -175.0, 5.0), _chunk(178.0, 1.0, 179.0, 2.0)],
+            geographic=True,
         )
         assert stats["bbox"] == [175.0, 0.0, -175.0, 5.0]
 
     def test_aggregate_without_wrap_is_unchanged(self):
         stats = aggregate_native_geo_stats(
-            [_chunk(0.0, 0.0, 10.0, 5.0), _chunk(-5.0, 1.0, 4.0, 20.0)]
+            [_chunk(0.0, 0.0, 10.0, 5.0), _chunk(-5.0, 1.0, 4.0, 20.0)],
+            geographic=True,
         )
         assert stats["bbox"] == [-5.0, 0.0, 10.0, 20.0]
 

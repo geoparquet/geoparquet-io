@@ -169,6 +169,17 @@ _SPEC_TYPE_BY_UPPER = {name.upper(): name for name in _GEOMETRY_TYPE_CODES.value
 # entry and fall back to 2D, the only reading that claims nothing extra.
 _GEOARROW_DIMENSION_CODES = {1: 0, 2: 1, 3: 2, 4: 3}
 
+#: The same two tables read the other way: a spec suffix -> geoarrow Dimensions.
+_GEOARROW_DIMENSION_BY_SUFFIX = {
+    _DIMENSION_SUFFIXES[code]: dim for dim, code in _GEOARROW_DIMENSION_CODES.items()
+}
+
+
+def geoarrow_dimension(suffix: str) -> int:
+    """The geoarrow ``Dimensions`` value (XY=1, XYZ=2, XYM=3, XYZM=4) of a spec
+    dimension suffix as :func:`split_zm_suffix` returns it ('', ' Z', ' M', ' ZM')."""
+    return _GEOARROW_DIMENSION_BY_SUFFIX[suffix]
+
 
 def geoarrow_wkb_codes(types_struct) -> list[int]:
     """WKB type codes for a geoarrow ``unique_geometry_types`` result.
@@ -1645,7 +1656,7 @@ class GeometryStats:
 _NO_STATS = GeometryStats(None, [])
 
 
-def merged_geometry_stats(parts, *, geographic: bool = True) -> GeometryStats:
+def merged_geometry_stats(parts, *, geographic: bool) -> GeometryStats:
     """The one fold: the stats of the union of what ``parts`` were measured on.
 
     Each part's bbox is a spec bbox, ``[xmin, ymin, xmax, ymax]`` or the 6-value
@@ -1656,7 +1667,8 @@ def merged_geometry_stats(parts, *, geographic: bool = True) -> GeometryStats:
     that is plain min/max. Y is min/max; Z is merged over the parts that carry
     one and makes the result 6 values. Types are the sorted union.
 
-    ``geographic=False`` is for coordinates known to be projected: the wrap
+    ``geographic`` has no default, so every fold says which CRS it is in
+    (``crs_utils.is_geographic_crs``): for projected coordinates the wrap
     reading splits at +/-180, meaningless in metres, so X is plain min/max
     there (#886) -- xmin > xmax in a projected bbox is broken metadata.
 
@@ -1670,7 +1682,7 @@ def merged_geometry_stats(parts, *, geographic: bool = True) -> GeometryStats:
     types = sorted({t for p in parts for t in p.geometry_types})
     if not boxes:
         return GeometryStats(None, types)
-    xy = [_bbox_xy4(b) for b in boxes]
+    xy = [bbox_xy(b) for b in boxes]
     if geographic:
         xmin, xmax = merge_longitude_ranges([(b[0], b[2]) for b in xy])
     else:
@@ -1682,20 +1694,26 @@ def merged_geometry_stats(parts, *, geographic: bool = True) -> GeometryStats:
     return GeometryStats(bbox, types)
 
 
-def _bbox_xy4(bbox) -> list[float]:
-    """``[xmin, ymin, xmax, ymax]`` of a 4- or 6-value spec bbox."""
+def bbox_xy(bbox) -> tuple[float, float, float, float]:
+    """``(xmin, ymin, xmax, ymax)`` of a 4-, 6- or 8-value spec bbox.
+
+    The spec interleaves the dimensions (``[xmin, ymin, zmin, xmax, ymax,
+    zmax]``), so indices 2 and 3 are xmax/ymax only in the 4-value form. The one
+    reader of X/Y off an interleaved bbox.
+    """
     half = len(bbox) // 2
-    return [bbox[0], bbox[1], bbox[half], bbox[half + 1]]
+    return float(bbox[0]), float(bbox[1]), float(bbox[half]), float(bbox[half + 1])
 
 
-def row_group_geometry_stats(chunks) -> GeometryStats:
+def row_group_geometry_stats(chunks, *, geographic: bool) -> GeometryStats:
     """The file's stats from its per-row-group statistics, through the one fold.
 
     ``chunks`` are dicts with ``xmin``..``ymax``, optional ``zmin``/``zmax``
     and ``geometry_types`` (WKB codes or DuckDB strings), as the Parquet
     geospatial statistics readers in ``duckdb_metadata`` return them. A chunk
     without an extent still contributes its types; the bbox comes back in the
-    spec's interleaved layout.
+    spec's interleaved layout. ``geographic`` is the column's CRS, as
+    :func:`merged_geometry_stats` takes it.
     """
     parts = []
     for chunk in chunks:
@@ -1706,7 +1724,7 @@ def row_group_geometry_stats(chunks) -> GeometryStats:
                 bbox = [bbox[0], bbox[1], chunk["zmin"], bbox[2], bbox[3], chunk["zmax"]]
         names = {geometry_type_name(t) for t in chunk.get("geometry_types") or []}
         parts.append(GeometryStats(bbox, sorted(n for n in names if n)))
-    return merged_geometry_stats(parts)
+    return merged_geometry_stats(parts, geographic=geographic)
 
 
 def _non_finite_error(column: str, example: str) -> Exception:
@@ -1778,14 +1796,6 @@ def _located_rows_sql(con, query: str, geometry_column: str, bbox_column: str | 
     """
 
 
-def _spec_type_name(duckdb_type: str) -> str:
-    """DuckDB's ``MULTIPOINT ZM`` (or ``ST_POINT``) in spec casing; an unmapped
-    base keeps its own spelling and its suffix once (``TRIANGLE Z``)."""
-    base, suffix = split_zm_suffix(duckdb_type)
-    base = base.upper().removeprefix("ST_")
-    return _SPEC_TYPE_BY_UPPER.get(base, base) + suffix
-
-
 _FINITE_SQL = "isfinite(__x0) AND isfinite(__y0) AND isfinite(__x1) AND isfinite(__y1)"
 
 
@@ -1812,7 +1822,7 @@ def _query_stats(
         """)
         )
         raise _non_finite_error(geometry_column, example[0] if example else "")
-    types = sorted({_spec_type_name(r[0]) for r in rows if r[0]})
+    types = sorted({n for n in (geometry_type_name(r[0]) for r in rows) if n})
     if not rows:
         return GeometryStats(None, types), located
     bbox = [
@@ -2483,14 +2493,16 @@ def geometry_type_name(raw) -> str | None:
     """A geometry type as the spec names it, from a WKB code or a DuckDB string.
 
     ``1003``, ``'polygon_z'``, ``'POLYGON Z'`` and ``'Polygon Z'`` all read as
-    ``'Polygon Z'``; code 0 and anything that is no spec type read as None.
-    The one reader of the Parquet geospatial statistics' ``geo_types``.
+    ``'Polygon Z'`` (DuckDB's ``ST_`` prefix is dropped); code 0 and anything
+    that is no spec type (``'TRIANGLE Z'``) read as None, on every path. The
+    one reader of the Parquet geospatial statistics' ``geo_types`` and of
+    DuckDB's ``ST_GeometryType``.
     """
     if isinstance(raw, int) and not isinstance(raw, bool):
         return _get_geometry_type_name(raw)
     if not isinstance(raw, str):
         return None
-    text = raw.replace("_", " ").strip().upper()
+    text = raw.replace("_", " ").strip().upper().removeprefix("ST ")
     for suffix in (" ZM", " Z", " M", ""):
         if suffix and not text.endswith(suffix):
             continue

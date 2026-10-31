@@ -133,11 +133,6 @@ _DIM_XY = 1
 _NATIVE_DIM_CODES = {1, 2, 3, 4}  # XY, XYZ, XYM, XYZM
 
 
-def _normalize_base_name(geometry_type: str) -> str:
-    """Strip Z/M dimension suffixes and lowercase: 'MultiPolygon Z' -> 'multipolygon'."""
-    return geometry_type.split(" ")[0].strip().lower()
-
-
 def _resolve_dimension(dimensions: set[int] | None):
     """Resolve a set of geoarrow dimension codes to a single target dimension.
 
@@ -169,10 +164,6 @@ def _resolve_dimension(dimensions: set[int] | None):
     return gat.Dimensions(code), True
 
 
-#: The spec's dimension suffix -> the geoarrow Dimensions code (XY=1 ... XYZM=4).
-_SUFFIX_TO_GEOARROW_DIM = {"": 1, " Z": 2, " M": 3, " ZM": 4}
-
-
 def determine_geoarrow_target_type(
     geometry_types: list[str],
     input_crs: dict | None = None,
@@ -192,12 +183,14 @@ def determine_geoarrow_target_type(
     """
     import geoarrow.pyarrow as ga
 
-    from geoparquet_io.core.geo_metadata import split_zm_suffix
+    from geoparquet_io.core.geo_metadata import geoarrow_dimension, split_zm_suffix
 
-    base_names = {_normalize_base_name(g) for g in geometry_types if g}
+    # One parse per type: the base picks the factory, the suffix the dimension.
+    parsed = [split_zm_suffix(g) for g in geometry_types if g]
+    base_names = {base.strip().lower() for base, _ in parsed}
     if not base_names or not base_names.issubset(_BASE_NAME_TO_FACTORY):
         return None, "WKB"
-    dimensions = {_SUFFIX_TO_GEOARROW_DIM[split_zm_suffix(g)[1]] for g in geometry_types if g}
+    dimensions = {geoarrow_dimension(suffix) for _, suffix in parsed}
 
     dimension_enum, dimension_ok = _resolve_dimension(dimensions)
     if not dimension_ok:

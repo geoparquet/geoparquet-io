@@ -188,7 +188,7 @@ class TestGetBboxFromRowGroupStats:
         bbox_name = check_bbox_structure(places_test_file)["bbox_column_name"]
         if bbox_name:
             rows = get_per_row_group_bbox_stats(places_test_file, bbox_name)
-            result = row_group_geometry_stats(rows).bbox
+            result = row_group_geometry_stats(rows, geographic=True).bbox
             if result is not None:
                 assert len(result) == 4
                 # xmin <= xmax and ymin <= ymax

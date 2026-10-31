@@ -853,7 +853,9 @@ def row_group_geography_bboxes(
         return ColumnBounds(per_group, None, unreadable)
     from geoparquet_io.core.geo_metadata import GeometryStats, merged_geometry_stats
 
-    merged = merged_geometry_stats(GeometryStats(list(b), []) for b in boxes).bbox
+    # GEOGRAPHY coordinates are longitude/latitude by definition.
+    parts = (GeometryStats(list(b), []) for b in boxes)
+    merged = merged_geometry_stats(parts, geographic=True).bbox
     assert merged is not None  # boxes is non-empty, so the fold has an extent
     xmin, ymin, xmax, ymax = merged
     return ColumnBounds(per_group, (xmin, ymin, xmax, ymax), unreadable)

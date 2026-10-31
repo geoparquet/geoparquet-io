@@ -44,6 +44,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
+    GeometryError,
     GeoParquetError,
     InvalidParameterError,
 )
@@ -183,8 +184,16 @@ def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | No
 
 
 def _get_data_bounds(input_parquet: str, geometry_col: str) -> tuple | None:
-    """The file's data bounds through the one file entry point (covering first), or None."""
-    return dataset_bounds(input_parquet, geometry_col, advise=False)
+    """The file's data bounds through the one file entry point (covering first), or None.
+
+    Only the CRS-mismatch warning reads them, so the owner's refusal of an
+    infinite coordinate is reported there rather than ending the extract.
+    """
+    try:
+        return dataset_bounds(input_parquet, geometry_col, advise=False)
+    except GeometryError as exc:
+        warn(f"Data bounds not shown: {exc}")
+        return None
 
 
 def _warn_if_crs_mismatch(

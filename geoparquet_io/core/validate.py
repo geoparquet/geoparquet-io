@@ -26,6 +26,7 @@ from geoparquet_io.core.crs_utils import (
     _is_crs84_equivalent,
     _is_ogc_crs84,
     _parse_crs_value,
+    column_is_geographic,
     crs_from_column_meta,
     entry_crs_is_unknown,
     get_crs_display_name,
@@ -59,9 +60,9 @@ from geoparquet_io.core.geo_metadata import (
     GEOGRAPHY_EDGE_ALGORITHMS,
     GEOPARQUET_VERSIONS,
     QuerySource,
+    bbox_xy,
     bounds_of,
     covering_lacks_bbox,
-    geometry_type_name,
     geometry_types_of,
     is_covering_path,
     read_raw_geo,
@@ -1142,9 +1143,10 @@ def _geoarrow_zm_suffix(col_type: str) -> str:
 def _geoarrow_bounds_subquery(raw_url: str, geom_col: str, encoding: str, limit_clause: str) -> str:
     """Per-row GeoArrow coordinate bounds, with empty geometries filtered out.
 
-    Empty GeoArrow values are either an empty coordinate list (NULL bounds) or,
-    for "point", NaN coordinates; neither has an extent to compare, so the
-    isfinite() guard drops both instead of poisoning MIN/MAX.
+    For the per-row contains-data comparison only; the column's bounds come from
+    ``geo_metadata.bounds_of``. Empty GeoArrow values are either an empty
+    coordinate list (NULL bounds) or, for "point", NaN coordinates; neither has
+    an extent to compare, so the isfinite() guard drops both.
     """
     quoted_geom = quote_identifier(geom_col)
     xmin, ymin, xmax, ymax, _, _ = _geoarrow_coord_exprs(quoted_geom, encoding)
@@ -1555,8 +1557,7 @@ def _bbox_xy(bbox: Any) -> tuple[float, float, float, float] | None:
         return None
     if not all(_is_finite_number(value) for value in bbox):
         return None
-    half = len(bbox) // 2
-    return float(bbox[0]), float(bbox[1]), float(bbox[half]), float(bbox[half + 1])
+    return bbox_xy(bbox)
 
 
 def _sql_float(value: Any) -> str:
@@ -2817,13 +2818,11 @@ def _check_native_geo_statistics(
             )
 
         # The whole file's bounds, not whichever row group comes first.
-        bbox = aggregate_native_geo_stats(chunks).get("bbox")
+        geographic = column_is_geographic(parquet_file, geom_col)
+        bbox = aggregate_native_geo_stats(chunks, geographic=geographic).get("bbox")
 
         if bbox:
-            # The fold returns the spec's interleaved layout (Z between XY halves).
-            half = len(bbox) // 2
-            xy = (bbox[0], bbox[1], bbox[half], bbox[half + 1])
-            geo_bbox = dict(zip(("xmin", "ymin", "xmax", "ymax"), xy, strict=True))
+            geo_bbox = dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox_xy(bbox), strict=True))
             # Validate that bbox values are reasonable (not garbage from parsing errors)
             if not _is_bbox_valid(geo_bbox):
                 return ValidationCheck(
@@ -2908,7 +2907,9 @@ def _check_native_geo_stats_contains_data(
         # The sample below spans the whole file, so it is judged against the
         # whole file's statistics -- the union over every row group, not the
         # bounds of whichever one happens to come first.
-        stats = get_aggregated_native_geo_stats(parquet_file, geom_col, con)
+        stats = get_aggregated_native_geo_stats(
+            parquet_file, geom_col, con, geographic=is_geographic_crs(crs)
+        )
 
         if not stats:
             return ValidationCheck(
@@ -2927,10 +2928,7 @@ def _check_native_geo_stats_contains_data(
                 category="parquet_geo_types",
             )
 
-        # The fold returns the spec's interleaved layout (Z between XY halves).
-        half = len(bbox) // 2
-        xy = (bbox[0], bbox[1], bbox[half], bbox[half + 1])
-        geo_bbox = dict(zip(("xmin", "ymin", "xmax", "ymax"), xy, strict=True))
+        geo_bbox = dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox_xy(bbox), strict=True))
 
         # Validate that bbox values are reasonable (not garbage from parsing errors)
         if not _is_bbox_valid(geo_bbox):
@@ -3052,7 +3050,8 @@ def _check_native_geo_types_match(
 
         # Declared geo_types from parquet metadata, folded and named by the owner.
         chunks = get_native_geo_stats_by_row_group(parquet_file, geom_col, con) or []
-        declared_types = set(row_group_geometry_stats(chunks).geometry_types)
+        # Types only: the CRS decides how extents fold, never which types there are.
+        declared_types = set(row_group_geometry_stats(chunks, geographic=True).geometry_types)
 
         # Empty list means "not known" - this is valid per spec
         if not declared_types:
@@ -3135,15 +3134,6 @@ def _check_native_columns_in_metadata(schema_info: list, columns: dict) -> Valid
     )
 
 
-def _stats_geometry_type_name(raw) -> str:
-    """'point_z' / 1001 from parquet_metadata().geo_types -> 'Point Z'.
-
-    Named by the one type table (``geo_metadata.geometry_type_name``), so this
-    check and the fold agree; a value that is no spec type comes back as written.
-    """
-    return geometry_type_name(raw) or str(raw)
-
-
 def _check_geometry_types_match_stats(
     parquet_file: str, geom_col: str, declared_types: list
 ) -> ValidationCheck:
@@ -3176,7 +3166,8 @@ def _check_geometry_types_match_stats(
             message=f"could not check geospatial statistics: {e}",
             category="geoparquet_2_0",
         )
-    found = {_stats_geometry_type_name(t) for c in chunks for t in c["geometry_types"]}
+    # Named and folded by the owner: a value that is no spec type is dropped.
+    found = set(row_group_geometry_stats(chunks, geographic=True).geometry_types)
     if not found:
         return ValidationCheck(
             name=name,

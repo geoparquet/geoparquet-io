@@ -392,7 +392,9 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
 
     # Try native Parquet GeospatialStatistics for files with native geo types
     if parquet_type != "No Parquet geo logical type":
-        native_stats = get_aggregated_native_geo_stats(parquet_file, primary_column, con=con)
+        native_stats = get_aggregated_native_geo_stats(
+            parquet_file, primary_column, con=con, geographic=is_geographic_crs(effective_crs)
+        )
 
         # Use native bbox if GeoParquet bbox not available (the fold returns
         # the spec's interleaved layout, as a geo bbox has).

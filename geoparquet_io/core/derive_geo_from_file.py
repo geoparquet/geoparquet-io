@@ -22,7 +22,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.compression import resolve_codec
-from geoparquet_io.core.crs_utils import NULL_CRS_HINT, is_default_crs, is_unknown_type_crs
+from geoparquet_io.core.crs_utils import (
+    NULL_CRS_HINT,
+    is_default_crs,
+    is_geographic_crs,
+    is_unknown_type_crs,
+)
 from geoparquet_io.core.duckdb_metadata import (
     get_schema_info,
     native_geo_type,
@@ -102,16 +107,16 @@ def _geo_col_meta_from_stats(pf, col_index: int, logical: str, parquet_file: str
     # The one fold (geo_metadata): X merged on the circle, Z over the row
     # groups that carry an extent, the spec's interleaved bbox (M is never part
     # of a bbox), spec type names only.
-    folded = row_group_geometry_stats(chunks)
-    col_meta: dict = {"encoding": "WKB", "geometry_types": folded.geometry_types}
-    if folded.bbox is not None:
-        col_meta["bbox"] = folded.bbox
     # The rebuilt block is the file's only geo metadata, so a CRS left behind
     # here is not merely missing: an absent `crs` *means* OGC:CRS84, which
     # relabels projected coordinates as lon/lat while the Parquet logical type
     # still names the real CRS (#785). Mirror the logical type, which is the
-    # authority at 2.0.
+    # authority at 2.0; it also decides how the extents fold.
     crs_present, crs = _crs_from_geo_logical(logical, parquet_file)
+    folded = row_group_geometry_stats(chunks, geographic=is_geographic_crs(crs))
+    col_meta: dict = {"encoding": "WKB", "geometry_types": folded.geometry_types}
+    if folded.bbox is not None:
+        col_meta["bbox"] = folded.bbox
     if crs_present:
         col_meta["crs"] = crs
     # A Geography logical type carries edge semantics the geo metadata must

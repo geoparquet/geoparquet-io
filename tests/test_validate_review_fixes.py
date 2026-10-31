@@ -374,17 +374,18 @@ class TestGeomTypeNormalization:
 
     # The data-side type names now come from the stats owner (#1367 concept 5).
 
-    def test_unmapped_base_no_double_suffix(self):
-        from geoparquet_io.core.geo_metadata import _spec_type_name
+    def test_unmapped_base_is_dropped_not_echoed(self):
+        # One reader, one rule: a name that is no spec type is no type (#1367).
+        from geoparquet_io.core.geo_metadata import geometry_type_name
 
-        assert _spec_type_name("TRIANGLE Z") == "TRIANGLE Z"
+        assert geometry_type_name("TRIANGLE Z") is None
 
     def test_mapped_with_suffix(self):
-        from geoparquet_io.core.geo_metadata import _spec_type_name
+        from geoparquet_io.core.geo_metadata import geometry_type_name
 
-        assert _spec_type_name("MULTIPOINT ZM") == "MultiPoint ZM"
+        assert geometry_type_name("MULTIPOINT ZM") == "MultiPoint ZM"
 
     def test_st_prefix_stripped(self):
-        from geoparquet_io.core.geo_metadata import _spec_type_name
+        from geoparquet_io.core.geo_metadata import geometry_type_name
 
-        assert _spec_type_name("ST_POINT") == "Point"
+        assert geometry_type_name("ST_POINT") == "Point"

@@ -12,6 +12,7 @@ from rich.table import Table
 from rich.text import Text
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.crs_utils import column_is_geographic, is_geographic_crs
 from geoparquet_io.core.duckdb_metadata import (
     detect_geometry_columns,
     get_file_metadata,
@@ -22,6 +23,7 @@ from geoparquet_io.core.duckdb_metadata import (
     parse_geometry_logical_type,
 )
 from geoparquet_io.core.geo_metadata import (
+    bbox_xy,
     is_covering_path,
     row_group_geometry_stats,
     sanitized_carried_geo_of_file,
@@ -32,15 +34,20 @@ from geoparquet_io.core.parquet_writer import declared_geoparquet_version
 from geoparquet_io.core.sizing import format_size
 
 
-def _calculate_overall_bbox(row_group_stats: list[dict]) -> dict[str, float] | None:
+def _calculate_overall_bbox(
+    row_group_stats: list[dict], *, geographic: bool
+) -> dict[str, float] | None:
     """The file's bbox from its row-group extents, through the one fold.
 
     ``geo_metadata.row_group_geometry_stats`` merges X on the circle, so a row
     group that wraps the antimeridian (xmin > xmax) is not inverted into its
-    complement; a row group missing a bound is skipped.
+    complement -- when ``geographic``; a projected CRS folds plainly. A row
+    group missing a bound is skipped.
     """
-    bbox = row_group_geometry_stats(row_group_stats).bbox
-    return dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox, strict=True)) if bbox else None
+    bbox = row_group_geometry_stats(row_group_stats, geographic=geographic).bbox
+    if not bbox:
+        return None
+    return dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox_xy(bbox), strict=True))
 
 
 def has_parquet_geo_row_group_stats(parquet_file: str, geometry_column: str | None = None) -> dict:
@@ -126,7 +133,9 @@ def extract_bbox_from_row_group_stats(
         return None
 
     # The covering's per-row-group statistics, folded the one way.
-    return row_group_geometry_stats(get_per_row_group_bbox_stats(parquet_file, bbox_col_name)).bbox
+    rows = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
+    geographic = column_is_geographic(parquet_file, geometry_column)
+    return row_group_geometry_stats(rows, geographic=geographic).bbox
 
 
 def _build_row_group_json(rg_id: int, cols_in_rg: list, geo_columns: dict) -> dict:
@@ -461,7 +470,9 @@ def _print_geo_column_stats(
     console: Console, col_info: dict, num_rg_to_show: int, num_row_groups: int
 ) -> None:
     """Print bbox and row group statistics for a geo column."""
-    overall_bbox = _calculate_overall_bbox(col_info["row_group_stats"])
+    overall_bbox = _calculate_overall_bbox(
+        col_info["row_group_stats"], geographic=is_geographic_crs(col_info["crs"])
+    )
     if overall_bbox:
         console.print(
             f"    Overall Bbox: [{overall_bbox['xmin']:.6f}, {overall_bbox['ymin']:.6f}, "
