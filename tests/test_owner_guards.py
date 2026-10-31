@@ -85,7 +85,7 @@ EXPECTED_COUNTS = {
     "G1.geometry_stats": 0,
     "G1.edges": 0,
     "G1.footer_patch": 0,
-    "G1.geometry_identity": 0,
+    "G1.geometry_identity": 9,
     "G2.exemptions": 12,
     "G3.pairs": 0,
     "G3.baseline": 0,
@@ -1994,39 +1994,10 @@ def _first_column_pick(m: _Module, node: ast.AST) -> bool:
     return bool(_GEOM_COLUMNS_TEXT.search(ast.unparse(inner))) or _geometry_named_target(m, node)
 
 
-#: The legitimate reads of a ``geo`` block's ``primary_column`` claim outside
-#: the owner and T3a's block decoder (``core/geo_metadata.py``), each with why
-#: it is not a column choice.
-_PRIMARY_CLAIM_READS = {
-    ("geoparquet_io/core/validate.py", "_check_primary_column_present"): (
-        "the validator checks the claim itself"
-    ),
-    ("geoparquet_io/core/validate.py", "_check_primary_column_in_columns"): (
-        "the validator checks the claim itself"
-    ),
-    ("geoparquet_io/core/check_fixes.py", "_supply_or_strip_bbox_member"): (
-        "repairs the block entry the block declares primary"
-    ),
-    ("geoparquet_io/core/derive_geo_from_file.py", "_with_primary_column"): (
-        "a block repoint: compares the claim it is about to rewrite"
-    ),
-    ("geoparquet_io/core/inspect.py", "inspect_summary"): (
-        "extract_geo_info's result: the resolver's answer, not the block's claim"
-    ),
-    ("geoparquet_io/core/inspect.py", "inspect_preview"): (
-        "extract_geo_info's result: the resolver's answer, not the block's claim"
-    ),
-    ("geoparquet_io/core/inspect.py", "inspect_stats"): (
-        "extract_geo_info's result: the resolver's answer, not the block's claim"
-    ),
-}
-_PRIMARY_CLAIM_OWNERS = ("geoparquet_io/core/geo_metadata.py",)
-
-
 def _primary_get(m: _Module, node: ast.AST) -> ast.AST | None:
     """``x.get("primary_column")`` outside the owner and the block decoder: the
     block's claim read as the column, skipping the resolver's "the schema has
-    it" rule. The legitimate reads are pinned in :data:`_PRIMARY_CLAIM_READS`."""
+    it" rule. The legitimate reads are ``[[G1.geometry_identity]]`` entries."""
     if not (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -2036,10 +2007,6 @@ def _primary_get(m: _Module, node: ast.AST) -> ast.AST | None:
         and node.args[0].value == "primary_column"
     ):
         return None
-    if _owns(m.path, _PRIMARY_CLAIM_OWNERS):
-        return None
-    if (m.path, m.hit(node).name.rsplit(".", 1)[-1]) in _PRIMARY_CLAIM_READS:
-        return None
     return node
 
 
@@ -2048,22 +2015,12 @@ def _primary_get(m: _Module, node: ast.AST) -> ast.AST | None:
 _READ_KIND_TYPES = frozenset({"BLOB", "BINARY", "STRUCT", "GEOMETRY", "GEOGRAPHY", "VARCHAR"})
 
 
-#: Type tests that are not a geometry read kind, each with why.
-_TYPE_TEST_PINS = {
-    ("geoparquet_io/core/wfs.py", "_probe_properties_type"): (
-        "the GeoJSON properties column's type (unnest a STRUCT), not a geometry"
-    ),
-}
-
-
 def _type_test(m: _Module, node: ast.AST) -> bool:
     """``t.upper().startswith("STRUCT")`` / ``startswith(("BLOB", "VARCHAR"))`` /
     ``"BLOB" in t``: a read kind decided outside ``GeometryRead``. A prefix tuple
     that also names non-geometry types (``"MAP"``, ``"UNION"``) is a general
     type classifier, not a read kind."""
     if not isinstance(node, (ast.Call, ast.Compare)):
-        return False
-    if (m.path, m.hit(node).name.rsplit(".", 1)[-1]) in _TYPE_TEST_PINS:
         return False
     if (
         isinstance(node, ast.Call)
@@ -2098,6 +2055,12 @@ def _positional_literal(node: ast.AST) -> ast.AST | None:
     )
     if callee in _NOT_COLUMN_CALLS:
         return None
+    if callee == "quote_identifier":
+        # Quoting it as an identifier makes any geometry name a column name
+        # (``quote_identifier("the_geom")``, #1392 pass 3).
+        return next(
+            (a for a in node.args if _is_str_constant(a) and a.value in _GEOMETRY_NAMES), None
+        )
     skip_first = callee.endswith(("Error", "Exception")) or callee in _MAPPING_LOOKUPS
     args = node.args[1:] if skip_first else node.args
     return next((a for a in args if _is_geometry_literal(a)), None)
@@ -2219,15 +2182,15 @@ def _find_geometry_identity(m: _Module) -> Iterator[Hit]:
     The second pass (#1392 pass 2) made the narrowings precise: a conditional
     whose branches are both strings is a column choice when it lands in a
     geometry-named target or keyword (``None`` is not a string); every
-    ``.get("primary_column")`` outside the owner and ``geo_metadata`` (T3a's
-    decoder) is a hit unless pinned in :data:`_PRIMARY_CLAIM_READS` with its
-    reason; a first-entry pick into a geometry-named target is a hit whatever
+    ``.get("primary_column")`` outside the owner is a hit (``geo_metadata``,
+    T3a's block decoder, and the legitimate reads are ``[[G1.geometry_identity]]``
+    entries with their reasons); a first-entry pick into a geometry-named target is a hit whatever
     the collection is called. New shapes: ``"geometry"`` as any positional
     argument (not an exception's parameter name, a mapping key, or a Click
     declaration) or any parameter's default, and a read-kind type test
     (``startswith("STRUCT")``, ``startswith(("BLOB", "VARCHAR"))``,
-    ``"BLOB" in t``) outside the owner and ``duckdb_utils``, unless pinned in
-    :data:`_TYPE_TEST_PINS`.
+    ``"BLOB" in t``) outside the owner and ``duckdb_utils``; one that tests a
+    non-geometry column is an entry with its reason.
 
     ``geometry_detection.resolve_geometry_read`` is the one BLOB-vs-native read
     expression, and the WKB codec is spelled once in ``duckdb_utils``
@@ -3369,6 +3332,7 @@ GEOMETRY_IDENTITY_SHAPES = {
         "def f(inferred_columns):\n    primary = next(iter(inferred_columns))\n"
     ),
     "positional literal": 'def f(src):\n    return bounds_of(src, "geometry")\n',
+    "a geometry name quoted as an identifier": 'def f():\n    return quote_identifier("the_geom")\n',
     "any parameter default": 'def f(cols, base="geometry"):\n    return base\n',
     "STRUCT prefix test": 'def f(t):\n    return t.upper().startswith("STRUCT")\n',
     "BLOB/VARCHAR prefix test": 'def f(t):\n    return not t.startswith(("BLOB", "VARCHAR"))\n',

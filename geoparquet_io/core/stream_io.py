@@ -198,9 +198,11 @@ def _stream_input_metadata(table: pa.Table) -> dict:
     if geometry_info is None:
         return metadata
     inferred_columns = geometry_info["metadata"]
-    # Every inferred column is a geometry column: the owner's type step answers
-    # when neither the block nor a standard name does.
-    primary = primary_geometry_column([(n, "GEOMETRY") for n in inferred_columns], geo=geo)
+    # The owner resolves over the geometry columns' own Arrow fields: a
+    # non-geometry column that merely has a standard name cannot win, and every
+    # inferred column is declared by the block or GeoArrow-typed, so one answers.
+    geometry_fields = pa.schema([table.schema.field(name) for name in inferred_columns])
+    primary = primary_geometry_column(geometry_fields, geo=geo)
     edges_by_col = table_nonplanar_edges(table, primary, None)
     columns = {}
     for name, inferred in inferred_columns.items():

@@ -242,7 +242,7 @@ def _build_carto_query(
 
 def _bbox_condition(bbox: tuple[float, float, float, float]) -> str:
     """The PostGIS bbox condition on ``the_geom``; a wrapped bbox ORs its two lobes."""
-    geom = quote_identifier("the_geom")
+    geom = quote_identifier(_CARTO_GEOMETRY_COLUMN)
     return any_piece(
         BBox(*bbox),
         lambda b: (

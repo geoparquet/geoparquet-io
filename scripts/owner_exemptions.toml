@@ -237,6 +237,48 @@ path = "geoparquet_io/core/write_strategies/duckdb_kv.py"
 count = "*"
 reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 
+# A geometry column chosen outside core/geometry_detection.py (#1367 concept 7).
+# Seed baseline recorded when the arm was created (#1392 pass 3): counts only
+# go down from here; T0e zeroes what it can.
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/geo_metadata.py"
+line_pattern = '\.get\("primary_column"\)'
+count = "*"
+reason = "permanent: T3a's geo-block decoder; reading the block's primary_column claim is its business"
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/validate.py"
+name = "_check_primary_column_present"
+reason = "permanent: the validator checks the block's primary_column claim itself"
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/validate.py"
+name = "_check_primary_column_in_columns"
+reason = "permanent: the validator checks the block's primary_column claim itself"
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/check_fixes.py"
+name = "_supply_or_strip_bbox_member"
+reason = "repairs the bbox member of the block entry the block declares primary; a block edit, not a column choice"
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/derive_geo_from_file.py"
+name = "_with_primary_column"
+reason = "a block repoint: compares the claim it is about to rewrite"
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/inspect.py"
+name = "inspect_summary"
+count = 2
+reason = "extract_geo_info's result: the resolver's answer, not the block's claim (two reads)"
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/inspect.py"
+name = "inspect_preview"
+reason = "extract_geo_info's result: the resolver's answer, not the block's claim"
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/inspect.py"
+name = "inspect_stats"
+reason = "extract_geo_info's result: the resolver's answer, not the block's claim"
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/wfs.py"
+name = "_probe_properties_type"
+reason = "the GeoJSON properties column's type (unnest a STRUCT), not a geometry read kind"
+
 # ---------------------------------------------------------------------------
 # G2: owner-only definitions (scripts/check_owner_defs.py)
 # ---------------------------------------------------------------------------

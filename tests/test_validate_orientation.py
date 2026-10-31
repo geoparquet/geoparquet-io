@@ -169,7 +169,7 @@ class TestEdges:
 class TestPathEscapedExactlyOnce:
     """#937: the check escaped its own path twice.
 
-    ``_describe_geom_type(con, raw_url, ...)`` escapes its argument itself (it
+    ``resolve_geometry_read(con, raw_url, ...)`` escapes its argument itself (it
     builds ``read_parquet({sql_path(raw_url)})``), so passing the already
     escaped ``safe_file_url()`` result turned ``o'brien`` into ``o''''brien``
     inside the literal. The read then failed, the broad ``except`` caught it,
