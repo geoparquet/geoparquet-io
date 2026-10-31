@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Collection, Iterator, Mapping
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any, cast, overload
 
 from geoparquet_io.core.compression import resolve_codec
@@ -1172,10 +1172,6 @@ class WriteOptions:
     def pick(cls, values: Mapping[str, Any]) -> WriteOptions:
         """The options named in *values*; other keys are ignored, absent fields stay unset."""
         return cls(**{f.name: values[f.name] for f in fields(cls) if f.name in values})
-
-    def with_version(self, geoparquet_version: str | None) -> WriteOptions:
-        """These options with the output version replaced (a pass-through keeps the input's)."""
-        return replace(self, geoparquet_version=geoparquet_version)
 
     def funnel_kwargs(self) -> dict[str, Any]:
         """The keywords every funnel takes, for ``funnel(..., **options.funnel_kwargs())``."""
