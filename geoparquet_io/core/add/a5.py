@@ -26,10 +26,7 @@ from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
-from geoparquet_io.core.geometry_repair import (
-    nonplanar_edges_of_arrow_table,
-    nonplanar_edges_of_file,
-)
+from geoparquet_io.core.geometry_repair import nonplanar_edges_of_arrow_table
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import execute_transform
@@ -38,6 +35,7 @@ from geoparquet_io.core.streaming import (
     is_stdin,
     should_stream_output,
 )
+from geoparquet_io.core.write_funnels import collect_nonplanar_edges
 
 
 def add_a5_table(
@@ -149,16 +147,17 @@ def _make_add_a5_query(
     a5_column_name: str,
     resolution: int,
     source_crs: str | None = None,
-    edges: str | None = None,
+    edges: dict[str, str] | None = None,
 ) -> str:
     """Build query to add A5 column to a source.
 
     ``source_crs`` reprojects a non-CRS84 input to lon/lat before centroid keying
     (#525); ``None`` (CRS84 / CRS-less) leaves the geometry untouched. ``edges``
-    is the column's: non-planar keys from a point on the sphere (#1293).
+    maps the input's non-planar columns to their edges: those key from a point
+    on the sphere (#1293).
     """
     geom_ref = transform_geom_sql(quote_identifier(geometry_column), source_crs)
-    point = representative_point_sql(geom_ref, edges)
+    point = representative_point_sql(geom_ref, (edges or {}).get(geometry_column))
     a5_expr = f"""a5_lonlat_to_cell(
         ST_X({point}),
         ST_Y({point}),
@@ -256,7 +255,7 @@ def add_a5_column(
 
     # Define the A5 SQL expression, keyed from a point on the sphere when the
     # edges are not planar (#1293).
-    point = representative_point_sql(geom_ref, nonplanar_edges_of_file(input_parquet, geom_col))
+    point = representative_point_sql(geom_ref, collect_nonplanar_edges(input_parquet).get(geom_col))
     sql_expression = f"""a5_lonlat_to_cell(
         ST_X({point}),
         ST_Y({point}),
@@ -315,11 +314,14 @@ def _add_a5_streaming(
     if should_stream_output(output_path):
         verbose = False
 
-    def make_query(source: str, con, source_crs: str | None = None) -> str:
+    def make_query(
+        source: str, con, source_crs: str | None = None, edges: dict | None = None
+    ) -> str:
         """Build the add A5 query for streaming source.
 
         ``source_crs`` is the streamed input's CRS (from its Arrow geo metadata),
-        used to reproject non-CRS84 input to lon/lat before keying (#525).
+        used to reproject non-CRS84 input to lon/lat before keying (#525);
+        ``edges`` the input's non-planar edges, file or stream (#1293).
         """
         # Load A5 extension
         load_community_extension(con, "a5")
@@ -339,7 +341,6 @@ def _add_a5_streaming(
         if verbose:
             debug(f"Using geometry column: {geom_col}")
 
-        edges = nonplanar_edges_of_file(input_path, geom_col)
         return _make_add_a5_query(source, geom_col, a5_column_name, resolution, source_crs, edges)
 
     execute_transform(

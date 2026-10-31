@@ -16,6 +16,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.add.quadkey import register_quadkey_udf
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.duckdb_utils import fetch_one, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
@@ -23,7 +24,6 @@ from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.logging_config import info as log_info
-from geoparquet_io.core.partition.auto_resolution import _register_quadkey_udf
 from geoparquet_io.core.process.aggregate.common import (
     geometry_to_geom_expr,
 )
@@ -157,7 +157,7 @@ def plan_bands(
 
     bpc = bytes_per_cell or estimate_bytes_per_cell(info.num_attributes, info.out_geometry)
     probe_zoom = MAX_PROBE_ZOOM if max_probe_zoom is None else max(0, max_probe_zoom)
-    _register_quadkey_udf(con)
+    register_quadkey_udf(con)
     worst: dict[int | str, dict[int, int]] = {}
     for level in candidates:
         if info.scheme == "admin":

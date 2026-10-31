@@ -108,38 +108,20 @@ def warn_planar_math_for_file(op: str, input_path: str, geometry_column: str | N
     when none is given. A stdin stream has no file to read, so it is skipped.
     Detection never breaks the command: a failure is a debug line.
     """
-    from geoparquet_io.core.geometry_detection import find_primary_geometry_column
     from geoparquet_io.core.streaming import is_stdin
 
     if not input_path or is_stdin(input_path):
         return
     try:
-        column = geometry_column or find_primary_geometry_column(input_path)
-    except Exception as e:  # noqa: BLE001 - detection must never break a pipeline
-        debug(f"Could not read the edges of {input_path}: {e}")
-        return
-    if column:
-        _warn_planar_edges(op, column, nonplanar_edges_of_file(input_path, column))
-
-
-def nonplanar_edges_of_file(input_path: str | None, geometry_column: str) -> str | None:
-    """The file-path twin of :func:`nonplanar_edges_of_arrow_table`.
-
-    One column of ``write_funnels.collect_nonplanar_edges`` (the native
-    GEOGRAPHY type or the ``geo`` block). A stdin stream has no file to read,
-    so it is ``None``, as is a failure: detection never breaks a pipeline.
-    """
-    from geoparquet_io.core.streaming import is_stdin
-
-    if not input_path or is_stdin(input_path):
-        return None
-    try:
+        from geoparquet_io.core.geometry_detection import find_primary_geometry_column
         from geoparquet_io.core.write_funnels import collect_nonplanar_edges
 
-        return collect_nonplanar_edges(input_path).get(geometry_column)
+        column = geometry_column or find_primary_geometry_column(input_path)
+        edges = collect_nonplanar_edges(input_path).get(column) if column else None
     except Exception as e:  # noqa: BLE001 - detection must never break a pipeline
         debug(f"Could not read the edges of {input_path}: {e}")
-    return None
+        return
+    _warn_planar_edges(op, column, edges)
 
 
 def _warn_planar_edges(op: str, geometry_column: str, edges: str | None) -> None:

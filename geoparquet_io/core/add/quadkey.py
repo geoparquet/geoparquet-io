@@ -208,6 +208,21 @@ def _lat_lon_to_quadkey(lat: float, lon: float, level: int) -> str:
     return mercantile.quadkey(tile)
 
 
+def register_quadkey_udf(con) -> None:
+    """Register :func:`_lat_lon_to_quadkey` as ``lat_lon_to_quadkey(lat, lon, level)``.
+
+    The one quadkey keyer and its one latitude bound, for every path that keys
+    a quadkey in SQL: add, sort and partition, the partition resolution probe,
+    and the overview tile probe.
+    """
+    con.create_function(
+        "lat_lon_to_quadkey",
+        _lat_lon_to_quadkey,
+        ["DOUBLE", "DOUBLE", "INTEGER"],
+        "VARCHAR",
+    )
+
+
 def add_quadkey_table(
     table: pa.Table,
     quadkey_column_name: str = DEFAULT_QUADKEY_COLUMN_NAME,
@@ -275,12 +290,7 @@ def add_quadkey_table(
         con.execute("SET geometry_always_xy = true;")
 
         # Register Python UDF
-        con.create_function(
-            "lat_lon_to_quadkey",
-            _lat_lon_to_quadkey,
-            ["DOUBLE", "DOUBLE", "INTEGER"],
-            "VARCHAR",
-        )
+        register_quadkey_udf(con)
 
         registered = register_arrow(con, "__input_table", table)
 
@@ -465,12 +475,7 @@ def _add_quadkey_streaming(
         con.execute("SET geometry_always_xy = true;")
 
         # Register Python UDF for quadkey generation
-        con.create_function(
-            "lat_lon_to_quadkey",
-            _lat_lon_to_quadkey,
-            ["DOUBLE", "DOUBLE", "INTEGER"],
-            "VARCHAR",
-        )
+        register_quadkey_udf(con)
 
         # Get column names from query result (works with both table names and read_parquet)
         col_names = query_schema(con, f"SELECT * FROM {source}").names
@@ -675,12 +680,7 @@ def _add_quadkey_file_based(
 
     try:
         # Register Python UDF for quadkey generation
-        con.create_function(
-            "lat_lon_to_quadkey",
-            _lat_lon_to_quadkey,
-            ["DOUBLE", "DOUBLE", "INTEGER"],
-            "VARCHAR",
-        )
+        register_quadkey_udf(con)
 
         # Build the SQL expression based on calculation method
         if use_bbox:

@@ -29,11 +29,12 @@ import pytest
 import geoparquet_io as gpio
 from geoparquet_io.core.duckdb_utils import (
     fetch_one,
-    geoarrow_field_edges,
+    geoarrow_extension,
     get_duckdb_connection,
     planar_view,
     register_arrow,
 )
+from geoparquet_io.core.edges import geoarrow_type_edges
 from tests.native_geo_probes import conus_wkb, write_native_geo_only
 
 EXT_NAME = b"ARROW:extension:name"
@@ -147,6 +148,11 @@ def test_planar_view_limits_to_the_named_columns(table):
     assert view is table.table
 
 
+def geoarrow_field_edges(field):
+    """The owner's one GeoArrow reader, handed both carriers of ``field``."""
+    return geoarrow_type_edges(field.type, geoarrow_extension(field)[1])
+
+
 def _meta_field(raw):
     return pa.field("g", pa.binary(), metadata={EXT_NAME: b"geoarrow.wkb", EXT_META: raw})
 
@@ -171,10 +177,11 @@ def test_geoarrow_field_edges_planar_is_not_non_planar():
 
 
 def test_one_copy_of_the_edge_helpers():
-    """#1280's write-side names are the duckdb_utils helpers, not a second copy."""
+    """One GeoArrow edges reader, the owner's: no field-level copy survives."""
     from geoparquet_io.core import arrow_geo_metadata, duckdb_utils
 
-    assert arrow_geo_metadata._field_edges is geoarrow_field_edges
+    assert not hasattr(arrow_geo_metadata, "_field_edges")
+    assert not hasattr(duckdb_utils, "geoarrow_field_edges")
     assert not hasattr(duckdb_utils, "_nonplanar_edges")
 
 
@@ -196,7 +203,7 @@ def _with_geo_block(table, edges):
     ],
 )
 def test_register_follows_the_type_not_the_geo_block(rows, type_edges, block_edges, declared):
-    """``geoarrow_field_edges`` is the type's answer, on purpose.
+    """``geoarrow_type_edges`` is the type's answer, on purpose.
 
     DuckDB never reads a ``geo`` block: it refuses a column whose GeoArrow
     type is non-planar whatever the block says. So the register path relabels
@@ -372,8 +379,6 @@ PLANAR_MATH = {
     "add_kdtree": lambda t: t.add_kdtree(iterations=2),
     "simplify": lambda t: t.simplify(0.01),
     "reproject": lambda t: t.reproject("EPSG:3857"),
-    "aggregate_h3": lambda t: t.aggregate_h3(3),
-    "aggregate_a5": lambda t: t.aggregate_a5(3),
 }
 PLANAR_MARKER = "planar math"
 
@@ -407,15 +412,30 @@ def test_pass_through_op_does_not_warn(op, table, caplog):
 #: so they no longer run planar math and say nothing.
 CELL_KEYS = ["add_quadkey", "add_h3", "add_a5", "add_s2"]
 CELL_KEYS_CLI = {op: ["add", op.removeprefix("add_")] for op in CELL_KEYS}
+#: The aggregations key their cells from the same point (#1293).
+CELL_KEYS_CLI["aggregate"] = ["process", "aggregate", "h3", "--resolution", "3"]
+CELL_KEY_OPS = {**{op: PASS_THROUGH[op] for op in CELL_KEYS}, **NEW_GEOMETRY}
+CELL_KEY_OPS.pop("reproject_3857")
 
 
-@pytest.mark.parametrize("op", CELL_KEYS)
+@pytest.mark.parametrize("op", sorted(CELL_KEY_OPS))
 def test_cell_keys_on_spherical_data_do_not_warn(op, table, caplog):
     import logging
 
     with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
-        PASS_THROUGH[op](table)
+        CELL_KEY_OPS[op](table)
     assert _planar_warnings(caplog) == []
+
+
+def test_an_aggregation_keyed_from_a_bbox_still_warns(table, caplog):
+    """A bbox bucket point is the planar box's midpoint, which the caller chose."""
+    import logging
+
+    with_bbox = table.add_bbox()
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        with_bbox.aggregate_h3(3, bucket_point="bbox")
+    assert len(_planar_warnings(caplog)) == 1
 
 
 def test_planar_data_does_not_warn(rows, tmp_path, caplog):
@@ -447,7 +467,6 @@ PLANAR_MATH_CLI = {
     "add_kdtree": ["add", "kdtree", "--partitions", "4"],
     "simplify": ["process", "simplify", "--tolerance", "0.01"],
     "reproject": ["convert", "reproject", "--dst-crs", "EPSG:3857"],
-    "aggregate": ["process", "aggregate", "h3", "--resolution", "3"],
 }
 
 
@@ -478,7 +497,7 @@ def test_cell_key_cli_on_spherical_file_does_not_warn(op, native_geography, tmp_
     assert PLANAR_MARKER not in result.output
 
 
-@pytest.mark.parametrize("op", ["add_bbox", "simplify", "aggregate"])
+@pytest.mark.parametrize("op", ["add_bbox", "simplify"])
 def test_planar_only_cli_on_a_geo_block_spherical_file_warns(op, rows, tmp_path):
     """A 1.1 WKB file whose geo block declares spherical edges counts too.
 

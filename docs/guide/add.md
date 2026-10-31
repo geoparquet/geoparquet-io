@@ -33,7 +33,7 @@ The `add` commands enhance GeoParquet files with spatial indices, geometry metri
 !!! warning "Spherical edges and planar math"
     The values these commands compute treat edges as straight lines on the
     plane. That covers `bbox` and `kdtree`, and also `simplify`, `reproject`
-    and the `aggregate` commands. On
+    and an `aggregate` keyed from a bbox column (`--bucket-point bbox`). On
     a column with spherical edges they still run, and the values they add are
     the planar ones. The output keeps the column's edges, and each command or
     Python call logs one warning. A CLI input read from stdin is not checked.
@@ -48,8 +48,10 @@ The `add` commands enhance GeoParquet files with spatial indices, geometry metri
     sphere, not its planar centroid, so a line keys from its great-circle
     midpoint and a polar cap from the pole
     ([#1293](https://github.com/geoparquet/geoparquet-io/issues/1293)).
-    `quadkey` uses that point rather than the bbox column's midpoint. `h3`,
-    `s2` and `a5` key a CLI input read from stdin as planar.
+    `quadkey` uses that point rather than the bbox column's midpoint. A CLI
+    input read from stdin is keyed from the edges its own `geo` block states.
+    The `aggregate` commands and `partition --auto`'s resolution probe key
+    from the same point.
 
     === "CLI"
 
