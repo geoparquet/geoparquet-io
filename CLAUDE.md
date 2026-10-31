@@ -214,8 +214,9 @@ Additional patterns (not yet enforced):
 
 The collected-count ratchet in `tests/test_suite_budget.py` limits the fast suite using
 `tests/suite_budget.toml`; its numbers only go down, and raising one needs a reason in the PR.
-The per-test time cap is `timeout = 60` in `pyproject.toml`, with explicit timeout marks
-ratcheted by `max_timeout_marks` in `tests/suite_budget.toml`.
+The per-test time cap is `timeout = 60` in `pyproject.toml` (the fast lane's); the slow and
+docs-examples jobs pass `--timeout=600`, and explicit timeout marks are ratcheted by
+`max_timeout_marks` in `tests/suite_budget.toml`.
 The duplicate-body gate in `tests/test_duplicate_tests.py` checks test bodies and their
 execution context to prevent identical tests from growing back.
 
@@ -288,8 +289,8 @@ lane, and locally they time out and read as a flaky docs lane.
 ## One owner per concept
 
 Ask these owners for policy; callers pass explicit inputs instead of keeping local
-copies or compatibility wrappers. The guard set and migration notes are in
-`docs/guide/one-owner-migration.md` and ADR-0008.
+copies or compatibility wrappers. The guard set is in ADR-0008 and
+`docs/contributing.md` (owner guards).
 
 | Concept | Owner module | Public entry points |
 |---|---|---|

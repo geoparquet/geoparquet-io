@@ -268,7 +268,7 @@ See `CLAUDE.md` for full architecture details.
 ### Owner guards
 
 Each concept (writing a file, the memory ceiling, the `geo` block, CRS checks, HTTP
-retries, ...) has one owner module, and these checks fail a new copy of it (#1367):
+retries, ...) has one owner module, and these checks fail a new copy of it:
 
 - **G1, banned calls** — ruff `TID251` bans `pyarrow.parquet.write_table`/`ParquetWriter`,
   `psutil`, `os.sysconf`, `requests`, `httpx` and `urllib.request` outside their owners
@@ -336,7 +336,7 @@ An exemption is justified only for a reviewed semantic false positive, such as a
 benchmark measuring pyarrow itself, a scratch spool rather than a final write,
 or dynamic Click dispatch. Record the exact site, count and enduring reason in
 `scripts/owner_exemptions.toml`; dynamic vulture entries explain their dispatch
-beside the whitelist name. Review the source before keeping an allowance. A track
+beside the whitelist name. Review the source before keeping an allowance. An issue
 name or a promise to fix a copy later is not a permanent justification. Counts
 only go down; never raise a baseline or add an exemption to make a new copy pass.
 
