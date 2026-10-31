@@ -331,3 +331,15 @@ def test_column_crs_resolves_another_columns_crs():
     table = _table(geo=carried, extra={"other": pa.array([b"\x01"], pa.binary())})
     block = _compose(table, version="1.1", column_crs={"other": "OGC:CRS84"})
     assert "crs" not in block["columns"]["other"]  # the default, by omission
+
+
+def test_edges_and_column_edges_that_disagree_on_the_primary_are_refused():
+    with pytest.raises(ValueError, match="column_edges"):
+        _compose(_table(), version="1.1", edges="spherical", column_edges={"geometry": "planar"})
+
+
+def test_edges_and_column_edges_that_agree_are_one_answer():
+    block = _compose(
+        _table(), version="1.1", edges="spherical", column_edges={"geometry": "spherical"}
+    )
+    assert block["columns"]["geometry"]["edges"] == "spherical"

@@ -1326,6 +1326,9 @@ class GeoBlockOptions:
     orientation a spherical request implies. ``column_edges`` is
     ``{column: edges}`` as each column's data already has them (a post-write
     restore, a stream's resolved edges): mapped the same way, implying nothing.
+    The two are distinct inputs -- a request versus a fact about the data --
+    so naming the primary in ``column_edges`` with a value other than
+    ``edges`` is a contradiction the composer refuses (``ValueError``).
     ``encoding`` is the primary's output encoding as the writer
     knows it; with none given, 1.1-geoarrow keeps the native encoding the input
     declared (``geometry_info``'s), and otherwise the carried one stays, or WKB.
@@ -1588,8 +1591,10 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
        column's (``column_edges``, a secondary's declared ones) and the
        primary's request, mapped by
        :func:`~geoparquet_io.core.edges.edges_for_version` -- and the
-       ``orientation`` a spherical *request* implies (a description records
-       the edges as declared and implies nothing);
+       ``orientation`` a spherical *request* (``edges``) implies; the data's
+       own edges (``column_edges``) imply none, and the two disagreeing on the
+       primary raise (a description records the edges as declared and
+       implies nothing);
     5. the ``crs`` (:func:`~geoparquet_io.core.crs_utils.apply_output_crs`, the
        one CRS writer; a description records the CRS its source declares);
     6. ``custom_metadata``: coverings merged into the primary's, other keys on top;
@@ -1633,6 +1638,7 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
     # declared: its version is not an output decision, and the write that
     # re-composes it maps them to what the output can say.
     carry_edges(geo_meta, None)
+    _refuse_contradicting_edges(options, primary)
     by_col = {**secondaries.edges, **(options.column_edges or {})}
     if options.edges:
         by_col[primary] = options.edges
@@ -1678,6 +1684,16 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
     )
     # Steps 10-13.
     return _covering_gates(geo_meta, view, version, options.verbose)
+
+
+def _refuse_contradicting_edges(options: GeoBlockOptions, primary: str) -> None:
+    """``edges`` (the request) and ``column_edges`` (the data) must agree on the primary."""
+    data = (options.column_edges or {}).get(primary, options.edges)
+    if options.edges and primary in (options.column_edges or {}) and data != options.edges:
+        raise ValueError(
+            f"compose_geo_block: edges={options.edges!r} is requested for '{primary}' "
+            f"but column_edges says its data has {data!r}"
+        )
 
 
 def composes_a_covering(source: GeoBlockSource, options: GeoBlockOptions) -> bool:
