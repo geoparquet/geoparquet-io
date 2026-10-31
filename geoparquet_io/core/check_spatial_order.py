@@ -416,14 +416,12 @@ def _compute_data_extent(row_group_bboxes: list[dict]) -> dict:
     Raises:
         ValueError: If row_group_bboxes is empty.
     """
+    from geoparquet_io.core.geo_metadata import row_group_geometry_stats
+
     if not row_group_bboxes:
         raise ValueError("No row group bboxes provided")
-    return {
-        "xmin": min(b["xmin"] for b in row_group_bboxes),
-        "ymin": min(b["ymin"] for b in row_group_bboxes),
-        "xmax": max(b["xmax"] for b in row_group_bboxes),
-        "ymax": max(b["ymax"] for b in row_group_bboxes),
-    }
+    bbox = row_group_geometry_stats(row_group_bboxes).bbox
+    return dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox, strict=True))
 
 
 def _generate_sample_query_bboxes(

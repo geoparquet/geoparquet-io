@@ -23,7 +23,6 @@ from geoparquet_io.core.crs_utils import (
     is_crs84_identifier,
     is_default_crs,
     is_geographic_crs,
-    merge_longitude_ranges,
 )
 from geoparquet_io.core.duckdb_metadata import (
     detect_geometry_columns,
@@ -44,7 +43,11 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geo_metadata import sanitized_carried_geo_of_file
+from geoparquet_io.core.geo_metadata import (
+    GeometryStats,
+    merged_geometry_stats,
+    sanitized_carried_geo_of_file,
+)
 from geoparquet_io.core.json_output import dumps_json, to_jsonable
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.metadata_utils import (
@@ -391,16 +394,10 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
     if parquet_type != "No Parquet geo logical type":
         native_stats = get_aggregated_native_geo_stats(parquet_file, primary_column, con=con)
 
-        # Use native bbox if GeoParquet bbox not available. Native statistics
-        # order Z after XY ([xmin, ymin, xmax, ymax, zmin, zmax]); this bbox is
-        # read as GeoParquet's interleaved form downstream, so reorder it.
+        # Use native bbox if GeoParquet bbox not available (the fold returns
+        # the spec's interleaved layout, as a geo bbox has).
         if not effective_bbox and native_stats.get("bbox"):
-            native = native_stats["bbox"]
-            effective_bbox = (
-                [native[0], native[1], native[4], native[2], native[3], native[5]]
-                if len(native) == 6
-                else native
-            )
+            effective_bbox = native_stats["bbox"]
 
         # Use native geometry_types if GeoParquet geometry_types not available
         if not effective_geometry_types and native_stats.get("geometry_types"):
@@ -1306,11 +1303,11 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
 
     total_rows = 0
     total_size_bytes = 0
-    x_ranges: list[tuple[float, float]] = []
-    # The antimeridian reading of xmin > xmax belongs to geographic CRS only, so
-    # one projected member is enough to disqualify it for the whole partition.
+    # Each file's declared bbox, folded once below by the stats owner. The wrap
+    # reading of xmin > xmax belongs to geographic CRS only, so one projected
+    # member is enough to disqualify it for the whole partition (#886).
+    file_boxes: list[GeometryStats] = []
     all_geographic = True
-    combined_bbox = None  # [xmin, ymin, xmax, ymax]
     compressions = set()
     geoparquet_versions = set()
     per_file_info = []
@@ -1348,14 +1345,8 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
         # not xmax/ymax; _bbox_xy pulls the X/Y bounds out of any of the three.
         xy = _bbox_xy(geo_info.get("bbox") or [])
         if xy:
-            xmin, ymin, xmax, ymax = xy
-            x_ranges.append((xmin, xmax))
+            file_boxes.append(GeometryStats(list(xy), []))
             all_geographic = all_geographic and is_geographic_crs(geo_info.get("crs"))
-            if combined_bbox is None:
-                combined_bbox = [xmin, ymin, xmax, ymax]
-            else:
-                combined_bbox[1] = min(combined_bbox[1], ymin)
-                combined_bbox[3] = max(combined_bbox[3], ymax)
 
         # Check schema consistency
         from geoparquet_io.core.duckdb_metadata import get_usable_columns
@@ -1381,17 +1372,9 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
             }
         )
 
-    if combined_bbox is not None:
-        if all_geographic:
-            # xmin > xmax in any file means an antimeridian-crossing extent, which
-            # min/max would turn into its complement (RFC 7946, 5.2).
-            combined_bbox[0], combined_bbox[2] = merge_longitude_ranges(x_ranges)
-        else:
-            # merge_longitude_ranges splits a wrapping range at +/-180, which is
-            # meaningless in projected units: for a non-geographic CRS the spec
-            # gives the bbox as plain minima then maxima, so union them plainly.
-            combined_bbox[0] = min(r[0] for r in x_ranges)
-            combined_bbox[2] = max(r[1] for r in x_ranges)
+    # The one fold: in geographic data xmin > xmax is an antimeridian wrap,
+    # merged on the circle (RFC 7946, 5.2); projected data unions plainly.
+    combined_bbox = merged_geometry_stats(file_boxes, geographic=all_geographic).bbox
 
     return {
         "file_count": len(per_file_info),

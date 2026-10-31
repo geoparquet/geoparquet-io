@@ -22,7 +22,6 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.crs_utils import (
     _projjson_from_authority,
     geoarrow_crs_to_projjson,
-    merge_longitude_ranges,
 )
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
@@ -42,7 +41,7 @@ from geoparquet_io.core.file_utils import (
     is_partition_path,
     resolve_file_url,
 )
-from geoparquet_io.core.geo_metadata import raw_geo_of_file
+from geoparquet_io.core.geo_metadata import raw_geo_of_file, row_group_geometry_stats
 from geoparquet_io.core.geoarrow_compat import srid_crs_as_text
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.remote import is_remote_url, is_s3_url, needs_httpfs
@@ -1023,30 +1022,6 @@ def detect_native_geometry_columns(parquet_file: str, con=None) -> dict[str, str
     return {name: kind for name, kind in geo_columns.items() if name not in nested}
 
 
-def get_bbox_from_row_group_stats(
-    parquet_file: str, bbox_column: str = "bbox", con=None
-) -> list[float] | None:
-    """
-    Extract overall bbox from row group statistics.
-
-    Queries parquet_metadata() for bbox columns (format: 'bbox, xmin' etc).
-    Returns [xmin, ymin, xmax, ymax] or None if not available.
-    """
-    # DuckDB uses 'bbox, xmin' format for path_in_schema (comma-space)
-    # Use FILTER to aggregate stats for each bbox component
-    # Use TRY_CAST to handle non-numeric stats gracefully
-    rows = _parquet_metadata_rows(
-        parquet_file,
-        con,
-        lambda source: f"SELECT {_bbox_stats_aggregates(bbox_column)} FROM {source}",
-        load_spatial=None,
-    )
-    result = tuple(rows[0].values()) if rows else None
-    if result and all(v is not None for v in result):
-        return [float(v) for v in result]
-    return None
-
-
 def _bbox_stats_aggregates(bbox_column: str) -> str:
     """The four ``MIN/MAX(stats) FILTER`` columns over a bbox struct's chunk statistics."""
 
@@ -1283,7 +1258,7 @@ def get_native_geo_stats_by_row_group(
         None if the file carries no column of that name, otherwise one dict per
         column chunk carrying statistics, ordered by row group: row_group_id,
         xmin/ymin/xmax/ymax, zmin/zmax (None when absent) and geometry_types
-        (raw type codes, for :func:`_format_geo_types`).
+        (raw type codes, named by ``geo_metadata.geometry_type_name``).
 
     Raises:
         Whatever DuckDB raises when the file itself cannot be read. ``None``
@@ -1355,21 +1330,11 @@ def get_native_geo_statistics(parquet_file: str, geometry_column: str, con=None)
     if not chunks:
         return None
 
-    stats: dict = {}
-
     # Both halves must describe the same column chunk: reporting one row group's
     # bbox beside another's geometry types would be a dict that matches no row
     # group in the file.
     first = next((c for c in chunks if c["xmin"] is not None), chunks[0])
-    if first["xmin"] is not None:
-        stats["bbox"] = [first["xmin"], first["ymin"], first["xmax"], first["ymax"]]
-        if first["zmin"] is not None:
-            stats["bbox"].extend([first["zmin"], first["zmax"]])
-
-    if first["geometry_types"]:
-        stats["geometry_types"] = _format_geo_types(first["geometry_types"])
-
-    return stats if stats else None
+    return aggregate_native_geo_stats([first]) or None
 
 
 def get_aggregated_native_geo_stats(parquet_file: str, geometry_column: str, con=None) -> dict:
@@ -1394,37 +1359,23 @@ def get_aggregated_native_geo_stats(parquet_file: str, geometry_column: str, con
 
 
 def aggregate_native_geo_stats(chunks: list[dict]) -> dict:
-    """Combine per-column-chunk statistics into one bbox and type list.
+    """Per-column-chunk statistics as one ``{'bbox', 'geometry_types'}`` dict.
 
-    A chunk whose ``xmin`` exceeds its ``xmax`` wraps the antimeridian, which
-    the Parquet geospatial statistics permit; ``merge_longitude_ranges`` unions
-    the X ranges on the circle so the wrap is not inverted into its complement.
+    A reader over ``geo_metadata.row_group_geometry_stats``, the one fold: X
+    merged on the circle (a chunk may wrap the antimeridian), Z over the chunks
+    that carry it, the bbox in the spec's interleaved layout, and spec type
+    names only (code 0 and unknown values dropped). A key is absent when
+    nothing supplies it.
 
     Args:
         chunks: Output of :func:`get_native_geo_stats_by_row_group`
-
-    Returns:
-        dict with 'bbox' (list of 4+ floats) and 'geometry_types' (list of strings)
     """
+    folded = row_group_geometry_stats(chunks)
     stats: dict = {}
-
-    with_bbox = [c for c in chunks if c["xmin"] is not None]
-    if with_bbox:
-        xmin, xmax = merge_longitude_ranges([(c["xmin"], c["xmax"]) for c in with_bbox])
-        stats["bbox"] = [
-            xmin,
-            min(c["ymin"] for c in with_bbox),
-            xmax,
-            max(c["ymax"] for c in with_bbox),
-        ]
-        with_z = [c for c in with_bbox if c["zmin"] is not None]
-        if with_z:
-            stats["bbox"].extend([min(c["zmin"] for c in with_z), max(c["zmax"] for c in with_z)])
-
-    raw_types = [t for c in chunks for t in c["geometry_types"] if t or t == 0]
-    if raw_types:
-        stats["geometry_types"] = _format_geo_types(raw_types)
-
+    if folded.bbox is not None:
+        stats["bbox"] = folded.bbox
+    if folded.geometry_types:
+        stats["geometry_types"] = folded.geometry_types
     return stats
 
 
@@ -1477,78 +1428,3 @@ def get_per_row_group_native_geo_stats(
     except Exception:
         return []
     return _chunk_bboxes(chunks or [])
-
-
-def _format_geo_types(geo_types: list) -> list[str]:
-    """
-    Format geo_types from parquet_metadata into human-readable strings.
-
-    DuckDB may return strings like 'polygon' or WKB integer codes.
-    This normalizes them to standard names like 'Polygon', 'Point Z', etc.
-    """
-    # WKB type code to name mapping (from Parquet geo spec)
-    WKB_TYPE_CODES = {
-        # XY
-        1: "Point",
-        2: "LineString",
-        3: "Polygon",
-        4: "MultiPoint",
-        5: "MultiLineString",
-        6: "MultiPolygon",
-        7: "GeometryCollection",
-        # XYZ (add 1000)
-        1001: "Point Z",
-        1002: "LineString Z",
-        1003: "Polygon Z",
-        1004: "MultiPoint Z",
-        1005: "MultiLineString Z",
-        1006: "MultiPolygon Z",
-        1007: "GeometryCollection Z",
-        # XYM (add 2000)
-        2001: "Point M",
-        2002: "LineString M",
-        2003: "Polygon M",
-        2004: "MultiPoint M",
-        2005: "MultiLineString M",
-        2006: "MultiPolygon M",
-        2007: "GeometryCollection M",
-        # XYZM (add 3000)
-        3001: "Point ZM",
-        3002: "LineString ZM",
-        3003: "Polygon ZM",
-        3004: "MultiPoint ZM",
-        3005: "MultiLineString ZM",
-        3006: "MultiPolygon ZM",
-        3007: "GeometryCollection ZM",
-    }
-
-    formatted = (
-        WKB_TYPE_CODES.get(t) if isinstance(t, int) else _spec_type_from_string(str(t))
-        for t in geo_types
-    )
-    # A name that is not a GeoParquet geometry type (code 0, an unknown code
-    # or string) is dropped: geometry_types holds only spec values.
-    return sorted({name for name in formatted if name})
-
-
-def _spec_type_from_string(raw: str) -> str | None:
-    """DuckDB's ``polygon`` / ``polygon_z`` / ``multipolygon zm`` as the spec name."""
-    lowered = raw.lower().replace("_", " ").strip()
-    for suffix in (" zm", " z", " m", "zm", "z", "m", ""):
-        if not lowered.endswith(suffix):
-            continue
-        base = _GEOM_TYPE_NAMES.get(lowered[: len(lowered) - len(suffix)].strip())
-        if base:
-            return base + (f" {suffix.strip().upper()}" if suffix else "")
-    return None
-
-
-_GEOM_TYPE_NAMES = {
-    "point": "Point",
-    "linestring": "LineString",
-    "polygon": "Polygon",
-    "multipoint": "MultiPoint",
-    "multilinestring": "MultiLineString",
-    "multipolygon": "MultiPolygon",
-    "geometrycollection": "GeometryCollection",
-}

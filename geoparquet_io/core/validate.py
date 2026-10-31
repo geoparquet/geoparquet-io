@@ -61,9 +61,11 @@ from geoparquet_io.core.geo_metadata import (
     QuerySource,
     bounds_of,
     covering_lacks_bbox,
+    geometry_type_name,
     geometry_types_of,
     is_covering_path,
     read_raw_geo,
+    row_group_geometry_stats,
     split_zm_suffix,
 )
 from geoparquet_io.core.geometry_detection import (
@@ -2818,7 +2820,10 @@ def _check_native_geo_statistics(
         bbox = aggregate_native_geo_stats(chunks).get("bbox")
 
         if bbox:
-            geo_bbox = dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox[:4], strict=True))
+            # The fold returns the spec's interleaved layout (Z between XY halves).
+            half = len(bbox) // 2
+            xy = (bbox[0], bbox[1], bbox[half], bbox[half + 1])
+            geo_bbox = dict(zip(("xmin", "ymin", "xmax", "ymax"), xy, strict=True))
             # Validate that bbox values are reasonable (not garbage from parsing errors)
             if not _is_bbox_valid(geo_bbox):
                 return ValidationCheck(
@@ -2922,10 +2927,10 @@ def _check_native_geo_stats_contains_data(
                 category="parquet_geo_types",
             )
 
-        # Native statistics order Z after XY ([xmin, ymin, xmax, ymax, zmin,
-        # zmax]), unlike GeoParquet's interleaved metadata bbox -- so the first
-        # four values are the X/Y bounds here and _bbox_xy does not apply.
-        geo_bbox = dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox[:4], strict=True))
+        # The fold returns the spec's interleaved layout (Z between XY halves).
+        half = len(bbox) // 2
+        xy = (bbox[0], bbox[1], bbox[half], bbox[half + 1])
+        geo_bbox = dict(zip(("xmin", "ymin", "xmax", "ymax"), xy, strict=True))
 
         # Validate that bbox values are reasonable (not garbage from parsing errors)
         if not _is_bbox_valid(geo_bbox):
@@ -3045,9 +3050,9 @@ def _check_native_geo_types_match(
 
         from geoparquet_io.core.duckdb_metadata import get_native_geo_stats_by_row_group
 
-        # Get declared geo_types from parquet metadata
+        # Declared geo_types from parquet metadata, folded and named by the owner.
         chunks = get_native_geo_stats_by_row_group(parquet_file, geom_col, con) or []
-        declared_types = {t.lower() for c in chunks for t in c["geometry_types"] if t}
+        declared_types = set(row_group_geometry_stats(chunks).geometry_types)
 
         # Empty list means "not known" - this is valid per spec
         if not declared_types:
@@ -3058,19 +3063,15 @@ def _check_native_geo_types_match(
                 category="parquet_geo_types",
             )
 
-        # Sample actual geometry types from the data. DuckDB's geo_types
-        # naming is dimension-aware ("linestring_m"): the owner's spec name
-        # ("LineString M") spelled that way compares suffix and all.
+        # Sample actual geometry types from the data, in the same spec names
+        # ("LineString M"), so the comparison covers the suffix too.
         quoted_col = quote_identifier(geom_col)
         limit = f"LIMIT {sample_size}" if sample_size else ""
         sample = f"""
             SELECT {quoted_col} FROM read_parquet({sql_path(raw_url)})
             WHERE {quoted_col} IS NOT NULL {limit}
         """
-        actual_types = {
-            t.lower().replace(" ", "_")
-            for t in geometry_types_of(QuerySource(con, sample), geom_col)
-        }
+        actual_types = set(geometry_types_of(QuerySource(con, sample), geom_col))
 
         # Check if actual types are a subset of declared types
         undeclared = actual_types - declared_types
@@ -3137,13 +3138,10 @@ def _check_native_columns_in_metadata(schema_info: list, columns: dict) -> Valid
 def _stats_geometry_type_name(raw) -> str:
     """'point_z' / 1001 from parquet_metadata().geo_types -> 'Point Z'.
 
-    Named by the row-group stats fold's own namer, so this check and the fold
-    agree; a value that is no spec type comes back as written.
+    Named by the one type table (``geo_metadata.geometry_type_name``), so this
+    check and the fold agree; a value that is no spec type comes back as written.
     """
-    from geoparquet_io.core.duckdb_metadata import _format_geo_types
-
-    names = _format_geo_types([raw])
-    return names[0] if names else str(raw)
+    return geometry_type_name(raw) or str(raw)
 
 
 def _check_geometry_types_match_stats(
@@ -3768,13 +3766,15 @@ def _get_geometry_bounds(
 ) -> tuple[float, float, float, float, int] | None:
     """``(min_x, max_x, min_y, max_y, rows checked)`` of the sampled geometries, or None."""
     if _is_geoarrow_encoding(encoding):
-        # Native columns carry coordinates, not serialized geometries: the
-        # per-row coordinate bounds are measured as a bbox struct.
+        # The owner reads a GeoArrow coordinate struct itself: an EMPTY (NaN or
+        # no coordinates) is skipped and an infinite coordinate raises, as on
+        # every other path.
+        quoted = quote_identifier(geom_col)
         sample = f"""
-            SELECT {{'xmin': xmin, 'ymin': ymin, 'xmax': xmax, 'ymax': ymax}} AS __bbox
-            FROM ({_geoarrow_bounds_subquery(raw_url, geom_col, encoding, limit_clause)})
+            SELECT {quoted} FROM read_parquet({sql_path(raw_url)})
+            WHERE {quoted} IS NOT NULL
+            {limit_clause}
         """
-        bbox = bounds_of(QuerySource(con, sample), geom_col, bbox_column="__bbox")
     else:
         read = _geometry_read(con, raw_url, geom_col)
         sample = f"""
@@ -3783,7 +3783,7 @@ def _get_geometry_bounds(
             WHERE {read.present_sql}
             {limit_clause}
         """
-        bbox = bounds_of(QuerySource(con, sample), geom_col)
+    bbox = bounds_of(QuerySource(con, sample), geom_col)
     if bbox is None:
         return None
     total = fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sample})"))[0]
@@ -3879,6 +3879,15 @@ def _check_coordinates_valid_for_crs(
             category="data_validation",
         )
 
+    except GeometryError as e:
+        # The bounds owner's refusal: an infinite coordinate has no bounds.
+        return ValidationCheck(
+            name=check_name,
+            status=CheckStatus.FAILED,
+            message="coordinates are not finite",
+            details=str(e),
+            category="data_validation",
+        )
     except Exception as e:
         if _is_geoarrow_encoding(encoding):
             return _geoarrow_layout_error(check_name, encoding, "geometry coordinates", e)

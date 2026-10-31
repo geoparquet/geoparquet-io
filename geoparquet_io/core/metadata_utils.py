@@ -13,9 +13,7 @@ from rich.text import Text
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.duckdb_metadata import (
-    aggregate_native_geo_stats,
     detect_geometry_columns,
-    get_bbox_from_row_group_stats,
     get_file_metadata,
     get_per_row_group_bbox_stats,
     get_per_row_group_native_geo_stats,
@@ -23,7 +21,11 @@ from geoparquet_io.core.duckdb_metadata import (
     get_schema_info,
     parse_geometry_logical_type,
 )
-from geoparquet_io.core.geo_metadata import is_covering_path, sanitized_carried_geo_of_file
+from geoparquet_io.core.geo_metadata import (
+    is_covering_path,
+    row_group_geometry_stats,
+    sanitized_carried_geo_of_file,
+)
 from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.parquet_writer import declared_geoparquet_version
@@ -31,20 +33,14 @@ from geoparquet_io.core.sizing import format_size
 
 
 def _calculate_overall_bbox(row_group_stats: list[dict]) -> dict[str, float] | None:
-    """The file's bbox from its row-group extents, through the one row-group fold.
+    """The file's bbox from its row-group extents, through the one fold.
 
-    ``aggregate_native_geo_stats`` merges the X ranges on the circle, so a row
+    ``geo_metadata.row_group_geometry_stats`` merges X on the circle, so a row
     group that wraps the antimeridian (xmin > xmax) is not inverted into its
-    complement, as a plain min/max did.
+    complement; a row group missing a bound is skipped.
     """
-    keys = ("xmin", "ymin", "xmax", "ymax")
-    chunks = [
-        {**{k: rg[k] for k in keys}, "zmin": None, "zmax": None, "geometry_types": []}
-        for rg in row_group_stats
-        if all(rg.get(k) is not None for k in keys)
-    ]
-    bbox = aggregate_native_geo_stats(chunks).get("bbox")
-    return dict(zip(keys, bbox[:4], strict=True)) if bbox else None
+    bbox = row_group_geometry_stats(row_group_stats).bbox
+    return dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox, strict=True)) if bbox else None
 
 
 def has_parquet_geo_row_group_stats(parquet_file: str, geometry_column: str | None = None) -> dict:
@@ -129,8 +125,8 @@ def extract_bbox_from_row_group_stats(
     if not bbox_col_name:
         return None
 
-    # Get overall bbox from row group stats using DuckDB
-    return get_bbox_from_row_group_stats(parquet_file, bbox_col_name)
+    # The covering's per-row-group statistics, folded the one way.
+    return row_group_geometry_stats(get_per_row_group_bbox_stats(parquet_file, bbox_col_name)).bbox
 
 
 def _build_row_group_json(rg_id: int, cols_in_rg: list, geo_columns: dict) -> dict:

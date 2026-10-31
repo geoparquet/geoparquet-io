@@ -139,9 +139,10 @@ def is_levelled_overview(schema_or_metadata) -> bool:
 # Geometry Type Mappings
 # =============================================================================
 
-# WKB geometry type codes to GeoParquet base names (2D types)
+#: The one geometry-type table: WKB base type code -> GeoParquet spec name.
+#: Code 0 ("Geometry", type unknown) names no spec type and has no entry, so
+#: every reader drops it rather than inventing an "Unknown" type.
 _GEOMETRY_TYPE_CODES = {
-    0: "Unknown",
     1: "Point",
     2: "LineString",
     3: "Polygon",
@@ -158,6 +159,10 @@ _DIMENSION_SUFFIXES = {
     2: " M",  # M dimension (codes 2001-2007)
     3: " ZM",  # ZM dimensions (codes 3001-3007)
 }
+
+#: The same names keyed by their upper-case spelling, which is how DuckDB's
+#: ``ST_GeometryType`` and the Parquet statistics' strings ("polygon_z") name them.
+_SPEC_TYPE_BY_UPPER = {name.upper(): name for name in _GEOMETRY_TYPE_CODES.values()}
 
 # geoarrow's Dimensions enum (XY=1, XYZ=2, XYM=3, XYZM=4) to the WKB type
 # code's dimensional modifier above. UNSPECIFIED (-1) and UNKNOWN (0) have no
@@ -1601,17 +1606,6 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
 #: How close to +/-180 data must reach before the antimeridian scan runs.
 _ANTIMERIDIAN_EPS = 1e-6
 
-# DuckDB ST_GeometryType names ("POINT") -> GeoParquet spec names ("Point").
-_DUCKDB_TO_SPEC_TYPE = {
-    "POINT": "Point",
-    "LINESTRING": "LineString",
-    "POLYGON": "Polygon",
-    "MULTIPOINT": "MultiPoint",
-    "MULTILINESTRING": "MultiLineString",
-    "MULTIPOLYGON": "MultiPolygon",
-    "GEOMETRYCOLLECTION": "GeometryCollection",
-}
-
 
 def split_zm_suffix(name: str) -> tuple[str, str]:
     """Split a spec geometry type into (base, suffix): 'Point ZM' -> ('Point', ' ZM').
@@ -1651,26 +1645,68 @@ class GeometryStats:
 _NO_STATS = GeometryStats(None, [])
 
 
-def merged_geometry_stats(parts) -> GeometryStats:
-    """The stats of the union of the sources ``parts`` were measured on.
+def merged_geometry_stats(parts, *, geographic: bool = True) -> GeometryStats:
+    """The one fold: the stats of the union of what ``parts`` were measured on.
 
-    For a writer that measures batch by batch: each batch's
-    :func:`geometry_stats_of`, merged, is the whole stream's -- the types'
-    union and the bboxes' planar union.
+    Each part's bbox is a spec bbox, ``[xmin, ymin, xmax, ymax]`` or the 6-value
+    ``[xmin, ymin, zmin, xmax, ymax, zmax]``, or None. X is merged on the
+    circle (``crs_utils.merge_longitude_ranges``), so a part whose xmin exceeds
+    its xmax -- an antimeridian wrap, which a bbox and the Parquet statistics
+    both permit -- is not inverted into its complement; with no wrapping part
+    that is plain min/max. Y is min/max; Z is merged over the parts that carry
+    one and makes the result 6 values. Types are the sorted union.
+
+    ``geographic=False`` is for coordinates known to be projected: the wrap
+    reading splits at +/-180, meaningless in metres, so X is plain min/max
+    there (#886) -- xmin > xmax in a projected bbox is broken metadata.
+
+    Batch writers, row-group statistics readers and multi-file summaries all
+    fold here.
     """
+    from geoparquet_io.core.crs_utils import merge_longitude_ranges
+
+    parts = list(parts)
     boxes = [p.bbox for p in parts if p.bbox is not None]
     types = sorted({t for p in parts for t in p.geometry_types})
     if not boxes:
         return GeometryStats(None, types)
-    return GeometryStats(
-        [
-            min(b[0] for b in boxes),
-            min(b[1] for b in boxes),
-            max(b[2] for b in boxes),
-            max(b[3] for b in boxes),
-        ],
-        types,
-    )
+    xy = [_bbox_xy4(b) for b in boxes]
+    if geographic:
+        xmin, xmax = merge_longitude_ranges([(b[0], b[2]) for b in xy])
+    else:
+        xmin, xmax = min(b[0] for b in xy), max(b[2] for b in xy)
+    bbox = [xmin, min(b[1] for b in xy), xmax, max(b[3] for b in xy)]
+    zs = [(b[2], b[5]) for b in boxes if len(b) == 6]
+    if zs:
+        bbox = [bbox[0], bbox[1], min(z[0] for z in zs), bbox[2], bbox[3], max(z[1] for z in zs)]
+    return GeometryStats(bbox, types)
+
+
+def _bbox_xy4(bbox) -> list[float]:
+    """``[xmin, ymin, xmax, ymax]`` of a 4- or 6-value spec bbox."""
+    half = len(bbox) // 2
+    return [bbox[0], bbox[1], bbox[half], bbox[half + 1]]
+
+
+def row_group_geometry_stats(chunks) -> GeometryStats:
+    """The file's stats from its per-row-group statistics, through the one fold.
+
+    ``chunks`` are dicts with ``xmin``..``ymax``, optional ``zmin``/``zmax``
+    and ``geometry_types`` (WKB codes or DuckDB strings), as the Parquet
+    geospatial statistics readers in ``duckdb_metadata`` return them. A chunk
+    without an extent still contributes its types; the bbox comes back in the
+    spec's interleaved layout.
+    """
+    parts = []
+    for chunk in chunks:
+        bbox = None
+        if all(chunk.get(k) is not None for k in ("xmin", "ymin", "xmax", "ymax")):
+            bbox = [chunk["xmin"], chunk["ymin"], chunk["xmax"], chunk["ymax"]]
+            if chunk.get("zmin") is not None:
+                bbox = [bbox[0], bbox[1], chunk["zmin"], bbox[2], bbox[3], chunk["zmax"]]
+        names = {geometry_type_name(t) for t in chunk.get("geometry_types") or []}
+        parts.append(GeometryStats(bbox, sorted(n for n in names if n)))
+    return merged_geometry_stats(parts)
 
 
 def _non_finite_error(column: str, example: str) -> Exception:
@@ -1747,7 +1783,7 @@ def _spec_type_name(duckdb_type: str) -> str:
     base keeps its own spelling and its suffix once (``TRIANGLE Z``)."""
     base, suffix = split_zm_suffix(duckdb_type)
     base = base.upper().removeprefix("ST_")
-    return _DUCKDB_TO_SPEC_TYPE.get(base, base) + suffix
+    return _SPEC_TYPE_BY_UPPER.get(base, base) + suffix
 
 
 _FINITE_SQL = "isfinite(__x0) AND isfinite(__y0) AND isfinite(__x1) AND isfinite(__y1)"
@@ -1839,7 +1875,7 @@ def _arrow_types(wkb, verbose: bool) -> list[str]:
         if verbose:
             debug(f"Could not compute geometry_types: {e}")
         return []
-    names = sorted({_get_geometry_type_name(code) for code in codes})
+    names = sorted({n for n in map(_get_geometry_type_name, codes) if n})
     if verbose:
         debug(f"Computed geometry_types from data: {names}")
     return names
@@ -2429,25 +2465,36 @@ def declare_carried_bbox_column(
 # =============================================================================
 
 
-def _get_geometry_type_name(code: int) -> str:
+def _get_geometry_type_name(code: int) -> str | None:
+    """WKB type code -> spec name ("Point Z" for 1001), or None for no spec type.
+
+    Code 0, an unknown base (8, 1008) or an unknown dimension (4001) is None:
+    a ``geometry_types`` list holds only spec values, so callers drop it.
     """
-    Convert WKB geometry type code to GeoParquet geometry type name.
-
-    Handles 2D types (0-7) and Z/M/ZM variants (1001-1007, 2001-2007, 3001-3007).
-
-    Args:
-        code: WKB geometry type code
-
-    Returns:
-        GeoParquet geometry type name (e.g., "Point", "Point Z", "Polygon ZM")
-    """
-    # Extract base type (0-7) and dimensional modifier (0, 1, 2, or 3)
-    base_type = code % 1000
-    dimension = code // 1000
-
-    base_name = _GEOMETRY_TYPE_CODES.get(base_type, "Unknown")
-    if base_name == "Unknown":
-        return "Unknown"
-
-    suffix = _DIMENSION_SUFFIXES.get(dimension, "")
+    dimension, base_type = divmod(int(code), 1000)
+    base_name = _GEOMETRY_TYPE_CODES.get(base_type)
+    suffix = _DIMENSION_SUFFIXES.get(dimension)
+    if base_name is None or suffix is None:
+        return None
     return base_name + suffix
+
+
+def geometry_type_name(raw) -> str | None:
+    """A geometry type as the spec names it, from a WKB code or a DuckDB string.
+
+    ``1003``, ``'polygon_z'``, ``'POLYGON Z'`` and ``'Polygon Z'`` all read as
+    ``'Polygon Z'``; code 0 and anything that is no spec type read as None.
+    The one reader of the Parquet geospatial statistics' ``geo_types``.
+    """
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return _get_geometry_type_name(raw)
+    if not isinstance(raw, str):
+        return None
+    text = raw.replace("_", " ").strip().upper()
+    for suffix in (" ZM", " Z", " M", ""):
+        if suffix and not text.endswith(suffix):
+            continue
+        base = _SPEC_TYPE_BY_UPPER.get(text[: len(text) - len(suffix)].strip())
+        if base:
+            return base + suffix
+    return None

@@ -457,8 +457,8 @@ class TestGetGeometryTypeName:
         assert not hasattr(derive_geo_from_file, "_GEOMETRY_TYPE_CODES")
 
     def test_2d_types(self):
-        """Test 2D geometry types (codes 0-7)."""
-        assert _get_geometry_type_name(0) == "Unknown"
+        """Test 2D geometry types (codes 1-7); code 0 names no spec type."""
+        assert _get_geometry_type_name(0) is None
         assert _get_geometry_type_name(1) == "Point"
         assert _get_geometry_type_name(2) == "LineString"
         assert _get_geometry_type_name(3) == "Polygon"
@@ -498,11 +498,12 @@ class TestGetGeometryTypeName:
         assert _get_geometry_type_name(3007) == "GeometryCollection ZM"
 
     def test_unknown_base_type(self):
-        """Test unknown base type returns Unknown."""
-        assert _get_geometry_type_name(8) == "Unknown"
-        assert _get_geometry_type_name(99) == "Unknown"
-        assert _get_geometry_type_name(1008) == "Unknown"
-        assert _get_geometry_type_name(2099) == "Unknown"
+        """An unknown base or dimension names no spec type: None, dropped by callers."""
+        assert _get_geometry_type_name(8) is None
+        assert _get_geometry_type_name(99) is None
+        assert _get_geometry_type_name(1008) is None
+        assert _get_geometry_type_name(2099) is None
+        assert _get_geometry_type_name(4001) is None
 
 
 class TestGetBboxAdvice:

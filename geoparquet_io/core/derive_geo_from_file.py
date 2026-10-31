@@ -24,7 +24,6 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import NULL_CRS_HINT, is_default_crs, is_unknown_type_crs
 from geoparquet_io.core.duckdb_metadata import (
-    aggregate_native_geo_stats,
     get_schema_info,
     native_geo_type,
     parse_geometry_logical_type,
@@ -32,6 +31,7 @@ from geoparquet_io.core.duckdb_metadata import (
 )
 from geoparquet_io.core.geo_metadata import (
     read_raw_geo,
+    row_group_geometry_stats,
     sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.logging_config import debug, warn
@@ -99,17 +99,13 @@ def _geo_col_meta_from_stats(pf, col_index: int, logical: str, parquet_file: str
                 "geometry_types": list(stats.geospatial_types or []),
             }
         )
-    # The one row-group fold: X merged on the circle, Z over the row groups
-    # that carry an extent, spec type names only.
-    folded = aggregate_native_geo_stats(chunks)
-    col_meta: dict = {"encoding": "WKB", "geometry_types": folded.get("geometry_types", [])}
-    bbox = folded.get("bbox")
-    if bbox is not None:
-        # The fold orders Z after XY; GeoParquet interleaves (RFC 7946), with
-        # 6 values when a Z range exists (M is never part of bbox per spec).
-        col_meta["bbox"] = (
-            [bbox[0], bbox[1], bbox[4], bbox[2], bbox[3], bbox[5]] if len(bbox) == 6 else bbox
-        )
+    # The one fold (geo_metadata): X merged on the circle, Z over the row
+    # groups that carry an extent, the spec's interleaved bbox (M is never part
+    # of a bbox), spec type names only.
+    folded = row_group_geometry_stats(chunks)
+    col_meta: dict = {"encoding": "WKB", "geometry_types": folded.geometry_types}
+    if folded.bbox is not None:
+        col_meta["bbox"] = folded.bbox
     # The rebuilt block is the file's only geo metadata, so a CRS left behind
     # here is not merely missing: an absent `crs` *means* OGC:CRS84, which
     # relabels projected coordinates as lon/lat while the Parquet logical type

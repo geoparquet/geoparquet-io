@@ -1,6 +1,8 @@
 """One fold of per-row-group geospatial statistics, one policy (#1367 concept 5).
 
-``duckdb_metadata.aggregate_native_geo_stats`` is the one fold. The inspect
+``geo_metadata.merged_geometry_stats`` is the one fold and
+``geo_metadata.row_group_geometry_stats`` its row-group reader;
+``duckdb_metadata.aggregate_native_geo_stats`` is a thin dict view of it. The inspect
 "Overall Bbox" (``metadata_utils._calculate_overall_bbox``) and the derived
 2.0 block (``derive_geo_from_file._geo_col_meta_from_stats``) used to fold the
 same row-group extents themselves with a plain min/max, which turns a chunk
@@ -74,3 +76,49 @@ def test_the_derived_block_folds_through_the_one_reader(tmp_path):
         meta = _geo_col_meta_from_stats(pf, index, "Geometry", str(path))
     assert meta["geometry_types"] == ["Point", "Polygon Z"]
     assert meta["bbox"] == [0.0, 0.0, 10.0, 10.0, 12.0, 15.0]
+
+
+def test_the_fold_returns_the_spec_interleaved_bbox_with_z():
+    stats = aggregate_native_geo_stats(
+        [_chunk(0, 0, 4, 4, zmin=10, zmax=15), _chunk(10, 10, 12, 12, zmin=5, zmax=5)]
+    )
+    assert stats["bbox"] == [0, 0, 5, 12, 12, 15]
+
+
+def test_one_type_table_names_codes_and_duckdb_strings():
+    from geoparquet_io.core import duckdb_metadata, geo_metadata
+    from geoparquet_io.core.geo_metadata import geometry_type_name
+
+    assert geometry_type_name(1003) == geometry_type_name("polygon_z") == "Polygon Z"
+    assert geometry_type_name("POLYGON ZM") == "Polygon ZM"
+    assert geometry_type_name(0) is None
+    assert geometry_type_name("triangle") is None
+    assert not hasattr(duckdb_metadata, "_format_geo_types")
+    assert not hasattr(duckdb_metadata, "_GEOM_TYPE_NAMES")
+    assert not hasattr(geo_metadata, "_DUCKDB_TO_SPEC_TYPE")
+
+
+def test_the_one_fold_wraps_on_the_circle_and_plainly_for_projected_data():
+    from geoparquet_io.core.geo_metadata import GeometryStats, merged_geometry_stats
+
+    parts = [
+        GeometryStats([170.0, -10.0, -170.0, 10.0], []),
+        GeometryStats([175.0, 0, 178.0, 1], []),
+    ]
+    assert merged_geometry_stats(parts).bbox == [170.0, -10.0, -170.0, 10.0]
+    assert merged_geometry_stats(parts, geographic=False).bbox == [170.0, -10.0, 178.0, 10.0]
+
+
+def test_the_spatial_order_extent_and_the_geodesic_whole_use_the_one_fold():
+    from geoparquet_io.core.check_spatial_order import _compute_data_extent
+
+    rows = [
+        {"xmin": 170.0, "ymin": -10.0, "xmax": -170.0, "ymax": 10.0},
+        {"xmin": 175.0, "ymin": -5.0, "xmax": 178.0, "ymax": 5.0},
+    ]
+    assert _compute_data_extent(rows) == {
+        "xmin": 170.0,
+        "ymin": -10.0,
+        "xmax": -170.0,
+        "ymax": 10.0,
+    }
