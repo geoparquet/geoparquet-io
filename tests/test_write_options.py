@@ -70,3 +70,90 @@ def test_pick_reads_the_fields_by_name_and_ignores_the_rest():
 
 def test_pick_leaves_an_absent_field_at_its_default():
     assert WriteOptions.pick({"compression": "LZ4"}) == WriteOptions(compression="LZ4")
+
+
+# ---------------------------------------------------------------------------
+# End to end: the options a user types land in the footer, per driver family.
+# ---------------------------------------------------------------------------
+
+ROWS = 5000
+GROUP = 2048
+WRITE_FLAGS = [
+    "--compression",
+    "brotli",
+    "--compression-level",
+    "5",
+    "--row-group-size",
+    str(GROUP),
+]
+
+
+@pytest.fixture(scope="module")
+def points_file(tmp_path_factory):
+    """5,000 points with a two-value category and a numeric sort key."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    root = tmp_path_factory.mktemp("write_options_e2e")
+    csv = root / "points.csv"
+    lines = ["lat,lon,cat,val"]
+    for i in range(ROWS):
+        lines.append(f"{(i % 170) - 85 + 0.5},{(i % 350) - 175 + 0.25},{'ab'[i % 2]},{ROWS - i}")
+    csv.write_text("\n".join(lines) + "\n")
+    out = root / "points.parquet"
+    result = CliRunner().invoke(cli, ["convert", str(csv), str(out)])
+    assert result.exit_code == 0, result.output
+    return out
+
+
+def _assert_footer(path, rows=None):
+    import pyarrow.parquet as pq
+
+    md = pq.read_metadata(path)
+    total = md.num_rows if rows is None else rows
+    assert md.num_rows == total
+    assert md.num_row_groups == -(-total // GROUP), (path, md.num_row_groups)
+    for rg in range(md.num_row_groups):
+        assert md.row_group(rg).num_rows <= GROUP
+        for col in range(md.num_columns):
+            assert md.row_group(rg).column(col).compression == "BROTLI"
+
+
+E2E = {
+    "add bbox": ["add", "bbox", "{i}", "{o}"],
+    "add h3": ["add", "h3", "{i}", "{o}", "--resolution", "5"],
+    "sort column": ["sort", "column", "{i}", "{o}", "val"],
+    "sort quadkey": ["sort", "quadkey", "{i}", "{o}"],
+    "convert reproject": ["convert", "reproject", "{i}", "{o}", "--dst-crs", "EPSG:3857"],
+    "process simplify": ["process", "simplify", "{i}", "{o}", "--tolerance", "0.001"],
+}
+
+
+@pytest.mark.parametrize("name", sorted(E2E))
+def test_the_write_flags_reach_the_footer(name, points_file, tmp_path):
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    out = tmp_path / "out.parquet"
+    argv = [a.format(i=points_file, o=out) for a in E2E[name]]
+    result = CliRunner().invoke(cli, [*argv, *WRITE_FLAGS])
+    assert result.exit_code == 0, result.output
+    _assert_footer(out)
+
+
+def test_the_write_flags_reach_every_partition_file(points_file, tmp_path):
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    out = tmp_path / "parts"
+    result = CliRunner().invoke(
+        cli, ["partition", "string", str(points_file), str(out), "--column", "cat", *WRITE_FLAGS]
+    )
+    assert result.exit_code == 0, result.output
+    files = sorted(out.rglob("*.parquet"))
+    assert len(files) == 2
+    for path in files:
+        _assert_footer(path, rows=ROWS // 2)
