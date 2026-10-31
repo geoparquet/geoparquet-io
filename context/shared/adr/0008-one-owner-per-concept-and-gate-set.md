@@ -126,7 +126,6 @@ and live AWS upload endpoint validation remain maintainer environment items.
 
 - [Issue #1367](https://github.com/geoparquet/geoparquet-io/issues/1367)
 - [Integration PR #1372](https://github.com/geoparquet/geoparquet-io/pull/1372)
-- [Track ledger](../documentation/TRACKS-1367.md)
 - [Owner guard maintenance](../../../docs/contributing.md#owner-guards)
 - [ADR-0001: CLI/Core Separation](0001-cli-core-separation.md)
 - [ADR-0002: DuckDB as Processing Engine](0002-duckdb-as-processing-engine.md)
@@ -228,7 +227,7 @@ Budgets require review when a new failure mode needs additional tests.
 The reported worker-seconds sum setup/call/teardown durations at or above 0.05 seconds.
 They are not complete CPU accounting.
 The local full-suite measurement had 3 socket failures and 30 socket setup errors; excluding exactly those cases passed.
-The close-out `Tests` run's per-leg walls are recorded in the [track ledger](../documentation/TRACKS-1367.md).
+The close-out `Tests` run's per-leg walls are recorded in the description of [PR #1372](https://github.com/geoparquet/geoparquet-io/pull/1372).
 The signature bypass was diagnostic and does not authorize disabling production verification.
 
 ### Alternatives Considered
