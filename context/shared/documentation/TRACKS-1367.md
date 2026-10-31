@@ -185,3 +185,4 @@ scope per the ticket (perf; the spatial-order heuristic #618/#755/#774).
 | 2026-10-31 | T3c rebased onto the T2d merge at 2affbd03 (conflicts import-only; all arms 0; byte identity 93/1); pushed; third audit pass launched. |
 | 2026-10-31 | T3c audit pass 3: 3 (pin lists in the test file → `[[G1.geometry_identity]]` entries with a seed count of 9; validate describes its own column read; one carto literal). Round sent. |
 | 2026-10-31 | T3c round 5 at 4645527d (pins → nine `[[G1.geometry_identity]]` entries, seed count 9; validate reads through the owner; carto constant; stream_io resolves over the Arrow schema); pushed; fourth audit pass launched. |
+| 2026-10-31 | **T3c merged** (#1392 at 4645527d after four audit passes). Live: T3e round 3 (must rebase onto this merge before its next pass). T4c now unblocked once T3e merges. Remaining: T4c, T2f, T5a, T0e. |
