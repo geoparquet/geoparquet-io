@@ -119,6 +119,58 @@ def test_files_that_disagree_are_refused_by_name():
         owner.agree_across_files({"a": {}, "b": {"g": "spherical"}})
 
 
+def test_the_write_facade_asks_the_one_1x_question(monkeypatch):
+    """``writable_geoparquet_version`` branches on ``is_geoparquet_1x``, not a
+    second parse of the version string."""
+    from geoparquet_io.core import parquet_writer
+
+    assert parquet_writer.writable_geoparquet_version("1.0.0") == "1.1"
+    monkeypatch.setattr(parquet_writer, "is_geoparquet_1x", lambda version: False)
+    assert parquet_writer.writable_geoparquet_version("1.0.0") is None
+
+
+def test_carry_edges_keeps_only_what_a_writer_says():
+    """The carry rule for a block a writer passes through: a non-planar value
+    stays, planar is said by omitting the key, a typo says nothing; then the
+    requested edges are set the same way."""
+    geo = {
+        "columns": {
+            "g": {"encoding": "WKB", "edges": "spherical"},
+            "h": {"encoding": "WKB", "edges": "planar"},
+            "k": {"encoding": "WKB", "edges": "spherikal"},
+            "m": {"encoding": "WKB"},
+        }
+    }
+    assert owner.carry_edges(geo) is geo
+    assert geo["columns"] == {
+        "g": {"encoding": "WKB", "edges": "spherical"},
+        "h": {"encoding": "WKB"},
+        "k": {"encoding": "WKB"},
+        "m": {"encoding": "WKB"},
+    }
+    owner.carry_edges(geo, {"m": "vincenty", "g": "planar", "absent": "spherical"})
+    assert geo["columns"]["m"] == {"encoding": "WKB", "edges": "vincenty"}
+    assert geo["columns"]["g"] == {"encoding": "WKB"}
+    assert "absent" not in geo["columns"]
+
+
+@pytest.mark.parametrize(
+    "edges, planar_request, orientation",
+    [
+        (None, False, None),
+        ("planar", True, None),
+        ("spherical", False, "counterclockwise"),
+        ("vincenty", False, None),
+        ("spherikal", False, None),
+    ],
+)
+def test_the_request_predicates(edges, planar_request, orientation):
+    """An explicit planar request (``None`` asks for nothing) and the
+    orientation a spherical request implies: decided in the owner."""
+    assert owner.requests_planar(edges) is planar_request
+    assert owner.implied_orientation(edges) == orientation
+
+
 def test_strip_and_restore():
     geo = {
         "columns": {

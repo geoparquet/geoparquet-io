@@ -80,6 +80,7 @@ from geoparquet_io.core.geo_metadata import (
     OVERVIEWS_KEY,
     carried_version,
     geoarrow_primary_encoding,
+    is_geoparquet_1x,
     sanitized_carried_geo,
     sanitized_carried_geo_of_file,
 )
@@ -625,12 +626,10 @@ def writable_geoparquet_version(
     ``preserve_input`` keeps a 1.0.x as 1.0. None for anything else (no
     version, no minor, a major this writer does not know).
     """
-    parts = declared.split(".") if declared else []
-    if len(parts) < 2:
-        return None
-    if parts[0] == "1":
+    if is_geoparquet_1x(declared):
         return _declared_1x(declared) if preserve_input else "1.1"
-    return "2.0" if parts[0] == "2" else None
+    parts = declared.split(".") if declared else []
+    return "2.0" if len(parts) >= 2 and parts[0] == "2" else None
 
 
 def declared_geoparquet_version(geo_meta: Mapping, default: str | None = "") -> str | None:

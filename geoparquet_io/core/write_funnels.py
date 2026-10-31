@@ -61,7 +61,6 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.edges import (
-    PLANAR,
     agree_across_files,
     block_edges,
     detect_edges,
@@ -69,6 +68,7 @@ from geoparquet_io.core.edges import (
     is_ellipsoidal,
     is_nonplanar,
     logical_type_edges,
+    requests_planar,
     restore_edges,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
@@ -1770,7 +1770,7 @@ def write_geoparquet_table(
     # Read before the metadata pass rebuilds the column: a 1.x write strips the
     # GeoArrow edge type, and a 2.0 one regenerates a block without `edges`.
     edges_by_col = table_nonplanar_edges(table, geometry_column, edges) if has_geometry else {}
-    if has_geometry and edges == PLANAR:
+    if has_geometry and requests_planar(edges):
         # An explicit planar choice also clears a native GEOGRAPHY type, which
         # a 2.0 write would otherwise keep as spherical.
         table = with_planar_edge_types(table, [geometry_column])

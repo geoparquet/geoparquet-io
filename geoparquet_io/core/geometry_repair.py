@@ -25,7 +25,7 @@ from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     quote_identifier,
 )
-from geoparquet_io.core.edges import PLANAR, is_nonplanar
+from geoparquet_io.core.edges import is_geodesic, is_nonplanar
 from geoparquet_io.core.logging_config import debug, warn
 
 
@@ -46,7 +46,7 @@ def _should_skip_nonplanar(geometry_column: str, nonplanar_edges, repair: bool) 
     other value -- ``"Planar"``, a typo, a number -- is not a declaration gpio
     can honor, so the column keeps the planar repair it would get anyway.
     """
-    if not nonplanar_edges or nonplanar_edges == PLANAR:
+    if not is_geodesic(nonplanar_edges):
         return False
     if not is_nonplanar(nonplanar_edges):
         debug(

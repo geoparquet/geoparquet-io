@@ -91,6 +91,20 @@ def is_geodesic(edges: object) -> bool:
     return declared_edges({_KEY: edges}) != PLANAR
 
 
+def requests_planar(edges: object) -> bool:
+    """Whether an ``edges=`` request is an explicit ``planar`` (``None`` asks
+    for nothing): a planar request also clears a native GEOGRAPHY type."""
+    return edges == PLANAR
+
+
+def implied_orientation(edges: object) -> str | None:
+    """The ``orientation`` an ``edges=`` request implies: ``counterclockwise``
+    for spherical, per the GeoParquet spec; nothing for any other value. Keyed
+    off the request, so an ellipsoidal algorithm a 1.x block degrades to
+    spherical does not gain an orientation it never stated."""
+    return "counterclockwise" if edges == SPHERICAL else None
+
+
 def normalized_edges(edges: object) -> object:
     """``edges`` in the vocabulary's case: a string lowercased, anything else as is.
 
@@ -263,6 +277,29 @@ def strip_edges(geo: dict, columns: Collection[str] | None = None) -> dict:
             continue
         if declares_edges(entry) and edges_of(entry) != PLANAR:
             del entry[_KEY]
+    return geo
+
+
+def carry_edges(
+    geo: Mapping | None, edges_by_col: Mapping[str, object] | None = None
+) -> Mapping | None:
+    """Rewrite the decoded block ``geo``'s ``edges`` as a writer says them, in place.
+
+    The carry rule for a block a writer passes through: a non-planar value
+    stays; ``planar`` is said by leaving the key out (:func:`set_edges`); a
+    value outside the vocabulary says nothing (#1288), so it is not carried.
+    Then each ``edges_by_col`` value (already mapped to the block's version) is
+    set on the column of that name the block describes. Returns ``geo``.
+    """
+    columns = (geo or {}).get("columns") or {}
+    for entry in columns.values():
+        if declares_edges(entry):
+            carried = edges_of(entry)
+            set_edges(entry, carried if is_nonplanar(carried) else None)
+    for name, edges in (edges_by_col or {}).items():
+        entry = columns.get(name)
+        if isinstance(entry, dict):
+            set_edges(entry, edges)
     return geo
 
 

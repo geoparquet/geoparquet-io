@@ -58,6 +58,7 @@ from geoparquet_io.core.edges import (
     declared_edges,
     edges_allowed,
     edges_of,
+    is_ellipsoidal,
     is_geodesic,
     logical_type_edges,
 )
@@ -2496,7 +2497,7 @@ def _geography_geod(schema_info: list | None, geom_col: str, algorithm: str):
     from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
     from geoparquet_io.core.geodesic_bbox import ellipsoid_for_crs
 
-    if algorithm == SPHERICAL:
+    if not is_ellipsoidal(algorithm):
         return Geod(a=6371008.8, f=0.0)
     crs = None
     for col in schema_info or []:
@@ -3459,7 +3460,7 @@ def _check_v2_edges_consistency(
         # this shape (most writers cannot emit the GEOGRAPHY logical type and
         # carry edges in geo metadata instead — gpio's own convert does), so
         # this is an interoperability warning, not a spec violation.
-        if is_planar_geometry and metadata_edges != PLANAR:
+        if is_planar_geometry and is_geodesic(metadata_edges):
             return ValidationCheck(
                 name=f"v2_edges_consistency_{geom_col}",
                 status=CheckStatus.WARNING,
