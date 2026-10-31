@@ -176,7 +176,7 @@ def test_overwrite_removes_a_stale_shapefile_sidecar(with_geo, tmp_path):
 
 
 def test_interrupted_write_leaves_no_staging_directory(tmp_path):
-    from geoparquet_io.core.write_strategies.base import atomic_write
+    from geoparquet_io.core.file_utils import atomic_write
 
     out = tmp_path / "out.fgb"
     with pytest.raises(KeyboardInterrupt):

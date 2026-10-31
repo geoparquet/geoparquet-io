@@ -27,7 +27,7 @@ from geoparquet_io.core.crs_utils import (
     transform_geom_sql,
 )
 from geoparquet_io.core.duckdb_utils import describe_query, quote_identifier
-from geoparquet_io.core.file_utils import handle_output_overwrite
+from geoparquet_io.core.file_utils import atomic_write, handle_output_overwrite, scratch_file
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
@@ -184,7 +184,8 @@ def _add_metrics_file_based(
     show_sql,
 ) -> None:
     """Handle file-based geometry metrics addition — two passes via add_computed_column."""
-    handle_output_overwrite(output_parquet, overwrite, input_parquet)
+    # remove=False: the output is staged and replaced only on success.
+    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
     require_single_file(input_parquet, "add geometry-metrics")
 
     geom_col = require_geometry_column(
@@ -205,15 +206,11 @@ def _add_metrics_file_based(
         info(f"  {PERIMETER_COLUMN}: {perimeter_expr}")
         return
 
-    import os
-    import tempfile
-
-    # Pass 1: add area column to a temp file
-    fd, temp_file = tempfile.mkstemp(suffix=".parquet")
-    os.close(fd)
-    os.unlink(temp_file)
-
-    try:
+    # Pass 1 writes the area column to a scratch copy; pass 2 the perimeter
+    # into the staged output, which the Vecorel steps finish before it is
+    # published (file_utils.atomic_write): a failure leaves the destination as
+    # it was and no copy behind.
+    with scratch_file() as temp_file, atomic_write(output_parquet) as staged:
         add_computed_column(
             input_parquet,
             temp_file,
@@ -222,35 +219,30 @@ def _add_metrics_file_based(
             verbose=verbose,
             **write.funnel_kwargs(),
         )
-
-        # Pass 2: add perimeter column to final output
         add_computed_column(
             temp_file,
-            output_parquet,
+            staged,
             column_name=PERIMETER_COLUMN,
             sql_expression=perimeter_expr,
             verbose=verbose,
             **write.funnel_kwargs(),
         )
-    finally:
-        if os.path.exists(temp_file):
-            os.unlink(temp_file)
 
-    # Add Vecorel metadata and ensure required columns. These rewrite the file
-    # in place, so they must keep writing at the caller's resolved settings —
-    # left to their own defaults they undid the level of everything above
-    # (DuckDB's 3 for the id column, pyarrow's 1 for the schema fix, before
-    # both resolved through `compression.resolve_codec`).
-    if vecorel:
-        from geoparquet_io.core.constants import ensure_vecorel_columns
+        # Add Vecorel metadata and ensure required columns. These rewrite the
+        # file in place, so they must keep writing at the caller's resolved
+        # settings -- left to their own defaults they undid the level of
+        # everything above (DuckDB's 3 for the id column, pyarrow's 1 for the
+        # schema fix, before both resolved through `compression.resolve_codec`).
+        if vecorel:
+            from geoparquet_io.core.constants import ensure_vecorel_columns
 
-        _add_vecorel_metadata_to_file(output_parquet, verbose, write)
-        ensure_vecorel_columns(
-            output_parquet,
-            verbose,
-            compression=write.compression,
-            compression_level=write.compression_level,
-        )
+            _add_vecorel_metadata_to_file(staged, verbose, write)
+            ensure_vecorel_columns(
+                staged,
+                verbose,
+                compression=write.compression,
+                compression_level=write.compression_level,
+            )
 
     success(f"Added {AREA_COLUMN} and {PERIMETER_COLUMN} to: {output_parquet}")
 

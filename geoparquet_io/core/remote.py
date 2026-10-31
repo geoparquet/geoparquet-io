@@ -424,35 +424,31 @@ def remote_write_context(output_path, is_directory=False, verbose=False):
             # Cleanup and upload handled automatically
     """
     is_remote = is_remote_url(output_path)
+    if not is_remote:
+        yield output_path, False
+        return
+    if not is_directory:
+        # A local scratch copy, named and removed by the staging owner.
+        from geoparquet_io.core.file_utils import scratch_file
 
-    if is_remote:
-        if is_directory:
-            temp_path = tempfile.mkdtemp(prefix="gpio_")
-        else:
-            temp_fd, temp_path = tempfile.mkstemp(suffix=".parquet")
-            os.close(temp_fd)
+        with scratch_file() as temp_path:
+            if verbose:
+                debug(f"Remote output detected: {output_path}")
+                debug(f"Writing to temporary file: {temp_path}")
+            yield temp_path, True
+        return
 
-        if verbose:
-            debug(f"Remote output detected: {output_path}")
-            debug(f"Writing to temporary {'directory' if is_directory else 'file'}: {temp_path}")
-    else:
-        temp_path = output_path
-
+    temp_path = tempfile.mkdtemp(prefix="gpio_")
+    if verbose:
+        debug(f"Remote output detected: {output_path}")
+        debug(f"Writing to temporary directory: {temp_path}")
     try:
-        yield temp_path, is_remote
+        yield temp_path, True
     finally:
-        if is_remote and os.path.exists(temp_path):
-            try:
-                if is_directory:
-                    shutil.rmtree(temp_path)
-                else:
-                    os.unlink(temp_path)
-                if verbose:
-                    debug(
-                        f"Cleaned up temporary {'directory' if is_directory else 'file'}: {temp_path}"
-                    )
-            except Exception as e:
-                if verbose:
-                    warn(
-                        f"Could not clean up temp {'directory' if is_directory else 'file'} {temp_path}: {e}"
-                    )
+        try:
+            shutil.rmtree(temp_path)
+            if verbose:
+                debug(f"Cleaned up temporary directory: {temp_path}")
+        except Exception as e:
+            if verbose:
+                warn(f"Could not clean up temp directory {temp_path}: {e}")

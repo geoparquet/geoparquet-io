@@ -15,7 +15,7 @@ decides none of its policy itself: the codec and level come from
 ``compression.resolve_codec``, the row groups from
 ``parquet_writer.resolve_row_group_rows``, the surviving footer keys from
 ``parquet_writer.output_schema_metadata``, and the staging from
-``staged_replacement`` (``write_strategies.base.atomic_write``).
+``file_utils.atomic_write``.
 
 This is deliberately a **sibling** of ``core/parquet_writer.py`` rather than
 part of it. That module is the facade #990 introduced, and it owns four
@@ -33,9 +33,8 @@ Split out of ``common.py`` unchanged; every name is still importable from there.
 import contextlib
 import copy
 import functools
-import os
-import shutil
 from collections.abc import Collection, Iterator, Mapping
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -82,7 +81,7 @@ from geoparquet_io.core.edges import (
     requests_planar,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
-from geoparquet_io.core.file_utils import get_all_parquet_files, is_partition_path
+from geoparquet_io.core.file_utils import atomic_write, get_all_parquet_files, is_partition_path
 from geoparquet_io.core.geo_metadata import (
     DETECT_BBOX_COLUMN,
     GEOPARQUET_VERSIONS,
@@ -92,6 +91,7 @@ from geoparquet_io.core.geo_metadata import (
     SchemaSource,
     compose_geo_block,
     composes_a_covering,
+    declared_write_metadata,
     geo_key_value,
     is_geoparquet_1x,
     may_hold_a_self_evident_bbox,
@@ -130,6 +130,7 @@ from geoparquet_io.core.parquet_writer import (
     _CARRIED_SCHEMA_METADATA_KEYS,
     WriteOptions,
     geoparquet_copy_options,
+    located_row_group_layout,
     note_duckdb_copy_rounding,
     output_schema_metadata,
     regroup,
@@ -156,7 +157,6 @@ from geoparquet_io.core.write_strategies import (
     needs_metadata_rewrite,
 )
 from geoparquet_io.core.write_strategies.base import (
-    atomic_write,
     has_unknown_secondary,
     wrap_query_with_secondary_crs,
 )
@@ -945,35 +945,29 @@ def _carried_with_updates(
     return carried
 
 
-@contextlib.contextmanager
-def staged_replacement(destination: str) -> Iterator[str]:
-    """The path a rewrite writes to, put over *destination* once it is closed.
+def open_parquet_writer(
+    destination: str,
+    schema: pa.Schema,
+    codec_kwargs: Mapping[str, Any],
+    *,
+    geometry_columns: Collection[str] = (),
+    **options: Any,
+) -> pq.ParquetWriter:
+    """The pyarrow writer for a caller that lays out its own row groups.
 
-    The one staging rule for a file rewritten where it lies, or written over an
-    existing output. A ``COPY`` whose destination exists writes ``tmp_<name>``
-    beside it and *moves* that over the destination; when the destination is
-    the file the same statement reads, nothing but the scheduler orders the
-    release of the scan handle against the move, and Windows refuses to rename
-    over a path a handle holds open (``Could not move file: Access is denied``,
-    #1032). So *any* existing local destination is staged beside itself
-    (:func:`~geoparquet_io.core.write_strategies.base.atomic_write`: same
-    filesystem, so the swap stays a rename) and swapped in by ``os.replace``
-    only after the caller has closed its writer and every reader it opened. The
-    original is never unlinked or truncated first, so a failure leaves it
-    intact and the staging directory is discarded (#959). The result takes the
-    original's mode: a 0640 file does not come back with the staging file's.
-
-    A new local destination needs none of it. Neither does a remote one: there
-    is no file on this machine to rename over, and the writer stages and
-    uploads it (``remote_write_context``).
+    The one door for a write that cannot be a funnel call -- an overview file
+    whose levels must end on row-group boundaries, a streamed simplify whose
+    footer is only known at close, a schema fix that casts each row group --
+    so no module outside the write layer constructs a ``ParquetWriter``
+    (ruff TID251). *codec_kwargs* is ``resolve_codec(...).pyarrow_kwargs()``;
+    the geometry is kept out of the dictionary
+    (``parquet_writer.without_geometry_dictionary``, #1122) for the columns the
+    schema's ``geo`` block or extension types name, plus *geometry_columns*.
+    *options* go to pyarrow as given (``store_schema=False``). The caller
+    stages *destination* (``file_utils.atomic_write``).
     """
-    if is_remote_url(destination) or not os.path.exists(destination):
-        yield destination
-        return
-    with atomic_write(destination) as staged:
-        yield staged
-        with contextlib.suppress(OSError):
-            shutil.copymode(destination, staged)
+    kwargs = without_geometry_dictionary(dict(codec_kwargs), schema, geometry_columns)
+    return pq.ParquetWriter(destination, schema, **kwargs, **options)
 
 
 def rewrite_file_through_funnel(
@@ -990,14 +984,14 @@ def rewrite_file_through_funnel(
     """Run *query* over *source* through the query funnel into *destination*, staged.
 
     The rewrite the ``check --fix`` repairs share: one staged destination
-    (:func:`staged_replacement`), one DuckDB connection closed before the swap,
-    the facade's codec, and *source* named as the facade's witness -- the file
+    (:func:`~geoparquet_io.core.file_utils.atomic_write`), one DuckDB
+    connection closed before the swap, the facade's codec, and *source* named as the facade's witness -- the file
     whose rows *query* reads (#1001). A remote read failure is reported with
     the store's hint (``RemoteAccessError``).
     """
     import duckdb  # deferred: the embeddable import surface defers duckdb (#1307)
 
-    with staged_replacement(destination) as staged:
+    with atomic_write(destination) as staged:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(source))
         try:
             write_parquet_with_metadata(
@@ -1062,8 +1056,8 @@ def rewrite_footer_kv(
       the input's rows (#710, #1268); pyarrow regenerates ``ARROW:schema``.
 
     Streams one row group at a time (#1155), and stages the destination
-    (:func:`staged_replacement`), so an in-place rewrite never writes over the
-    file it reads.
+    (:func:`~geoparquet_io.core.file_utils.atomic_write`), so an in-place
+    rewrite never writes over the file it reads.
 
     Args:
         source: The file to read; local or remote.
@@ -1075,6 +1069,23 @@ def rewrite_footer_kv(
             are copied as they are, and no DuckDB connection is opened.
         verbose: Report the footer keys written.
     """
+    _rewrite_parquet(source, destination, updates, write=write, verbose=verbose)
+
+
+def _rewrite_parquet(
+    source: str,
+    destination: str,
+    updates: Mapping[str, str | None],
+    *,
+    write: WriteOptions | None = None,
+    verbose: bool = False,
+    _layout: list[int] | None = None,
+) -> None:
+    """One streaming re-encode for footer fallback and data-layout repair.
+
+    A layout repair changes data-page boundaries and cannot be a footer patch.
+    The footer fallback reaches this mechanism only through patch_or_rewrite.
+    """
     # geoarrow registration makes pyarrow round-trip the native GEOMETRY/
     # GEOGRAPHY logical types (and their CRS) instead of demoting to binary.
     import geoarrow.pyarrow  # noqa: F401
@@ -1084,7 +1095,7 @@ def rewrite_footer_kv(
         write.compression, write.compression_level, context="write"
     ).pyarrow_kwargs()
     with remote_write_context(destination, verbose=verbose) as (local, _):
-        with staged_replacement(local) as staged:
+        with atomic_write(local) as staged:
             # Every handle on *source* closes before the swap: Windows refuses
             # to replace a file that is still open.
             with contextlib.ExitStack() as stack:
@@ -1099,9 +1110,7 @@ def rewrite_footer_kv(
                 schema = pf.schema_arrow.with_metadata(metadata)
                 if verbose:
                     debug(f"Rewriting with footer keys: {[key.decode() for key in metadata]}")
-                with pq.ParquetWriter(
-                    staged, schema, **without_geometry_dictionary(write_kwargs, schema)
-                ) as writer:
+                with open_parquet_writer(staged, schema, write_kwargs) as writer:
                     # Read at the row count when there is one, so each batch
                     # is one group; a byte target is sized by the facade on
                     # the leading batches (sized_stream).
@@ -1110,8 +1119,10 @@ def rewrite_footer_kv(
                     chunks, rows = sized_stream(
                         batches, write.row_group_rows, write.row_group_size_mb, pf.schema_arrow
                     )
-                    for group in regroup(chunks, rows):
-                        writer.write_table(pa.Table.from_batches([group]), row_group_size=rows)
+                    for group in regroup(chunks, _layout or rows):
+                        writer.write_table(
+                            pa.Table.from_batches([group]), row_group_size=group.num_rows
+                        )
         upload_if_remote(local, destination, profile=write.profile, verbose=verbose)
 
 
@@ -1840,6 +1851,8 @@ def write_parquet_with_metadata(
                 actual_output, extra_kv_metadata, original_metadata, compression_level
             )
 
+        _ensure_located_row_groups(actual_output, geometry_column, compression, compression_level)
+
         if is_remote:
             upload_if_remote(
                 actual_output,
@@ -1944,6 +1957,60 @@ def _auto_fix_vecorel_if_needed(
             _fix_vecorel_schema(output_path, non_nullable, compression_level=compression_level)
 
 
+def _ensure_located_row_groups(output, geometry_column, compression, compression_level) -> None:
+    """Apply the facade's spatial layout after a writer has chosen its groups."""
+    if geometry_column is None:
+        return
+    with pq.ParquetFile(output) as pf:
+        if geometry_column not in pf.schema_arrow.names or pf.num_row_groups < 2:
+            return
+        layout = located_row_group_layout(pf, geometry_column)
+    if layout:
+        _rewrite_parquet(
+            output,
+            output,
+            {},
+            write=WriteOptions(compression=compression, compression_level=compression_level),
+            _layout=layout,
+        )
+
+
+def _write_table_with_strategy(strategy, **kwargs) -> None:
+    """Give every table strategy the same declared block and surviving KV keys.
+
+    The metadata-only rewrite and data writes use output_schema_metadata's
+    key policy. Derived primary stats are invalidated before composition.
+    """
+    edges_by_col = kwargs.pop("edges_by_col", {})
+    table = kwargs["table"]
+    original = declared_write_metadata(table.schema.metadata)
+    kwargs["original_metadata"] = original
+    kwargs["extra_kv_metadata"] = extract_preserved_kv_metadata(
+        output_schema_metadata(original, None, kwargs.get("extra_kv_metadata"))
+    )
+    destination = kwargs["output_path"]
+    profile = kwargs.pop("profile", None)
+    with remote_write_context(destination, verbose=kwargs["verbose"]) as (local, _):
+        kwargs["output_path"] = local
+        strategy.write_from_table(**kwargs)
+        apply_nonplanar_edges(
+            edges_by_col,
+            kwargs["output_path"],
+            compression=kwargs["compression"],
+            compression_level=kwargs["compression_level"],
+            row_group_rows=kwargs["row_group_rows"],
+            verbose=kwargs["verbose"],
+        )
+        _ensure_located_row_groups(
+            kwargs["output_path"],
+            kwargs["geometry_column"],
+            kwargs["compression"],
+            kwargs["compression_level"],
+        )
+
+        upload_if_remote(local, destination, profile=profile, verbose=kwargs["verbose"])
+
+
 def write_geoparquet_table(
     table,
     output_file: str,
@@ -1958,6 +2025,9 @@ def write_geoparquet_table(
     edges: str | None = None,
     geo_bbox: list[float] | None = None,
     memory_limit: str | None = None,
+    write_strategy: str | None = None,
+    input_crs: dict | None = None,
+    custom_metadata: dict | None = None,
 ) -> None:
     """
     Write a PyArrow Table to a GeoParquet file with proper metadata.
@@ -1965,6 +2035,10 @@ def write_geoparquet_table(
     ``memory_limit`` is accepted so a ``WriteOptions`` expands here whole
     (``**write.funnel_kwargs()``); the table is written by pyarrow, with no
     DuckDB statement to bound, so it is not used.
+
+    ``write_strategy`` selects a Table.write strategy through this same door;
+    unset uses the ordinary Arrow table writer. Input declarations and layout
+    are handled in this funnel for either choice.
 
     This is the table-centric version for writing GeoParquet files.
     It applies proper GeoParquet metadata and handles compression settings.
@@ -2019,7 +2093,8 @@ def write_geoparquet_table(
 
     # Extract CRS from original metadata if available
     col_meta = (geo_meta.get("columns") or {}).get(geometry_column)
-    input_crs = col_meta.get("crs") if isinstance(col_meta, dict) else None
+    if input_crs is None:
+        input_crs = col_meta.get("crs") if isinstance(col_meta, dict) else None
 
     # Validated and resolved once, by the owner; every write below takes it.
     codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
@@ -2034,6 +2109,26 @@ def write_geoparquet_table(
         # An explicit planar choice also clears a native GEOGRAPHY type, which
         # a 2.0 write would otherwise keep as spherical.
         table = with_planar_edge_types(table, [geometry_column])
+
+    if write_strategy is not None:
+        strategy = WriteStrategyFactory.get_strategy(WriteStrategy(write_strategy))
+        _write_table_with_strategy(
+            strategy,
+            profile=profile,
+            table=with_planar_edge_types(table),
+            edges_by_col=edges_by_col,
+            output_path=output_file,
+            geometry_column=geometry_column if has_geometry else None,
+            geoparquet_version=geoparquet_version,
+            compression=codec.name,
+            compression_level=codec.level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            verbose=verbose,
+            input_crs=input_crs,
+            custom_metadata=custom_metadata,
+        )
+        return
 
     # No AWS_PROFILE env mutation here: the write target inside this block is a
     # local (temp) file, and the upload at the end is credentialed by passing
@@ -2052,7 +2147,7 @@ def write_geoparquet_table(
                 geoparquet_version=geoparquet_version,
                 original_metadata=original_metadata,
                 input_crs=input_crs,
-                custom_metadata=None,
+                custom_metadata=custom_metadata,
                 verbose=verbose,
                 edges=edges,
                 geo_bbox=geo_bbox,
@@ -2086,6 +2181,8 @@ def write_geoparquet_table(
             ),
             verbose=verbose,
         )
+
+        _ensure_located_row_groups(actual_output, geometry_column, codec.name, codec.level)
 
         # Upload to remote if needed
         if is_remote:

@@ -194,10 +194,6 @@ def read_stdin_to_temp_file(verbose: bool = False) -> str:
     Returns:
         Path to the temporary parquet file. Caller must delete after use.
     """
-    import os
-    import tempfile
-    import uuid
-
     # Registers the GeoArrow extension types process-wide, so a geometry column
     # arriving on the stream as `geoarrow.wkb` is written to the scratch file
     # with its Parquet GEOMETRY/GEOGRAPHY logical type -- and the CRS inside it --
@@ -207,6 +203,8 @@ def read_stdin_to_temp_file(verbose: bool = False) -> str:
     # is why it happens here rather than being relied on (#1006).
     import geoarrow.pyarrow  # noqa: F401
     import pyarrow.parquet as pq
+
+    from geoparquet_io.core.file_utils import scratch_path
 
     if verbose:
         debug("Reading Arrow IPC stream from stdin...")
@@ -218,9 +216,8 @@ def read_stdin_to_temp_file(verbose: bool = False) -> str:
         metadata = prune_geo_metadata_to_columns(metadata, table.column_names)
         table = table.replace_schema_metadata(backfill_derived_stats(metadata, table, verbose))
 
-    # Write to temp file with UUID for uniqueness
-    temp_dir = tempfile.gettempdir()
-    temp_path = os.path.join(temp_dir, f"gpio_stdin_{uuid.uuid4()}.parquet")
+    # The caller holds the spool and removes it (file_utils.unlink_released_file).
+    temp_path = scratch_path(prefix="gpio_stdin_")
 
     pq.write_table(table, temp_path)
 

@@ -256,15 +256,6 @@ def codec_from_footer(
     return resolve_codec(upper if upper in ACCEPTED_CODEC_NAMES else None, level, context=context)
 
 
-def resolve_process_compression_level(compression, compression_level):
-    """The level a ``gpio process`` write uses: ``resolve_codec(..., context="process").level``.
-
-    Kept for its callers in ``core/process/`` until they call
-    :func:`resolve_codec` themselves (T2f).
-    """
-    return resolve_codec(compression, compression_level, context="process").level
-
-
 def print_copy_dry_run(
     query: str,
     output_parquet: str,

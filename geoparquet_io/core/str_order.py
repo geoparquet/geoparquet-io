@@ -22,22 +22,25 @@ from geoparquet_io.core.duckdb_utils import (
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
-from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
+from geoparquet_io.core.file_utils import (
+    handle_output_overwrite,
+    resolve_file_url,
+    unlink_released_file,
+)
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
     create_geometry_view,
     resolve_geometry_column,
 )
 
-# These three helpers are private to hilbert_order.py but are shared by convention
-# between the two spatial-sort commands: both run the same prepare/write/cleanup
-# pipeline. Extracting them (with the rest of the duplicated pipeline) into a
+# These helpers are private to hilbert_order.py but are shared by convention
+# between the two spatial-sort commands: both run the same prepare/write
+# pipeline, and the scratch copy is removed by its owner (file_utils). Extracting them (with the rest of the duplicated pipeline) into a
 # core/sort_common.py is tracked in #776, because it also rewrites the sibling
 # `sort hilbert` command and this project keeps cross-cutting refactors in their
 # own PR.
 from geoparquet_io.core.hilbert_order import (
     _advised_output_version,
-    _cleanup_temp_file,
     _prepare_working_file,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success, warn
@@ -402,4 +405,4 @@ def _str_order_file_based(
         raise
     finally:
         con.close()
-        _cleanup_temp_file(temp_file, verbose)
+        unlink_released_file(temp_file)

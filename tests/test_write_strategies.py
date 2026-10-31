@@ -22,12 +22,12 @@ import pytest
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
+from geoparquet_io.core.file_utils import atomic_write
 from geoparquet_io.core.validate import validate_geoparquet
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 from geoparquet_io.core.write_strategies import (
     WriteStrategy,
     WriteStrategyFactory,
-    atomic_write,
     needs_metadata_rewrite,
 )
 

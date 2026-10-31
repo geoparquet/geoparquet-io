@@ -1,5 +1,6 @@
 """Helper functions for check --fix CLI commands."""
 
+import itertools
 import os
 import shutil
 
@@ -76,18 +77,30 @@ def validate_remote_file_modification(parquet_file, fix_output, overwrite):
     return is_remote
 
 
+def _free_backup_path(parquet_file: str) -> str:
+    """The first of ``<file>.bak``, ``<file>.bak.1``, ... that does not exist."""
+    numbered = (f"{parquet_file}.bak" + (f".{n}" if n else "") for n in itertools.count())
+    return next(path for path in numbered if not os.path.lexists(path))
+
+
 def create_backup_if_needed(
     parquet_file, output_path, no_backup, is_remote, verbose, quiet: bool = False
 ):
-    """Create backup file if needed for local files."""
-    backup_path = f"{parquet_file}.bak"
+    """Back up a local input an in-place fix is about to rewrite: the one backup rule.
 
+    The backup takes the first free name of ``<file>.bak``, ``<file>.bak.1``,
+    ``<file>.bak.2``, ...: a second in-place fix used to copy the once-fixed
+    file over the ``.bak`` holding the original (#1076 item 1), so the
+    original was gone after two fixes. Returns the backup's path, or ``None``
+    when no backup is taken (``--no-backup``, another output, a remote file).
+    """
     if (
         not no_backup
         and is_same_file_path(output_path, parquet_file)
         and os.path.exists(parquet_file)
         and not is_remote
     ):
+        backup_path = _free_backup_path(parquet_file)
         if verbose:
             click.echo(f"\nCreating backup: {backup_path}")
         shutil.copy2(parquet_file, backup_path)
@@ -213,30 +226,20 @@ def handle_fix_common(
     validate_remote_file_modification(parquet_file, fix_output, overwrite)
 
     output_path = fix_output or parquet_file
-    backup_path = f"{parquet_file}.bak"
-
-    # `--fix-output ./same.parquet` is an in-place fix: comparing the raw strings
-    # sent it down the "different file" branch, so it got no .bak and no
-    # confirmation, while handle_output_overwrite -- which compares resolve() --
-    # refused the write anyway (#959).
-    fixing_in_place = is_same_file_path(output_path, parquet_file)
 
     # Confirm overwrite without backup for local files -- once per run (#1041).
     confirmation.ensure(parquet_file, output_path)
 
-    # Create backup if needed (only for local files)
-    if (
-        not no_backup
-        and fixing_in_place
-        and os.path.exists(parquet_file)
-        and not is_remote_url(parquet_file)
-    ):
-        shutil.copy2(parquet_file, backup_path)
-        if not quiet:
-            click.echo(click.style(f"✓ Created backup: {backup_path}", fg="green"))
-        created_backup = backup_path
-    else:
-        created_backup = None
+    # `--fix-output ./same.parquet` is an in-place fix: create_backup_if_needed
+    # compares resolved paths, so it gets the .bak and the confirmation (#959).
+    created_backup = create_backup_if_needed(
+        parquet_file,
+        output_path,
+        no_backup,
+        is_remote_url(parquet_file),
+        verbose=False,
+        quiet=quiet,
+    )
 
     # A fix that fails leaves no orphan .bak beside an unrewritten file: the
     # staged rewrite never landed, so the backup is put back and removed.

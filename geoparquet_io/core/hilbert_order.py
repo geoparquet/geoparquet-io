@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from itertools import pairwise
 
 import duckdb
@@ -20,7 +19,12 @@ from geoparquet_io.core.duckdb_utils import (
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import RemoteAccessError
-from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
+from geoparquet_io.core.file_utils import (
+    handle_output_overwrite,
+    resolve_file_url,
+    scratch_path,
+    unlink_released_file,
+)
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of, sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
     register_geometry_column,
@@ -287,14 +291,12 @@ def _prepare_working_file(input_parquet, add_bbox_flag, verbose):
         tuple: (working_parquet, temp_file_created, temp_file_path_or_none)
     """
     import shutil
-    import tempfile
 
     bbox_advice = get_bbox_advice(input_parquet, "bounds_calculation", verbose)
 
     if add_bbox_flag and not bbox_advice["has_bbox_column"]:
         info("\nAdding bbox column to enable fast bounds calculation...")
-        temp_fd, temp_file = tempfile.mkstemp(suffix=".parquet")
-        os.close(temp_fd)
+        temp_file = scratch_path()
         shutil.copy2(input_parquet, temp_file)
         add_bbox(temp_file, "bbox", verbose)
         success("Added bbox column for optimized processing")
@@ -307,18 +309,6 @@ def _prepare_working_file(input_parquet, add_bbox_flag, verbose):
                 info(f"Tip: {suggestion}")
 
     return input_parquet, False, None
-
-
-def _cleanup_temp_file(temp_file, verbose):
-    """Clean up temporary file if it exists."""
-    if temp_file and os.path.exists(temp_file):
-        try:
-            os.remove(temp_file)
-            if verbose:
-                debug("Cleaned up temporary file")
-        except OSError as e:
-            if verbose:
-                warn(f"Warning: Could not remove temporary file: {e}")
 
 
 def hilbert_order(
@@ -581,8 +571,8 @@ def _hilbert_order_file_based(
             **write.funnel_kwargs(),
         )
         con.close()
-        if temp_file_created and temp_file:
-            _cleanup_temp_file(temp_file, verbose)
+        if temp_file_created:
+            unlink_released_file(temp_file)
         success(f"Wrote data without Hilbert ordering to: {output_parquet}")
         return
 
@@ -632,7 +622,7 @@ def _hilbert_order_file_based(
             raise RemoteAccessError(input_parquet, f"{hints}\n\nOriginal error: {str(e)}") from e
         raise
     finally:
-        _cleanup_temp_file(temp_file, verbose)
+        unlink_released_file(temp_file)
 
 
 if __name__ == "__main__":

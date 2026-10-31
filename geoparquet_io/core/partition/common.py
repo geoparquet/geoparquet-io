@@ -17,7 +17,7 @@ from geoparquet_io.core.duckdb_utils import (
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import PartitionError
-from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.file_utils import get_all_parquet_files, resolve_file_url
 from geoparquet_io.core.logging_config import debug, error, info, progress, warn
 from geoparquet_io.core.parquet_writer import WriteOptions, resolve_output_geoparquet_version
 from geoparquet_io.core.partition.staging import (
@@ -124,12 +124,7 @@ def calculate_partition_stats(output_folder: str, num_partitions: int) -> tuple[
     Returns:
         Tuple of (total_size_mb, avg_size_mb).
     """
-    total_size_bytes = sum(
-        os.path.getsize(os.path.join(root, f))
-        for root, _, files in os.walk(output_folder)
-        for f in files
-        if f.endswith(".parquet")
-    )
+    total_size_bytes = sum(os.path.getsize(f) for f in get_all_parquet_files(output_folder))
     total_size_mb = total_size_bytes / (1024 * 1024)
     avg_size_mb = total_size_mb / num_partitions if num_partitions > 0 else 0
     return total_size_mb, avg_size_mb

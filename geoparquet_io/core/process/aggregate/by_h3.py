@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pyarrow as pa
 
-from geoparquet_io.core.compression import resolve_process_compression_level
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.constants import DEFAULT_H3_COLUMN_NAME
 from geoparquet_io.core.duckdb_utils import as_wkb_sql, geom_from_wkb_sql
 from geoparquet_io.core.index_ops import get_index_spec
@@ -57,7 +57,7 @@ def aggregate_by_h3(
     show_sql: bool = False,
 ) -> None:
     """Aggregate a GeoParquet file into H3 cells. Writes the output file."""
-    compression_level = resolve_process_compression_level(compression, compression_level)
+    compression_level = resolve_codec(compression, compression_level, context="process").level
     aggregate_grid_file(
         H3_SCHEME,
         input_parquet,

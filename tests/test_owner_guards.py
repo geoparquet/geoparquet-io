@@ -66,7 +66,7 @@ CHECK_OWNER_DEFS = REPO / "scripts" / "check_owner_defs.py"
 #: The pinned number of exemption entries per check (G1 per arm). Lower it with
 #: the commit that deletes a copy; raising it needs a reason in review.
 EXPECTED_COUNTS = {
-    "G1.tid251": 13,
+    "G1.tid251": 10,
     "G1.geo_parse": 0,
     "G1.set_memory_limit": 0,
     "G1.sql_escape": 0,
@@ -91,6 +91,7 @@ EXPECTED_COUNTS = {
     "G1.footer_patch": 0,
     "G1.geometry_identity": 8,
     "G1.geo_compose": 0,
+    "G1.staging": 0,
     "G2.exemptions": 7,
     "G3.pairs": 0,
     "G3.baseline": 0,
@@ -98,7 +99,7 @@ EXPECTED_COUNTS = {
     "G13.options": 11,
     "G13.bbox_parsers": 0,
     "G4.whitelist": 148,
-    "G4.tests_whitelist": 95,
+    "G4.tests_whitelist": 96,
 }
 
 
@@ -3124,6 +3125,64 @@ def _find_geo_compose(m: _Module) -> Iterator[Hit]:
                 yield m.hit(node)
 
 
+_PUBLISH_MOVES = frozenset({"os.replace", "os.rename", "shutil.move"})
+_PATH_JOINS = frozenset({"os.path.join", "pathlib.Path", "Path"})
+
+
+def _builds_a_path(m: _Module, call: ast.Call) -> bool:
+    """Whether *call*'s result is joined into a file name (``/``, ``+``,
+    ``os.path.join``, an f-string), not used as a directory as it stands."""
+    up = m.parents.get(id(call))
+    while isinstance(up, ast.Call) and m.dotted(up.func) in _PATH_JOINS:
+        if m.dotted(up.func) == "os.path.join":
+            return True
+        up = m.parents.get(id(up))
+    if isinstance(up, ast.BinOp) and isinstance(up.op, (ast.Div, ast.Add)):
+        return True
+    # An f-string that starts with the directory is a path; one that mentions
+    # it mid-sentence is a message.
+    joined = m.parents.get(id(up)) if isinstance(up, ast.FormattedValue) else None
+    return isinstance(joined, ast.JoinedStr) and joined.values[0] is up
+
+
+def _keeps_its_file(call: ast.Call) -> bool:
+    return any(
+        k.arg == "delete" and isinstance(k.value, ast.Constant) and k.value.value is False
+        for k in call.keywords
+    )
+
+
+def _find_staging(m: _Module) -> Iterator[Hit]:
+    """A file staged, published or named for scratch outside
+    ``file_utils.atomic_write`` / ``scratch_file`` / ``scratch_path``
+    (#1367 concept 11, #1076).
+
+    Hits: ``os.replace``, ``os.rename`` and ``shutil.move`` (a publish
+    step); ``tempfile.mkstemp`` and a ``NamedTemporaryFile(delete=False)``
+    (a named temp kept past its block); and ``tempfile.gettempdir()`` joined
+    into a file name. Would have caught the fourteen staging copies #1076's
+    family found -- reproject's ``NamedTemporaryFile`` + ``shutil.move`` that
+    leaked its temp on Ctrl-C, ``geometry-metrics``' unstaged rewrite that
+    clobbered its destination, the ``mkstemp`` writers that published 0600
+    (HANDOFFS row 34), ``staged_replacement``'s second staging rule, the
+    pmtiles ``.building`` and ``.meta.tmp`` renames -- and the hand-joined
+    ``gettempdir() / f"gpio_*_{uuid}.parquet"`` scratch names in the API, the
+    extractors and the stdin spool. ``gettempdir()`` used as a directory
+    (DuckDB's spill dir, tippecanoe's ``TMPDIR``) and a self-deleting probe
+    file are not hits.
+    """
+    for node in ast.walk(m.tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = m.dotted(node.func)
+        if name in _PUBLISH_MOVES or name == "tempfile.mkstemp":
+            yield m.hit(node)
+        elif name == "tempfile.NamedTemporaryFile" and _keeps_its_file(node):
+            yield m.hit(node)
+        elif name == "tempfile.gettempdir" and _builds_a_path(m, node):
+            yield m.hit(node)
+
+
 @dataclass(frozen=True)
 class Arm:
     finder: Callable[..., Iterator[Hit]]
@@ -3173,6 +3232,7 @@ ARMS = {
         _find_geometry_identity, ("geoparquet_io/core/geometry_detection.py",)
     ),
     "geo_compose": Arm(_find_geo_compose, ("geoparquet_io/core/geo_metadata.py",)),
+    "staging": Arm(_find_staging, ("geoparquet_io/core/file_utils.py",)),
 }
 
 
@@ -3649,6 +3709,7 @@ def test_g4_whitelist_has_a_reason():
 # ---------------------------------------------------------------------------
 
 G1_PLANTS = {
+    "staging": ("import os\n\ndef publish(staged, final):\n    os.replace(staged, final)\n"),
     "geo_parse": 'import json\n\ndef read(md):\n    return json.loads(md[b"geo"])\n',
     "set_memory_limit": "def cap(con):\n    con.execute(\"SET memory_limit = '4GB'\")\n",
     "sql_escape": 'def esc(v):\n    return v.replace("\'", "\'\'")\n',
@@ -3703,6 +3764,13 @@ G1_PLANTS = {
 
 #: Near-misses each arm must not flag, so a planted hit is the pattern itself.
 G1_CLEAN = {
+    "staging": (
+        "import tempfile\n\n"
+        "def spill_dir():\n    return tempfile.gettempdir()\n\n"
+        "def probe(d):\n"
+        "    with tempfile.NamedTemporaryFile(dir=d):\n        pass\n\n"
+        'def say():\n    return f"spills to {tempfile.gettempdir()}"\n'
+    ),
     "geo_parse": "import json\n\ndef read(text):\n    return json.loads(text)\n",
     "set_memory_limit": '"""Never SET memory_limit here."""\n',
     "sql_escape": 'def esc(v):\n    return v.replace("a", "b")\n',
@@ -6374,3 +6442,30 @@ def test_migrated_arm_repository(arm):
     hits, stale = reconcile(arm_hits(REPO, arm), load_exemptions().get("G1", {}).get(arm, []))
     assert not hits, _format(hits)
     assert not stale, stale
+
+
+STAGING_SHAPES = {
+    "replace": "import os\n\ndef f(a, b):\n    os.replace(a, b)\n",
+    "rename_alias": "from os import rename\n\ndef f(a, b):\n    rename(a, b)\n",
+    "move": "import shutil\n\ndef f(a, b):\n    shutil.move(a, b)\n",
+    "mkstemp": "import tempfile\n\ndef f():\n    return tempfile.mkstemp(suffix='.parquet')\n",
+    "named_kept": (
+        "import tempfile\n\ndef f():\n"
+        "    return tempfile.NamedTemporaryFile(suffix='.parquet', delete=False)\n"
+    ),
+    "gettempdir_div": (
+        "import tempfile, uuid\nfrom pathlib import Path\n\ndef f():\n"
+        "    return Path(tempfile.gettempdir()) / f'gpio_{uuid.uuid4()}.parquet'\n"
+    ),
+    "gettempdir_join": (
+        "import os, tempfile\n\ndef f(n):\n    return os.path.join(tempfile.gettempdir(), n)\n"
+    ),
+    "gettempdir_concat": "import tempfile\n\ndef f(n):\n    return tempfile.gettempdir() + '/' + n\n",
+    "gettempdir_fstring": "import tempfile\n\ndef f(n):\n    return f'{tempfile.gettempdir()}/{n}'\n",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(STAGING_SHAPES))
+def test_g12_staging_arm_flags_every_shape(shape, tmp_path):
+    repo = _plant(tmp_path, "staging", STAGING_SHAPES[shape])
+    assert len(arm_hits(repo, "staging")) == 1

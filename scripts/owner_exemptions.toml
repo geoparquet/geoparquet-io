@@ -41,26 +41,13 @@ path = "geoparquet_io/core/carto.py"
 name = "httpx"
 reason = "permanent: CARTO status probe streams one request with httpx.stream to read the status without the body; accepted by the T4a audit"
 [[G1.tid251]]
-path = "geoparquet_io/core/constants.py"
-name = "pyarrow.parquet.ParquetWriter"
-reason = "vecorel schema fix rewrites the file itself; private write outside the facade, T2f"
-[[G1.tid251]]
 path = "geoparquet_io/core/duckdb_utils.py"
 name = "psutil"
 reason = "permanent: process-liveness check for stale DuckDB temp dirs, not a memory fact; optional import (#1330)"
 [[G1.tid251]]
-path = "geoparquet_io/core/process/overview/overview_file.py"
-name = "pyarrow.parquet.ParquetWriter"
-count = 2
-reason = "overview writer (annotation + call); private write outside the facade, T2f"
-[[G1.tid251]]
-path = "geoparquet_io/core/process/simplify.py"
-name = "pyarrow.parquet.ParquetWriter"
-reason = "streaming simplify writer; private write outside the facade, T2f"
-[[G1.tid251]]
 path = "geoparquet_io/core/streaming.py"
 name = "pyarrow.parquet.write_table"
-reason = "permanent scratch copy: stdin spooled to a temp file the command then reads; never an output, so not a facade write. Its hand-rolled temp path is T2f's (concept 11)"
+reason = "permanent scratch copy: stdin spooled to a temp file the command then reads; never an output, so not a facade write. Its path comes from file_utils.scratch_path (concept 11)"
 [[G1.tid251]]
 path = "geoparquet_io/core/wfs.py"
 name = "httpx"
@@ -288,9 +275,10 @@ reason = "permanent: constant geometry filter, not a spatial join"
 "*covering*" = ["geoparquet_io/core/geo_metadata.py", "geoparquet_io/core/bbox_structure.py"]
 "parse_size*" = ["geoparquet_io/core/sizing.py"]
 "format_size*" = ["geoparquet_io/core/sizing.py"]
-# atomic_write lives in write_strategies/base.py until T2f moves it to
-# file_utils (re-exported from write_funnels); T2f changes this owner with the move.
-"atomic_write" = ["geoparquet_io/core/write_strategies/base.py"]
+# The one staging owner (#1367 T2f, concept 11): moved out of
+# write_strategies/base.py, which write_funnels and parquet_footer could not
+# both import without a cycle. No re-export.
+"atomic_write" = ["geoparquet_io/core/file_utils.py"]
 # T1c: the native-geo-type probe (was _is_geography_column, copied in validate.py) and
 # the query-schema probes (was geo_metadata.output_query_schema / LIMIT 0 / DESCRIBE copies).
 "_is_geography_column" = ["geoparquet_io/core/duckdb_metadata.py"]

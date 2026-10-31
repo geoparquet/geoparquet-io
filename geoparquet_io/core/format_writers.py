@@ -41,6 +41,7 @@ from geoparquet_io.core.exceptions import (
     ValidationError,
 )
 from geoparquet_io.core.file_utils import (
+    atomic_write,
     handle_output_overwrite,
     output_exists_error,
     resolve_file_url,
@@ -62,7 +63,6 @@ from geoparquet_io.core.remote import (
 )
 from geoparquet_io.core.sizing import format_size
 from geoparquet_io.core.streaming import is_stdin
-from geoparquet_io.core.write_strategies.base import atomic_write
 
 # Error message templates for consistency
 ERROR_REMOTE_OUTPUT = "{format} output path must be local. Use upload() for cloud destinations."

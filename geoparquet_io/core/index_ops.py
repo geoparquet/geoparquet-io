@@ -8,9 +8,6 @@ never translate IDs to imitate another build. Golden tests pin each build.
 from __future__ import annotations
 
 import math
-import os
-import tempfile
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -37,7 +34,12 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.edges import is_nonplanar, representative_point_sql
 from geoparquet_io.core.exceptions import InvalidParameterError, PartitionError
-from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
+from geoparquet_io.core.file_utils import (
+    handle_output_overwrite,
+    resolve_file_url,
+    scratch_path,
+    unlink_released_file,
+)
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo, sanitized_carried_geo_of_file
 from geoparquet_io.core.geometry_detection import (
     create_geometry_view,
@@ -469,10 +471,7 @@ def ensure_index_column(
             column_name,
             None,
         )
-    temp = os.path.join(
-        tempfile.gettempdir(),
-        f"{spec.name}_enriched_{uuid.uuid4().hex}.parquet",
-    )
+    temp = scratch_path(prefix=f"{spec.name}_enriched_")
     try:
         add_index_column(
             spec,
@@ -490,8 +489,7 @@ def ensure_index_column(
             debug(f"{spec.label} column added successfully at {spec.unit} {resolution}")
         return temp, column_name, temp
     except Exception as e:
-        if os.path.exists(temp):
-            os.remove(temp)
+        unlink_released_file(temp)
         raise PartitionError(f"Failed to add {spec.label} column: {str(e)}") from e
 
 
@@ -629,8 +627,7 @@ def partition_index(
     try:
         raise_if_no_rows(actual_input)
     except Exception:
-        if stdin_temp_file and os.path.exists(stdin_temp_file):
-            os.remove(stdin_temp_file)
+        unlink_released_file(stdin_temp_file)
         raise
 
     # Calculate auto resolution if requested
@@ -653,8 +650,7 @@ def partition_index(
             else:
                 info(f"Auto-calculated {spec.label} {spec.unit}: {resolution}")
         except Exception as e:
-            if stdin_temp_file and os.path.exists(stdin_temp_file):
-                os.remove(stdin_temp_file)
+            unlink_released_file(stdin_temp_file)
             if not spec.wrap_auto_error:
                 raise
             raise PartitionError(f"Auto-resolution calculation failed: {str(e)}") from e
@@ -664,8 +660,7 @@ def partition_index(
         if spec.prefix_partition:
             validate_partition_resolutions(resolution, partition_resolution, spec)
     except Exception:
-        if stdin_temp_file and os.path.exists(stdin_temp_file):
-            os.remove(stdin_temp_file)
+        unlink_released_file(stdin_temp_file)
         raise
 
     if keep_column is None:
@@ -682,8 +677,7 @@ def partition_index(
                     working_parquet, column_name, preview_limit, verbose, partition_resolution
                 )
             finally:
-                if temp_file and os.path.exists(temp_file):
-                    os.remove(temp_file)
+                unlink_released_file(temp_file)
             return
 
         if spec.prefix_partition:
@@ -717,14 +711,12 @@ def partition_index(
                 f"(total: {total_size_mb:.2f} MB, avg: {avg_size_mb:.2f} MB)"
             )
         finally:
-            if temp_file and os.path.exists(temp_file):
-                if verbose:
-                    debug(f"Cleaning up temporary {spec.label}-enriched file...")
-                os.remove(temp_file)
+            if temp_file and verbose:
+                debug(f"Cleaning up temporary {spec.label}-enriched file...")
+            unlink_released_file(temp_file)
     finally:
         # Clean up stdin temp file
-        if stdin_temp_file and os.path.exists(stdin_temp_file):
-            os.remove(stdin_temp_file)
+        unlink_released_file(stdin_temp_file)
 
 
 def validate_partition_arguments(spec, resolution, partition_resolution=None, auto=False):

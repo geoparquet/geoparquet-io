@@ -3400,8 +3400,8 @@ def convert_to_geoparquet(
                 query = _apply_order(query, order_by)
 
                 # This convert rebuilds the output's `geo` block from the converted
-                # data (`original_metadata=None` below, and at 2.0 DuckDB regenerates
-                # the block outright on the plain-COPY fast path), so an input `crs`
+                # data (only declarations survive below; at 2.0 DuckDB regenerates
+                # the block on the plain-COPY fast path), so an input `crs`
                 # that spelled out the default never reaches `apply_output_crs` and
                 # its note never fired here. Emit the same note from the same helper
                 # so the key does not vanish unannounced on this path alone (#844).
@@ -3409,12 +3409,8 @@ def convert_to_geoparquet(
                     (geometry_info or {}).get("metadata", {}).get(geom_col, {}).get("crs")
                 )
 
-            # Sidecar KV payloads (fiboa, vecorel, STAC fragments) live next to the
-            # 'geo' key and are rebuilt from scratch by every write strategy, so a
-            # parquet→parquet convert has to hand them to the writer explicitly or
-            # they vanish (#690). Only the non-geo keys travel: 'geo' is regenerated
-            # from the converted data, never copied.
-            preserved_kv = read_preserved_kv_metadata(input_file, verbose) if is_parquet else {}
+            # The funnel carries sidecars under the same key policy as a
+            # metadata-only rewrite; the composer rebuilds derived geo facts.
 
             # A covering is declared only for a column this conversion computed, or
             # one the input's metadata already declared -- never inferred from a
@@ -3426,13 +3422,17 @@ def convert_to_geoparquet(
                 else None
             )
 
+            from geoparquet_io.core.duckdb_metadata import get_kv_metadata
+            from geoparquet_io.core.geo_metadata import declared_write_metadata
+
             write_parquet_with_metadata(
                 con,
                 query,
                 output_file,
-                original_metadata=None,
+                original_metadata=(
+                    declared_write_metadata(get_kv_metadata(input_file)) if is_parquet else None
+                ),
                 custom_metadata=custom_metadata,
-                extra_kv_metadata=preserved_kv or None,
                 compression=compression,
                 compression_level=compression_level,
                 row_group_rows=row_group_rows,

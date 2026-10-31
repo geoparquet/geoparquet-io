@@ -1,7 +1,8 @@
 """A loopback S3 endpoint for tests that must read through DuckDB's httpfs.
 
 Serves ``ListObjectsV2`` (what DuckDB's ``glob()`` asks), ``HEAD`` and ranged
-``GET`` for a dict of ``{"bucket/key": bytes}``, path-style, over plain HTTP.
+``GET`` for a dict of ``{"bucket/key": bytes}``, path-style, over plain HTTP,
+and stores a single-request ``PUT`` (what obstore sends for a small upload).
 It stands in for the network and nothing else: gpio talks to it through its
 real ``--s3-endpoint``/``--s3-no-ssl`` configuration.
 """
@@ -61,6 +62,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("ETag", '"x"')
         self.end_headers()
 
+    def do_PUT(self) -> None:
+        self.requests.append(("PUT", self.path))
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.objects[urlparse(self.path).path.lstrip("/")] = body
+        self._send(200, headers={"ETag": '"x"'})
+
     def do_GET(self) -> None:
         self.requests.append(("GET", self.path))
         url = urlparse(self.path)
@@ -98,9 +105,12 @@ class _Handler(BaseHTTPRequestHandler):
 
 @contextmanager
 def fake_s3(objects: dict[str, bytes]) -> Iterator[tuple[str, list[tuple[str, str]]]]:
-    """Serve *objects*; yield ``(endpoint, requests)`` with ``host:port`` and a request log."""
+    """Serve *objects*; yield ``(endpoint, requests)`` with ``host:port`` and a request log.
+
+    *objects* is served as given, so a ``PUT`` lands in the caller's dict.
+    """
     requests: list[tuple[str, str]] = []
-    handler = type("Handler", (_Handler,), {"objects": dict(objects), "requests": requests})
+    handler = type("Handler", (_Handler,), {"objects": objects, "requests": requests})
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

@@ -18,6 +18,7 @@ from geoparquet_io.cli.decorators import (
     grid_aggregate_options,
     metric_nodata_option,
     overwrite_option,
+    parse_row_group_options,
     process_compression_options,
     refuse_together,
     repair_geometry_option,
@@ -562,6 +563,8 @@ def process_simplify(
         raise click.UsageError(
             "--simplify-boundary/--no-simplify-boundary only applies with --coverage."
         )
+    # Parsed here, once: the core takes MB as a number (HANDOFFS row 78).
+    row_group_size_mb = parse_row_group_options(row_group_size, row_group_size_mb)
     with _activate_s3(ctx):
         try:
             simplify_file_impl(
@@ -662,6 +665,8 @@ def process_polygonize(
     from geoparquet_io.core.process.raster.polygonize import polygonize_file
 
     value_list = _parse_float_csv(values, "--values")
+    # Parsed here, once: the core takes MB as a number (HANDOFFS row 78).
+    row_group_size_mb = parse_row_group_options(row_group_size, row_group_size_mb)
     with _activate_s3(ctx):
         try:
             polygonize_file(
@@ -767,6 +772,8 @@ def process_contour(
     from geoparquet_io.core.process.raster.contour import contour_file
 
     level_list = _parse_float_csv(levels, "--levels")
+    # Parsed here, once: the core takes MB as a number (HANDOFFS row 78).
+    row_group_size_mb = parse_row_group_options(row_group_size, row_group_size_mb)
     with _activate_s3(ctx):
         try:
             contour_file(

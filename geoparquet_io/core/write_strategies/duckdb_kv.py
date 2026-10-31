@@ -14,9 +14,6 @@ Reliability: Atomic write - either succeeds completely or fails
 from __future__ import annotations
 
 import json
-import os
-import tempfile
-from pathlib import Path
 
 import duckdb
 import pyarrow as pa
@@ -39,6 +36,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_literal,
     sql_path,
 )
+from geoparquet_io.core.file_utils import scratch_path, unlink_released_file
 from geoparquet_io.core.geo_metadata import (
     NATIVE_GEOMETRY_VERSIONS,
     GeoBlockOptions,
@@ -318,8 +316,8 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                     upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
 
         finally:
-            if is_remote and Path(local_path).exists():
-                Path(local_path).unlink()
+            if is_remote:
+                unlink_released_file(local_path)
 
     #: Settings this strategy pins for the duration of one write, on top of the
     #: shared memory policy in ``scoped_write_memory_limit`` (#1174: one policy,
@@ -339,9 +337,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
     def _get_local_path(self, output_path: str, is_remote: bool) -> str:
         """Get local path for writing (temp file if remote)."""
         if is_remote:
-            fd, local_path = tempfile.mkstemp(suffix=".parquet")
-            os.close(fd)
-            return local_path
+            return scratch_path()
         return output_path
 
     def _write_parquet_geo_only(
@@ -545,6 +541,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         input_crs: dict | None = None,
         custom_metadata: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        original_metadata: dict | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using DuckDB COPY TO with KV_METADATA."""
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
@@ -653,8 +650,8 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
         finally:
             con.close()
-            if is_remote and Path(local_path).exists():
-                Path(local_path).unlink()
+            if is_remote:
+                unlink_released_file(local_path)
 
     def _write_plain_parquet_from_query(
         self,
@@ -701,5 +698,5 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 pf = pq.ParquetFile(local_path)
                 success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
         finally:
-            if is_remote and Path(local_path).exists():
-                Path(local_path).unlink()
+            if is_remote:
+                unlink_released_file(local_path)

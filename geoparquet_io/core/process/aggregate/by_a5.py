@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pyarrow as pa
 
-from geoparquet_io.core.compression import resolve_process_compression_level
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.constants import DEFAULT_A5_COLUMN_NAME
 from geoparquet_io.core.duckdb_utils import as_wkb_sql
 from geoparquet_io.core.index_ops import get_index_spec
@@ -60,7 +60,7 @@ def aggregate_by_a5(
     show_sql: bool = False,
 ) -> None:
     """Aggregate a GeoParquet file into A5 cells. Writes the output file."""
-    compression_level = resolve_process_compression_level(compression, compression_level)
+    compression_level = resolve_codec(compression, compression_level, context="process").level
     aggregate_grid_file(
         A5_SCHEME,
         input_parquet,

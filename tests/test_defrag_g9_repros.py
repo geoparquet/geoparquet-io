@@ -410,9 +410,8 @@ def test_236_no_write_path_declares_a_non_finite_bbox(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="#1146")
 def test_1146_every_row_group_holds_a_located_geometry(tmp_path):
-    """Expected to fail: the last row group is the 3 NULL rows alone, with no covering stats.
+    """The trailing NULL rows join the preceding located group, preserving row order.
 
     ``convert`` orders located rows first and NULL/EMPTY rows last, so when
     the located count is an exact multiple of the row-group size the writer

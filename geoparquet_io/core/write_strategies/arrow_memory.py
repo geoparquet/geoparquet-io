@@ -79,7 +79,7 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
             debug(f"Using GeoParquet version: {geoparquet_version}")
 
         if has_geometry:
-            final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
+            final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
         else:
             final_query = query
             if verbose:
@@ -139,6 +139,7 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
         input_crs: dict | None = None,
         custom_metadata: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        original_metadata: dict | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet file."""
 
@@ -163,7 +164,7 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
                 table,
                 geometry_column=geometry_column,
                 geoparquet_version=geoparquet_version,
-                original_metadata=None,
+                original_metadata=original_metadata,
                 input_crs=input_crs,
                 custom_metadata=custom_metadata,
                 verbose=verbose,

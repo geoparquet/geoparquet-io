@@ -563,7 +563,7 @@ class TestFixSpatialOrdering:
         """A move that fails must not take the only good copy of the data with it.
 
         The whole destructive step is the ``os.replace()`` inside
-        ``write_funnels.staged_replacement``, so if it raises, the original -- never unlinked --
+        ``file_utils.atomic_write``, so if it raises, the original -- never unlinked --
         is exactly as it was. Under ``--fix --no-backup`` there is no ``.bak``
         to fall back on, and a direct caller of this function has no ``.bak``
         concept at all.

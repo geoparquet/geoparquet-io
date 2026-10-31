@@ -15,7 +15,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.file_utils import handle_output_overwrite
+from geoparquet_io.core.file_utils import atomic_write, handle_output_overwrite
 from geoparquet_io.core.geojson_stream import require_planar_geojson_file
 from geoparquet_io.core.logging_config import configure_verbose, debug, success, warn
 from geoparquet_io.core.pmtiles import (
@@ -110,7 +110,7 @@ def _merge_pyramid_metadata(pmtiles_path: str, pyramid: dict) -> None:
     verbatim; the writer recomputes header offsets and zoom bounds).
 
     The archive is read fully into memory first so that no handle on either
-    file remains open when ``os.replace`` runs. In particular, pmtiles'
+    file remains open when the staged archive is published. In particular, pmtiles'
     ``MmapSource`` must NOT be used here: it wraps the file in an ``mmap``
     that lives on inside the reader's ``get_bytes`` closure with no way to
     close it, and on Windows an open memory map keeps the file locked (even
@@ -131,24 +131,14 @@ def _merge_pyramid_metadata(pmtiles_path: str, pyramid: dict) -> None:
     metadata = reader.metadata()
     metadata["gpio:pyramid"] = pyramid
 
-    # Unpredictable temp name in the output dir (same filesystem for the
-    # atomic replace; not symlink-followable like a fixed "<output>.meta.tmp").
-    tmp = tempfile.NamedTemporaryFile(
-        dir=os.path.dirname(os.path.abspath(pmtiles_path)),
-        prefix=Path(pmtiles_path).name + ".",
-        suffix=".meta.tmp",
-        delete=False,
-    )
-    try:
-        with tmp:
+    # Staged beside the archive (same filesystem, private directory) and
+    # published over it by the owner, which keeps the archive's mode.
+    with atomic_write(pmtiles_path, suffix=Path(pmtiles_path).suffix) as staged:
+        with open(staged, "wb") as tmp:
             writer = Writer(tmp)
             for zxy, data in all_tiles(source):
                 writer.write_tile(zxy_to_tileid(*zxy), data)
             writer.finalize(header, metadata)
-        os.replace(tmp.name, pmtiles_path)
-    except BaseException:
-        Path(tmp.name).unlink(missing_ok=True)
-        raise
 
 
 def _sibling_is_current(sibling: str, input_path: str, dropped_columns: tuple[str, ...]) -> bool:

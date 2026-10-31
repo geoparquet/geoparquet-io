@@ -55,7 +55,12 @@ from geoparquet_io.core.duckdb_utils import (
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
+from geoparquet_io.core.file_utils import (
+    atomic_write,
+    handle_output_overwrite,
+    resolve_file_url,
+    unlink_released_file,
+)
 from geoparquet_io.core.geo_metadata import is_levelled_overview, sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
@@ -294,9 +299,10 @@ def _tile_chunks(
 ) -> list[str]:
     """Tile each chunk file to its archive, reusing the complete ones.
 
-    The archive is built under a temporary name and renamed on success, so a
-    part with the final name is one tippecanoe finished. ``.pmtiles`` stays
-    the suffix because tippecanoe picks the output format from it.
+    The archive is staged by ``file_utils.atomic_write`` and published on
+    success, so a part with the final name is one tippecanoe finished.
+    ``.pmtiles`` stays the suffix because tippecanoe picks the output format
+    from it.
     """
     parts: list[str] = []
     for n, chunk in enumerate(chunk_files, start=1):
@@ -305,12 +311,11 @@ def _tile_chunks(
             debug(f"chunk {n}/{len(chunk_files)}: reusing {part}")
             parts.append(part)
             continue
-        building = chunk[: -len(".parquet")] + ".building.pmtiles"
         debug(f"chunk {n}/{len(chunk_files)}: tiling {part}")
-        create_pmtiles_from_geoparquet(
-            chunk, building, layer=layer, force=True, verbose=verbose, **tiling
-        )
-        os.replace(building, part)
+        with atomic_write(part, suffix=".pmtiles") as building:
+            create_pmtiles_from_geoparquet(
+                chunk, building, layer=layer, force=True, verbose=verbose, **tiling
+            )
         parts.append(part)
     return parts
 
@@ -376,7 +381,7 @@ def create_pmtiles_chunked(
     parts_dir = f"{output_path}.parts"
     if not _prepare_parts_dir(parts_dir, manifest):
         for stale in glob.glob(os.path.join(parts_dir, f"{_CHUNK_PREFIX}*")):
-            os.remove(stale)
+            unlink_released_file(stale)
         _split_input(
             input_path,
             parts_dir,
@@ -402,14 +407,13 @@ def create_pmtiles_chunked(
         verbose=verbose,
     )
 
-    # Joined under the parts directory and moved into place, so a failed join
-    # leaves no partial archive at the output path and the next run resumes.
-    joined = os.path.join(parts_dir, "joined.pmtiles")
-    _run_tile_join(
-        _build_tile_join_command(joined, parts, name=stem, attribution=attribution, force=True),
-        verbose,
-    )
-    os.replace(joined, output_path)
+    # Staged and published by the owner, so a failed join leaves no partial
+    # archive at the output path and the next run resumes.
+    with atomic_write(output_path, suffix=".pmtiles") as joined:
+        _run_tile_join(
+            _build_tile_join_command(joined, parts, name=stem, attribution=attribution, force=True),
+            verbose,
+        )
     shutil.rmtree(parts_dir, ignore_errors=True)
     if os.path.exists(parts_dir):
         warn(f"Could not remove {parts_dir}; it is safe to delete")

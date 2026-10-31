@@ -364,6 +364,9 @@ def _setup_store_and_kwargs(
         if s3_endpoint:
             protocol = "https" if s3_use_ssl else "http"
             store_kwargs["endpoint"] = f"{protocol}://{s3_endpoint}"
+            if not s3_use_ssl:
+                # obstore refuses a plain-HTTP endpoint unless told to allow it.
+                store_kwargs["client_options"] = {"allow_http": True}
             if not region:
                 store_kwargs["region"] = "us-east-1"  # Default for custom endpoints
 
@@ -659,6 +662,27 @@ def _upload_directory(
     )
 
 
+def _with_active_s3_config(
+    profile: str | None, s3_region: str | None, s3_use_ssl: bool
+) -> tuple[str | None, str | None, str | None, bool]:
+    """The upload's S3 settings when its caller named no endpoint (HANDOFFS row 43).
+
+    The ``--s3-endpoint``/``--s3-region``/``--s3-no-ssl``/``--aws-profile`` a
+    command runs under (``duckdb_utils.s3_config_scope``) configured its reads
+    but not its upload, so a MinIO or loopback destination was written to AWS.
+    One rule now, the one ``file_utils``' copy already follows: what the caller
+    passes wins, and what it leaves unset comes from the active config.
+    """
+    from geoparquet_io.core.duckdb_utils import get_active_s3_config
+
+    active = get_active_s3_config()
+    endpoint = active.get("s3_endpoint")
+    if endpoint is not None:
+        s3_region = s3_region or active.get("s3_region")
+        s3_use_ssl = active.get("s3_use_ssl", s3_use_ssl)
+    return profile or active.get("profile"), endpoint, s3_region, s3_use_ssl
+
+
 def upload(
     source: Path,
     destination: str,
@@ -712,6 +736,10 @@ def upload(
             s3_use_ssl=False,
         )
     """
+    if s3_endpoint is None:
+        profile, s3_endpoint, s3_region, s3_use_ssl = _with_active_s3_config(
+            profile, s3_region, s3_use_ssl
+        )
     bucket_url, prefix = parse_object_store_url(destination)
 
     if source.is_file():

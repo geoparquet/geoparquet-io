@@ -34,7 +34,6 @@ if TYPE_CHECKING:
     import duckdb
     import pyarrow as pa
 
-from geoparquet_io.core.column_selection import same_column
 from geoparquet_io.core.edges import (
     PLANAR,
     geoarrow_edge_type,
@@ -2428,37 +2427,29 @@ def _geoarrow_coord_exprs(quoted_geom: str, encoding: str) -> tuple:
     )
 
 
-def _wrap_query_with_wkb_conversion(query: str, geometry_column: str, con=None) -> str:
-    """
-    Wrap a query to convert geometry column to WKB format.
+def _wrap_query_with_wkb_conversion(query: str, geometry_column: str | Iterable[str] | None) -> str:
+    """Wrap *query* so each named geometry column comes out as WKB, in place.
+
+    The one rule (#1367 HANDOFFS row 75): DuckDB's Arrow export hands geometry
+    over in its own format, so a write or a stream converts it with
+    ``ST_AsWKB``. ``SELECT * REPLACE`` keeps the query's column order and
+    needs no column discovery; the copy this replaces fell back to
+    ``EXCLUDE`` + append without a connection, moving the geometry last.
 
     Args:
         query: Original SQL query
-        geometry_column: Name of the geometry column
-        con: Optional DuckDB connection for column discovery
-
-    Returns:
-        Modified query with geometry converted to WKB
+        geometry_column: One geometry column, several, or ``None`` to leave
+            the query as it is
     """
-    quoted_geom = quote_identifier(geometry_column)
-
-    if con:
-        try:
-            columns = _get_query_columns(con, query)
-            # In the query's own order: appending the geometry moved a column
-            # after it (a bbox) ahead of it in the written file.
-            is_geom = [same_column(c, geometry_column) for c in columns]
-            select = [
-                f"{as_wkb_sql(quoted_geom)} AS {quoted_geom}" if geom else quote_identifier(c)
-                for c, geom in zip(columns, is_geom, strict=True)
-            ]
-            if any(is_geom) and not all(is_geom):
-                return f"SELECT {', '.join(select)} FROM ({query})"
-        except Exception:
-            pass
-
-    # Fallback: select all and convert geometry
-    return f"SELECT * EXCLUDE({quoted_geom}), {as_wkb_sql(quoted_geom)} AS {quoted_geom} FROM ({query})"
+    if not geometry_column:
+        return query
+    columns = [geometry_column] if isinstance(geometry_column, str) else list(geometry_column)
+    if not columns:
+        return query
+    replacements = ", ".join(
+        f"{as_wkb_sql(quote_identifier(name))} AS {quote_identifier(name)}" for name in columns
+    )
+    return f"SELECT * REPLACE ({replacements}) FROM ({query})"
 
 
 def _wrap_query_with_blob_conversion(

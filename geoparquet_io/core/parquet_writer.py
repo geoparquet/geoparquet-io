@@ -71,7 +71,7 @@ from geoparquet_io.core.crs_utils import (
     extract_crs_from_parquet,
     source_crs_is_unknown,
 )
-from geoparquet_io.core.duckdb_utils import _strip_trailing_order_by, build_kv_metadata_clause
+from geoparquet_io.core.duckdb_utils import build_kv_metadata_clause
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.geo_metadata import (
@@ -377,6 +377,11 @@ def resolve_row_group_rows_for_table(
     where a row count goes, asking for 134,217,728 rows per group and writing
     one row group for the whole file (#1021).
 
+    All three data resolvers measure a compact copy of the first 20,000
+    rows. A bounded prefix lets streaming and query writes use the same rows
+    without materializing the whole input; copying removes retained buffers
+    and chunk-boundary overhead from the byte measurement.
+
     The answer is always a whole writer vector (or the caller's own count). An
     MB target against an empty table has nothing to measure and no rows to
     group, so it gets the default. It is not capped at the table's row count:
@@ -390,22 +395,34 @@ def resolve_row_group_rows_for_table(
     if table.num_rows <= 0:
         return DEFAULT_ROW_GROUP_ROWS
     # resolve answers None only for an MB target, so there is one here.
-    return _rows_for_byte_target(table, cast(float, row_group_size_mb), verbose)
+    # A compact prefix makes chunking and retained slice buffers irrelevant.
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    if not isinstance(table, (pa.Table, pa.RecordBatch)):
+        # Table-like measurement adapters expose bytes directly, without Arrow buffers.
+        return _rows_for_byte_target(table, cast(float, row_group_size_mb), verbose)
+    sample = pc.take(table, pa.array(range(min(table.num_rows, _MB_ESTIMATE_SAMPLE_ROWS))))
+    return _rows_for_byte_target(sample, cast(float, row_group_size_mb), verbose)
 
 
-def regroup(chunks, rows: int):
-    """Yield the stream's rows in groups of exactly ``rows``; the last takes the remainder.
+def regroup(chunks, rows):
+    """Yield groups of ``rows`` (one count or successive counts); the last takes the remainder.
 
     The one regrouper: every streamed write cuts its row groups here, after a
     resolver above has decided ``rows``. ``chunks`` are Arrow record batches or
     tables, and each group comes back as the same kind (``concat_batches`` /
-    ``concat_tables`` of zero-copy slices), so it holds at most ``rows`` rows.
+    ``concat_tables`` of zero-copy slices), so it holds at most one target group.
     A source in small or uneven groups (DuckDB 2.0's ``to_arrow_reader`` only
     caps a batch at ``n``; a file's own row groups; batches shrunk by a
     filter) comes out in whole groups.
     """
+    import itertools
+
     import pyarrow as pa
 
+    targets = itertools.repeat(rows) if isinstance(rows, int) else iter(rows)
+    target = next(targets, None)
     pending: list = []
     held = 0
 
@@ -416,15 +433,46 @@ def regroup(chunks, rows: int):
 
     for chunk in chunks:
         while chunk.num_rows:
-            take = min(rows - held, chunk.num_rows)
+            take = min(target - held, chunk.num_rows)
             pending.append(chunk.slice(0, take))
             held += take
             chunk = chunk.slice(take)
-            if held == rows:
+            if held == target:
                 yield joined()
                 pending, held = [], 0
+                target = next(targets, None)
     if held:
         yield joined()
+
+
+def located_row_group_layout(parquet_file, geometry_column: str) -> list[int] | None:
+    """Merge unlocated groups into their nearest preceding located group (#1146).
+
+    Leading unlocated groups join the first located group. Row order is
+    preserved; the requested size is a target, enlarged to avoid groups with
+    no spatial statistics. Location is decided by the geometry-stats owner,
+    including its NULL/EMPTY/non-finite policy, not by WKB null counts.
+
+    If the entire file is unlocated, no layout can supply a located geometry:
+    leave its groups alone. Return None when no rewrite is necessary.
+    """
+    from geoparquet_io.core.geo_metadata import geometry_stats_of
+
+    original = [
+        parquet_file.metadata.row_group(i).num_rows for i in range(parquet_file.num_row_groups)
+    ]
+    layout: list[int] = []
+    leading = 0
+    for index, rows in enumerate(original):
+        group = parquet_file.read_row_group(index, columns=[geometry_column])
+        if geometry_stats_of(group, geometry_column).bbox is not None:
+            layout.append(leading + rows)
+            leading = 0
+        elif layout:
+            layout[-1] += rows
+        else:
+            leading += rows
+    return layout if layout and layout != original else None
 
 
 def resolve_row_group_rows_for_sample(
@@ -452,13 +500,6 @@ def resolve_row_group_rows_for_sample(
         return resolved
     if not final and table.num_rows < _MB_ESTIMATE_SAMPLE_ROWS:
         return None
-    if table.num_rows > _MB_ESTIMATE_SAMPLE_ROWS:
-        import pyarrow as pa
-        import pyarrow.compute as pc
-
-        # take() copies, so the buffer sizes are the sample's, not the
-        # whole table's buffers a zero-copy slice would still report.
-        table = pc.take(table, pa.array(range(_MB_ESTIMATE_SAMPLE_ROWS)))
     return resolve_row_group_rows_for_table(
         table, row_group_rows, row_group_size_mb, verbose=verbose
     )
@@ -511,9 +552,9 @@ def resolve_row_group_rows_for_query(
 
     DuckDB's ``ROW_GROUP_SIZE`` is a row count (``ROW_GROUP_SIZE_BYTES`` needs
     insertion order off, which would undo a spatial sort), so an MB target is
-    measured on a sample of the query's first rows. The sample drops a trailing
-    ``ORDER BY`` so the ``LIMIT`` streams instead of sorting (and, for a remote
-    input, re-reading) the whole source just to size row groups.
+    measured on the query's first output rows, preserving ORDER BY. Dropping
+    the order would measure different rows from the table and stream resolvers
+    when row widths vary, so the same output bytes would get different counts.
 
     Every DuckDB write path asks here: the plain-``COPY`` fast path a 2.0 input
     takes used to skip the measurement and write DuckDB's own 122,880-row
@@ -523,12 +564,9 @@ def resolve_row_group_rows_for_query(
     resolved = resolve_row_group_rows(row_group_rows, row_group_size_mb)
     if resolved is not None:
         return resolved
-    sample_query = _strip_trailing_order_by(query)
     try:
         sample = (
-            con.sql(f"SELECT * FROM ({sample_query}) LIMIT {_MB_ESTIMATE_SAMPLE_ROWS}")
-            .arrow()
-            .read_all()
+            con.sql(f"SELECT * FROM ({query}) LIMIT {_MB_ESTIMATE_SAMPLE_ROWS}").arrow().read_all()
         )
     except Exception as exc:  # pragma: no cover - defensive, fall back to the default
         debug(f"Could not sample rows for the --row-group-size-mb estimate: {exc}")
@@ -536,7 +574,7 @@ def resolve_row_group_rows_for_query(
     if sample.num_rows == 0:
         return DEFAULT_ROW_GROUP_ROWS
     # resolve answers None only for an MB target, so there is one here.
-    return _rows_for_byte_target(sample, cast(float, row_group_size_mb), verbose)
+    return resolve_row_group_rows_for_table(sample, None, row_group_size_mb, verbose=verbose)
 
 
 def resolve_row_group_rows_for_rewrite(num_rows: int, input_row_groups: int) -> int:

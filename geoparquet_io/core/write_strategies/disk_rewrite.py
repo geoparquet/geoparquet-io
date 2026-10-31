@@ -26,6 +26,7 @@ from geoparquet_io.core.duckdb_utils import (
     register_arrow,
     sql_path,
 )
+from geoparquet_io.core.file_utils import unlink_released_file
 from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
     QuerySource,
@@ -174,7 +175,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             stats = geometry_stats_of(QuerySource(con, query), geometry_column)
             bbox, geometry_types = stats.bbox, stats.geometry_types
 
-            final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
+            final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
 
             copy_options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
             if resolved_row_group_rows:
@@ -251,11 +252,11 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 native_geometry_crs=native_crs,
             )
 
-            os.unlink(temp_path)
+            unlink_released_file(temp_path)
 
             if is_remote:
                 upload_if_remote(final_path, output_path, is_directory=False, verbose=verbose)
-                os.unlink(final_path)
+                unlink_released_file(final_path)
 
         finally:
             if os.path.exists(work_dir):
@@ -277,6 +278,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         input_crs: dict | None = None,
         custom_metadata: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        original_metadata: dict | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using temporary file and rewrite."""
 

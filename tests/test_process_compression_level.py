@@ -34,7 +34,6 @@ import pytest
 from geoparquet_io.core.compression import (
     PROCESS_ZSTD_LEVEL,
     resolve_codec,
-    resolve_process_compression_level,
 )
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS, ParquetWriteSettings
 
@@ -88,11 +87,15 @@ def levels(monkeypatch):
     return seen
 
 
+def _process_level(codec, level):
+    return resolve_codec(codec, level, context="process").level
+
+
 class TestResolver:
-    """``resolve_process_compression_level`` -- the group's one decision."""
+    """``resolve_codec(..., context="process")`` -- the group's one decision."""
 
     def test_unset_zstd_becomes_the_process_level(self):
-        assert resolve_process_compression_level("ZSTD", None) == PROCESS_ZSTD_LEVEL
+        assert _process_level("ZSTD", None) == PROCESS_ZSTD_LEVEL
 
     def test_the_process_level_is_nine(self):
         # Pinned deliberately: the number is the measurement, and moving it is
@@ -101,10 +104,10 @@ class TestResolver:
 
     @pytest.mark.parametrize("level", [1, 3, 9, 15, 22])
     def test_an_explicit_level_is_never_touched(self, level):
-        assert resolve_process_compression_level("ZSTD", level) == level
+        assert _process_level("ZSTD", level) == level
 
     def test_codec_case_does_not_matter(self):
-        assert resolve_process_compression_level("zstd", None) == PROCESS_ZSTD_LEVEL
+        assert _process_level("zstd", None) == PROCESS_ZSTD_LEVEL
 
     @pytest.mark.parametrize(
         ("codec", "level"),
@@ -113,12 +116,10 @@ class TestResolver:
     def test_only_zstd_moves(self, codec, level):
         # The measurement is ZSTD's. GZIP and BROTLI have their own curves and
         # keep their global defaults; nothing here claims to have measured them.
-        assert resolve_process_compression_level(codec, None) == level
+        assert _process_level(codec, None) == level
 
     def test_an_unset_codec_is_zstd_at_the_process_level(self):
-        """One spelling of "process, unset": the wrapper is resolve_codec's level."""
-        assert resolve_process_compression_level(None, None) == PROCESS_ZSTD_LEVEL
-        assert resolve_codec(None, None, context="process").level == PROCESS_ZSTD_LEVEL
+        assert _process_level(None, None) == PROCESS_ZSTD_LEVEL
 
 
 class TestGlobalDefaultIsUnchanged:
@@ -331,7 +332,7 @@ class TestEveryProcessWriterResolves:
                     continue
                 body = ast.get_source_segment(source, node) or ""
                 key = (str(path.relative_to(root)).replace("\\", "/"), node.name)
-                found[key] = "resolve_process_compression_level(" in body
+                found[key] = 'context="process"' in body
         return found
 
     def test_every_writer_is_accounted_for(self):
@@ -346,7 +347,7 @@ class TestEveryProcessWriterResolves:
             else:
                 assert resolves, (
                     f"{key[0]}:{key[1]} takes a compression_level but never calls "
-                    "resolve_process_compression_level. Add the call at its entry, or "
+                    'resolve_codec(..., context="process"). Add the call at its entry, or '
                     "list it in DOWNSTREAM if its caller already resolved."
                 )
 
