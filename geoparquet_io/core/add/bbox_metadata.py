@@ -19,6 +19,7 @@ import functools
 from typing import TYPE_CHECKING
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.column_selection import find_column
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import resolve_file_url
@@ -128,8 +129,10 @@ def add_bbox_metadata_table(
 
     geom_col = resolve_geometry_column(table, geometry_column, where="the table")
 
-    if bbox_column not in table.column_names:
+    found = find_column(bbox_column, table.column_names, option_name="bbox_column")
+    if found is None:
         raise ValueError(f"Bbox column '{bbox_column}' not found. Use add_bbox() first.")
+    bbox_column = found
 
     problem = arrow_bbox_covering_problem(bbox_column, table.schema.field(bbox_column))
     if problem is not None:
@@ -188,11 +191,13 @@ def _validate_requested_bbox_column(
       covering -- that one is the secondary's envelope, and declaring it on the
       primary is exactly #1171/#953 by hand.
     """
-    if bbox_column not in schema.names:
+    found = find_column(bbox_column, schema.names, option_name="bbox_column")
+    if found is None:
         raise GeoParquetError(
             f"Bbox column '{bbox_column}' not found in {parquet_file}.\n"
             f"Add one: gpio add bbox --bbox-name {bbox_column} {parquet_file}"
         )
+    bbox_column = found
 
     problem = arrow_bbox_covering_problem(bbox_column, schema.field(bbox_column))
     if problem is not None:

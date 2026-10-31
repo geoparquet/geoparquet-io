@@ -9,8 +9,9 @@ from geoparquet_io.core.bbox_structure import (
     check_bbox_structure,
     resolve_bbox_name,
 )
+from geoparquet_io.core.column_selection import find_column
 from geoparquet_io.core.common import add_computed_column
-from geoparquet_io.core.duckdb_metadata import get_column_names, get_schema_info
+from geoparquet_io.core.duckdb_metadata import get_schema_info, get_usable_column_names
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     query_schema,
@@ -141,9 +142,8 @@ def _has_bbox_struct_column(con, source: str, bbox_column_name: str) -> bool:
     nothing at all (#1176).
     """
     schema = query_schema(con, f"SELECT * FROM {source}")
-    if bbox_column_name not in schema.names:
-        return False
-    return is_bbox_struct_field(schema.field(bbox_column_name))
+    found = find_column(bbox_column_name, schema.names, option_name="bbox_column_name")
+    return found is not None and is_bbox_struct_field(schema.field(found))
 
 
 def add_bbox_table(
@@ -194,10 +194,9 @@ def _prepare_table_bbox_column(table: pa.Table, bbox_column_name: str) -> tuple[
     Resolution is case-insensitive because the computed column is aliased in SQL,
     where ``BBOX`` and ``bbox`` are one name.
     """
-    if bbox_column_name in table.column_names and is_bbox_struct_field(
-        table.schema.field(bbox_column_name)
-    ):
-        return table.remove_column(table.column_names.index(bbox_column_name)), bbox_column_name
+    found = find_column(bbox_column_name, table.column_names, option_name="bbox_column_name")
+    if found is not None and is_bbox_struct_field(table.schema.field(found)):
+        return table.remove_column(table.column_names.index(found)), bbox_column_name
     return table, resolve_bbox_name(table.column_names, None, requested=bbox_column_name)
 
 
@@ -519,7 +518,9 @@ def _add_bbox_file_based(
     # same file wrote `bbox_1` (#1176).
     if replace_column is None:
         bbox_column_name = resolve_bbox_name(
-            get_column_names(input_parquet), write.geoparquet_version, requested=bbox_column_name
+            get_usable_column_names(input_parquet),
+            write.geoparquet_version,
+            requested=bbox_column_name,
         )
 
     # A column is being computed. Say which bbox-shaped structs it will sit

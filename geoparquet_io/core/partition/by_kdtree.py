@@ -209,12 +209,13 @@ def partition_by_kdtree(
         raise_if_no_rows(actual_input)
 
         # Check if KD-tree column exists and get row count for dataset size validation
-        from geoparquet_io.core.duckdb_metadata import get_column_names, get_row_count
+        from geoparquet_io.core.column_selection import has_column
+        from geoparquet_io.core.duckdb_metadata import get_row_count, get_usable_column_names
 
-        column_names = get_column_names(actual_input)
+        column_names = get_usable_column_names(actual_input)
         total_rows = get_row_count(actual_input)
 
-        column_exists = kdtree_column_name in column_names
+        column_exists = has_column(column_names, kdtree_column_name)
 
         # Auto mode leaves `iterations` None on purpose: `add_kdtree_column` sizes
         # the tree from the row count below. Defaulting it to 9 here (as this did

@@ -190,6 +190,13 @@ reason = "metadata serialization, not a report: PROJJSON for SQL"
 "geoparquet_io/core/crs_utils.py" = ["crs"]
 "geoparquet_io/core/edges.py" = ["edges", "orientation"]
 
+# The modules that own the SHAPE of a schema-listing walk (G1.column_fold's
+# "tests or keys a column by name" check): the walk is not a hit there. An
+# ownership statement, not an exemption: a fold or a suffix loop in the same
+# module is still a hit.
+[G1.column_fold_walk_owners]
+modules = ["geoparquet_io/core/parquet_schema.py"]
+
 # A geometry column chosen outside core/geometry_detection.py (#1367 concept 7).
 # Seed baseline recorded when the arm was created (#1392 pass 3): counts only
 # go down from here; T0e zeroes what it can.
@@ -340,7 +347,6 @@ reason = "the GeoJSON properties column's type (unnest a STRUCT), not a geometry
 [G2.known_copies]
 "resolve_*version*" = ["_detect_version_from_table", "extract_version_from_metadata", "detect_version_for_output"]
 "*crs_equal*" = ["_crs_are_equivalent", "_crs_matches"]
-"*unique_name*" = ["free_column_name", "_suffixed_to_unique"]
 "parse_bbox" = ["_normalize_bbox", "_validated_bbox"]
 
 # Owners named above that do not exist yet (none today).
@@ -358,14 +364,6 @@ path = "geoparquet_io/core/carto.py"
 name = "_fetch_with_retry"
 reason = "permanent: caller-specific classify wrapper over run_with_retry, accepted by the T4a audit"
 [[G2.exemptions]]
-path = "geoparquet_io/core/convert.py"
-name = "_suffixed_to_unique"
-reason = "column-name suffixer copy; T5a"
-[[G2.exemptions]]
-path = "geoparquet_io/core/duckdb_utils.py"
-name = "free_column_name"
-reason = "column-name suffixer copy; T5a"
-[[G2.exemptions]]
 path = "geoparquet_io/core/extract.py"
 name = "is_geographic_crs"
 reason = "is-geographic copy (approved change 8); T4c"
@@ -373,10 +371,6 @@ reason = "is-geographic copy (approved change 8); T4c"
 path = "geoparquet_io/core/inspect_utils.py"
 name = "_crs_are_equivalent"
 reason = "CRS equality copy (approved change 9); T4c"
-[[G2.exemptions]]
-path = "geoparquet_io/core/process/aggregate/common.py"
-name = "_unique_name"
-reason = "copy of column_selection's; T5a"
 [[G2.exemptions]]
 path = "geoparquet_io/core/validate.py"
 name = "_crs_equals"
@@ -446,14 +440,6 @@ reason = "permanent: the same keyword-argument list forwarded to one callee (API
 block = "cli.commands.add:add_h3|cli.commands.sort:str_order_command"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
-block = "cli.commands.process:process_aggregate_a5|core.process.aggregate.by_h3:aggregate_by_h3"
-count = 2
-reason = "aggregation options (metric, breakdown, bucket-point, ...) forwarded to the grid driver; T5a: one aggregate-options object"
-[[G3.pylint]]
-block = "cli.commands.process:process_aggregate_h3|core.process.aggregate.by_a5:aggregate_by_a5"
-count = 2
-reason = "aggregation options (metric, breakdown, bucket-point, ...) forwarded to the grid driver; T5a: one aggregate-options object"
-[[G3.pylint]]
 block = "core.add.quadkey:_is_geographic_crs|core.extract:is_geographic_crs"
 reason = "is-geographic CRS copy (approved change 8); T4c"
 [[G3.pylint]]
@@ -462,10 +448,6 @@ reason = "GeoArrow extension-name list copied; T3a's decoder owner"
 [[G3.pylint]]
 block = "core.extract:_extract_streaming|core.str_order:_str_order_streaming"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.process.aggregate.by_a5:aggregate_by_a5|core.process.aggregate.by_h3:aggregate_by_h3"
-count = 2
-reason = "aggregation options (metric, breakdown, bucket-point, ...) forwarded to the grid driver; T5a: one aggregate-options object"
 [[G3.pylint]]
 block = "core.process.raster.contour:contour_file|core.process.raster.polygonize:polygonize_file"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"

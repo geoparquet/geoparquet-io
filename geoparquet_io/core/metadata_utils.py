@@ -534,7 +534,7 @@ def _build_geo_columns_info(schema_info: list, geo_columns: dict) -> dict:
     """Build geo column info dictionary from schema and detected geo columns."""
 
     geo_columns_info = {}
-    for col in schema_info:
+    for col in root_schema_columns(schema_info):
         col_name = col.get("name", "")
         if col_name in geo_columns:
             logical_type = col.get("logical_type") or ""

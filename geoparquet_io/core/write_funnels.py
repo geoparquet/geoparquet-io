@@ -179,15 +179,23 @@ def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
     return agree_across_files({path: _file_nonplanar_edges(path) for path in files})
 
 
+def _native_geography_edges(schema_info: list) -> Iterator[tuple[str, str]]:
+    """``(root column, edges)`` of each native GEOGRAPHY type (a nested field is no column).
+
+    Lazy, so a malformed type partway down keeps the declarations read before it.
+    """
+    for col in root_schema_columns(schema_info):
+        logical = col.get("logical_type") or ""
+        if native_geo_type(logical) == "GEOGRAPHY":
+            yield col["name"], logical_type_edges(parse_geometry_logical_type(logical))
+
+
 def _file_nonplanar_edges(input_file: str) -> dict[str, str]:
     """:func:`collect_nonplanar_edges` of one file (or the first of a partition)."""
     native: dict[str, str] = {}
     declared: dict[str, object] = {}
     try:
-        for col in get_schema_info(input_file):
-            logical = col.get("logical_type") or ""
-            if native_geo_type(logical) == "GEOGRAPHY":
-                native[col["name"]] = logical_type_edges(parse_geometry_logical_type(logical))
+        native.update(_native_geography_edges(get_schema_info(input_file)))
         declared = block_edges(sanitized_carried_geo_of_file(input_file))
     except Exception as e:
         # A broken optional geo block must not erase native declarations already
@@ -1718,7 +1726,7 @@ def write_parquet_with_metadata(
     # into the edges footer patch when both are coming (#1270); the answer only
     # reads the input, which the write does not change.
     edges_to_restore = _edges_to_restore(
-        input_file, original_metadata, exclude_columns=drop_nonplanar_edges_columns
+        input_file, original_metadata, invalidated_columns=drop_nonplanar_edges_columns
     )
 
     if show_sql:
@@ -1893,20 +1901,22 @@ def declared_nonplanar_edges(
 def _edges_to_restore(
     input_file: str | None,
     original_metadata: dict | None,
-    exclude_columns: Collection[str] | None = None,
+    invalidated_columns: Collection[str] | None = None,
 ) -> dict[str, str]:
     """The non-planar edges the writer will drop and the write must restore.
 
     The input's declaration (:func:`declared_nonplanar_edges`), less
-    ``exclude_columns``: columns whose declaration the write itself invalidated
+    ``invalidated_columns``: columns whose declaration the write itself invalidated
     (#601). The input still declares them, but they must not come back.
 
     Collection only; :func:`apply_nonplanar_edges` writes the answer back
     after the write, on any rewrite path.
     """
     edges_by_col = declared_nonplanar_edges(input_file, original_metadata)
-    if exclude_columns:
-        edges_by_col = {k: v for k, v in edges_by_col.items() if k not in exclude_columns}
+    if invalidated_columns:
+        # Exact, as ``edges.strip_edges`` matches the same ``geo`` keys: ``geom`` and
+        # ``GEOM`` are two columns, and reprojecting one says nothing of the other.
+        edges_by_col = {k: v for k, v in edges_by_col.items() if k not in invalidated_columns}
     return edges_by_col
 
 

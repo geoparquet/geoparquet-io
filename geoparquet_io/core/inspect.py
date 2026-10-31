@@ -50,6 +50,8 @@ def _build_columns_info(usable_columns: list[dict], primary_geom_col: str | None
         {
             "name": col["name"],
             "type": col["type"],
+            # Exact: both are resolved names (DuckDB's described spelling, the
+            # geo block's), and a read case twin is renamed (geom, GEOM_1).
             "is_geometry": col["name"] == primary_geom_col,
         }
         for col in usable_columns

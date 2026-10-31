@@ -16,6 +16,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.column_selection import matching_columns
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.duckdb_utils import fetch_one, query_schema, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
@@ -504,7 +505,7 @@ def _refuse_overview_out(input_parquet: str, overview_out: str, force: bool) -> 
     shadow one the input already has (OVERVIEWS_SPEC 4.1) -- checked on the
     input before any rollup runs."""
     handle_output_overwrite(overview_out, force, input_parquet, flag="--force", remove=False)
-    names = [n for n in pq.read_schema(input_parquet).names if n.lower() == "level"]
+    names = matching_columns("level", pq.read_schema(input_parquet).names)
     if names:
         raise InvalidParameterError(
             "input",

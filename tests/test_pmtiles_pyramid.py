@@ -17,6 +17,7 @@ from geoparquet_io.core.pmtiles_pyramid import (
     _layer_name,
     _resolve_feature_zooms,
 )
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 from geoparquet_io.core.process.overview.levels import Band
 
 
@@ -854,7 +855,7 @@ def test_pyramid_end_to_end_grouped(tmp_path):
     cells = tmp_path / "cells.parquet"
     out = tmp_path / "cells.pmtiles"
     _write_points(src)
-    aggregate_by_a5(str(src), str(cells), resolution=7, metric="sum:v")
+    aggregate_by_a5(str(src), str(cells), resolution=7, options=AggregateOptions(metric="sum:v"))
 
     # Absurd bytes-per-cell => nothing fits inside the probed range, so the
     # coarse level takes z0..max_zoom-1 and the base starts at max_zoom.
@@ -893,7 +894,7 @@ def test_pyramid_per_level_with_features(tmp_path):
     cells = tmp_path / "cells.parquet"
     out = tmp_path / "pyramid.pmtiles"
     _write_points(src)
-    aggregate_by_a5(str(src), str(cells), resolution=7, metric="sum:v")
+    aggregate_by_a5(str(src), str(cells), resolution=7, options=AggregateOptions(metric="sum:v"))
 
     create_pmtiles_pyramid(
         str(cells),

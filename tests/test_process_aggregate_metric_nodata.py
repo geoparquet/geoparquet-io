@@ -25,6 +25,7 @@ from geoparquet_io.core.process.aggregate.common import (
     validate_metric_nodata,
 )
 from geoparquet_io.core.process.aggregate.grid_common import GridScheme, build_grid_query
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
 # A scheme with trivial SQL templates so the shared grid engine can be exercised
 # end-to-end on a plain DuckDB connection (no community extension, no network).
@@ -321,7 +322,12 @@ def test_metric_nodata_requires_metric(tmp_path):
     src = tmp_path / "f.parquet"
     _write_points_geoparquet(src, [(10.0, 50.0, 5.0)])
     with pytest.raises(InvalidParameterError, match="metric"):
-        aggregate_by_a5(str(src), str(tmp_path / "o.parquet"), resolution=5, metric_nodata="-999")
+        aggregate_by_a5(
+            str(src),
+            str(tmp_path / "o.parquet"),
+            resolution=5,
+            options=AggregateOptions(metric_nodata="-999"),
+        )
 
 
 def test_admin_metric_nodata_requires_metric(tmp_path):
@@ -385,7 +391,7 @@ def test_table_api_metric_nodata_requires_metric_flag_neutral():
 
     tbl = pa.table({"geometry": pa.array([b"\x00"], type=pa.binary()), "height": [1.0]})
     with pytest.raises(InvalidParameterError, match="metric") as exc:
-        aggregate_a5_table(tbl, resolution=5, metric_nodata="-999")
+        aggregate_a5_table(tbl, resolution=5, options=AggregateOptions(metric_nodata="-999"))
     assert "--" not in str(exc.value)
 
 
@@ -401,7 +407,12 @@ def test_grid_validates_nodata_before_auto_resolution(tmp_path, monkeypatch):
     src = tmp_path / "f.parquet"
     _write_points_geoparquet(src, [(10.0, 50.0, 5.0)])
     with pytest.raises(InvalidParameterError, match="metric"):
-        aggregate_by_a5(str(src), str(tmp_path / "o.parquet"), auto=True, metric_nodata="-999")
+        aggregate_by_a5(
+            str(src),
+            str(tmp_path / "o.parquet"),
+            auto=True,
+            options=AggregateOptions(metric_nodata="-999"),
+        )
 
 
 def test_build_grid_query_varchar_metric_with_nodata_raises():
@@ -654,8 +665,7 @@ def test_aggregate_a5_metric_nodata(tmp_path):
         str(src),
         str(out),
         resolution=5,
-        metric="avg:height,min:height",
-        metric_nodata="-999",
+        options=AggregateOptions(metric="avg:height,min:height", metric_nodata="-999"),
     )
     df = pq.read_table(out).to_pandas()
     assert int(df["count"].sum()) == 3  # count includes the sentinel row

@@ -1978,21 +1978,13 @@ class Table:
             New Table with one row per A5 cell
         """
         from geoparquet_io.core.process.aggregate.by_a5 import aggregate_a5_table
+        from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
         result = aggregate_a5_table(
             self._table,
             resolution=resolution,
-            metric=metric,
-            breakdown=breakdown,
-            breakdown_limit=breakdown_limit,
-            out_geometry=out_geometry,
+            options=AggregateOptions.pick(locals()),
             geometry_column=self._geometry_column,
-            where=where,
-            metric_nodata=metric_nodata,
-            bucket_point=bucket_point,
-            bbox_column=bbox_column,
-            breakdown_metric=breakdown_metric,
-            memory_limit=memory_limit,
         )
         return self._wrap_geographic(
             result, BUILT_GEOMETRY_COLUMN if out_geometry != "none" else None
@@ -2038,21 +2030,13 @@ class Table:
             New Table with one row per H3 cell
         """
         from geoparquet_io.core.process.aggregate.by_h3 import aggregate_h3_table
+        from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
         result = aggregate_h3_table(
             self._table,
             resolution=resolution,
-            metric=metric,
-            breakdown=breakdown,
-            breakdown_limit=breakdown_limit,
-            out_geometry=out_geometry,
+            options=AggregateOptions.pick(locals()),
             geometry_column=self._geometry_column,
-            where=where,
-            metric_nodata=metric_nodata,
-            bucket_point=bucket_point,
-            bbox_column=bbox_column,
-            breakdown_metric=breakdown_metric,
-            memory_limit=memory_limit,
         )
         return self._wrap_geographic(
             result, BUILT_GEOMETRY_COLUMN if out_geometry != "none" else None

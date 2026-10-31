@@ -11,6 +11,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.admin_datasets import OvertureAdminDataset
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 from geoparquet_io.core.process.overview import create_overviews
 from geoparquet_io.core.process.overview.detect import (
     detect_aggregate_file,
@@ -1155,7 +1156,9 @@ def test_gold_rollup_a5(tmp_path):
     base = tmp_path / "cells.parquet"
     direct = tmp_path / "direct_r5.parquet"
     _write_points_geoparquet(src, _GOLD_POINTS)
-    kwargs = {"metric": _GOLD_METRIC, "breakdown": "crop", "out_geometry": "both"}
+    kwargs = {
+        "options": AggregateOptions(metric=_GOLD_METRIC, breakdown="crop", out_geometry="both")
+    }
     aggregate_by_a5(str(src), str(base), resolution=7, **kwargs)
     aggregate_by_a5(str(src), str(direct), resolution=5, **kwargs)
 
@@ -1179,7 +1182,9 @@ def test_gold_rollup_h3(tmp_path):
     src = tmp_path / "points.parquet"
     base = tmp_path / "cells.parquet"
     _write_points_geoparquet(src, _GOLD_POINTS)
-    kwargs = {"metric": _GOLD_METRIC, "breakdown": "crop", "out_geometry": "both"}
+    kwargs = {
+        "options": AggregateOptions(metric=_GOLD_METRIC, breakdown="crop", out_geometry="both")
+    }
     aggregate_by_h3(str(src), str(base), resolution=7, **kwargs)
 
     results = create_overviews(str(base), levels="5")
@@ -1290,7 +1295,7 @@ def test_table_overview_api(tmp_path):
     src = tmp_path / "points.parquet"
     base = tmp_path / "cells.parquet"
     _write_points_geoparquet(src, _GOLD_POINTS)
-    aggregate_by_a5(str(src), str(base), resolution=7, metric="sum:area")
+    aggregate_by_a5(str(src), str(base), resolution=7, options=AggregateOptions(metric="sum:area"))
 
     result = Table(pq.read_table(base)).overview(5)
     assert "a5_cell" in result.column_names

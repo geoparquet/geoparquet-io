@@ -85,6 +85,15 @@ def _commands_with_write_memory():
 # ---------------------------------------------------------------------------
 
 
+def _packs_memory_limit(source: str) -> bool:
+    """A grid-aggregate command gets ``--write-memory`` as ``aggregate_options.memory_limit``."""
+    from geoparquet_io.cli.decorators import _AGGREGATE_OPTION_PARAMS
+
+    return "aggregate_options" in source and _AGGREGATE_OPTION_PARAMS["memory_limit"] == (
+        "write_memory"
+    )
+
+
 class TestEveryCommandForwardsWriteMemory:
     """The offender list must stay empty.
 
@@ -103,7 +112,7 @@ class TestEveryCommandForwardsWriteMemory:
                 from geoparquet_io.cli.commands.partition import _partition_cell_index
 
                 source += inspect.getsource(_partition_cell_index)
-            if "memory_limit=write_memory" not in source:
+            if "memory_limit=write_memory" not in source and not _packs_memory_limit(source):
                 offenders.append(name)
 
         assert not offenders, (
@@ -235,6 +244,8 @@ class TestCliForwardsWriteMemoryByKeyword:
         assert result.exit_code == 0, result.output
         mocked_impl.assert_called_once()
         _call_args, call_kwargs = mocked_impl.call_args
+        if "options" in call_kwargs:  # a grid aggregate: the limit rides in AggregateOptions
+            call_kwargs = {"memory_limit": call_kwargs["options"].memory_limit}
         assert "memory_limit" in call_kwargs, (
             f"{impl_name} was not called with memory_limit as a keyword argument "
             f"(kwargs were: {sorted(call_kwargs)})"

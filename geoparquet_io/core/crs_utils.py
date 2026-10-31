@@ -875,11 +875,9 @@ def _block_omits_requested_column(
     if requested is None or block_col is None or block_col == requested:
         return False
     from geoparquet_io.core.duckdb_metadata import get_schema_info
-    from geoparquet_io.core.parquet_schema import root_schema_columns
+    from geoparquet_io.core.parquet_schema import root_schema_index
 
-    return any(
-        col["name"] == requested for col in root_schema_columns(get_schema_info(parquet_file))
-    )
+    return root_schema_index(get_schema_info(parquet_file), requested) is not None
 
 
 def _native_type_crs_value(parquet_file, column: str | None = None):
@@ -892,16 +890,18 @@ def _native_type_crs_value(parquet_file, column: str | None = None):
         is_geometry_column,
         parse_geometry_logical_type,
     )
-    from geoparquet_io.core.parquet_schema import root_schema_columns
+    from geoparquet_io.core.parquet_schema import root_schema_columns, root_schema_index
 
-    root_columns = root_schema_columns(get_schema_info(parquet_file))
+    schema_info = get_schema_info(parquet_file)
+    root_columns = root_schema_columns(schema_info)
     # ``column`` (a block's primary, or the caller's) wins when the file has it;
     # otherwise the one primary rule over the root columns' own types (#1248).
     target = primary_geometry_column(
         [(col["name"], col.get("logical_type")) for col in root_columns],
         geo={"primary_column": column} if column is not None else None,
     )
-    entry = next((col for col in root_columns if col["name"] == target), None)
+    index = root_schema_index(schema_info, target)
+    entry = schema_info[index] if index is not None else None
     if entry is None or not is_geometry_column(entry.get("logical_type")):
         return None
     parsed = parse_geometry_logical_type(entry.get("logical_type") or "")

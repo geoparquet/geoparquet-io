@@ -19,6 +19,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.bbox_parse import parse_bbox
+from geoparquet_io.core.column_selection import unique_name
 from geoparquet_io.core.crs_utils import (
     _extract_crs_identifier,
     extract_crs_from_parquet,
@@ -26,7 +27,6 @@ from geoparquet_io.core.crs_utils import (
 )
 from geoparquet_io.core.duckdb_utils import (
     fetch_one,
-    free_column_name,
     get_duckdb_connection,
     quote_identifier,
     sql_literal,
@@ -336,10 +336,10 @@ def _gpkg_collision_options(column_names: list[str], geometry_col: str | None) -
     """
     attributes = [name for name in column_names if name != geometry_col]
     options = []
-    fid = free_column_name("fid", attributes)
+    fid = unique_name("fid", attributes)
     if fid != "fid":
         options.append(f"FID={fid}")
-    geometry_name = free_column_name("geom", [*attributes, fid])
+    geometry_name = unique_name("geom", [*attributes, fid])
     if geometry_name != "geom":
         options.append(f"GEOMETRY_NAME={geometry_name}")
     return options

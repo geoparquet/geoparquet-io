@@ -29,7 +29,6 @@ from geoparquet_io.core.extract import (
     is_geographic_crs,
     looks_like_latlong_bbox,
     parse_geometry_input,
-    validate_columns,
     validate_where_clause,
 )
 from tests.conftest import safe_unlink
@@ -458,24 +457,33 @@ class TestBuildColumnSelection:
         assert len(result) == 2
 
 
-class TestValidateColumns:
-    """Tests for validate_columns function."""
+class TestColumnSelectionResolvesNames:
+    """``build_column_selection`` checks the names it is given against the schema."""
+
+    COLS = ["id", "name", "geometry"]
 
     def test_valid_columns(self):
-        """Test with valid columns."""
-        # Should not raise
-        validate_columns(["id", "name"], ["id", "name", "geometry"], "--include-cols")
+        assert build_column_selection(self.COLS, ["id", "name"], None, "geometry", None) == [
+            "id",
+            "name",
+            "geometry",
+        ]
 
     def test_missing_columns(self):
-        """Test with missing columns."""
         with pytest.raises(GeoParquetError) as exc_info:
-            validate_columns(["id", "nonexistent"], ["id", "name", "geometry"], "--include-cols")
+            build_column_selection(
+                self.COLS,
+                ["id", "nonexistent"],
+                None,
+                "geometry",
+                None,
+                include_option="--include-cols",
+            )
         assert "nonexistent" in str(exc_info.value)
         assert "--include-cols" in str(exc_info.value)
 
     def test_none_columns(self):
-        """Test with None columns (should not raise)."""
-        validate_columns(None, ["id", "name"], "--include-cols")
+        assert build_column_selection(self.COLS, None, None, "geometry", None) == self.COLS
 
 
 class TestBuildSpatialFilter:

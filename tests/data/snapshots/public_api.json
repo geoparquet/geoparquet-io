@@ -147,10 +147,17 @@
     "within_wrapped_x_sql"
   ],
   "geoparquet_io.core.column_selection": [
+    "exclude_columns",
+    "find_column",
+    "fold",
+    "has_column",
     "join_column_list",
+    "matching_columns",
     "reject_blank_column_entries",
     "resolve_columns_against_schema",
-    "split_column_list"
+    "same_column",
+    "split_column_list",
+    "unique_name"
   ],
   "geoparquet_io.core.compression": [
     "ACCEPTED_CODEC_NAMES",
@@ -251,6 +258,7 @@
     "get_row_group_sizes",
     "get_row_group_stats_summary",
     "get_schema_info",
+    "get_usable_column_names",
     "get_usable_columns",
     "is_geometry_column",
     "is_native_geo_column",
@@ -285,7 +293,6 @@
     "fetch_rows",
     "file_relation",
     "file_schema",
-    "free_column_name",
     "geoarrow_extension",
     "geom_from_wkb_sql",
     "get_active_s3_config",
@@ -393,8 +400,7 @@
     "get_schema_columns",
     "is_geographic_crs",
     "looks_like_latlong_bbox",
-    "parse_geometry_input",
-    "validate_columns"
+    "parse_geometry_input"
   ],
   "geoparquet_io.core.file_utils": [
     "copy_file",
@@ -621,6 +627,10 @@
     "without_geometry_dictionary",
     "writable_geoparquet_version",
     "write_arrow_table"
+  ],
+  "geoparquet_io.core.process.aggregate.options": [
+    "AggregateOptions",
+    "BUCKET_POINT_GEOMETRY"
   ],
   "geoparquet_io.core.remote": [
     "REMOTE_SCHEMES",

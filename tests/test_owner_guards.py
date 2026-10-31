@@ -84,16 +84,17 @@ EXPECTED_COUNTS = {
     "G1.output_version": 0,
     "G1.geometry_stats": 0,
     "G1.edges": 0,
+    "G1.column_fold": 0,
     "G1.footer_patch": 0,
     "G1.geometry_identity": 8,
     "G1.geo_compose": 0,
-    "G2.exemptions": 10,
+    "G2.exemptions": 7,
     "G3.pairs": 0,
     "G3.baseline": 0,
-    "G3.pylint": 23,
+    "G3.pylint": 17,
     "G13.options": 11,
     "G13.bbox_parsers": 0,
-    "G4.whitelist": 175,
+    "G4.whitelist": 174,
     "G4.tests_whitelist": 95,
 }
 
@@ -2247,6 +2248,515 @@ def _geometry_identity_nodes(m: _Module) -> Iterator[ast.AST]:
             yield node
 
 
+_FOLD_METHODS = frozenset({"lower", "upper", "casefold"})
+#: An identifier that says it holds a column name; a type, a colour or a collection
+#: is not one.
+_COLUMNISH = re.compile(r"(col|field)", re.IGNORECASE)
+_NOT_COLUMNISH = re.compile(r"(type|colo|collect|collis|colon|encod)", re.IGNORECASE)
+#: A loop over these hands its target a column name.
+_COLUMN_SOURCE = re.compile(r"(col|field|schema|names)", re.IGNORECASE)
+#: A bare name that is a column name when the function around it deals in columns.
+_BARE_NAMES = frozenset({"name", "requested", "candidate", "base"})
+#: ``schema.names`` / ``table.column_names``: the case-sensitive Arrow lists.
+_ARROW_NAME_LISTS = frozenset({"names", "column_names"})
+#: A parameter that carries a column name the user typed. Geometry names are
+#: resolved by ``geometry_detection`` before they are tested, so they are not here.
+_USER_COLUMN_NAME = re.compile(
+    r"(column|column_name|requested\w*|include_\w+|exclude_\w+|bbox_column(_name)?)"
+)
+#: A list of column names the user supplied (``--include-cols``, ``--columns``).
+_USER_LIST = re.compile(r"(requested\w*|include_\w+|exclude_\w+|column_list|bbox_column_names)")
+#: A variable that holds a list of column names.
+_COLUMN_COLLECTION = re.compile(
+    r"(columns?|cols|names|schema|fields?|exclude|include)(_list)?$",
+    re.IGNORECASE,
+)
+#: SQL that folds a column: ``lower(name)``, ``UPPER(column_name)``.
+_SQL_FOLD = re.compile(r"\b(lower|upper)\(\s*\"?\w*(col|field|name)", re.IGNORECASE)
+
+
+def _ident(node: ast.AST) -> str:
+    """The last identifier of ``x``, ``a.x`` or ``a[i]`` (``a``): '' for anything else."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Subscript):
+        return _ident(node.value)
+    return ""
+
+
+def _root(node: ast.AST) -> ast.AST:
+    """The value a chain of calls, attributes and subscripts is made from:
+    ``str(col).strip()`` and ``field.strip().split(" ")[0]`` both come from a name."""
+    while True:
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute):
+                node = node.func.value
+            elif node.args:
+                node = node.args[0]
+            else:
+                return node
+        elif isinstance(node, (ast.Attribute, ast.Subscript)):
+            node = node.value
+        else:
+            return node
+
+
+def _says_column(name: str) -> bool:
+    return bool(_COLUMNISH.search(name)) and not _NOT_COLUMNISH.search(name)
+
+
+def _column_targets(m: _Module) -> set[tuple[int, str]]:
+    """``(loop id, target)`` for each ``for``/comprehension target that iterates columns."""
+    found: set[tuple[int, str]] = set()
+    for node in ast.walk(m.tree):
+        if isinstance(node, (ast.For, ast.comprehension)):
+            source = ast.unparse(node.iter)
+            if _COLUMN_SOURCE.search(source) and not _NOT_COLUMNISH.search(source):
+                # ``for name, col_type in schema_rows`` hands the name first.
+                target = node.target
+                if isinstance(target, ast.Tuple) and target.elts:
+                    target = target.elts[0]
+                if isinstance(target, ast.Name):
+                    found.add((id(node), target.id))
+    return found
+
+
+def _enclosing_loops(m: _Module, node: ast.AST) -> Iterator[ast.AST]:
+    """The ``for`` statements and comprehension clauses *node* sits inside."""
+    up = m.parents.get(id(node))
+    while up is not None:
+        if isinstance(up, ast.For):
+            yield up
+        yield from getattr(up, "generators", [])
+        up = m.parents.get(id(up))
+
+
+def _enclosing_function(m: _Module, node: ast.AST) -> ast.AST | None:
+    up = m.parents.get(id(node))
+    while up is not None and not isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        up = m.parents.get(id(up))
+    return up
+
+
+def _function_deals_in_columns(m: _Module, node: ast.AST) -> bool:
+    """Whether the function around *node* names a column (a parameter or a local)."""
+    func = _enclosing_function(m, node)
+    if func is None:
+        return False
+    names = {n.id for n in ast.walk(func) if isinstance(n, ast.Name)}
+    names |= {a.arg for a in ast.walk(func) if isinstance(a, ast.arg)}
+    return any(_says_column(n) for n in names)
+
+
+def _builds_suffix(value: ast.AST) -> bool:
+    """``f"{base}_{n}"`` (any f-string joining two values), ``base + "_" + str(n)``
+    and the right side of ``name += "_"``."""
+    if isinstance(value, ast.JoinedStr):
+        return sum(isinstance(v, ast.FormattedValue) for v in value.values) >= 2
+    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+        return any(
+            isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value.startswith("_")
+            for n in ast.walk(value)
+        )
+    return isinstance(value, ast.Constant) and isinstance(value.value, str) and value.value == "_"
+
+
+def _suffix_loop(m: _Module, node: ast.AST) -> bool:
+    """A loop that re-suffixes a name until a test says it is free: a ``while``
+    whose condition mentions the rebuilt name, or a ``for`` that returns or
+    breaks on ``name not in taken``."""
+    if not isinstance(node, (ast.While, ast.For)):
+        return False
+    inner = list(ast.walk(node))
+    suffixed = {
+        t.id
+        for a in inner
+        if isinstance(a, (ast.Assign, ast.AugAssign)) and _builds_suffix(a.value)
+        for t in (a.targets if isinstance(a, ast.Assign) else [a.target])
+        if isinstance(t, ast.Name)
+    }
+    if not suffixed:
+        return False
+    if isinstance(node, ast.While):
+        return _mentions(node.test, suffixed)
+    return any(
+        isinstance(i, ast.If)
+        and isinstance(i.test, ast.Compare)
+        and any(isinstance(op, ast.NotIn) for op in i.test.ops)  # codespell:ignore
+        and _mentions(i.test.left, suffixed)
+        and any(isinstance(b, (ast.Return, ast.Break)) for b in i.body)
+        for i in inner
+    )
+
+
+def _mentions(node: ast.AST, names: set[str]) -> bool:
+    return any(isinstance(n, ast.Name) and n.id in names for n in ast.walk(node))
+
+
+def _is_fold_call(node: ast.AST) -> bool:
+    return isinstance(node, ast.Call) and _ident(node.func) == "fold"
+
+
+def _fold_keyed(node: ast.AST) -> bool:
+    """A lookup map keyed by ``fold(...)``: ``{fold(c): c ...}``, ``d[fold(c)] = c``,
+    ``d.setdefault(fold(c), c)`` -- the owner's lookup, re-made."""
+    if isinstance(node, ast.DictComp):
+        return _is_fold_call(node.key)
+    if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
+        return _is_fold_call(node.slice)
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "setdefault"
+        and bool(node.args)
+        and _is_fold_call(node.args[0])
+    )
+
+
+def _loop_source_matches(m: _Module, node: ast.AST, pattern: re.Pattern) -> bool:
+    """Whether *node* is the target of a loop whose iterable's identifier matches *pattern*."""
+    if not isinstance(node, ast.Name):
+        return False
+    for loop in _enclosing_loops(m, node):
+        target = loop.target
+        if isinstance(target, ast.Tuple) and target.elts:
+            target = target.elts[0]
+        if isinstance(target, ast.Name) and target.id == node.id:
+            if pattern.search(_ident(_root(loop.iter)) or ast.unparse(loop.iter)):
+                return True
+    return False
+
+
+def _is_parameter(m: _Module, node: ast.Name) -> bool:
+    """Whether *node* names a parameter of its function (not a loop variable)."""
+    func = _enclosing_function(m, node)
+    if func is None or node.id not in {
+        a.arg for a in ast.walk(func.args) if isinstance(a, ast.arg)
+    }:
+        return False
+    return not any(
+        isinstance(loop.target, ast.Name) and loop.target.id == node.id
+        for loop in _enclosing_loops(m, node)
+    )
+
+
+def _iterates_column_source(m: _Module, node: ast.AST) -> bool:
+    """Whether *node* is a loop target over columns: a name that says so, a
+    column collection (``table.column_names``, ``schema.names``) or the
+    ``.items()`` of one."""
+    if not isinstance(node, ast.Name):
+        return False
+    for loop in _enclosing_loops(m, node):
+        target = loop.target
+        if isinstance(target, ast.Tuple) and target.elts:
+            target = target.elts[0]
+        if not (isinstance(target, ast.Name) and target.id == node.id):
+            continue
+        source = loop.iter
+        if isinstance(source, ast.Call) and isinstance(source.func, ast.Attribute):
+            if source.func.attr in {"items", "keys", "values"}:
+                source = source.func.value
+        if _COLUMN_SOURCE.search(ast.unparse(loop.iter)) or _is_column_collection(source):
+            return True
+    return False
+
+
+def _is_user_name(m: _Module, node: ast.AST, targets) -> bool:
+    """A name the user typed: a parameter called like one, or the target of a
+    loop over a list the user supplied. Resolved geometry names are not here."""
+    if not isinstance(node, ast.Name):
+        return False
+    return (
+        bool(_USER_COLUMN_NAME.fullmatch(node.id)) and _is_parameter(m, node)
+    ) or _loop_source_matches(m, node, _USER_LIST)
+
+
+def _is_user_list(node: ast.AST) -> bool:
+    return isinstance(node, (ast.Name, ast.Attribute)) and bool(_USER_LIST.fullmatch(_ident(node)))
+
+
+def _is_column_collection(node: ast.AST) -> bool:
+    """``schema.names``, ``table.column_names``, ``existing_columns``,
+    ``exclude_list``: a list of column names."""
+    if isinstance(node, ast.Attribute) and node.attr in _ARROW_NAME_LISTS:
+        return True
+    return isinstance(node, (ast.Name, ast.Attribute)) and bool(
+        _COLUMN_COLLECTION.search(_ident(node))
+    )
+
+
+def _name_read_receiver(node: ast.AST) -> ast.Name | None:
+    """``col`` of ``col.get("name")`` / ``col["name"]``: whose name is read."""
+    if isinstance(node, ast.Subscript):
+        key, receiver = node.slice, node.value
+    elif (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and node.args
+    ):
+        key, receiver = node.args[0], node.func.value
+    else:
+        return None
+    named = isinstance(key, ast.Constant) and key.value == "name"
+    return receiver if named and isinstance(receiver, ast.Name) else None
+
+
+#: A loop source that is a schema listing (``get_schema_info`` rows), the concept
+#: ``parquet_schema`` owns; ``usable_columns`` and the like are resolved names.
+_SCHEMA_LISTING = re.compile(r"schema", re.IGNORECASE)
+
+
+def _is_schema_listing_source(m: _Module, source: ast.AST) -> bool:
+    """A loop iterable that is a raw schema listing: ``schema_info``,
+    ``get_schema_info(p)``, ``enumerate(schema_info)``, or a local assigned from
+    one (``rows = get_schema_info(p)``). ``root_schema_*(...)`` is the owner's
+    root-only walk, so it is not one."""
+    calls = [n for n in ast.walk(source) if isinstance(n, ast.Call)]
+    if any(_ident(c.func).startswith("root_schema_") for c in calls):
+        return False
+    if _SCHEMA_LISTING.search(ast.unparse(source)):
+        return True
+    func = _enclosing_function(m, source)
+    if func is None:
+        return False
+    names = {n.id for n in ast.walk(source) if isinstance(n, ast.Name)}
+    return any(
+        isinstance(a, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id in names for t in a.targets)
+        and _SCHEMA_LISTING.search(ast.unparse(a.value))
+        and not any(
+            _ident(c.func).startswith("root_schema_")
+            for c in ast.walk(a.value)
+            if isinstance(c, ast.Call)
+        )
+        for a in ast.walk(func)
+    )
+
+
+def _walks_schema_listing(m: _Module, receiver: ast.Name) -> bool:
+    """Whether *receiver* is a target (a plain name or one of a tuple, as in
+    ``for i, c in enumerate(schema_info)``) of a loop over a raw schema listing."""
+    for loop in _enclosing_loops(m, receiver):
+        target = loop.target
+        elts = target.elts if isinstance(target, ast.Tuple) else [target]
+        if any(isinstance(e, ast.Name) and e.id == receiver.id for e in elts):
+            return _is_schema_listing_source(m, loop.iter)
+    return False
+
+
+def _schema_name_read(m: _Module, node: ast.AST) -> bool:
+    """A name read off a row of a schema listing: ``col.get("name")`` where ``col``
+    walks ``schema_info``, or a local that was assigned one."""
+    receiver = _name_read_receiver(node)
+    if receiver is not None:
+        return _walks_schema_listing(m, receiver)
+    if not isinstance(node, ast.Name):
+        return False
+    func = _enclosing_function(m, node)
+    return func is not None and any(
+        isinstance(a, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == node.id for t in a.targets)
+        and _name_read_receiver(a.value) is not None
+        and _walks_schema_listing(m, _name_read_receiver(a.value))
+        for a in ast.walk(func)
+    )
+
+
+def _schema_listing_walk(m: _Module, node: ast.AST) -> bool:
+    """A walk of the full depth-first schema listing that tests or keys a column
+    by name, which a nested field of that name shadows: ``col.get("name") != g``,
+    ``col["name"] not in columns``, ``{col["name"]: ... for col in schema_info}``,
+    ``native[col["name"]] = ...`` -- also through ``name = col.get("name")``.
+    ``parquet_schema.root_schema_index`` / ``root_schema_columns`` own the walk;
+    a name compared that was not read off a schema listing is a resolved name."""
+    if isinstance(node, ast.DictComp):
+        return _schema_name_read(m, node.key)
+    if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
+        return _schema_name_read(m, node.slice)
+    if not isinstance(node, ast.Compare):
+        return False
+    operands = [node.left, *node.comparators]
+    walked = (ast.Eq, ast.NotEq, ast.In, ast.NotIn)  # codespell:ignore
+    return any(
+        isinstance(op, walked)
+        and (
+            (_schema_name_read(m, left) and isinstance(right, (ast.Name, ast.Attribute)))
+            or (_schema_name_read(m, right) and isinstance(left, (ast.Name, ast.Attribute)))
+        )
+        for op, left, right in zip(node.ops, operands[:-1], operands[1:], strict=True)
+    )
+
+
+def _is_set_of_columns(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and _ident(node.func) in {"set", "frozenset"}
+        and len(node.args) == 1
+        and _is_column_collection(node.args[0])
+    )
+
+
+def _is_set_of_user_columns(node: ast.AST) -> bool:
+    return _is_set_of_columns(node) and _is_user_list(node.args[0])
+
+
+def _exact_column_compare(m: _Module, node: ast.AST, targets) -> bool:
+    """A case-sensitive test of a name a user typed against a schema or a column
+    list: ``col not in table.column_names``, ``c not in exclude_list``,
+    ``set(requested) - set(all_columns)``.
+    A literal on the left is the code's own name, not the user's."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Sub):
+        return (
+            _is_set_of_columns(node.left)
+            and _is_set_of_columns(node.right)
+            and (_is_set_of_user_columns(node.left) or _is_set_of_user_columns(node.right))
+        )
+    if not isinstance(node, ast.Compare):
+        return False
+    operands = [node.left, *node.comparators]
+    for op, left, right in zip(node.ops, operands[:-1], operands[1:], strict=True):
+        if isinstance(op, (ast.In, ast.NotIn)):  # codespell:ignore
+            if _is_user_name(m, left, targets) and _is_column_collection(right):
+                return True
+            # ``[c for c in schema_cols if c not in exclude_list]``: the user's list
+            if _is_user_list(right) and _iterates_column_source(m, left):
+                return True
+    return False
+
+
+def _str_method_fold(node: ast.AST) -> bool:
+    """``str.lower(col)`` and ``map(str.lower, columns)``."""
+
+    def is_str_fold(n: ast.AST) -> bool:
+        return (
+            isinstance(n, ast.Attribute)
+            and n.attr in _FOLD_METHODS
+            and isinstance(n.value, ast.Name)
+            and n.value.id == "str"
+        )
+
+    if not isinstance(node, ast.Call):
+        return False
+    if is_str_fold(node.func):
+        return bool(node.args) and _says_column(_ident(_root(node.args[0])))
+    return (
+        isinstance(node.func, ast.Name)
+        and node.func.id == "map"
+        and len(node.args) >= 2
+        and is_str_fold(node.args[0])
+        and bool(_COLUMN_SOURCE.search(ast.unparse(node.args[1])))
+    )
+
+
+def _ascii_fold_table(node: ast.AST) -> bool:
+    """``str.maketrans(string.ascii_uppercase, string.ascii_lowercase)``: a fold table."""
+    return (
+        isinstance(node, ast.Call)
+        and _ident(node.func) == "maketrans"
+        and any(
+            isinstance(n, ast.Attribute) and n.attr in {"ascii_uppercase", "ascii_lowercase"}
+            for n in ast.walk(node)
+        )
+    )
+
+
+def _names_a_type(chain: ast.AST) -> bool:
+    """A chain that reads a ``"type"`` / ``"repetition_type"`` entry: a type string, not a name."""
+    return any(
+        isinstance(n, ast.Constant) and isinstance(n.value, str) and "type" in n.value
+        for n in ast.walk(chain)
+    )
+
+
+def _fold_method_on_column(m: _Module, node: ast.AST, targets) -> bool:
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in _FOLD_METHODS
+    ):
+        return False
+    root = _root(node.func.value)
+    if _names_a_type(node.func.value):
+        return False
+    if _says_column(_ident(node.func.value)) or _says_column(_ident(root)):
+        return True
+    if not isinstance(root, ast.Name):
+        return False
+    if any((id(loop), root.id) in targets for loop in _enclosing_loops(m, node)):
+        return True
+    if _NOT_COLUMNISH.search(root.id):
+        return False
+    return root.id in _BARE_NAMES and _function_deals_in_columns(m, node)
+
+
+@functools.lru_cache(maxsize=1)
+def _schema_walk_owners() -> tuple[str, ...]:
+    """``[G1.column_fold_walk_owners]`` of the one exemptions file: the modules that
+    own the shape of the schema walk only; a fold or a suffix loop there is flagged."""
+    table = load_exemptions().get("G1", {}).get("column_fold_walk_owners", {})
+    return tuple(table.get("modules", ()))
+
+
+def _find_column_fold(m: _Module) -> Iterator[Hit]:
+    """A case fold applied to a column name, or a hand-written name suffixer or
+    lookup map, outside ``core/column_selection.py`` (#1367 concept 12).
+
+    ``column_selection.fold`` is the one rule (DuckDB's: ASCII only),
+    ``find_column`` the one lookup (a name that two columns fold to is refused),
+    ``matching_columns`` / ``has_column`` / ``same_column`` its other forms and
+    ``unique_name`` the one suffixer. Would have caught the eleven folding sites
+    (some ``.lower()``, some ASCII, one exact-only) that disagreed about whether
+    ``--bucket-point PT`` meant ``pt`` (#1109), and the three suffixers that
+    started at ``_1``, ``_2`` and ``_1`` with three notions of "taken".
+
+    What it sees: ``.lower()`` / ``.upper()`` / ``.casefold()`` on a name that
+    says it is a column or field, on the root of a call chain (``str(col)
+    .strip().lower()``), on the target of a loop or comprehension over columns,
+    names, fields or a schema, and on ``name`` / ``requested`` / ``base`` /
+    ``candidate`` inside a function that deals in columns; ``str.lower(col)`` and
+    ``map(str.lower, columns)``; a ``maketrans`` fold table; SQL ``lower(name)``
+    in a query string; a ``while``/``for`` that rebuilds ``f"{base}_{n}"``,
+    ``f"{base}{n}"``, ``base + "_" + str(n)`` or ``name += "_"`` until a
+    membership test says the name is free; a lookup map keyed by ``fold(...)``
+    (``{fold(c): c}``, ``d[fold(c)] = c``, ``d.setdefault(fold(c), c)``); and a
+    case-sensitive ``column in schema.names`` / ``table.column_names``; and a
+    walk of a schema listing (``get_schema_info`` rows) that tests or keys a
+    column by name -- ``col.get("name") != x``, ``col["name"] not in columns``,
+    ``{col["name"]: ... for col in schema_info}``, ``d[col["name"]] = ...``, also
+    through a local holding the name -- which a nested field of that name
+    shadows (``parquet_schema.root_schema_index`` / ``root_schema_columns``;
+    ``parquet_schema`` owns only this walk, not a fold or a suffix there).
+    A name compared that did not come off a schema listing is a resolved name
+    and is left to ``==``.
+
+    Not seen (named so a reviewer looks for them): a fold of a name held in a
+    variable that says nothing and is not a loop target, a suffix built with
+    ``%`` or ``.format``, and a lookup keyed by a fold held in a variable first.
+    """
+    targets = _column_targets(m)
+    for node in ast.walk(m.tree):
+        if (
+            _suffix_loop(m, node)
+            or _fold_method_on_column(m, node, targets)
+            or _str_method_fold(node)
+            or _ascii_fold_table(node)
+            or _fold_keyed(node)
+            or _exact_column_compare(m, node, targets)
+            or (not _owns(m.path, _schema_walk_owners()) and _schema_listing_walk(m, node))
+        ):
+            yield m.hit(node)
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in m.docstrings
+            and _SQL_FOLD.search(node.value)
+        ):
+            yield m.hit(node)
+
+
 def _dict_str_keys(node: ast.Dict) -> set[str]:
     return {k.value for k in node.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)}
 
@@ -2646,6 +3156,7 @@ ARMS = {
     "geometry_stats": Arm(_find_geometry_stats, ("geoparquet_io/core/geo_metadata.py",)),
     "edges": Arm(_find_edges, ("geoparquet_io/core/edges.py",)),
     "footer_patch": Arm(_find_footer_patch, ("geoparquet_io/core/parquet_footer.py",)),
+    "column_fold": Arm(_find_column_fold, ("geoparquet_io/core/column_selection.py",)),
     "geometry_identity": Arm(
         _find_geometry_identity, ("geoparquet_io/core/geometry_detection.py",)
     ),
@@ -3158,6 +3669,7 @@ G1_PLANTS = {
     "scheme_test": 'def remote(p):\n    return p.startswith("s3://")\n',
     "output_version": ('def version(md):\n    return sanitized_carried_geo(md).get("version")\n'),
     "edges": 'def spherical(col):\n    return col.get("edges") is not None\n',
+    "column_fold": "def same(col, other):\n    return col.lower() == other.lower()\n",
     "footer_patch": (
         "from geoparquet_io.core import parquet_footer\n\n"
         "def add(path, rewrite):\n    try:\n        rewrite(path)\n"
@@ -3211,6 +3723,13 @@ G1_CLEAN = {
         '    return f"s3://{bucket}/{rest}"\n'
     ),
     "output_version": ('def version(path):\n    return read_raw_geo(path).value.get("version")\n'),
+    "column_fold": (
+        "from geoparquet_io.core.column_selection import same_column\n\n"
+        "def same(col, other):\n    return same_column(col, other)\n"
+        "def kind(col_type):\n    return col_type.upper()\n"
+        "def ext(path):\n    return path.suffix.lower()\n"
+        "def label(name):\n    return name.lower()  # not said to be a column\n"
+    ),
     "geo_compose": (
         "def report(geo):\n"
         '    return {"version": geo.get("version"), "primary_column": geo.get("primary_column")}\n'
@@ -3945,7 +4464,7 @@ def test_g12_g2_a_leading_underscore_does_not_leave_the_family(tmp_path):
 
 @pytest.mark.parametrize(
     "name",
-    ["_detect_version_from_table", "_crs_matches", "free_column_name", "_validated_bbox"],
+    ["_detect_version_from_table", "_crs_matches", "_validated_bbox"],
 )
 def test_g12_g2_flags_a_known_renamed_copy(tmp_path, name):
     repo = _g2_tree(tmp_path, {"m.py": f"def {name}(x):\n    return x\n"})
@@ -4751,6 +5270,256 @@ def test_g12_edges_arm_leaves_a_centroid_elsewhere_alone(tmp_path):
 def test_g12_edges_arm_flags_every_shape(shape, tmp_path):
     repo = _plant(tmp_path, "edges", EDGES_SHAPES[shape])
     assert arm_hits(repo, "edges"), shape
+
+
+#: Every shape of a column-name fold or hand-written suffixer the G1.column_fold
+#: arm must see (the base's eleven folding sites and three suffixers), and the
+#: look-alikes it must not.
+COLUMN_FOLD_SHAPES = {
+    "lower of a column": "def f(col, x):\n    return col.lower() == x\n",
+    "upper of a field": "def f(field_name):\n    return field_name.upper()\n",
+    "casefold of a column": "def f(column):\n    return column.casefold()\n",
+    "attribute": "def f(spec):\n    return spec.column.lower()\n",
+    "subscript": "def f(columns):\n    return columns[0].lower()\n",
+    "str() wrapped": "def f(col):\n    return str(col).lower()\n",
+    "comprehension target": (
+        "def f(schema_rows, want):\n    return [n for n, _ in schema_rows if n.lower() == want]\n"
+    ),
+    "for target": (
+        "def f(columns, want):\n    for c in columns:\n        if c.lower() == want:\n"
+        "            return c\n"
+    ),
+    "set of folded": "def f(cols):\n    return {c.lower() for c in cols}\n",
+    "while suffixer": (
+        "def f(base, taken):\n    name = base\n    n = 0\n    while name in taken:\n"
+        '        n += 1\n        name = f"{base}_{n}"\n    return name\n'
+    ),
+    "while on a fold": (
+        "def f(base, taken):\n    name = base\n    n = 0\n    while name.lower() in taken:\n"
+        '        n += 1\n        name = f"{base}_{n}"\n    return name\n'
+    ),
+    "for suffixer": (
+        "def f(base, taken):\n    for i in range(1, 100):\n"
+        '        cand = f"{base}_{i}"\n        if cand not in taken:\n            return cand\n'
+    ),
+    # The first audit's blind spots (#1395): each passed the arm at 0.
+    "loop over names": "def f(names, want):\n    return [n for n in names if n.lower() == want]\n",
+    "for over names": (
+        "def f(names, want):\n    for n in names:\n        if n.lower() == want:\n"
+        "            return n\n"
+    ),
+    "lower map": "def f(names):\n    return {n.lower(): n for n in names}\n",
+    "str.lower call": "def f(col):\n    return str.lower(col)\n",
+    "map str.lower": "def f(columns):\n    return list(map(str.lower, columns))\n",
+    "maketrans table": (
+        "import string\n\nTABLE = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)\n"
+    ),
+    "sql lower": (
+        'def f(path):\n    return f"SELECT name FROM parquet_schema({path}) WHERE lower(name) = 1"\n'
+    ),
+    "sql upper of a column": 'Q = "SELECT UPPER(column_name) FROM t"\n',
+    "three-part f-string suffix": (
+        "def f(base, taken):\n    n = 0\n    name = base\n    while name in taken:\n"
+        '        n += 1\n        name = f"{base}_{n}_{n}"\n    return name\n'
+    ),
+    "joined f-string suffix": (
+        "def f(base, taken):\n    n = 0\n    name = base\n    while name in taken:\n"
+        '        n += 1\n        name = f"{base}{n}"\n    return name\n'
+    ),
+    "concatenated suffix": (
+        "def f(base, taken):\n    n = 0\n    name = base\n    while name in taken:\n"
+        '        n += 1\n        name = base + "_" + str(n)\n    return name\n'
+    ),
+    "underscore padding": (
+        'def f(idx, geom):\n    while idx.lower() == geom.lower():\n        idx += "_"\n'
+        "    return idx\n"
+    ),
+    "name receiver in a column function": (
+        "def f(name, column_names):\n    return [c for c in column_names if c == name.lower()]\n"
+    ),
+    "requested receiver": ("def f(requested, columns):\n    return requested.lower() in columns\n"),
+    "chained receiver": (
+        "def f(field):\n    return field.strip().split(' ')[0].strip('\"').lower()\n"
+    ),
+    "str() chain": "def f(col):\n    return str(col).strip().lower()\n",
+    "fold map": "from m import fold\n\ndef f(names):\n    return {fold(n): n for n in names}\n",
+    "fold subscript map": (
+        "from m import fold\n\ndef f(names):\n    out = {}\n    for n in names:\n"
+        "        out[fold(n)] = n\n    return out\n"
+    ),
+    "fold setdefault map": (
+        "from m import fold\n\ndef f(names):\n    out = {}\n    for n in names:\n"
+        "        out.setdefault(fold(n), n)\n    return out\n"
+    ),
+    "exact schema membership": (
+        "def f(schema, bbox_column_name):\n    return bbox_column_name in schema.names\n"
+    ),
+    "exact table membership": (
+        "def f(table, column_name):\n    return column_name not in table.column_names\n"
+    ),
+    # The second audit's shapes (#1395): the membership tests this PR routed away.
+    "loop target not in schema.names": (
+        "def f(table, column_list):\n    for col in column_list:\n"
+        "        if col not in table.column_names:\n            raise ValueError(col)\n"
+    ),
+    "loop target not in a column list": (
+        "def f(existing_columns, column_list):\n    for col in column_list:\n"
+        "        if col not in existing_columns:\n            raise ValueError(col)\n"
+    ),
+    "set difference": (
+        "def f(requested_cols, all_columns):\n    return set(requested_cols) - set(all_columns)\n"
+    ),
+    "comprehension filtered by exclusion": (
+        "def f(all_schema_cols, exclude_list):\n"
+        "    return [c for c in all_schema_cols if c not in exclude_list]\n"
+    ),
+    "schema name equals the typed name": (
+        "def f(schema_info, column_name):\n"
+        '    return [col for col in schema_info if col.get("name") == column_name]\n'
+    ),
+    "parameter named column": ("def f(table, column):\n    return column in table.column_names\n"),
+    "exclusion over table.column_names": (
+        "def f(table, exclude_columns):\n"
+        "    return [c for c in table.column_names if c not in exclude_columns]\n"
+    ),
+    "exclusion over schema.names": (
+        "def f(schema, exclude_list):\n    return [c for c in schema.names if c not in exclude_list]\n"
+    ),
+    "exclusion over a dict's items": (
+        "def f(edges_by_col, exclude_list):\n"
+        "    return {k: v for k, v in edges_by_col.items() if k not in exclude_list}\n"
+    ),
+    "name-read inequality continue": (
+        "def f(schema_info, geom_col):\n    for col in schema_info:\n"
+        '        if col.get("name") != geom_col:\n            continue\n        return col\n'
+    ),
+    "name-read equality walk": (
+        "def f(schema_info, geom_col):\n    for col in schema_info:\n"
+        '        if col.get("name") == geom_col:\n            return col\n'
+    ),
+    "name-read in a local, then compared": (
+        "def f(schema_info, geometry_col):\n    for col in schema_info:\n"
+        '        name = col.get("name", "")\n        if name != geometry_col:\n'
+        "            continue\n        return col\n"
+    ),
+    "name-read set form": (
+        "def f(schema_info, columns):\n"
+        '    return [col["name"] for col in schema_info if col["name"] not in columns]\n'
+    ),
+    "name-read dict form": (
+        "def f(schema_info):\n"
+        '    return {col["name"]: col.get("logical_type") for col in schema_info}\n'
+    ),
+    "name-read dict store": (
+        "def f(schema_info):\n    out = {}\n    for col in schema_info:\n"
+        '        out[col["name"]] = col\n    return out\n'
+    ),
+    "name-read through enumerate": (
+        "def f(schema_info, columns):\n    for i, col in enumerate(schema_info):\n"
+        '        if col["name"] in columns:\n            return i\n'
+    ),
+    "name-read over a listing held in a local": (
+        "from m import get_schema_info\n\n"
+        "def f(path, geom_col):\n    rows = get_schema_info(path)\n    for col in rows:\n"
+        '        if col.get("name") == geom_col:\n            return col\n'
+    ),
+    "type-named loop target": (
+        "def f(columns):\n    for col_type in columns:\n        yield col_type.lower()\n"
+    ),
+}
+
+
+COLUMN_FOLD_NEAR_MISSES = {
+    "a type": "def f(col_type):\n    return col_type.upper()\n",
+    "a path suffix": "def f(path):\n    return path.suffix.lower()\n",
+    "a codec": "def f(codec):\n    return codec.lower()\n",
+    "a name that says nothing": "def f(name):\n    return name.lower()\n",
+    "a one-shot suffix": 'def f(prefix, v):\n    base = f"{prefix}_{v}"\n    return base in {"a"}\n',
+    "a loop over plain names": "def f(items):\n    return [i.lower() for i in items]\n",
+    "a resolved geometry name": (
+        "def f(table, geometry_column):\n    return geometry_column in table.column_names\n"
+    ),
+    "a type unpacked beside a name": (
+        "def f(schema_rows):\n    return [(n, col_type.upper()) for n, col_type in schema_rows]\n"
+    ),
+    "an exact membership on a literal": ("def f(schema):\n    return 'id' in schema.names\n"),
+    "a resolved name compared to a described one": (
+        "def f(usable_columns, primary_geom_col):\n"
+        '    return [col["name"] == primary_geom_col for col in usable_columns]\n'
+    ),
+    "a walk over the owner's root columns": (
+        "from geoparquet_io.core.parquet_schema import root_schema_columns\n\n"
+        "def f(schema_info, columns):\n"
+        '    return [c for c in root_schema_columns(schema_info) if c["name"] not in columns]\n'
+    ),
+    "a walk over root columns held in a local": (
+        "from geoparquet_io.core.parquet_schema import root_schema_columns\n\n"
+        "def f(schema_info, columns):\n    rows = root_schema_columns(schema_info)\n"
+        '    return [c for c in rows if c["name"] not in columns]\n'
+    ),
+    "a schema name read that is only listed": (
+        'def f(schema_info):\n    return [col["name"] for col in schema_info]\n'
+    ),
+    "a table's own name": "def f(table):\n    return table.name.lower()\n",
+    "sql lower of a path": 'Q = "SELECT lower(path) FROM t"\n',
+    "a fold of a constant": "from m import fold\n\nKNOWN = {fold('A'): 1}\n",
+    "the owner's lookups": (
+        "from geoparquet_io.core.column_selection import matching_columns, unique_name\n\n"
+        "def f(c, cols, taken):\n    return matching_columns(c, cols), unique_name(c, taken)\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(COLUMN_FOLD_SHAPES))
+def test_g12_column_fold_arm_flags_every_shape(shape, tmp_path):
+    repo = _plant(tmp_path, "column_fold", COLUMN_FOLD_SHAPES[shape])
+    assert arm_hits(repo, "column_fold"), shape
+
+
+def _plant_in(tmp_path: Path, relative: str, source: str) -> Path:
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text(source, encoding="utf-8")
+    return tmp_path
+
+
+def test_g12_the_schema_walk_owner_table_names_real_modules():
+    owners = _schema_walk_owners()
+    assert owners, "[G1.column_fold_walk_owners] is missing"
+    for path in owners:
+        assert (REPO / path).exists(), path
+
+
+def test_g12_column_fold_owner_of_the_schema_walk_may_walk(tmp_path):
+    walk = (
+        "def f(schema_info, name):\n    for col in schema_info:\n"
+        '        if col.get("name") == name:\n            return col\n'
+    )
+    repo = _plant_in(tmp_path, "geoparquet_io/core/parquet_schema.py", walk)
+    assert arm_hits(repo, "column_fold") == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def f(col, x):\n    return col.lower() == x\n",
+        (
+            "def f(base, taken):\n    n = 0\n    name = base\n    while name in taken:\n"
+            '        n += 1\n        name = f"{base}_{n}"\n    return name\n'
+        ),
+        "def f(table, column):\n    return column in table.column_names\n",
+    ],
+    ids=["fold", "suffix loop", "exact membership"],
+)
+def test_g12_column_fold_owner_of_the_schema_walk_does_not_own_folds(source, tmp_path):
+    repo = _plant_in(tmp_path, "geoparquet_io/core/parquet_schema.py", source)
+    assert arm_hits(repo, "column_fold"), source
+
+
+@pytest.mark.parametrize("shape", sorted(COLUMN_FOLD_NEAR_MISSES))
+def test_g12_column_fold_arm_passes_its_look_alikes(shape, tmp_path):
+    repo = _plant(tmp_path, "column_fold", COLUMN_FOLD_NEAR_MISSES[shape])
+    assert arm_hits(repo, "column_fold") == [], shape
 
 
 @pytest.mark.parametrize(

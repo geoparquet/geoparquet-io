@@ -5,6 +5,7 @@ This module provides reusable decorators to ensure consistency across commands
 and reduce code duplication.
 """
 
+import functools
 import math
 from typing import Any
 
@@ -26,6 +27,7 @@ from geoparquet_io.core.parquet_writer import (
     SPATIAL_BAND_TOP_ROWS,
     WRITER_VECTOR_ROWS,
 )
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
 
 class ErrorBoundaryGroup(click.Group):
@@ -531,7 +533,7 @@ def _validate_column_list(ctx, param, value):
 
     This layer owns blank entries only. Whether a non-blank name exists is a
     schema question, so it stays with whichever backend can see the schema
-    (``core.extract.validate_columns`` for parquet,
+    (``core.extract.build_column_selection`` for parquet,
     ``core.column_selection.resolve_columns_against_schema`` for BigQuery,
     Carto and ArcGIS), which reports it as ``InvalidParameterError`` -- also
     exit 2. Catching blanks here matters even so: ``--dry-run`` builds the same
@@ -934,7 +936,37 @@ def grid_aggregate_options(func):
     )(func)
     func = click.option("--auto", is_flag=True, help="Auto-select resolution from data size.")(func)
     func = aggregate_memory_option(func)
-    return func
+    return _pack_aggregate_options(func)
+
+
+#: The Click parameter feeding each ``AggregateOptions`` field.
+_AGGREGATE_OPTION_PARAMS = {
+    "metric": "metric",
+    "metric_nodata": "metric_nodata",
+    "breakdown": "breakdown",
+    "breakdown_limit": "breakdown_limit",
+    "breakdown_metric": "breakdown_metric",
+    "out_geometry": "out_geometry",
+    "where": "where",
+    "bucket_point": "bucket_point",
+    "bbox_column": "bbox_column",
+    "memory_limit": "write_memory",
+}
+
+
+def _pack_aggregate_options(func):
+    """Hand the command one ``aggregate_options`` instead of ten parameters.
+
+    The commands only forward these to the grid engine, so each took the ten
+    values by name and passed them on by name. The options travel whole now.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        fields = {name: kwargs.pop(param) for name, param in _AGGREGATE_OPTION_PARAMS.items()}
+        return func(*args, aggregate_options=AggregateOptions(**fields), **kwargs)
+
+    return wrapper
 
 
 #: ``--write-memory`` for the aggregate/overview commands. The value bounds the

@@ -9,6 +9,7 @@ import duckdb
 import pyarrow as pa
 
 from geoparquet_io.core.bbox_structure import dataset_bounds, get_bbox_advice
+from geoparquet_io.core.column_selection import unique_name
 from geoparquet_io.core.common import add_bbox, get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
@@ -118,10 +119,7 @@ def _view_twin(typ: pa.DataType) -> pa.DataType | None:
 
 def _row_index_name(geom_col: str) -> str:
     """An index column name DuckDB cannot confuse with ``geom_col`` (identifiers fold case)."""
-    idx_col = "__gpio_row_idx"
-    while idx_col.lower() == geom_col.lower():
-        idx_col += "_"
-    return idx_col
+    return unique_name("__gpio_row_idx", [geom_col])
 
 
 def _row_bytes(column: pa.ChunkedArray):

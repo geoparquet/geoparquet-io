@@ -5,8 +5,9 @@ from __future__ import annotations
 import duckdb
 import pyarrow as pa
 
+from geoparquet_io.core.column_selection import resolve_columns_against_schema
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.duckdb_metadata import get_usable_columns
+from geoparquet_io.core.duckdb_metadata import get_usable_column_names
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     get_duckdb_connection,
@@ -59,12 +60,7 @@ def sort_by_column_table(
         raise ValueError("At least one column name must be specified")
 
     # Validate columns exist
-    for col in column_list:
-        if col not in table.column_names:
-            raise ValueError(
-                f"Column '{col}' not found in table. "
-                f"Available columns: {', '.join(table.column_names)}"
-            )
+    column_list = resolve_columns_against_schema(column_list, table.column_names, "columns")
 
     # Register table and execute query
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
@@ -84,26 +80,6 @@ def sort_by_column_table(
 
         result = registered.restore_edges(result)
         return result
-    finally:
-        con.close()
-
-
-def _sortable_columns(input_parquet: str, read_expr: str, allow_schema_diff: bool) -> list[str]:
-    """The column names the sort may be asked for.
-
-    ``get_usable_columns`` describes the FIRST file of a multi-file input, which
-    is the right answer for a strict read -- that first file's schema is exactly
-    what DuckDB will return. Under ``--allow-schema-diff`` it is the wrong one:
-    the read returns the union, and validating against the first file would
-    reject the very column the flag was turned on to keep (#867). So describe
-    the read expression itself instead.
-    """
-    if not allow_schema_diff:
-        return [c["name"] for c in get_usable_columns(input_parquet)]
-
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
-    try:
-        return [name for name, _ in describe_query(con, f"SELECT * FROM {read_expr}")]
     finally:
         con.close()
 
@@ -200,15 +176,12 @@ def sort_by_column(
     # Get metadata from original file
     metadata, schema = get_parquet_metadata(input_parquet, verbose)
 
-    # Validate that specified columns exist - use get_usable_columns for actual DuckDB column names
-    existing_columns = _sortable_columns(input_parquet, read_expr, allow_schema_diff)
-    for col in column_list:
-        if col not in existing_columns:
-            raise InvalidParameterError(
-                "columns",
-                f"column '{col}' not found in input file. "
-                f"Available columns: {', '.join(existing_columns)}",
-            )
+    # Validate that specified columns exist - use the names a query can name (get_usable_column_names)
+    column_list = resolve_columns_against_schema(
+        column_list,
+        get_usable_column_names(input_parquet, read_expr=read_expr if allow_schema_diff else None),
+        "columns",
+    )
 
     if verbose:
         debug(f"Sorting by column(s): {', '.join(column_list)}")
@@ -285,19 +258,14 @@ def _sort_by_column_streaming(
         col_names = [name for name, _ in describe_query(con, f"SELECT * FROM {source}")]
 
         # Validate columns exist
-        for col in column_list:
-            if col not in col_names:
-                raise InvalidParameterError(
-                    "columns",
-                    f"column '{col}' not found in input. Available columns: {', '.join(col_names)}",
-                )
+        resolved = resolve_columns_against_schema(column_list, col_names, "columns")
 
         # Build ORDER BY clause
         direction = " DESC" if descending else ""
-        order_clause = ", ".join(f"{quote_identifier(col)}{direction}" for col in column_list)
+        order_clause = ", ".join(f"{quote_identifier(col)}{direction}" for col in resolved)
 
         if verbose:
-            debug(f"Sorting by column(s): {', '.join(column_list)}")
+            debug(f"Sorting by column(s): {', '.join(resolved)}")
 
         return f"SELECT * FROM {source} ORDER BY {order_clause}"
 

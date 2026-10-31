@@ -25,6 +25,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME, aggregate_by_a5
 from geoparquet_io.core.process.aggregate.common import geometry_to_geom_expr
 from geoparquet_io.core.process.aggregate.grid_common import wrap_grid_geometry
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
 # a5 r7 cell over Fiji. `a5_cell_to_boundary` reports it spanning
 # -180.2016 .. -179.6540, i.e. with vertices west of -180.
@@ -137,7 +138,9 @@ def test_the_raw_a5_boundary_leaves_the_valid_range(cell, side):
 @pytest.mark.network
 def test_a5_r7_dateline_cells_stay_inside_the_world(dateline_parquet, tmp_path):
     out = tmp_path / "a5_r7.parquet"
-    aggregate_by_a5(dateline_parquet, str(out), resolution=7, metric="sum:area")
+    aggregate_by_a5(
+        dateline_parquet, str(out), resolution=7, options=AggregateOptions(metric="sum:area")
+    )
     total, invalid, out_of_range, multi = _vertex_report(out)
     assert total > 0
     assert invalid == 0, f"{invalid} of {total} cell polygons are invalid"
@@ -197,9 +200,14 @@ def test_the_seam_repair_leaves_counts_and_metrics_alone(dateline_parquet, tmp_p
     must produce the same cells, the same counts and the same metric."""
     with_geom = tmp_path / "with_geom.parquet"
     without = tmp_path / "without.parquet"
-    aggregate_by_a5(dateline_parquet, str(with_geom), resolution=7, metric="sum:area")
     aggregate_by_a5(
-        dateline_parquet, str(without), resolution=7, metric="sum:area", out_geometry="none"
+        dateline_parquet, str(with_geom), resolution=7, options=AggregateOptions(metric="sum:area")
+    )
+    aggregate_by_a5(
+        dateline_parquet,
+        str(without),
+        resolution=7,
+        options=AggregateOptions(metric="sum:area", out_geometry="none"),
     )
     con = _a5_connection()
     try:
@@ -234,7 +242,9 @@ def test_a5_overview_parents_are_dateline_safe(dateline_parquet, tmp_path):
     from geoparquet_io.core.process.overview.run import create_overviews
 
     base = tmp_path / "a5_base.parquet"
-    aggregate_by_a5(dateline_parquet, str(base), resolution=7, metric="sum:area")
+    aggregate_by_a5(
+        dateline_parquet, str(base), resolution=7, options=AggregateOptions(metric="sum:area")
+    )
     written = create_overviews(str(base), levels=[5])
     assert len(written) == 1
     _level, parent_path = written[0]

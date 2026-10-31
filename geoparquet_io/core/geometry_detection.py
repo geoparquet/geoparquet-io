@@ -13,6 +13,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Literal, overload
 
+from geoparquet_io.core.column_selection import find_column, fold
 from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
     describe_query,
@@ -56,12 +57,11 @@ def _name_match(column_names, extra_names=()) -> str | None:
     :data:`STANDARD_GEOMETRY_NAMES` in their priority, then ``extra_names``;
     the answer is the schema's own spelling.
     """
-    by_lowered: dict[str, str] = {}
-    for name in column_names:
-        by_lowered.setdefault(str(name).lower(), name)
-    for std_name in (*STANDARD_GEOMETRY_NAMES, *(str(n).lower() for n in extra_names)):
-        if std_name in by_lowered:
-            return by_lowered[std_name]
+    names = list(column_names)
+    for std_name in (*STANDARD_GEOMETRY_NAMES, *extra_names):
+        found = find_column(std_name, names)
+        if found is not None:
+            return found
     return None
 
 
@@ -152,14 +152,6 @@ def _block_declared(block) -> list[str]:
     return []
 
 
-def _in_schema(name: str, names: list) -> str | None:
-    """``name`` as the schema spells it: exactly, else case-insensitively."""
-    if name in names:
-        return name
-    folded = {str(n).lower(): n for n in reversed(names)}
-    return folded.get(name.lower())
-
-
 def _resolve_primary(primary: str | None, declared, columns, extra_names=()) -> str | None:
     """The one rule. ``columns`` is ``[(name, is_geometry_typed)]``, or None when
     the schema could not be read (then the block's word is all there is)."""
@@ -167,7 +159,7 @@ def _resolve_primary(primary: str | None, declared, columns, extra_names=()) -> 
         return primary
     names = [name for name, _ in columns]
     for candidate in ([primary] if primary is not None else []) + list(declared):
-        found = _in_schema(candidate, names)
+        found = find_column(candidate, names)
         if found is not None:
             return found
     by_name = _name_match(names, extra_names)
@@ -484,7 +476,7 @@ def _geoarrow_struct_depth(duckdb_type: str) -> int | None:
     match = _GEOARROW_STRUCT_TYPE.match(duckdb_type.strip())
     if not match:
         return None
-    fields = {f.strip().split(" ")[0].strip('"').lower() for f in match.group(1).split(",")}
+    fields = {fold(f.strip().split(" ")[0].strip('"')) for f in match.group(1).split(",")}
     if not {"x", "y"} <= fields:
         return None
     return len(match.group(2)) // 2
@@ -671,10 +663,8 @@ class GeometryPresence:
 
 def _find_described_type(described, column: str) -> str | None:
     by_name = {row[0]: str(row[1]) for row in described if row and row[0]}
-    if column in by_name:
-        return by_name[column]
-    folded = {name.lower(): col_type for name, col_type in by_name.items()}
-    return folded.get(column.lower())
+    found = find_column(column, by_name)
+    return by_name[found] if found is not None else None
 
 
 def resolve_geometry_read(

@@ -45,7 +45,7 @@ from geoparquet_io.core.file_utils import (
 )
 from geoparquet_io.core.geo_metadata import row_group_geometry_stats
 from geoparquet_io.core.geoarrow_compat import srid_crs_as_text
-from geoparquet_io.core.parquet_schema import root_schema_columns
+from geoparquet_io.core.parquet_schema import root_schema_columns, root_schema_index
 from geoparquet_io.core.remote import is_remote_url, is_s3_url, needs_httpfs
 
 # =============================================================================
@@ -561,6 +561,33 @@ def get_usable_columns(parquet_file: str, con=None) -> list[dict]:
             connection.close()
 
 
+def get_usable_column_names(
+    parquet_file: str, con=None, *, read_expr: str | None = None
+) -> list[str]:
+    """The column names a query over the input can name (#963).
+
+    The one answer to "can the SQL I am about to write name this column?". The
+    physical schema (:func:`get_column_names`) cannot say yes to a hive
+    partition column, which ``read_parquet`` synthesizes from the directory
+    names and no file carries.
+
+    By default this is :func:`get_usable_columns`: the first file's
+    ``SELECT * FROM read_parquet()``, which exposes a hive column because DuckDB
+    detects ``key=value`` directories from that file's path. A caller that reads
+    more than that -- the union of every file under ``--allow-schema-diff``, an
+    explicit ``hive_partitioning`` -- passes the read expression it will use as
+    ``read_expr``, and the names are those of ``SELECT * FROM <read_expr>``.
+    """
+    if read_expr is None:
+        return [col["name"] for col in get_usable_columns(parquet_file, con)]
+    connection, should_close = _get_connection_for_file(parquet_file, con)
+    try:
+        return [name for name, _ in describe_query(connection, f"SELECT * FROM {read_expr}")]
+    finally:
+        if should_close:
+            connection.close()
+
+
 def get_row_group_metadata(parquet_file: str, con=None) -> list[dict]:
     """
     Get per-row-group statistics using parquet_metadata().
@@ -885,10 +912,9 @@ def native_geo_type(logical_type: object) -> str | None:
 
 def is_native_geo_column(schema_info: list[dict] | None, column: str) -> str | None:
     """:func:`native_geo_type` of ``column`` in :func:`get_schema_info` rows; None if absent."""
-    for col in schema_info or []:
-        if col.get("name") == column:
-            return native_geo_type(col.get("logical_type"))
-    return None
+    rows = schema_info or []
+    index = root_schema_index(rows, column)
+    return native_geo_type(rows[index].get("logical_type")) if index is not None else None
 
 
 def is_geometry_column(logical_type: str) -> bool:
@@ -979,12 +1005,9 @@ def detect_geometry_columns(parquet_file: str, con=None) -> dict[str, str]:
     schema = get_schema_info(parquet_file, con)
     geo_columns = {}
 
-    for col in schema:
+    for col in root_schema_columns(schema):
         logical_type = col.get("logical_type") or ""
         name = col.get("name", "")
-
-        if not name:
-            continue
 
         kind = native_geo_type(logical_type)
         if kind is not None:

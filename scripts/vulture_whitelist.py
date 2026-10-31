@@ -116,7 +116,6 @@ contour  # unused function (geoparquet_io/api/ops.py:3240) -- dynamic: public Py
 _.polygonize  # unused method (geoparquet_io/api/table.py:811) -- dynamic: public Python API (docs/api/python-api.md)
 _.add_kdtree  # unused method (geoparquet_io/api/table.py:2313) -- dynamic: public Python API (docs/api/python-api.md)
 polygonize  # unused function (geoparquet_io/api/ops.py:3189) -- dynamic: public Python API (docs/api/python-api.md)
-extract_bigquery_table  # unused function (geoparquet_io/core/extract_bigquery.py:363) -- dead: T0e deletes (no package caller; only tests)
 publish_stac  # unused function (geoparquet_io/cli/commands/publish.py:202) -- dynamic: Click command, registered by its decorator
 add_stac_metadata_cmd  # unused function (geoparquet_io/cli/commands/add.py:540) -- dynamic: Click command, registered by its decorator
 _.contour  # unused method (geoparquet_io/api/table.py:860) -- dynamic: public Python API (docs/api/python-api.md)

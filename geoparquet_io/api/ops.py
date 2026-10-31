@@ -488,21 +488,13 @@ def aggregate_a5(
         New PyArrow Table with one row per A5 cell
     """
     from geoparquet_io.core.process.aggregate.by_a5 import aggregate_a5_table
+    from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
     return aggregate_a5_table(
         table,
         resolution=resolution,
-        metric=metric,
-        breakdown=breakdown,
-        breakdown_limit=breakdown_limit,
-        out_geometry=out_geometry,
+        options=AggregateOptions.pick(locals()),
         geometry_column=geometry_column,
-        where=where,
-        metric_nodata=metric_nodata,
-        bucket_point=bucket_point,
-        bbox_column=bbox_column,
-        breakdown_metric=breakdown_metric,
-        memory_limit=memory_limit,
     )
 
 
@@ -551,21 +543,13 @@ def aggregate_h3(
         New PyArrow Table with one row per H3 cell
     """
     from geoparquet_io.core.process.aggregate.by_h3 import aggregate_h3_table
+    from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
     return aggregate_h3_table(
         table,
         resolution=resolution,
-        metric=metric,
-        breakdown=breakdown,
-        breakdown_limit=breakdown_limit,
-        out_geometry=out_geometry,
+        options=AggregateOptions.pick(locals()),
         geometry_column=geometry_column,
-        where=where,
-        metric_nodata=metric_nodata,
-        bucket_point=bucket_point,
-        bbox_column=bbox_column,
-        breakdown_metric=breakdown_metric,
-        memory_limit=memory_limit,
     )
 
 

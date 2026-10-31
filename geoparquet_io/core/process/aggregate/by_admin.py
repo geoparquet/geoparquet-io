@@ -44,7 +44,6 @@ from geoparquet_io.core.process.aggregate.common import (
 )
 from geoparquet_io.core.process.aggregate.grid_common import (
     _RESERVED_INTERNAL,
-    BUCKET_POINT_GEOMETRY,
     _resolve_bbox_column_for_file,
     _validate_bucket_point_args,
     _validate_keying_columns_for_file,
@@ -52,6 +51,7 @@ from geoparquet_io.core.process.aggregate.grid_common import (
     needed_source_columns,
     source_select_list,
 )
+from geoparquet_io.core.process.aggregate.options import BUCKET_POINT_GEOMETRY
 from geoparquet_io.core.write_funnels import write_aggregate_table
 
 
@@ -248,7 +248,13 @@ def aggregate_by_admin(
     if bucket_point == "bbox":
         bbox_column = _resolve_bbox_column_for_file(input_parquet, bbox_column, verbose)
     # Fail on a bad keying column before the (possibly network-bound) dataset setup.
-    _validate_keying_columns_for_file(input_parquet, bucket_point, bbox_column, verbose)
+    _validate_keying_columns_for_file(
+        input_parquet,
+        bucket_point,
+        bbox_column,
+        verbose,
+        needed_source_columns(metrics, breakdown, bd_metric),
+    )
 
     admin_dataset, _boundary_columns, _ = resolve_admin_dataset(
         dataset, [level], cache=False, verbose=verbose

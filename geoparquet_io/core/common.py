@@ -23,7 +23,8 @@ import os
 
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.duckdb_metadata import get_column_names
+from geoparquet_io.core.column_selection import has_column
+from geoparquet_io.core.duckdb_metadata import get_usable_column_names
 from geoparquet_io.core.duckdb_utils import (
     _DuckDBSchemaWrapper,
     computed_column_query,
@@ -295,10 +296,8 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
         click.ClickException: If column already exists or operation fails
     """
 
-    # Check if column already exists using DuckDB
-    column_names = get_column_names(parquet_file)
-
-    if bbox_column_name in column_names:
+    # Check if column already exists (as a query can name it)
+    if has_column(get_usable_column_names(parquet_file), bbox_column_name):
         raise InvalidParameterError(
             "bbox_column_name",
             f"Column '{bbox_column_name}' already exists in the file. "
