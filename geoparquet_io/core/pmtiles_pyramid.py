@@ -396,9 +396,9 @@ def create_pmtiles_pyramid(
     if not _check_tile_join():
         raise TileJoinNotFoundError()
 
-    require_planar_geojson_file(input_path, use_primary_geometry=True)
+    require_planar_geojson_file(input_path)
     if include_features and features_source:
-        require_planar_geojson_file(features_source, use_primary_geometry=True)
+        require_planar_geojson_file(features_source)
 
     info, plan = _detect_and_plan(
         input_path,

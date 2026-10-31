@@ -36,7 +36,10 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import (
+    primary_geometry_column,
+    require_geometry_column,
+)
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
 from geoparquet_io.core.parquet_writer import WriteOptions, resolve_row_group_rows_for_query
 from geoparquet_io.core.partition.reader import require_single_file
@@ -162,7 +165,9 @@ def _setup_dataset_and_columns(
     # through sql_path at the SQL boundary (#802).
     input_path = resolve_file_url(input_parquet, verbose)
 
-    input_geom_col = find_primary_geometry_column(input_parquet, verbose)
+    input_geom_col = require_geometry_column(
+        primary_geometry_column(input_parquet, verbose=verbose), input_parquet
+    )
     admin_geom_col = dataset.get_geometry_column()
 
     # Check if we should skip bbox pre-filtering (for native geometry files)

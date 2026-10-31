@@ -51,6 +51,7 @@ from geoparquet_io.cli.main import cli
 # where the value is written into the ``geo`` block as JSON and the guard is
 # what turns a blank value into a usage error before the footer is touched.
 GUARDED_OPTIONS = {
+    ("process", "simplify"): "--geometry-column",
     ("add", "bbox"): "--bbox-name",
     ("add", "bbox-metadata"): "--bbox-name",
     ("add", "h3"): "--h3-name",
@@ -67,7 +68,6 @@ GUARDED_OPTIONS = {
     ("sort", "quadkey"): "--quadkey-name",
     ("sort", "hilbert"): "--geometry-column",
     ("sort", "str"): "--geometry-column",
-    ("process", "simplify"): "--geometry-column",
 }
 
 # Options the sweep matches but that deliberately carry no Click-layer guard.

@@ -43,7 +43,7 @@ from geoparquet_io.core.file_utils import (
     is_partition_path,
     resolve_file_url,
 )
-from geoparquet_io.core.geo_metadata import raw_geo_of_file, row_group_geometry_stats
+from geoparquet_io.core.geo_metadata import row_group_geometry_stats
 from geoparquet_io.core.geoarrow_compat import srid_crs_as_text
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.remote import is_remote_url, is_s3_url, needs_httpfs
@@ -1193,27 +1193,6 @@ def get_bloom_filter_info(parquet_file: str, con=None) -> list[dict]:
     )
 
 
-def find_primary_geometry_column_duckdb(parquet_file: str, con=None) -> str:
-    """
-    Find primary geometry column from GeoParquet metadata.
-
-    Falls back to 'geometry' if no metadata found.
-    """
-    geo_meta = raw_geo_of_file(parquet_file, con).value
-
-    if not geo_meta:
-        return "geometry"
-
-    if isinstance(geo_meta, dict):
-        return geo_meta.get("primary_column", "geometry")
-    elif isinstance(geo_meta, list):
-        for col in geo_meta:
-            if isinstance(col, dict) and col.get("primary", False):
-                return col.get("name", "geometry")
-
-    return "geometry"
-
-
 def get_row_group_bbox_stats(
     parquet_file: str,
     *,
@@ -1418,9 +1397,13 @@ def get_per_row_group_native_geo_stats(
         List of dicts with row_group_id, xmin, ymin, xmax, ymax (empty if no stats)
     """
     if not geometry_column:
+        from geoparquet_io.core.geometry_detection import primary_geometry_column
+
         try:
-            geometry_column = find_primary_geometry_column_duckdb(parquet_file, con)
+            geometry_column = primary_geometry_column(parquet_file, con=con)
         except Exception:
+            return []
+        if geometry_column is None:
             return []
     elif strict:
         chunks = get_native_geo_stats_by_row_group(parquet_file, geometry_column, con)

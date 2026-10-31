@@ -119,10 +119,11 @@ def test_read_partition_keeps_a_crs_typed_geometry_and_its_crs(tmp_path, con):
 def test_geojson_geometry_column_fallback_needs_no_row(con):
     """Behaviour change: the type fallback read ``typeof(col) LIMIT 1``, which
     finds nothing in an empty source; DESCRIBE types the column without a row."""
-    from geoparquet_io.core.geojson_stream import _find_geometry_column
+    from geoparquet_io.core.duckdb_utils import describe_query
+    from geoparquet_io.core.geometry_detection import primary_geometry_column
 
     con.execute("CREATE TABLE t AS SELECT 1 AS id, ST_Point(0, 0) AS footprint_pt WHERE false")
-    assert _find_geometry_column(con, "t") == "footprint_pt"
+    assert primary_geometry_column(describe_query(con, "SELECT * FROM t")) == "footprint_pt"
 
 
 # --- F3: WFS properties type from DESCRIBE ------------------------------------------

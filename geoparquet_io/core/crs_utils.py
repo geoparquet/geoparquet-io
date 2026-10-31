@@ -28,10 +28,7 @@ from geoparquet_io.core.geo_metadata import (
     sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.geoarrow_compat import srid_crs_as_text
-from geoparquet_io.core.geometry_detection import (
-    detect_geometry_column_from_names,
-    detect_parquet_geometry_column,
-)
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.logging_config import debug, warn
 
 
@@ -546,28 +543,11 @@ def geoparquet_crs_is_null(parquet_file) -> bool:
     geo_meta = sanitized_carried_geo_of_file(parquet_file)
     if not geo_meta:
         return False
-    primary_col = _primary_column_of_file(geo_meta, parquet_file)
+    primary_col = primary_geometry_column(parquet_file, geo=geo_meta)
     if primary_col is None:
         return False
     col_meta = geo_meta.get("columns", {}).get(primary_col, {})
     return crs_is_explicitly_null(col_meta)
-
-
-def _primary_column_of_file(geo_meta: dict, parquet_file) -> str | None:
-    """The column a sanitized block names as primary, or the one the schema shows.
-
-    Sanitizing *drops* a malformed ``primary_column``, so a block can reach a
-    reader without one. Defaulting to the literal string ``"geometry"`` there is
-    silently wrong on a file whose column is called ``geom``: the lookup misses,
-    the CRS reads as absent, and ``reproject`` then transforms unknown or
-    projected coordinates as if they were lon/lat -- where the raw block used to
-    raise (#887 review). Ask the file instead.
-    """
-
-    primary_col = geo_meta.get("primary_column")
-    if isinstance(primary_col, str):
-        return primary_col
-    return detect_parquet_geometry_column(str(parquet_file))
 
 
 @lru_cache(maxsize=256)
@@ -847,12 +827,7 @@ def extract_crs_from_table(table, geometry_column: str | None = None):
 
     geo_meta = sanitized_carried_geo(table.schema.metadata)
     columns = geo_meta.get("columns", {})
-    col = geometry_column or geo_meta.get("primary_column")
-    if not isinstance(col, str):
-        # Sanitizing dropped a malformed `primary_column`; the table's own
-        # schema names the column, where the literal "geometry" would miss a
-        # `geom` one and report a projected CRS as absent (#887 review).
-        col = detect_geometry_column_from_names(table.schema.names)
+    col = geometry_column or primary_geometry_column(table, geo=geo_meta)
     if col is None:
         return None
     col_meta = columns.get(col, {})
@@ -894,7 +869,7 @@ def _crs_from_geo_block(
     if geometry_column is not None and geometry_column in columns:
         col = geometry_column
     else:
-        col = _primary_column_of_file(geo_meta, parquet_file)
+        col = primary_geometry_column(parquet_file, geo=geo_meta)
     if col not in columns:
         return None, col, False
     if crs_is_explicitly_null(columns[col]) and not quiet:
@@ -902,27 +877,6 @@ def _crs_from_geo_block(
     crs = columns[col].get("crs")
     stated = "crs" in columns[col]
     return (crs if crs and not is_default_crs(crs) else None), col, stated
-
-
-def _native_primary_column(root_columns: list[dict], requested: str | None) -> str | None:
-    """The root column whose native logical type answers for the primary geometry.
-
-    ``requested`` (a ``geo`` block's primary, or the caller's column) wins when
-    the file has it. Otherwise gpio's own primary detection: a standard geometry
-    name (``geometry``, ``geom``, ...), else the first native geometry column.
-    Never "the first column with a non-default CRS": in a multi-geometry file
-    that is a secondary's whenever one comes first in schema order (#1248).
-    """
-    names = [col["name"] for col in root_columns]
-    if requested is not None and requested in names:
-        return requested
-    by_name = detect_geometry_column_from_names(names)
-    if by_name is not None:
-        return by_name
-    from geoparquet_io.core.duckdb_metadata import is_geometry_column
-
-    native = [col["name"] for col in root_columns if is_geometry_column(col.get("logical_type"))]
-    return native[0] if native else None
 
 
 def _block_omits_requested_column(
@@ -956,7 +910,12 @@ def _native_type_crs_value(parquet_file, column: str | None = None):
     from geoparquet_io.core.parquet_schema import root_schema_columns
 
     root_columns = root_schema_columns(get_schema_info(parquet_file))
-    target = _native_primary_column(root_columns, column)
+    # ``column`` (a block's primary, or the caller's) wins when the file has it;
+    # otherwise the one primary rule over the root columns' own types (#1248).
+    target = primary_geometry_column(
+        [(col["name"], col.get("logical_type")) for col in root_columns],
+        geo={"primary_column": column} if column is not None else None,
+    )
     entry = next((col for col in root_columns if col["name"] == target), None)
     if entry is None or not is_geometry_column(entry.get("logical_type")):
         return None
@@ -971,7 +930,7 @@ def _crs_from_native_geo_type(
 
     ``column`` names the column to read -- the one a ``geo`` block named, as
     the second opinion on it, or the caller's. Without one (or when the file has
-    no such column) :func:`_native_primary_column` picks the primary. This is
+    no such column) :func:`primary_geometry_column` picks the primary. This is
     the only place a *native-geo-only* file records its CRS. ``crs`` is ``None``
     when the column has no native type, a default CRS, or ``srid:0``. ``unknown``
     is True for ``srid:0`` only. It is the type's spelling of an unknown CRS
@@ -1044,7 +1003,7 @@ def unknown_crs_reason(parquet_file, geometry_column: str | None = None) -> str 
     columns = geo_meta.get("columns") or {}
     col = geometry_column if geometry_column in columns else None
     if col is None and columns:
-        col = _primary_column_of_file(geo_meta, parquet_file)
+        col = primary_geometry_column(parquet_file, geo=geo_meta)
     target = geometry_column
     if col in columns and not _block_omits_requested_column(parquet_file, col, geometry_column):
         if "crs" in columns[col]:
@@ -1928,7 +1887,7 @@ def crs_string_from_geo_meta(geo_meta: dict | None, geom_col: str) -> str | None
     columns = geo_meta.get("columns", {})
     col_meta = columns.get(geom_col)
     if col_meta is None:
-        col_meta = columns.get(geo_meta.get("primary_column", "geometry"), {})
+        col_meta = columns.get(primary_geometry_column(None, geo=geo_meta), {})
     crs = col_meta.get("crs") if isinstance(col_meta, dict) else None
     return transform_source_crs(crs)
 

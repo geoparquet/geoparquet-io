@@ -22,6 +22,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.index_ops import get_index_spec, load_index
 from geoparquet_io.core.logging_config import warn
 from geoparquet_io.core.memory_limits import open_bounded_connection
@@ -172,7 +173,7 @@ def _scheme_for_column(con, relation: str, name: str, dtype: str) -> str:
 
 def _classify_columns(columns: list[tuple[str, str]], cell_column: str, scheme: str):
     """Split attribute columns into rollup roles; return (rollups, dropped)."""
-    special = {cell_column, "count", "geometry", "centroid"}
+    special = {cell_column, "count", BUILT_GEOMETRY_COLUMN, "centroid"}
     if scheme == ADMIN_SCHEME:
         special.add("admin_name")
     # Single-sourced from the aggregate engine's metric functions so adding a
@@ -226,11 +227,11 @@ def _pct_cell_source(name: str, names: set[str], scheme: str) -> str | None:
 
 
 def _infer_out_geometry(con, relation: str, columns: dict[str, str]) -> str:
-    if "geometry" not in columns:
+    if BUILT_GEOMETRY_COLUMN not in columns:
         return "none"
     if "centroid" in columns:
         return "both"
-    geom_expr = geometry_to_geom_expr(con, relation, "geometry")
+    geom_expr = geometry_to_geom_expr(con, relation, BUILT_GEOMETRY_COLUMN)
     row = fetch_one(
         con.execute(
             f"SELECT ST_GeometryType({geom_expr}) FROM {relation} WHERE geometry IS NOT NULL LIMIT 1"

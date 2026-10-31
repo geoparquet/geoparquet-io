@@ -13,7 +13,12 @@ from geoparquet_io.core.bbox_structure import (
 )
 from geoparquet_io.core.common import add_computed_column
 from geoparquet_io.core.duckdb_metadata import get_column_names, get_schema_info
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, query_schema, quote_identifier
+from geoparquet_io.core.duckdb_utils import (
+    describe_query,
+    get_duckdb_connection,
+    query_schema,
+    quote_identifier,
+)
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
 from geoparquet_io.core.geo_metadata import (
@@ -26,9 +31,10 @@ from geoparquet_io.core.geo_metadata import (
     sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.geometry_detection import (
-    STANDARD_GEOMETRY_NAMES,
-    find_primary_geometry_column,
+    primary_geometry_column,
     register_geometry_column,
+    require_geometry_column,
+    resolve_geometry_column,
 )
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, progress, success, warn
@@ -40,7 +46,6 @@ from geoparquet_io.core.parquet_writer import (
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
-    find_geometry_column_from_table,
     is_stdin,
     should_stream_output,
 )
@@ -156,9 +161,7 @@ def add_bbox_table(
         New table with bbox column added
     """
     # Find geometry column
-    geom_col = geometry_column or find_geometry_column_from_table(table)
-    if not geom_col:
-        geom_col = "geometry"
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table")
 
     table, bbox_column_name = _prepare_table_bbox_column(table, bbox_column_name)
 
@@ -420,7 +423,12 @@ def _add_bbox_streaming(
     # built. (add_bbox's query builder takes no source CRS, so nothing is lost.)
     with open_input(input_path, verbose=verbose) as (source, metadata, _is_stream, con):
         query, passed_through, bbox_column_name = _make_streaming_bbox_query(
-            source, con, bbox_column_name, force=force, geoparquet_version=write.geoparquet_version
+            source,
+            con,
+            bbox_column_name,
+            force=force,
+            geoparquet_version=write.geoparquet_version,
+            metadata=metadata,
         )
 
         write_output(
@@ -449,7 +457,12 @@ def _add_bbox_streaming(
 
 
 def _make_streaming_bbox_query(
-    source: str, con, bbox_column_name: str, force: bool, geoparquet_version: str | None = None
+    source: str,
+    con,
+    bbox_column_name: str,
+    force: bool,
+    geoparquet_version: str | None = None,
+    metadata: dict | None = None,
 ) -> tuple[str, bool, str]:
     """Build the add-bbox query for a streaming source.
 
@@ -473,16 +486,13 @@ def _make_streaming_bbox_query(
         return f"SELECT * FROM {source}", True, bbox_column_name
 
     # Get column names from query result (works with both table names and read_parquet)
-    col_names = query_schema(con, f"SELECT * FROM {source}").names
-
-    # Find geometry column from common names
-    geom_col = None
-    for name in STANDARD_GEOMETRY_NAMES:
-        if name in col_names:
-            geom_col = name
-            break
-    if not geom_col:
-        geom_col = "geometry"
+    described = describe_query(con, f"SELECT * FROM {source}")
+    col_names = [name for name, _ in described]
+    # The owner over the typed columns and the stream's carried block (#1367).
+    geom_col = require_geometry_column(
+        primary_geometry_column(described, geo=sanitized_carried_geo(metadata)),
+        "the input stream",
+    )
 
     # --force over a real bbox struct replaces it in place; anything else of that
     # name is the user's own column and the computed one moves aside instead.
@@ -565,7 +575,9 @@ def _add_bbox_file_based(
     _note_bbox_structs_computed_beside(input_parquet, bbox_column_name, verbose)
 
     # Get geometry column for the SQL expression
-    geom_col = find_primary_geometry_column(input_parquet, verbose)
+    geom_col = require_geometry_column(
+        primary_geometry_column(input_parquet, verbose=verbose), input_parquet
+    )
 
     # Define the SQL expression (the only unique part)
     quoted_geom_col = quote_identifier(geom_col)

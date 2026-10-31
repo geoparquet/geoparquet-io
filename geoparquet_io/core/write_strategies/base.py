@@ -365,6 +365,22 @@ def atomic_write(
         shutil.rmtree(stage_dir, ignore_errors=True)
 
 
+#: The :meth:`BaseWriteStrategy.write_from_table` arguments a query write takes
+#: unchanged.
+_TABLE_WRITE_FORWARDED = (
+    "output_path",
+    "geometry_column",
+    "compression",
+    "compression_level",
+    "row_group_size_mb",
+    "row_group_rows",
+    "input_crs",
+    "verbose",
+    "custom_metadata",
+    "extra_kv_metadata",
+)
+
+
 class BaseWriteStrategy(ABC):
     """
     Base class for write strategy implementations.
@@ -456,6 +472,25 @@ class BaseWriteStrategy(ABC):
                 (fiboa, vecorel, STAC) survive on every strategy (#690).
         """
         ...
+
+    def _write_table_query(
+        self, con, query: str, table_args: dict, *, geoparquet_version: str, geometry_info
+    ) -> None:
+        """:meth:`write_from_query` over a query on a registered table.
+
+        ``table_args`` is the caller's :meth:`write_from_table` arguments; the
+        ones a query write takes are forwarded under their own names, so each
+        strategy's table entry point does not restate the list.
+        """
+        forwarded = {name: table_args[name] for name in _TABLE_WRITE_FORWARDED}
+        self.write_from_query(
+            con=con,
+            query=query,
+            original_metadata=None,
+            geoparquet_version=geoparquet_version,
+            geometry_info=geometry_info,
+            **forwarded,
+        )
 
     def _validate_output_path(self, output_path: str) -> None:
         """

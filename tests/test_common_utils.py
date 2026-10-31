@@ -23,7 +23,7 @@ from geoparquet_io.core.file_utils import (
     validate_parquet_extension,
 )
 from geoparquet_io.core.geo_metadata import _get_geometry_type_name
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.remote import (
     get_remote_error_hint,
     is_azure_url,
@@ -270,22 +270,22 @@ class TestDetectGeoparquetFileType:
 
 
 class TestFindPrimaryGeometryColumn:
-    """Tests for find_primary_geometry_column function."""
+    """Tests for primary_geometry_column function."""
 
     def test_finds_geometry_column(self, places_test_file):
         """Test finding geometry column in places file."""
-        result = find_primary_geometry_column(places_test_file, verbose=False)
+        result = primary_geometry_column(places_test_file, verbose=False)
         assert isinstance(result, str)
         assert result == "geometry"
 
     def test_buildings_geometry_column(self, buildings_test_file):
         """Test finding geometry column in buildings file."""
-        result = find_primary_geometry_column(buildings_test_file, verbose=False)
+        result = primary_geometry_column(buildings_test_file, verbose=False)
         assert isinstance(result, str)
 
     def test_with_verbose(self, places_test_file):
         """Test with verbose flag."""
-        result = find_primary_geometry_column(places_test_file, verbose=True)
+        result = primary_geometry_column(places_test_file, verbose=True)
         assert isinstance(result, str)
 
 

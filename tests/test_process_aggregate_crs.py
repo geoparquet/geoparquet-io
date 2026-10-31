@@ -9,14 +9,14 @@ import duckdb
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3
 
 
 def _reprojected_cells(parquet_file, key_sql_template, res):
     """Cells computed from the input geometries reprojected EPSG:5070 -> CRS84."""
-    geom = find_primary_geometry_column(parquet_file)
+    geom = primary_geometry_column(parquet_file)
     con = duckdb.connect()
     con.execute(
         "INSTALL spatial; LOAD spatial; INSTALL a5 FROM community; LOAD a5; "

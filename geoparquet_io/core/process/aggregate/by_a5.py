@@ -10,8 +10,10 @@ import pyarrow as pa
 
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.constants import DEFAULT_A5_COLUMN_NAME
+from geoparquet_io.core.duckdb_utils import as_wkb_sql
 from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.grid_common import (
+    BUCKET_POINT_GEOMETRY,
     GridScheme,
     aggregate_grid_file,
     aggregate_grid_table,
@@ -34,7 +36,7 @@ A5_SCHEME = GridScheme(
     ),
     latlng_template="a5_cell_to_lonlat({cell})",
     # a5_cell_to_lonlat returns [lon, lat].
-    centroid_wkb_template="ST_AsWKB(ST_Point({ll}[1], {ll}[2]))",
+    centroid_wkb_template=as_wkb_sql("ST_Point({ll}[1], {ll}[2])"),
     # A5 is equal-area by construction: every cell at a resolution covers the
     # same number of square metres, so the denominator of `pct_cell` is one
     # constant and does not need the cell id (#1181).
@@ -61,7 +63,7 @@ def aggregate_by_a5(
     show_sql: bool = False,
     where: str | None = None,
     metric_nodata: str | None = None,
-    bucket_point: str = "geometry",
+    bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
     memory_limit: str | None = None,
@@ -106,7 +108,7 @@ def aggregate_a5_table(
     geometry_column: str | None = None,
     where: str | None = None,
     metric_nodata: str | None = None,
-    bucket_point: str = "geometry",
+    bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
     memory_limit: str | None = None,

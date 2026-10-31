@@ -31,7 +31,8 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import (
-    find_primary_geometry_column,
+    GeometryColumnNotFoundError,
+    primary_geometry_column,
     resolve_geometry_read,
 )
 from geoparquet_io.core.logging_config import debug, progress, warn
@@ -331,7 +332,7 @@ def check_spatial_order(
     row_group_bboxes, source = get_row_group_bbox_stats(
         parquet_file,
         native=lambda: get_per_row_group_native_geo_stats(
-            parquet_file, find_primary_geometry_column(parquet_file, verbose)
+            parquet_file, primary_geometry_column(parquet_file, verbose=verbose)
         ),
         bbox_column=bbox_column,
     )
@@ -358,24 +359,14 @@ def check_spatial_order(
             "For faster checks, add bbox column with 'gpio add bbox' or use GeoParquet 2.0."
         )
 
-    geometry_column = find_primary_geometry_column(parquet_file, verbose)
-    if verbose:
-        debug(f"Using geometry column: {geometry_column}")
-        debug("Using sampling method")
-
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
-    try:
-        disable_geoparquet_conversion(con)
-        averages = _sample_distances(
-            con, raw_url, geometry_column, limit_rows, random_sample_size, verbose
+    geometry_column = primary_geometry_column(parquet_file, verbose=verbose)
+    if geometry_column is None:
+        # Not a crash: the check could not run, and says why (the owner's words).
+        averages: tuple | str = str(GeometryColumnNotFoundError(parquet_file))
+    else:
+        averages = _sample_file(
+            parquet_file, raw_url, geometry_column, limit_rows, random_sample_size, verbose
         )
-    except duckdb.Error as e:
-        if is_interrupt(e):
-            # The user stopping the run (Ctrl-C), not a verdict on the file.
-            raise
-        averages = f"could not read geometry column {geometry_column!r} ({e})"
-    finally:
-        con.close()
 
     if isinstance(averages, str):
         # A caller asking for results presents the verdict itself.
@@ -394,6 +385,26 @@ def check_spatial_order(
         return _build_results_dict(ratio, consecutive_avg, random_avg)
 
     return ratio
+
+
+def _sample_file(parquet_file, raw_url, geometry_column, limit_rows, random_sample_size, verbose):
+    """:func:`_sample_distances` on its own connection; a read error becomes the reason."""
+    if verbose:
+        debug(f"Using geometry column: {geometry_column}")
+        debug("Using sampling method")
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
+    try:
+        disable_geoparquet_conversion(con)
+        return _sample_distances(
+            con, raw_url, geometry_column, limit_rows, random_sample_size, verbose
+        )
+    except duckdb.Error as e:
+        if is_interrupt(e):
+            # The user stopping the run (Ctrl-C), not a verdict on the file.
+            raise
+        return f"could not read geometry column {geometry_column!r} ({e})"
+    finally:
+        con.close()
 
 
 def _sample_distances(con, raw_url, geometry_column, limit_rows, random_sample_size, verbose):

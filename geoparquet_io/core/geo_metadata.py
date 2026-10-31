@@ -653,24 +653,6 @@ def read_raw_geo(metadata) -> RawGeo:
     return RawGeo(present=True, value=value, error=problem and f"{problem}: {detail}")
 
 
-def carried_geometry_column(geo_meta, column_names) -> str | None:
-    """The column a *sanitized* block names as primary, else the one the schema shows.
-
-    Sanitizing *drops* a malformed ``primary_column`` (and repairs it only from
-    a single surviving column), so a block reaches a reader without one.
-    Defaulting to the literal string ``"geometry"`` there is silently wrong on a
-    file whose column is called ``geom`` -- the write then names a column that
-    is not in the table (#887 review). ``column_names`` is the schema to ask
-    instead; the caller supplies the last-resort default, if it wants one.
-    """
-    from geoparquet_io.core.geometry_detection import detect_geometry_column_from_names
-
-    primary = geo_meta.get("primary_column") if isinstance(geo_meta, dict) else None
-    if isinstance(primary, str) and primary:
-        return primary
-    return detect_geometry_column_from_names(column_names)
-
-
 def _article(type_name: str) -> str:
     """``"a list"`` / ``"an object"`` -- correct article for a JSON type name."""
     if type_name == "null":
@@ -1731,21 +1713,21 @@ def _non_finite_error(column: str, example: str) -> Exception:
 # -- DuckDB ------------------------------------------------------------------
 
 
-def _envelope_columns(read_expr: str, col_type: str, quoted: str) -> tuple[str, str] | None:
+def _envelope_columns(read) -> tuple[str, str] | None:
     """``(type expression, the four envelope expressions)`` of one row, or None.
 
+    ``read`` is the owner's :class:`~geoparquet_io.core.geometry_detection.GeometryRead`.
     The type expression is NULL where SQL cannot name the type (a GeoArrow
     coordinate struct, which ``ST_GeometryType`` does not take).
     """
-    if "STRUCT" in col_type:
-        depth_to_encoding = {0: "point", 1: "linestring", 2: "polygon", 3: "multipolygon"}
-        enc = depth_to_encoding.get(col_type.count("[]"), "linestring")
-        xmin_e, ymin_e, xmax_e, ymax_e, _, _ = _geoarrow_coord_exprs(quoted, enc)
+    if read.kind == "geoarrow":
+        enc = read.geoarrow_encoding
+        xmin_e, ymin_e, xmax_e, ymax_e, _, _ = _geoarrow_coord_exprs(read.quoted, enc)
         # A GeoArrow EMPTY carries NaN coordinates instead of none.
         xmin_e, ymin_e = (f"nullif({e}, 'NaN'::DOUBLE)" for e in (xmin_e, ymin_e))
         xmax_e, ymax_e = (f"nullif({e}, 'NaN'::DOUBLE)" for e in (xmax_e, ymax_e))
         return "NULL::VARCHAR", f"{xmin_e}, {ymin_e}, {xmax_e}, {ymax_e}"
-    g = read_expr
+    g = read.shape_expr
     return (
         f"ST_GeometryType({g}) || {zm_suffix_sql(g)}",
         f"ST_XMin({g}), ST_YMin({g}), ST_XMax({g}), ST_YMax({g})",
@@ -1775,9 +1757,8 @@ def _located_rows_sql(con, query: str, geometry_column: str, bbox_column: str | 
         geom = "NULL::GEOMETRY"
     else:
         read = GeometryRead.for_type(target, col_type)
-        g = read.shape_expr if read.kind == "wkb" else quoted
-        type_expr, env = _envelope_columns(g, col_type, quoted)
-        geom = "NULL::GEOMETRY" if "STRUCT" in col_type else g
+        type_expr, env = _envelope_columns(read)
+        geom = "NULL::GEOMETRY" if read.kind == "geoarrow" else read.shape_expr
     return f"""
         SELECT * FROM (
             SELECT {type_expr} AS __t, {env}, {geom} AS __g
@@ -2005,12 +1986,12 @@ def _stats(
 def _file_stats(path, geometry_column: str | None, **kwargs) -> GeometryStats:
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
     from geoparquet_io.core.file_utils import resolve_file_url
-    from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+    from geoparquet_io.core.geometry_detection import primary_geometry_column
     from geoparquet_io.core.remote import needs_httpfs
 
     path = str(path)
     if geometry_column is None:
-        geometry_column = find_primary_geometry_column(path, verbose=False)
+        geometry_column = primary_geometry_column(path)
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path))
     try:
         query = f"SELECT * FROM read_parquet({sql_path(resolve_file_url(path, verbose=False))})"

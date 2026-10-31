@@ -28,11 +28,10 @@ from geoparquet_io.core.crs_utils import _crs_from_geoarrow_field, geoarrow_crs_
 from geoparquet_io.core.edges import EDGES, geoarrow_edge_type
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
-    carried_geometry_column,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
 )
-from geoparquet_io.core.geometry_detection import detect_geometry_column_from_names
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.logging_config import debug
 
 # Marker for stdin/stdout in CLI arguments
@@ -194,24 +193,6 @@ def apply_metadata_to_table(table: pa.Table, metadata: dict | None) -> pa.Table:
     if not metadata:
         return table
     return table.replace_schema_metadata(metadata)
-
-
-def find_geometry_column_from_table(table: pa.Table) -> str | None:
-    """
-    Find the geometry column name from table metadata or common names.
-
-    Args:
-        table: PyArrow Table to inspect
-
-    Returns:
-        Geometry column name or None if not found
-    """
-    names = table.column_names
-    geom_col = carried_geometry_column(sanitized_carried_geo(table.schema.metadata), names)
-    if geom_col in names:
-        return geom_col
-    # The block named a column this table does not have: ask the schema.
-    return detect_geometry_column_from_names(names)
 
 
 def read_stdin_to_temp_file(verbose: bool = False) -> str:
@@ -482,7 +463,7 @@ def extract_crs_from_table(
 
     # Find geometry column if not specified
     if geometry_column is None:
-        geometry_column = find_geometry_column_from_table(table)
+        geometry_column = primary_geometry_column(table)
 
     if geometry_column and geometry_column in table.column_names:
         geom_type = table.column(geometry_column).type
@@ -509,7 +490,7 @@ def extract_crs_from_table(
         # exist on a file whose column is `geom`, and reported its CRS
         # as absent (#887 review). Ask the table's schema instead — the
         # shared recovery #960 shared out (#968).
-        geom_col_name = geometry_column or carried_geometry_column(geo_meta, table.column_names)
+        geom_col_name = geometry_column or primary_geometry_column(table, geo=geo_meta)
         if geom_col_name in columns:
             if crs_is_explicitly_null(columns[geom_col_name]):
                 warn_null_crs_once(

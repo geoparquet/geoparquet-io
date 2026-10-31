@@ -71,7 +71,6 @@ from geoparquet_io.core.duckdb_utils import (
     _get_query_column_type,
     _get_query_columns,
     get_duckdb_connection,
-    parse_duckdb_geo_type,
     sql_path,
 )
 from geoparquet_io.core.edges import (
@@ -90,7 +89,6 @@ from geoparquet_io.core.file_utils import get_all_parquet_files, is_partition_pa
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     SELF_EVIDENT_BBOX_COLUMN,
-    carried_geometry_column,
     declare_carried_bbox_column,
     gate_illegal_bbox_covering,
     is_geoparquet_1x,
@@ -108,8 +106,11 @@ from geoparquet_io.core.geodesic_bbox import (
     geography_statistics,
 )
 from geoparquet_io.core.geometry_detection import (
+    BUILT_GEOMETRY_COLUMN,
+    GeometryRead,
     _detect_geometry_from_query,
     native_geometry_types_from_query,
+    primary_geometry_column,
 )
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -1323,16 +1324,15 @@ def _query_geometry_is_already_native(con, query: str, geometry_column: str | No
     Only ``convert`` builds a ``geometry_info``, so the encoding witness the
     1.1-geoarrow guard used to read is absent on every other write path (sort,
     extract, partition, the ``add`` family). Ask the query instead: DESCRIBE
-    alone, no scan. A native column describes as its nested shape
-    (``STRUCT(x DOUBLE, y DOUBLE)[][]`` for a polygon); a WKB/WKT one describes
-    as ``GEOMETRY``, ``GEOGRAPHY``, ``BLOB`` or ``VARCHAR`` (#1176).
+    alone, no scan. The read kind is the owner's (``GeometryRead.kind``): a
+    GeoArrow coordinate struct (``STRUCT(x DOUBLE, y DOUBLE)[][]`` for a
+    polygon) is ``geoarrow``; GEOMETRY, BLOB, VARCHAR and any other nested
+    shape are not (#1176, #1367).
     """
     if not geometry_column:
         return False
     col_type = _get_query_column_type(con, query, geometry_column)
-    if not col_type or parse_duckdb_geo_type(col_type) is not None:
-        return False
-    return not col_type.upper().startswith(("BLOB", "VARCHAR"))
+    return GeometryRead.for_type(geometry_column, col_type).kind == "geoarrow"
 
 
 def _secondary_geo_columns(carried_geo_block: dict | None, geometry_info: dict | None):
@@ -1845,7 +1845,7 @@ def _edges_to_restore(
     return edges_by_col
 
 
-def table_nonplanar_edges(table, geometry_column: str, edges: str | None) -> dict[str, str]:
+def table_nonplanar_edges(table, geometry_column: str | None, edges: str | None) -> dict[str, str]:
     """Map geometry column -> non-planar edges an in-memory table declares.
 
     The one reader of a table's edges (the repair gate's
@@ -1964,7 +1964,7 @@ def write_geoparquet_table(
     row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
 
     if geometry_column is None:
-        geometry_column = carried_geometry_column(geo_meta, table.column_names) or "geometry"
+        geometry_column = primary_geometry_column(table, geo=geo_meta)
 
     # Check if geometry column exists
     has_geometry = geometry_column in table.column_names
@@ -2143,7 +2143,7 @@ def write_aggregate_table(
     write_geoparquet_table(
         table,
         output_file,
-        geometry_column="geometry",
+        geometry_column=BUILT_GEOMETRY_COLUMN,
         compression=compression,
         compression_level=compression_level,
         geoparquet_version=geoparquet_version,

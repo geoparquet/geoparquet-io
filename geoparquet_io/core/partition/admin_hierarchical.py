@@ -39,7 +39,10 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import output_is_kept, resolve_file_url
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import (
+    primary_geometry_column,
+    require_geometry_column,
+)
 from geoparquet_io.core.logging_config import debug, progress, success, warn
 from geoparquet_io.core.parquet_writer import WriteOptions, resolve_output_geoparquet_version
 from geoparquet_io.core.partition.common import raise_if_no_rows, sanitize_filename
@@ -63,7 +66,9 @@ def _get_input_file_info(input_parquet, verbose):
     boundary (:func:`sql_path`) rather than in this return value (#802).
     """
     input_path = resolve_file_url(input_parquet, verbose)
-    input_geom_col = find_primary_geometry_column(input_parquet, verbose)
+    input_geom_col = require_geometry_column(
+        primary_geometry_column(input_parquet, verbose=verbose), input_parquet
+    )
     input_bbox_info = check_bbox_structure(input_parquet, verbose)
     input_bbox_col = input_bbox_info["bbox_column_name"]
 

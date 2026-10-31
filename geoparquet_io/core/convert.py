@@ -26,11 +26,13 @@ from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
     _get_query_columns,
     _install_and_load_extension,
+    as_wkb_sql,
     complete_without_fetch,
     describe_query,
     duckdb_type_is_numeric,
     fetch_one,
     free_column_name,
+    geom_from_wkb_sql,
     get_duckdb_connection,
     quote_identifier,
     sql_literal,
@@ -61,8 +63,10 @@ from geoparquet_io.core.geo_metadata import (
 )
 from geoparquet_io.core.geojson_datetimes import DatetimeRead, plan_datetime_read
 from geoparquet_io.core.geometry_detection import (
+    BUILT_GEOMETRY_COLUMN,
     STANDARD_GEOMETRY_NAMES,
-    detect_parquet_geometry_column,
+    primary_geometry_column,
+    resolve_geometry_read,
 )
 from geoparquet_io.core.geometry_repair import (
     repair_arrow_table_geometry,
@@ -228,13 +232,8 @@ def _parquet_geometry_expr(con, source: str, geom_column: str) -> tuple[str, boo
     ``BLOB`` it is stored as. ``ST_GeomFromWKB`` binds only against the latter,
     so the column has to be asked which shape it has before either is wrapped.
     """
-    quoted = quote_identifier(geom_column)
-    (column_type,) = fetch_one(
-        con.execute(f"SELECT column_type FROM (DESCRIBE SELECT {quoted} FROM {source})")
-    )
-    if column_type.upper().startswith("GEOMETRY"):
-        return quoted, True
-    return f"ST_GeomFromWKB({quoted})", False
+    read = resolve_geometry_read(con, source, geom_column, relation=True)
+    return read.shape_expr, read.native
 
 
 def _flatten_geometry_metadata(column_meta: dict) -> dict:
@@ -276,7 +275,7 @@ def _force_2d_parquet_expr(con, input_file: str, geom_info: dict) -> str:
                 "force_2d", f"Parquet geometry column {column!r} must be WKB to drop Z/M"
             )
         expr, native = _parquet_geometry_expr(con, source, column)
-        flattened = f"ST_Force2D({expr})" if native else f"ST_AsWKB(ST_Force2D({expr}))"
+        flattened = f"ST_Force2D({expr})" if native else as_wkb_sql(f"ST_Force2D({expr})")
         replacements.append(f"{flattened} AS {quote_identifier(column)}")
     for column in geom_info["secondary"]:
         geom_info["metadata"][column] = _flatten_geometry_metadata(
@@ -308,6 +307,11 @@ _ALIASED_SOURCE = "gpio_source"
 #: one; everywhere else the read keeps whatever GDAL called it.
 _DRIVER_FID_COLUMNS = {"GPKG": "fid", "OpenFileGDB": "OBJECTID", "FileGDB": "OBJECTID"}
 _DEFAULT_FID_COLUMN = "OGC_FID"
+
+
+#: The column GDAL's ``ST_Read(..., keep_wkb := true)`` names its geometry when
+#: the source names none: GDAL's fixed name, not one gpio chooses.
+_ST_READ_WKB_COLUMN = "wkb_geometry"
 
 
 def _build_st_read_expr(
@@ -399,7 +403,7 @@ def _st_read_column_count(
     """
     probe = [f"c{index}" for index in range(probe_width)]
     expr = _build_st_read_expr(input_path, layer, open_options=open_options, column_aliases=probe)
-    return len(con.execute(f"SELECT * FROM {expr} LIMIT 0").description)
+    return len(describe_query(con, f"SELECT * FROM {expr}"))
 
 
 def _suffixed_to_unique(names: list[str]) -> list[str]:
@@ -519,7 +523,7 @@ def _detect_geometry_column(
 ):
     """Detect geometry column name from input file.
 
-    ``input_file`` is RAW: ``detect_parquet_geometry_column`` escapes its own
+    ``input_file`` is RAW: ``primary_geometry_column`` escapes its own
     argument, and ``_build_st_read_expr`` escapes at the SQL boundary.
 
     ``columns_out``, when a list, receives every ``(name, type)`` a non-parquet
@@ -533,27 +537,21 @@ def _detect_geometry_column(
 
     # For parquet files, check GeoParquet metadata first, then fall back to names
     if is_parquet:
-        result = detect_parquet_geometry_column(input_file, verbose=verbose)
+        result = primary_geometry_column(input_file, verbose=verbose)
         return result
 
     # For other formats, use schema-based detection with standard names
     table_expr = _build_st_read_expr(
         input_file, layer, open_options=open_options, column_aliases=column_aliases
     )
+    # A bind, not DESCRIBE: DESCRIBE hands the names back as row values, and a
+    # name that is not UTF-8 (an undeclared shapefile codepage) then fails as a
+    # bare "Invalid unicode" instead of reaching the read's named refusal.
     description = con.execute(f"SELECT * FROM {table_expr} LIMIT 0").description
-    names = [col[0] for col in description]
+    typed = [(col[0], str(col[1])) for col in description]
     if columns_out is not None:
-        columns_out[:] = [(col[0], str(col[1])) for col in description]
-
-    for name in names:
-        if name.lower() in STANDARD_GEOMETRY_NAMES:
-            if verbose:
-                debug(f"Detected geometry column: {name}")
-            return name
-
-    if verbose:
-        debug("No geometry column found in input file")
-    return None
+        columns_out[:] = typed
+    return primary_geometry_column(typed, verbose=verbose)
 
 
 def _detect_spatial_geometry(con, input_file, verbose, layer, open_options, columns_out=None):
@@ -599,11 +597,11 @@ def _detect_spatial_geometry(con, input_file, verbose, layer, open_options, colu
         )
 
 
-def _schema_geometry_column(input_file: str, verbose: bool, is_parquet: bool = True) -> str | None:
-    """``_detect_geometry_column`` on a connection of its own, closed either way."""
+def _schema_geometry_column(input_file: str, verbose: bool) -> str | None:
+    """``_detect_geometry_column`` of a non-parquet source, on its own connection."""
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_file))
     try:
-        return _detect_geometry_column(con, input_file, verbose, is_parquet=is_parquet)
+        return _detect_geometry_column(con, input_file, verbose)
     finally:
         con.close()
 
@@ -633,7 +631,7 @@ def detect_all_geometry_columns(input_file: str, verbose: bool = False) -> dict:
     # Only GeoParquet files can have multiple geometry columns with metadata
     if not _is_parquet_file(input_file):
         # For non-parquet, detect single geometry column the standard way
-        geom_col = _schema_geometry_column(input_file, verbose, is_parquet=False)
+        geom_col = _schema_geometry_column(input_file, verbose)
         if geom_col:
             result["primary"] = geom_col
             result["metadata"][geom_col] = {"encoding": "WKB"}
@@ -647,22 +645,18 @@ def detect_all_geometry_columns(input_file: str, verbose: bool = False) -> dict:
     # reached `_calculate_bounds`'s `encoding.lower()`.
     geo_meta = sanitized_carried_geo_of_file(input_file)
 
+    # The primary is the owner's answer over the file's typed columns and the
+    # sanitized block (#1367): a dropped or stale `primary_column` falls through
+    # to the schema rather than naming a column the file may not have (#887).
+    primary_col = primary_geometry_column(input_file, geo=geo_meta, verbose=verbose)
     if not geo_meta or not geo_meta.get("columns"):
         # No GeoParquet metadata -- or nothing left of it once the malformed
-        # parts were dropped. Either way, detect the column from the schema.
-        geom_col = _schema_geometry_column(input_file, verbose)
-        if geom_col:
-            result["primary"] = geom_col
-            result["metadata"][geom_col] = {"encoding": "WKB"}
+        # parts were dropped.
+        if primary_col:
+            result["primary"] = primary_col
+            result["metadata"][primary_col] = {"encoding": "WKB"}
         return result
 
-    # Extract from GeoParquet metadata
-    primary_col = geo_meta.get("primary_column")
-    if not isinstance(primary_col, str):
-        # Sanitizing dropped a malformed `primary_column` and could not repair
-        # it from a single column. The literal "geometry" would name a column
-        # this file may not have, so ask the schema (#887 review).
-        primary_col = _schema_geometry_column(input_file, verbose)
     columns = geo_meta.get("columns", {})
 
     result["primary"] = primary_col
@@ -903,7 +897,8 @@ def _validate_explicit_latlon_columns(lat_column, lon_column, columns):
 
 def _try_detect_wkt_column(con, csv_read, col_names_lower):
     """Try to auto-detect WKT column. Returns column name or None."""
-    wkt_candidates = ["wkt", "geometry", "geom", "the_geom", "shape"]
+    # "wkt" first: a CSV's own name for a text column, then the geometry names.
+    wkt_candidates = ["wkt", *STANDARD_GEOMETRY_NAMES]
     for candidate in wkt_candidates:
         if candidate in col_names_lower:
             actual_col = col_names_lower[candidate]
@@ -1422,7 +1417,7 @@ def _csv_carried_columns(geom_info):
     return [name for name in geom_info["source_columns"] if str(name).lower() not in excluded]
 
 
-def _resolve_tabular_geometry_name(carried_columns, base="geometry"):
+def _resolve_tabular_geometry_name(carried_columns, base=BUILT_GEOMETRY_COLUMN):
     """The name the geometry built from WKT or lat/lon columns is written under.
 
     ``base`` is the name asked for -- ``geometry_column``'s value on the Arrow
@@ -1455,7 +1450,7 @@ def _build_csv_conversion_query(
     skip_invalid,
     skip_bbox=False,
     bbox_name="bbox",
-    geometry_name="geometry",
+    geometry_name=BUILT_GEOMETRY_COLUMN,
 ):
     """Build SQL query for CSV/TSV conversion with geometry construction.
 
@@ -2370,7 +2365,7 @@ def read_spatial_to_arrow(
     crs="EPSG:4326",
     skip_invalid=False,
     profile=None,
-    geometry_column="geometry",
+    geometry_column=BUILT_GEOMETRY_COLUMN,
     layer=None,
     repair_geometry=True,
     linearize_curves=True,
@@ -2528,7 +2523,7 @@ def read_spatial_to_arrow(
                 skip_invalid,
                 verbose,
                 force_2d=force_2d,
-                geometry_name=geometry_column or "geometry",
+                geometry_name=geometry_column or BUILT_GEOMETRY_COLUMN,
             )
         elif is_csv:
             arrow_table, geometry_column = _read_csv_to_arrow(
@@ -2542,7 +2537,7 @@ def read_spatial_to_arrow(
                 verbose,
                 encoding=encoding,
                 force_2d=force_2d,
-                geometry_name=geometry_column or "geometry",
+                geometry_name=geometry_column or BUILT_GEOMETRY_COLUMN,
             )
         else:
             arrow_table = _read_spatial_to_arrow(
@@ -2560,7 +2555,7 @@ def read_spatial_to_arrow(
             # Both spatial reads emit `ST_AsWKB(...) AS geometry` (here and in the
             # linearized retry), so report that rather than the requested name: the
             # repair below and the Table the API hands back both key off it (#1176).
-            geometry_column = "geometry"
+            geometry_column = BUILT_GEOMETRY_COLUMN
 
         # No geometry found — read as plain table
         if arrow_table is None:
@@ -2641,7 +2636,7 @@ def _read_csv_to_arrow(
     verbose,
     encoding=None,
     force_2d=False,
-    geometry_name="geometry",
+    geometry_name=BUILT_GEOMETRY_COLUMN,
 ):
     """``(table, geometry column)`` with geometry as WKB; ``(None, None)`` if none."""
     geom_info = _detect_csv_geometry_column(
@@ -2656,7 +2651,7 @@ def _read_csv_to_arrow(
 
 
 def _tabular_geometry_to_arrow(
-    con, geom_info, skip_invalid, verbose, force_2d=False, geometry_name="geometry"
+    con, geom_info, skip_invalid, verbose, force_2d=False, geometry_name=BUILT_GEOMETRY_COLUMN
 ):
     """``(table, geometry column)``: WKB geometry built from WKT or lat/lon columns.
 
@@ -2701,14 +2696,14 @@ def _tabular_geometry_to_arrow(
                     FROM {csv_read}
                 )
                 SELECT * EXCLUDE (_geom),
-                       ST_AsWKB(_geom) AS {quoted_geometry}
+                       {as_wkb_sql("_geom")} AS {quoted_geometry}
                 FROM _parsed
                 WHERE _geom IS NOT NULL
             """
         else:
             query = f"""
                 SELECT * EXCLUDE ({wkt_col}),
-                       ST_AsWKB({_csv_wkt_geom_expr(wkt_col, geom_info)}) AS {quoted_geometry}
+                       {as_wkb_sql(_csv_wkt_geom_expr(wkt_col, geom_info))} AS {quoted_geometry}
                 FROM {csv_read}
                 WHERE {wkt_col} IS NOT NULL
             """
@@ -2717,7 +2712,7 @@ def _tabular_geometry_to_arrow(
         lon_col = quote_identifier(geom_info["lon_column"])
         query = f"""
             SELECT * EXCLUDE ({lat_col}, {lon_col}),
-                   ST_AsWKB(ST_Point(CAST({lon_col} AS DOUBLE), CAST({lat_col} AS DOUBLE)))
+                   {as_wkb_sql(f"ST_Point(CAST({lon_col} AS DOUBLE), CAST({lat_col} AS DOUBLE))")}
                        AS {quoted_geometry}
             FROM {csv_read}
             WHERE {lat_col} IS NOT NULL AND {lon_col} IS NOT NULL
@@ -2798,7 +2793,7 @@ def _read_spatial_to_arrow(
         geometry_expr = f"ST_Force2D({geometry_expr})"
     query = f"""
         SELECT * EXCLUDE ({quoted_geom}),
-               ST_AsWKB({geometry_expr}) AS geometry
+               {as_wkb_sql(geometry_expr)} AS geometry
         FROM {table_expr}
     """
 
@@ -2864,7 +2859,7 @@ class _LinearizedRead:
         self.max_angle_deg = DEFAULT_MAX_ANGLE_DEG if max_angle_deg is None else max_angle_deg
         self._reader = self._open_reader()
         self.schema = self._reader.schema
-        self.wkb_col = geom_column if geom_column in self.schema.names else "wkb_geometry"
+        self.wkb_col = geom_column if geom_column in self.schema.names else _ST_READ_WKB_COLUMN
         if self.wkb_col not in self.schema.names:
             raise GeoParquetError(
                 f"keep_wkb read of {input_file} exposes no '{geom_column}' column"
@@ -2966,12 +2961,12 @@ def _read_spatial_linearized(
     # WKB-encoded `geometry` column shape as the normal read path.
     con.register("_gpio_linearized_src", table)
     quoted_wkb = quote_identifier(read.wkb_col)
-    geometry_expr = f"ST_GeomFromWKB({quoted_wkb})"
+    geometry_expr = f"{geom_from_wkb_sql(quoted_wkb)}"
     if force_2d:
         geometry_expr = f"ST_Force2D({geometry_expr})"
     result = con.sql(
         f"SELECT * EXCLUDE ({quoted_wkb}), "
-        f"ST_AsWKB({geometry_expr}) AS geometry "
+        f"{as_wkb_sql(geometry_expr)} AS geometry "
         f"FROM _gpio_linearized_src"
     )
     return result.arrow().read_all()
@@ -2995,7 +2990,7 @@ def _register_linearized_view(
     )
     quoted_wkb = quote_identifier(read.wkb_col)
     select = (
-        f"SELECT * REPLACE (ST_GeomFromWKB({quoted_wkb}) AS {quoted_wkb}) "
+        f"SELECT * REPLACE ({geom_from_wkb_sql(quoted_wkb)} AS {quoted_wkb}) "
         "FROM _gpio_linearized_batch"
     )
     con.execute("DROP TABLE IF EXISTS _gpio_linearized")

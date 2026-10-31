@@ -20,12 +20,18 @@ This module provides three injection styles:
 """
 
 from geoparquet_io.core.duckdb_utils import (
-    describe_query,
-    duckdb_type_is_geometry,
+    as_wkb_sql,
     fetch_one,
+    is_interrupt,
     quote_identifier,
 )
 from geoparquet_io.core.edges import is_geodesic, is_nonplanar
+from geoparquet_io.core.exceptions import GeometryError
+from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
+from geoparquet_io.core.geometry_detection import (
+    resolve_geometry_column,
+    resolve_geometry_read,
+)
 from geoparquet_io.core.logging_config import debug, warn
 
 
@@ -113,15 +119,15 @@ def warn_planar_math_for_file(op: str, input_path: str, geometry_column: str | N
     if not input_path or is_stdin(input_path):
         return
     try:
-        from geoparquet_io.core.geometry_detection import find_primary_geometry_column
         from geoparquet_io.core.write_funnels import collect_nonplanar_edges
 
-        column = geometry_column or find_primary_geometry_column(input_path)
+        column = resolve_geometry_column(input_path, geometry_column, required=False)
         edges = collect_nonplanar_edges(input_path).get(column) if column else None
     except Exception as e:  # noqa: BLE001 - detection must never break a pipeline
         debug(f"Could not read the edges of {input_path}: {e}")
         return
-    _warn_planar_edges(op, column, edges)
+    if column:
+        _warn_planar_edges(op, column, edges)
 
 
 def _warn_planar_edges(op: str, geometry_column: str, edges: str | None) -> None:
@@ -225,27 +231,24 @@ def repair_query_geometry(
         return query
     col = quote_identifier(geometry_column)
     try:
-        desc = describe_query(con, query)
+        read = resolve_geometry_read(con, f"({query})", geometry_column, relation=True)
     except Exception:
         return query
-    col_type = next((d[1].upper() for d in desc if d[0] == geometry_column), None)
-    if col_type is None:
-        return query
 
-    if duckdb_type_is_geometry(col_type):
+    if read.native:
         # Native GEOMETRY: no decode needed; it cannot be a malformed-bytes case.
         parsed = col
         repaired_expr = repair_geometry_sql(parsed)
-    elif "BLOB" in col_type or "BINARY" in col_type:
-        # WKB-encoded: decode defensively. TRY() yields NULL on malformed bytes so
-        # we never crash the pipeline; such rows are passed through unchanged.
-        parsed = f"TRY(ST_GeomFromWKB({col}))"
+    elif read.kind == "wkb":
+        # WKB-encoded: the owner's read yields NULL on malformed bytes so we
+        # never crash the pipeline; such rows are passed through unchanged.
+        parsed = read.shape_expr
         # AND-form (repair in THEN, passthrough in ELSE). The equivalent OR-form
         # with ST_MakeValid in the ELSE branch segfaults DuckDB <= 1.5.1's spatial
         # extension on some real WKB inputs (see repair_arrow_table_geometry).
         repaired_expr = (
             f"CASE WHEN {parsed} IS NOT NULL AND NOT ST_IsValid({parsed}) "
-            f"THEN ST_AsWKB(ST_MakeValid({parsed})) ELSE {col} END"
+            f"THEN {as_wkb_sql(f'ST_MakeValid({parsed})')} ELSE {col} END"
         )
     else:
         # GeoArrow STRUCT or other encoding we don't repair in place.
@@ -256,10 +259,33 @@ def repair_query_geometry(
     except Exception:
         # Defensive: never let geometry repair break extraction.
         return query
+    if repair and n:
+        _refuse_unmeasurable(con, query, geometry_column)
     _warn_invalid(n, repaired=repair)
     if not repair or n == 0:
         return query
     return f"SELECT * REPLACE ({repaired_expr} AS {col}) FROM ({query})"
+
+
+def _refuse_unmeasurable(con, query: str, geometry_column: str) -> None:
+    """The degenerate-geometry policy, before ST_MakeValid sees the rows.
+
+    A geometry with an infinite coordinate crashes GEOS inside ``ST_MakeValid``
+    (``orientationIndex encountered NaN/Inf``). Every write measures its bounds,
+    which refuses such a geometry with a :class:`GeometryError` naming the
+    column -- but a path that skips the bounds step (``--skip-hilbert``) used to
+    reach the repair first. The owner's measure runs here instead, only when
+    there is something to repair; it raises on that geometry and on nothing
+    else, so any other failure to measure leaves the repair as it was.
+    """
+    try:
+        bounds_of(QuerySource(con, query), geometry_column)
+    except GeometryError:
+        raise
+    except Exception as e:  # noqa: BLE001 - measuring is advisory here; the repair decides
+        if is_interrupt(e):
+            raise
+        debug(f"Could not measure {geometry_column!r} before repair: {e}")
 
 
 # Offset-based layouts ``if_else`` can patch; a view column is patched as its
@@ -278,7 +304,7 @@ def _repaired_rows(con, read):
     return (
         con.sql(
             "SELECT CASE WHEN __g IS NOT NULL AND NOT ST_IsValid(__g) "
-            "THEN ST_AsWKB(ST_MakeValid(__g)) END AS __fixed "
+            f"THEN {as_wkb_sql('ST_MakeValid(__g)')} END AS __fixed "
             f"FROM (SELECT {read.expr} AS __g FROM _gpio_repair_src)"
         )
         .arrow()
@@ -339,7 +365,7 @@ def _patch_repaired_rows(original, fixed):
 
 def repair_arrow_table_geometry(
     table,
-    geometry_column: str = "geometry",
+    geometry_column: str,
     *,
     repair: bool = True,
     nonplanar_edges: str | None = None,

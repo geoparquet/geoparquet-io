@@ -25,15 +25,15 @@ import psutil
 
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
+    describe_query,
     duckdb_capabilities,
     fetch_one,
     get_duckdb_connection,
-    query_schema,
     quote_identifier,
     sql_path,
 )
 from geoparquet_io.core.exceptions import FileNotFoundGeoParquetError, GeoParquetError
-from geoparquet_io.core.geometry_detection import STANDARD_GEOMETRY_NAMES
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.logging_config import progress
 from geoparquet_io.core.remote import needs_httpfs
@@ -134,14 +134,9 @@ def get_file_info(filepath: Path) -> dict[str, Any]:
             feature_count = result[0] if result else 0
 
             # Get schema to find geometry column
-            names = query_schema(conn, f"SELECT * FROM ST_Read({sql_path(filepath)})").names
-
-            # Find geometry column (common names)
-            geom_col = None
-            for name in names:
-                if name.lower() in [n.lower() for n in STANDARD_GEOMETRY_NAMES]:
-                    geom_col = name
-                    break
+            geom_col = primary_geometry_column(
+                describe_query(conn, f"SELECT * FROM ST_Read({sql_path(filepath)})")
+            )
 
             # Try to get geometry type from first row
             geom_type = "unknown"

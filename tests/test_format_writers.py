@@ -511,7 +511,8 @@ class TestNoGeometryConversions:
         output_file = tmp_path / "output.json"
 
         # Should raise error about missing geometry
-        with pytest.raises(GeoParquetError, match="(?i)cannot export to geojson.*no geometry"):
+        # The owner's one error (#1367), naming the CSV alternative.
+        with pytest.raises(GeoParquetError, match="(?s)No geometry column found.*GeoJSON.*CSV"):
             write_geojson(
                 input_path=plain_parquet,
                 output_path=str(output_file),

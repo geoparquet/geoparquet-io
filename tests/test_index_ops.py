@@ -10,7 +10,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.api import ops
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.geometry_detection import detect_geometry_column_from_names
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.index_ops import (
     calculate_index_resolution,
     clamp_resolution,
@@ -161,7 +161,7 @@ def test_resolution_bounds(index):
 
 
 def test_standard_geometry_name_preserves_schema_spelling():
-    assert detect_geometry_column_from_names(["ID", "GeOmEtRy"]) == "GeOmEtRy"
+    assert primary_geometry_column(["ID", "GeOmEtRy"]) == "GeOmEtRy"
 
 
 @pytest.mark.parametrize("index", INDICES)

@@ -29,12 +29,15 @@ from geoparquet_io.core.geo_metadata import (
     covering_supported,
     sanitized_carried_geo,
 )
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import (
+    primary_geometry_column,
+    require_geometry_column,
+    resolve_geometry_column,
+)
 from geoparquet_io.core.logging_config import debug, success
 from geoparquet_io.core.parquet_footer import patch_or_rewrite
 from geoparquet_io.core.parquet_writer import declared_geoparquet_version
 from geoparquet_io.core.remote import is_remote_url
-from geoparquet_io.core.streaming import find_geometry_column_from_table
 from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
 if TYPE_CHECKING:
@@ -130,12 +133,7 @@ def add_bbox_metadata_table(
             version predates GeoParquet 1.1
     """
 
-    geom_col = geometry_column or find_geometry_column_from_table(table)
-    if geom_col is None:
-        raise ValueError(
-            "Cannot add bbox metadata: no geometry column detected. "
-            "Ensure the table has a valid geometry column."
-        )
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table")
 
     if bbox_column not in table.column_names:
         raise ValueError(f"Bbox column '{bbox_column}' not found. Use add_bbox() first.")
@@ -335,7 +333,9 @@ def add_bbox_metadata(
         )
 
     # Find primary geometry column
-    primary_col = find_primary_geometry_column(parquet_file, verbose)
+    primary_col = require_geometry_column(
+        primary_geometry_column(parquet_file, verbose=verbose), parquet_file
+    )
 
     # Update or create the columns section. A `columns` value that is not an
     # object is as unusable as a missing one, so replace it rather than indexing

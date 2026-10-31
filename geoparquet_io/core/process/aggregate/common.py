@@ -17,6 +17,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.geometry_detection import resolve_geometry_read
 from geoparquet_io.core.logging_config import warn
 
 # Plain SQL aggregates: a metric named this way is `FUNC(column)`, and the
@@ -73,15 +74,9 @@ def geometry_to_geom_expr(con, relation: str, geom_col: str) -> str:
     ``relation`` must be usable in a FROM clause (e.g. ``read_parquet('...')`` or a
     registered relation name). ``con`` must have the spatial extension loaded.
     """
-    qcol = quote_identifier(geom_col)
-    rows = con.execute(f"DESCRIBE SELECT {qcol} FROM {relation}").fetchall()
-    col_type = (rows[0][1] if rows else "").upper()
-    if "GEOMETRY" in col_type:
-        return qcol
-    # BLOB/BINARY (and anything unrecognized) is treated as WKB. Wrap in TRY so a
-    # single malformed value becomes NULL (-> unassigned bucket) instead of
-    # aborting the whole aggregation.
-    return f"TRY(ST_GeomFromWKB({qcol}))"
+    # The owner's read: a malformed WKB value is NULL (-> unassigned bucket)
+    # instead of aborting the whole aggregation.
+    return resolve_geometry_read(con, relation, geom_col, relation=True).shape_expr
 
 
 @dataclass(frozen=True)

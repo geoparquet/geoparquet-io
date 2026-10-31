@@ -38,6 +38,7 @@ from geoparquet_io.core.exceptions import (
     status_message,
 )
 from geoparquet_io.core.file_utils import handle_output_overwrite
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
     DEFAULT_MAX_RETRIES,
@@ -212,8 +213,8 @@ def _build_carto_query(
     # Column selection - quote each column name
     if columns:
         # Always include the_geom for geometry extraction
-        if include_geom and "the_geom" not in columns:
-            columns = [*columns, "the_geom"]
+        if include_geom and _CARTO_GEOMETRY_COLUMN not in columns:
+            columns = [*columns, _CARTO_GEOMETRY_COLUMN]
         col_str = ", ".join(quote_identifier(c) for c in columns)
     else:
         col_str = "*"
@@ -241,7 +242,7 @@ def _build_carto_query(
 
 def _bbox_condition(bbox: tuple[float, float, float, float]) -> str:
     """The PostGIS bbox condition on ``the_geom``; a wrapped bbox ORs its two lobes."""
-    geom = quote_identifier("the_geom")
+    geom = quote_identifier(_CARTO_GEOMETRY_COLUMN)
     return any_piece(
         BBox(*bbox),
         lambda b: (
@@ -564,8 +565,8 @@ def _apply_column_exclusions(
     exclude_list = resolve_columns_against_schema(
         exclude_list, table.column_names, "--exclude-cols"
     )
-    if exclude_list and protect_geometry and "geometry" in exclude_list:
-        exclude_list = [col for col in exclude_list if col != "geometry"]
+    if exclude_list and protect_geometry and BUILT_GEOMETRY_COLUMN in exclude_list:
+        exclude_list = [col for col in exclude_list if col != BUILT_GEOMETRY_COLUMN]
         warn("Cannot exclude 'geometry' column - it is required for GeoParquet output")
     if not exclude_list:
         return table
@@ -720,9 +721,9 @@ def _with_geo_metadata(table: pa.Table, version: str | None, crs: dict) -> pa.Ta
     """Attach the ``geo`` block for the ``geometry`` column, keeping other metadata."""
     geo_metadata = {
         "version": version or "1.1.0",
-        "primary_column": "geometry",
+        "primary_column": BUILT_GEOMETRY_COLUMN,
         "columns": {
-            "geometry": {
+            BUILT_GEOMETRY_COLUMN: {
                 "encoding": "WKB",
                 "crs": crs,
                 "geometry_types": [],  # Mixed types possible
@@ -747,7 +748,7 @@ def _create_empty_geoparquet_table(
     Returns:
         Empty PyArrow table with valid GeoParquet metadata
     """
-    table = pa.table({"geometry": pa.array([], type=pa.binary())})
+    table = pa.table({BUILT_GEOMETRY_COLUMN: pa.array([], type=pa.binary())})
     return _with_geo_metadata(table, geoparquet_version, crs or _crs84())
 
 
@@ -1192,7 +1193,7 @@ def _carto_geo_table(
     col_names = table.column_names
     if "geom" in col_names:
         idx = col_names.index("geom")
-        col_names[idx] = "geometry"
+        col_names[idx] = BUILT_GEOMETRY_COLUMN
         table = table.rename_columns(col_names)
 
     # Remove OGC_FID if present (added by ST_Read)
@@ -1209,7 +1210,7 @@ def _carto_geo_table(
 
     # Repair invalid geometry (issue #506). Helper preserves schema metadata.
     if table.num_rows > 0:
-        table, _ = repair_arrow_table_geometry(table, "geometry", repair=repair_geometry)
+        table, _ = repair_arrow_table_geometry(table, BUILT_GEOMETRY_COLUMN, repair=repair_geometry)
 
     success(f"Extracted {table.num_rows:,} features")
     return table
@@ -1366,7 +1367,7 @@ def convert_carto_to_geoparquet(
         progress("Applying Hilbert curve ordering...")
         from geoparquet_io.core.hilbert_order import hilbert_order_table
 
-        table = hilbert_order_table(table, geometry_column="geometry")
+        table = hilbert_order_table(table, geometry_column=BUILT_GEOMETRY_COLUMN)
         debug("Hilbert sort complete")
 
     # Add bbox column (unless skipped, geometry only)
@@ -1374,7 +1375,7 @@ def convert_carto_to_geoparquet(
         progress("Adding bbox column...")
         from geoparquet_io.core.add.bbox import add_bbox_table
 
-        table = add_bbox_table(table, geometry_column="geometry")
+        table = add_bbox_table(table, geometry_column=BUILT_GEOMETRY_COLUMN)
         debug("Bbox column added")
 
     # Write output. For plain/tabular tables pass an empty geometry_column so

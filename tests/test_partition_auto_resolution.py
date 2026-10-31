@@ -284,7 +284,7 @@ class TestProbeFallbackIsAnnounced:
         module = "geoparquet_io.core.partition.auto_resolution"
         monkeypatch.setattr(f"{module}.resolve_file_url", lambda *a, **k: "u")
         monkeypatch.setattr(f"{module}.get_duckdb_connection", lambda **k: _NullConnection())
-        monkeypatch.setattr(f"{module}.find_primary_geometry_column", lambda *a, **k: "geometry")
+        monkeypatch.setattr(f"{module}.primary_geometry_column", lambda *a, **k: "geometry")
         monkeypatch.setattr(f"{module}.source_crs_string", lambda *a, **k: None)
         monkeypatch.setattr(f"{module}._geom_sql", lambda *a, **k: "geometry")
         monkeypatch.setattr(f"{module}.file_key_inputs", lambda *a, **k: (None, None, None))

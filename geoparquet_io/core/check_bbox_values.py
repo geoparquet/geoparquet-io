@@ -75,7 +75,7 @@ from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import raw_geo_of_file
 from geoparquet_io.core.geometry_detection import (
     GeometryRead,
-    find_primary_geometry_column,
+    primary_geometry_column,
     resolve_geometry_read,
 )
 from geoparquet_io.core.logging_config import debug, error, info, progress, success, warn
@@ -660,12 +660,9 @@ def _check(
             f"bbox fields are {', '.join(sorted(field_types))}, not FLOAT or DOUBLE",
             bbox_column,
         )
-    geometry_column = geo_meta.get("primary_column") or find_primary_geometry_column(
-        parquet_file, verbose
-    )
-    # Presence, not just a name: the detector falls back to the conventional
-    # name, so a file with a bbox column and no geometry at all answers
-    # "geometry" and the query would fail to bind.
+    geometry_column = primary_geometry_column(parquet_file, geo=geo_meta, verbose=verbose)
+    # Presence, not just a name: the block's primary is taken as stated, and
+    # a file whose block names a column it lacks would fail to bind.
     if not geometry_column or geometry_column not in {
         column.get("name") for column in root_schema_columns(schema_info)
     }:

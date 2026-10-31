@@ -24,7 +24,6 @@ from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
     _wrap_query_with_wkb_conversion,
     get_duckdb_connection,
-    quote_identifier,
     register_arrow,
     sql_path,
 )
@@ -36,7 +35,8 @@ from geoparquet_io.core.geo_metadata import (
     sanitized_carried_geo,
     strip_bboxless_covering,
 )
-from geoparquet_io.core.geoarrow_encoding import arrow_extension_name, native_wkb_type
+from geoparquet_io.core.geoarrow_encoding import native_wkb_type
+from geoparquet_io.core.geometry_detection import create_geometry_view
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import (
@@ -338,34 +338,18 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         try:
             register_arrow(con, "input_table", table)
 
-            # Convert WKB bytes to GEOMETRY for proper spatial processing.
-            # A geoarrow.wkb column already registers as GEOMETRY, and
-            # ST_GeomFromWKB(GEOMETRY) is a binder error -- in either shape the
-            # extension name arrives in, resolved on the Arrow type or carried
-            # in the field metadata (#727).
-            if arrow_extension_name(table.schema.field(geometry_column)) == "geoarrow.wkb":
-                query = "SELECT * FROM input_table"
-            else:
-                query = f"""
-                    SELECT * REPLACE (ST_GeomFromWKB({quote_identifier(geometry_column)}) AS {quote_identifier(geometry_column)})
-                    FROM input_table
-                """
+            # Convert WKB bytes to GEOMETRY for proper spatial processing: the
+            # owner's view decodes a BLOB in place and leaves a column that
+            # already registers as GEOMETRY (a geoarrow.wkb field, in either
+            # shape its extension name arrives in, #727) as it is.
+            source = create_geometry_view(con, "input_table", geometry_column)
+            query = f"SELECT * FROM {source}"
 
-            self.write_from_query(
-                con=con,
-                query=query,
-                output_path=output_path,
-                geometry_column=geometry_column,
-                original_metadata=None,
+            self._write_table_query(
+                con,
+                query,
+                locals(),
                 geoparquet_version=effective_version,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
-                input_crs=input_crs,
-                verbose=verbose,
-                custom_metadata=custom_metadata,
-                extra_kv_metadata=extra_kv_metadata,
                 # This entry point gets no `geometry_info`, so the table's own
                 # schema is what names a block-less table's secondaries (#1175).
                 geometry_info=table_geometry_info(table, geometry_column, carried_geo),

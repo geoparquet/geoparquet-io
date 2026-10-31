@@ -94,8 +94,8 @@ class TestDetectGeometryColumn:
         )
         assert _detect_geometry_column(table) == "geom"
 
-    def test_detect_fallback_to_geo_in_name(self):
-        """Test fallback to columns containing 'geo' in name."""
+    def test_a_name_containing_geo_is_not_detected(self):
+        """The substring fallback is gone (#1367): name the column explicitly."""
         from geoparquet_io.core.extract_bigquery import _detect_geometry_column
 
         table = pa.table(
@@ -104,7 +104,7 @@ class TestDetectGeometryColumn:
                 "building_geom_wkb": [b"test", b"test2"],
             }
         )
-        assert _detect_geometry_column(table) == "building_geom_wkb"
+        assert _detect_geometry_column(table) is None
 
     def test_detect_returns_none_when_not_found(self):
         """Test that None is returned when no geometry column found."""
@@ -1241,7 +1241,7 @@ def _bq_result_table(num_rows: int) -> pa.Table:
     """One table both branches write, so a row-size estimate is identical.
 
     The geometry column is called ``geom`` -- a name
-    ``detect_geometry_column_from_names`` matches -- on purpose: the
+    the owner's name match takes -- on purpose: the
     geometry-less branch must stay plain Parquet even then.
     """
     return pa.table(

@@ -9,6 +9,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.logging_config import info
 from geoparquet_io.core.optional_deps import require_contourrs
@@ -46,7 +47,7 @@ def polygonize_array(
     sprawling regions, so repairing them can cost several times the
     polygonization. ``repair_geometry=False`` keeps the count and skips the fix.
     """
-    if value_column == "geometry":
+    if value_column == BUILT_GEOMETRY_COLUMN:
         raise InvalidParameterError(
             "value_column", "collides with the output's geometry column name"
         )
@@ -66,7 +67,7 @@ def polygonize_array(
     # one convert and extract use: one DuckDB scan over the geometry column
     # that counts, warns, and patches only the broken rows, so every valid
     # row's WKB and the table's metadata survive byte for byte.
-    table, _ = repair_arrow_table_geometry(table, "geometry", repair=repair_geometry)
+    table, _ = repair_arrow_table_geometry(table, BUILT_GEOMETRY_COLUMN, repair=repair_geometry)
     if verbose:
         info(f"Polygonized {table.num_rows} features")
     return table

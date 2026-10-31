@@ -10,8 +10,6 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
-    describe_query,
-    duckdb_type_is_geometry,
     fetch_one,
     get_duckdb_connection,
     planar_view,
@@ -21,7 +19,12 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.edges import PLANAR, representative_point_sql
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import (
+    primary_geometry_column,
+    require_geometry_column,
+    resolve_geometry_column,
+    resolve_geometry_read,
+)
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -39,7 +42,6 @@ from geoparquet_io.core.remote import (
 )
 from geoparquet_io.core.stream_io import write_output
 from geoparquet_io.core.streaming import (
-    find_geometry_column_from_table,
     is_stdin,
     read_stdin_to_temp_file,
     should_stream_output,
@@ -189,11 +191,8 @@ def _centroid_sql(con, input_path, geom_col) -> str:
     by ``add_kdtree_table``) reads back as ``BLOB``, and ``ST_Centroid(BLOB)``
     does not bind (#1222). ``input_path`` is RAW, escaped here by ``sql_path``.
     """
-    quoted = quote_identifier(geom_col)
-    ((_, column_type),) = describe_query(con, f"SELECT {quoted} FROM {sql_path(input_path)}")
-    if duckdb_type_is_geometry(column_type):
-        return representative_point_sql(quoted, PLANAR)
-    return representative_point_sql(f"ST_GeomFromWKB({quoted})", PLANAR)
+    read = resolve_geometry_read(con, sql_path(input_path), geom_col, relation=True)
+    return representative_point_sql(read.shape_expr, PLANAR)
 
 
 def _build_sampling_query(
@@ -395,9 +394,7 @@ def add_kdtree_table(
         raise InvalidParameterError("iterations", f"must be between 1 and 20, got {iterations}")
 
     # Find geometry column
-    geom_col = geometry_column or find_geometry_column_from_table(table)
-    if not geom_col:
-        geom_col = "geometry"
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table")
 
     # Write table to temp file for processing (kdtree needs file access)
     temp_fd, temp_path = tempfile.mkstemp(suffix=".parquet")
@@ -550,7 +547,9 @@ def add_kdtree_column(
         raise InvalidParameterError("iterations", f"must be between 1 and 20, got {iterations}")
 
     # Get geometry column for the SQL expression
-    geom_col = find_primary_geometry_column(input_parquet, verbose)
+    geom_col = require_geometry_column(
+        primary_geometry_column(input_parquet, verbose=verbose), input_parquet
+    )
 
     con.close()
 
@@ -717,7 +716,9 @@ def _add_kdtree_streaming(
 
         try:
             # Find geometry column
-            geom_col = find_primary_geometry_column(working_file, verbose)
+            geom_col = require_geometry_column(
+                primary_geometry_column(working_file, verbose=verbose), working_file
+            )
 
             if iterations is None:
                 # Auto mode: size the tree from the row count, as the file path

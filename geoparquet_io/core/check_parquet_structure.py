@@ -22,7 +22,7 @@ from geoparquet_io.core.geo_metadata import (
     covering_supported,
     raw_geo_of_file,
 )
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.logging_config import debug, error, info, progress, success, warn
 from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
@@ -930,7 +930,7 @@ def check_compression(parquet_file, verbose=False, return_results=False, quiet=F
             - issues: list of issue descriptions
             - recommendations: list of recommendations
     """
-    primary_col = find_primary_geometry_column(parquet_file, verbose)
+    primary_col = primary_geometry_column(parquet_file, verbose=verbose)
     if not primary_col:
         if not quiet:
             error("\n✗ No geometry column found")

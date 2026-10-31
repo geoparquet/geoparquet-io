@@ -19,6 +19,7 @@ import pytest
 
 from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.geo_metadata import read_raw_geo
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.streaming import (
     STREAM_MARKER,
     StreamingError,
@@ -29,7 +30,6 @@ from geoparquet_io.core.streaming import (
     apply_geoarrow_extension_type,
     apply_metadata_to_table,
     extract_crs_from_table,
-    find_geometry_column_from_table,
     is_stdin,
     is_stdout,
     read_arrow_stream,
@@ -275,40 +275,40 @@ class TestMetadataHandling:
 class TestGeometryColumnDetection:
     """Tests for geometry column detection."""
 
-    def test_find_geometry_column_from_table_prefers_a_present_primary(self):
+    def test_primary_geometry_column_of_a_table_prefers_a_present_primary(self):
         """A declared primary the table lacks does not win over the schema."""
         table = pa.table({"id": [1], "geom": [b"wkb"]}).replace_schema_metadata(
             {b"geo": json.dumps({"primary_column": "gone"}).encode("utf-8")}
         )
-        assert find_geometry_column_from_table(table) == "geom"
+        assert primary_geometry_column(table) == "geom"
 
-    def test_find_geometry_column_from_table_with_metadata(self):
+    def test_primary_geometry_column_of_a_table_with_metadata(self):
         """Test finding geometry from table with metadata."""
         geo_meta = {"primary_column": "geom"}
         table = pa.table({"id": [1], "geom": [b"wkb"]})
         metadata = {b"geo": json.dumps(geo_meta).encode("utf-8")}
         table = table.replace_schema_metadata(metadata)
 
-        assert find_geometry_column_from_table(table) == "geom"
+        assert primary_geometry_column(table) == "geom"
 
-    def test_find_geometry_column_from_table_common_names(self):
+    def test_primary_geometry_column_of_a_table_common_names(self):
         """Test finding geometry from common column names."""
         # Test 'geometry'
         table = pa.table({"id": [1], "geometry": [b"wkb"]})
-        assert find_geometry_column_from_table(table) == "geometry"
+        assert primary_geometry_column(table) == "geometry"
 
         # Test 'geom'
         table = pa.table({"id": [1], "geom": [b"wkb"]})
-        assert find_geometry_column_from_table(table) == "geom"
+        assert primary_geometry_column(table) == "geom"
 
         # Test 'the_geom'
         table = pa.table({"id": [1], "the_geom": [b"wkb"]})
-        assert find_geometry_column_from_table(table) == "the_geom"
+        assert primary_geometry_column(table) == "the_geom"
 
-    def test_find_geometry_column_from_table_no_match(self):
+    def test_primary_geometry_column_of_a_table_no_match(self):
         """Test None when no geometry column found."""
         table = pa.table({"id": [1], "name": ["test"]})
-        assert find_geometry_column_from_table(table) is None
+        assert primary_geometry_column(table) is None
 
 
 @pytest.mark.slow

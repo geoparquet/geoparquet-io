@@ -209,10 +209,9 @@ PROBE_OWNER_FUNCTIONS = frozenset(
 PROBE_BASELINE = {
     # Not a DuckDB probe: a ``LIMIT 0`` sent to the CARTO remote SQL API.
     "geoparquet_io/core/carto.py": 1,  # 421
-    "geoparquet_io/core/convert.py": 3,  # T3: 226, 398, 539 (functions T3 deletes)
-    "geoparquet_io/core/partition/auto_resolution.py": 1,  # T3: 371
-    "geoparquet_io/core/process/aggregate/common.py": 1,  # T3: 98
-    "geoparquet_io/core/process/aggregate/grid_common.py": 1,  # T3: 258
+    # ST_Read's column bind: DESCRIBE returns the names as values, so a non-UTF-8
+    # shapefile field name fails there before the named refusal (T3c kept it).
+    "geoparquet_io/core/convert.py": 1,
 }
 
 #: A Parquet logical type read as a string, as either reader renders it: DuckDB's
@@ -231,11 +230,7 @@ NATIVE_BASELINE: dict[str, int] = {}
 #: ``t.upper() == "GEOMETRY"`` (owner: ``duckdb_utils.parse_duckdb_geo_type``). Comparing an owner's answer
 #: (``parse_duckdb_geo_type(t)[0] == "GEOMETRY"``, ``native_geo_type(lt) == ...``)
 #: is not one. May only go down.
-DUCKDB_GEO_TYPE_BASELINE = {
-    "geoparquet_io/core/convert.py": 1,  # T3: 228 (inside the 226 probe's function)
-    "geoparquet_io/core/partition/auto_resolution.py": 1,  # T3: 373
-    "geoparquet_io/core/process/aggregate/common.py": 1,  # T3: 100
-}
+DUCKDB_GEO_TYPE_BASELINE: dict[str, int] = {}
 
 _GEO_TYPE_OWNERS = frozenset({"native_geo_type", "parse_duckdb_geo_type", "is_native_geo_column"})
 

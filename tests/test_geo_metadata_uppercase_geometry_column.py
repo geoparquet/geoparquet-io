@@ -44,7 +44,7 @@ Cause -- ``geoparquet_io/core/geometry_detection.py``,
 ``_detect_geometry_from_query``: it lowercased the ``DESCRIBE`` column list and
 then, on a standard-name match, returned ``std_name`` (the lowercase literal)
 rather than the column's own spelling, unlike its own ``primary_column`` branch
-directly above it and unlike ``detect_geometry_column_from_names``.
+directly above it and unlike the owner's name match.
 ``write_funnels.write_parquet_with_metadata`` took that as ``geometry_column``
 and handed it to ``build_geo_metadata``, which wrote ``geo["columns"]["geometry"]``.
 

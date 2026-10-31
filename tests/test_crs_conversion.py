@@ -33,10 +33,10 @@ from geoparquet_io.core.crs_utils import (
     is_default_crs,
 )
 from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.reproject import (
     _detect_crs_from_table,
-    _detect_geometry_column_from_table,
     _detect_source_crs,
 )
 from tests.geo_schema_helpers import parse_geometry_type_from_schema
@@ -673,7 +673,7 @@ class TestAdditionalCRSEdgeCases:
 class TestCRSDetectionHelpers:
     """Tests for CRS detection helper functions from reproject module."""
 
-    def test_detect_geometry_column_from_table_with_primary_column(self):
+    def test_primary_geometry_column_of_a_table_with_primary_column(self):
         """Test geometry column detection when primary_column is specified."""
         import pyarrow as pa
 
@@ -688,20 +688,20 @@ class TestCRSDetectionHelpers:
         )
         table = pa.table({"geom": [b""]}, schema=schema)
 
-        geom_col = _detect_geometry_column_from_table(table)
+        geom_col = primary_geometry_column(table)
         assert geom_col == "geom"
 
-    def test_detect_geometry_column_from_table_defaults_to_geometry(self):
-        """Test geometry column detection defaults to 'geometry' when no metadata."""
+    def test_primary_geometry_column_of_a_table_never_guesses_the_literal(self):
+        """No metadata and no standard name: no column (#1367), not a guessed 'geometry'."""
         import pyarrow as pa
 
         schema = pa.schema([pa.field("some_geom", pa.binary())])
         table = pa.table({"some_geom": [b""]}, schema=schema)
 
-        geom_col = _detect_geometry_column_from_table(table)
-        assert geom_col == "geometry"
+        geom_col = primary_geometry_column(table)
+        assert geom_col is None
 
-    def test_detect_geometry_column_from_table_handles_invalid_json(self):
+    def test_primary_geometry_column_of_a_table_handles_invalid_json(self):
         """Undecodable metadata falls back to the schema, not to the literal 'geometry'.
 
         This asserted ``"geometry"`` until #887's review: the table's only
@@ -714,7 +714,7 @@ class TestCRSDetectionHelpers:
         schema = pa.schema([pa.field("geom", pa.binary())]).with_metadata({b"geo": b"invalid json"})
         table = pa.table({"geom": [b""]}, schema=schema)
 
-        geom_col = _detect_geometry_column_from_table(table)
+        geom_col = primary_geometry_column(table)
         assert geom_col == "geom"
 
     def test_detect_crs_from_table_with_epsg_code(self):

@@ -48,7 +48,8 @@ from geoparquet_io.core.file_utils import (
 )
 from geoparquet_io.core.geometry_detection import (
     GeometryRead,
-    detect_parquet_geometry_column,
+    primary_geometry_column,
+    require_geometry_column,
     resolve_geometry_read,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
@@ -66,7 +67,6 @@ from geoparquet_io.core.write_strategies.base import atomic_write
 # Error message templates for consistency
 ERROR_REMOTE_OUTPUT = "{format} output path must be local. Use upload() for cloud destinations."
 ERROR_CONVERSION_FAILED = "Failed to create {format}: {error}"
-ERROR_NO_GEOMETRY = "No geometry column found. Expected 'geometry', 'geom', or 'wkb_geometry'."
 ERROR_NATIVE_GEOMETRY = (
     "Geometry column '{column}' uses a GeoArrow-native (nested) encoding, which the "
     "GDAL writers cannot read. Re-encode it as WKB first."
@@ -470,7 +470,7 @@ def write_gdal_format(
             schema = pf.schema_arrow
 
         # Check for geometry column using GeoParquet metadata first, then name-based fallback
-        geometry_col = detect_parquet_geometry_column(input_url, verbose=verbose)
+        geometry_col = primary_geometry_column(input_url, verbose=verbose)
         has_geometry = geometry_col is not None
 
         # FlatGeobuf requires geometry - fail early with a clear message
@@ -644,7 +644,7 @@ def write_csv(
             columns = [field.name for field in schema]
 
         # Find geometry column from GeoParquet metadata first, then name-based fallback
-        geom_col = detect_parquet_geometry_column(input_url, verbose=verbose)
+        geom_col = primary_geometry_column(input_url, verbose=verbose)
 
         if not geom_col:
             warn("No geometry column found. Converting as plain CSV without WKT.")
@@ -762,15 +762,11 @@ def write_geojson(
     if not is_stdin(input_path):
         # Check if input has geometry column using GeoParquet metadata first
         input_url = resolve_file_url(input_path, verbose)
-        has_geometry = detect_parquet_geometry_column(input_url, verbose=verbose) is not None
-
-        if not has_geometry:
-            # Reject GeoJSON export without geometry data
-            raise GeoParquetError(
-                "Cannot export to GeoJSON: no geometry column found. "
-                "GeoJSON requires geometry data. Expected column named 'geom', 'geometry', 'wkb_geometry', or 'shape'. "
-                "To export data without geometry, use CSV format instead: gpio convert input.parquet output.csv"
-            )
+        # GeoJSON requires geometry data; without it, CSV is the export.
+        require_geometry_column(
+            primary_geometry_column(input_url, verbose=verbose),
+            f"{input_path} (GeoJSON needs one; for data without geometry convert to CSV)",
+        )
 
     progress(f"Converting to GeoJSON: {output_path}")
 

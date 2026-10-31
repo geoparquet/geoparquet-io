@@ -13,14 +13,17 @@ from geoparquet_io.core.crs_utils import source_crs_string
 from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     get_duckdb_connection,
-    quote_identifier,
     sql_path,
     uses_aws_profile,
     validate_where_clause,
     where_sql_fragment,
 )
 from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import (
+    primary_geometry_column,
+    require_geometry_column,
+    resolve_geometry_read,
+)
 from geoparquet_io.core.index_ops import (
     calculate_index_resolution,
     file_key_inputs,
@@ -96,14 +99,9 @@ def _geom_sql(con, url: str, geom_col: str) -> str:
     """Return a GEOMETRY-typed SQL expression for ``geom_col`` in ``url``.
 
     DuckDB reads a GeoParquet geometry column as GEOMETRY; WKB-blob columns come
-    back as BLOB and must be decoded. Raises if the column is absent.
+    back as BLOB and are decoded (the owner's read: a malformed value is NULL).
     """
-    qcol = quote_identifier(geom_col)
-    desc = con.execute(f"DESCRIBE SELECT {qcol} FROM {sql_path(url)}").fetchall()
-    col_type = (desc[0][1] if desc else "").upper()
-    if "GEOMETRY" in col_type:
-        return qcol
-    return f"ST_GeomFromWKB({qcol})"
+    return resolve_geometry_read(con, sql_path(url), geom_col, relation=True).shape_expr
 
 
 def _probe_distinct_cell_counts(
@@ -216,7 +214,9 @@ def _probe_extent_resolution(
         spec = get_index_spec(spatial_index_type)
         load_index(con, spec)
 
-        geom_col = find_primary_geometry_column(input_parquet, verbose)
+        geom_col = require_geometry_column(
+            primary_geometry_column(input_parquet, verbose=verbose), input_parquet
+        )
         # Key each row the way the driver will: the same CRS (a known non-CRS84
         # input is reprojected to lon/lat, #530), the same edges and the same
         # bbox-midpoint decision, read through the driver's one file reader.

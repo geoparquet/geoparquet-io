@@ -648,7 +648,7 @@ def quote_identifier(name: str) -> str:
     or uppercase letters that need to be preserved.
 
     The input must be a **bare** identifier, exactly as it appears in the file's
-    schema (e.g. from ``find_primary_geometry_column`` or ``table.column_names``).
+    schema (e.g. from ``primary_geometry_column`` or ``table.column_names``).
     The function is deliberately not idempotent: quoting an already-quoted name
     yields an identifier that literally contains double quotes, so never pass it
     something already quoted.
@@ -2000,6 +2000,23 @@ def describe_query(con, sql: str, params=None) -> list[tuple[str, str]]:
     return [(row[0], str(row[1])) for row in rows]
 
 
+def geom_from_wkb_sql(expr: str) -> str:
+    """SQL decoding the WKB bytes ``expr`` yields into a GEOMETRY.
+
+    The WKB codec is spelled here and nowhere else (#1367 concept 7). Whether a
+    column *needs* decoding is ``geometry_detection.resolve_geometry_read``'s
+    question; this is only the spelling, for a caller that already knows it
+    holds WKB. Malformed bytes raise; wrap the result in ``TRY(...)`` to read
+    them as NULL.
+    """
+    return f"ST_GeomFromWKB({expr})"
+
+
+def as_wkb_sql(expr: str) -> str:
+    """SQL encoding the GEOMETRY ``expr`` yields as WKB bytes (the 1.x carrier)."""
+    return f"ST_AsWKB({expr})"
+
+
 #: A DuckDB type name (``DESCRIBE`` / ``TYPEOF`` / a relation's ``.types``) that is
 #: a top-level GEOMETRY or GEOGRAPHY: bare, or ``GEOMETRY('EPSG:3857')`` once it
 #: carries a CRS. Anchored at both ends so a STRUCT or LIST type that merely
@@ -2434,7 +2451,7 @@ def _wrap_query_with_wkb_conversion(query: str, geometry_column: str, con=None) 
             # after it (a bbox) ahead of it in the written file.
             is_geom = [c.lower() == geometry_column.lower() for c in columns]
             select = [
-                f"ST_AsWKB({quoted_geom}) AS {quoted_geom}" if geom else quote_identifier(c)
+                f"{as_wkb_sql(quoted_geom)} AS {quoted_geom}" if geom else quote_identifier(c)
                 for c, geom in zip(columns, is_geom, strict=True)
             ]
             if any(is_geom) and not all(is_geom):
@@ -2443,9 +2460,7 @@ def _wrap_query_with_wkb_conversion(query: str, geometry_column: str, con=None) 
             pass
 
     # Fallback: select all and convert geometry
-    return (
-        f"SELECT * EXCLUDE({quoted_geom}), ST_AsWKB({quoted_geom}) AS {quoted_geom} FROM ({query})"
-    )
+    return f"SELECT * EXCLUDE({quoted_geom}), {as_wkb_sql(quoted_geom)} AS {quoted_geom} FROM ({query})"
 
 
 def _wrap_query_with_blob_conversion(
@@ -2518,7 +2533,7 @@ def _wrap_query_with_blob_conversion(
     # Cast to BLOB to produce plain binary without geoarrow extension type
     # Use SELECT * REPLACE to preserve column order
     replacements = ", ".join(
-        f"ST_AsWKB({quote_identifier(col)})::BLOB AS {quote_identifier(col)}" for col in targets
+        f"{as_wkb_sql(quote_identifier(col))}::BLOB AS {quote_identifier(col)}" for col in targets
     )
     return f"""
         WITH __arrow_source AS ({query})

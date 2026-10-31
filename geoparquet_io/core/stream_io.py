@@ -29,6 +29,7 @@ from geoparquet_io.core.crs_utils import (
     source_crs_string,
 )
 from geoparquet_io.core.duckdb_utils import (
+    as_wkb_sql,
     describe_query,
     get_duckdb_connection,
     query_schema,
@@ -40,12 +41,15 @@ from geoparquet_io.core.edges import declared_edges, set_edges
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
-    carried_geometry_column,
     gate_carried_covering,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
 )
-from geoparquet_io.core.geometry_detection import native_geometry_types_from_query
+from geoparquet_io.core.geometry_detection import (
+    create_geometry_view,
+    native_geometry_types_from_query,
+    primary_geometry_column,
+)
 from geoparquet_io.core.logging_config import progress, warn
 from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.remote import needs_httpfs
@@ -69,50 +73,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     import duckdb
-
-
-def _create_view_with_geometry(
-    con: duckdb.DuckDBPyConnection,
-    table_name: str,
-    geometry_column: str | None,
-) -> str:
-    """
-    Create a view that converts WKB BLOB to GEOMETRY type for DuckDB.
-
-    When Arrow IPC is registered, WKB geometry is seen as BLOB.
-    This creates a view that converts it to proper GEOMETRY type.
-
-    Args:
-        con: DuckDB connection
-        table_name: Name of registered table
-        geometry_column: Name of geometry column, or None if unknown
-
-    Returns:
-        Name of view to use in queries (may be same as table_name)
-    """
-    if not geometry_column:
-        return table_name
-
-    quoted_table = quote_identifier(table_name)
-
-    # Get column info to check types
-    column_defs = []
-
-    for col_name, col_type in describe_query(con, f"SELECT * FROM {quoted_table}"):
-        quoted_col = quote_identifier(col_name)
-        if col_name == geometry_column and "BLOB" in col_type.upper():
-            # Convert BLOB to GEOMETRY using ST_GeomFromWKB
-            column_defs.append(f"ST_GeomFromWKB({quoted_col}) AS {quoted_col}")
-        else:
-            column_defs.append(quoted_col)
-
-    # Create view with proper geometry type
-    view_name = f"{table_name}_geom"
-    quoted_view = quote_identifier(view_name)
-    select_cols = ", ".join(column_defs)
-    con.execute(f"CREATE OR REPLACE VIEW {quoted_view} AS SELECT {select_cols} FROM {quoted_table}")
-
-    return view_name
 
 
 @contextmanager
@@ -171,8 +131,12 @@ def _open_stdin_input(
         register_arrow(con, "input_stream", table)
 
         # Find geometry column and create view with proper geometry type
-        geom_col = carried_geometry_column(sanitized_carried_geo(metadata), table.column_names)
-        source_ref = _create_view_with_geometry(con, "input_stream", geom_col)
+        geom_col = primary_geometry_column(table, geo=sanitized_carried_geo(metadata))
+        source_ref = (
+            create_geometry_view(con, "input_stream", geom_col, "input_stream_geom")
+            if geom_col
+            else "input_stream"
+        )
 
         yield source_ref, metadata, True, con
     finally:
@@ -234,9 +198,11 @@ def _stream_input_metadata(table: pa.Table) -> dict:
     if geometry_info is None:
         return metadata
     inferred_columns = geometry_info["metadata"]
-    primary = carried_geometry_column(geo, inferred_columns)
-    if primary not in inferred_columns:
-        primary = next(iter(inferred_columns))
+    # The owner resolves over the geometry columns' own Arrow fields: a
+    # non-geometry column that merely has a standard name cannot win, and every
+    # inferred column is declared by the block or GeoArrow-typed, so one answers.
+    geometry_fields = pa.schema([table.schema.field(name) for name in inferred_columns])
+    primary = primary_geometry_column(geometry_fields, geo=geo)
     edges_by_col = table_nonplanar_edges(table, primary, None)
     columns = {}
     for name, inferred in inferred_columns.items():
@@ -281,7 +247,7 @@ def _wrap_query_with_wkb_conversion(
 
     columns = [geometry_column] if isinstance(geometry_column, str) else geometry_column
     replacements = ", ".join(
-        f"ST_AsWKB({quote_identifier(name)}) AS {quote_identifier(name)}" for name in columns
+        f"{as_wkb_sql(quote_identifier(name))} AS {quote_identifier(name)}" for name in columns
     )
     return f"""
         WITH __stream_source AS ({query})
@@ -391,7 +357,7 @@ def _extract_crs_from_metadata(
     columns = geo_meta.get("columns")
     if not isinstance(columns, dict):
         return None
-    col = geometry_column or geo_meta.get("primary_column", "geometry")
+    col = geometry_column or primary_geometry_column(None, geo=geo_meta)
     col_meta = columns.get(col)
     return col_meta.get("crs") if isinstance(col_meta, dict) else None
 
@@ -412,7 +378,7 @@ def _write_stream_output(
     # Auto-detect geometry column if not provided
     carried = sanitized_carried_geo(original_metadata)
     if geometry_column is None:
-        geometry_column = carried.get("primary_column")
+        geometry_column = primary_geometry_column(describe_query(con, query), geo=carried)
 
     # Convert geometry to WKB (DuckDB's Arrow export uses native format)
     native_columns = native_geometry_types_from_query(con, query)

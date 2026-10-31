@@ -539,7 +539,9 @@ class TestTableEntryPointDefensivePaths:
         """Detection returns None rather than guessing a column."""
         table = _arrow_table(json.dumps(_GEO_11).encode(), with_geometry=False)
 
-        with pytest.raises(ValueError, match="no geometry column detected"):
+        from geoparquet_io.core.geometry_detection import GeometryColumnNotFoundError
+
+        with pytest.raises(GeometryColumnNotFoundError, match="No geometry column found"):
             add_bbox_metadata_table(table)
 
     def test_an_unparsable_geo_key_is_treated_as_absent(self):

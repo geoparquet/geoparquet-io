@@ -45,9 +45,10 @@ from geoparquet_io.core.duckdb_metadata import (
 )
 from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
-    describe_query,
+    as_wkb_sql,
     disable_geoparquet_conversion,
     fetch_one,
+    geom_from_wkb_sql,
     is_interrupt,
     quote_identifier,
     sql_path,
@@ -85,6 +86,7 @@ from geoparquet_io.core.geometry_detection import (
     GeometryPresence,
     GeometryRead,
     count_geometry_presence,
+    resolve_geometry_read,
 )
 from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.logging_config import configure_verbose, debug
@@ -1120,14 +1122,6 @@ def _check_geometry_not_repeated(schema_info: list, geom_col: str) -> Validation
 # =============================================================================
 
 
-def _describe_geom_type(con, raw_url: str, geom_col: str) -> str:
-    """DuckDB's type string for a geometry column ('' when unavailable)."""
-    rows = describe_query(
-        con, f"SELECT {quote_identifier(geom_col)} FROM read_parquet({sql_path(raw_url)})"
-    )
-    return rows[0][1] if rows else ""
-
-
 def _geoarrow_zm_suffix(col_type: str) -> str:
     """Dimension suffix implied by a GeoArrow coordinate struct's fields.
 
@@ -1311,8 +1305,10 @@ def _bad_wkb_message(geom_col: str, encoding: Any, presence: GeometryPresence, p
 
 
 def _geometry_read(con, raw_url: str, geom_col: str) -> GeometryRead:
-    """How the data checks read ``geom_col``, raising when it cannot be read."""
-    read = GeometryRead.for_type(geom_col, _describe_geom_type(con, raw_url, geom_col))
+    """How the data checks read ``geom_col``, raising when it cannot be read.
+
+    The owner describes the file and decides the read (#1367 concept 7)."""
+    read = resolve_geometry_read(con, raw_url, geom_col)
     if not read.readable:
         raise ValueError(read.problem)
     return read
@@ -1372,7 +1368,7 @@ def _check_geoarrow_geometry_types(
     """
     quoted_geom = quote_identifier(geom_col)
     found = _GEOARROW_ENCODING_TYPE[encoding] + _geoarrow_zm_suffix(
-        _describe_geom_type(con, raw_url, geom_col)
+        resolve_geometry_read(con, raw_url, geom_col).duckdb_type
     )
     count_query = f"""
         SELECT COUNT(*) FROM read_parquet({sql_path(raw_url)})
@@ -1503,7 +1499,7 @@ def _check_orientation_matches_data(
 
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
     try:
-        # RAW, like every sibling caller: _describe_geom_type and sql_path each
+        # RAW, like every sibling caller: resolve_geometry_read and sql_path each
         # escape their own argument, so handing them a pre-escaped
         # safe_file_url() value escaped it twice and failed this check on any
         # valid file whose path contains an apostrophe (#937, the #718 class).
@@ -1512,7 +1508,7 @@ def _check_orientation_matches_data(
         raw_url = resolve_file_url(parquet_file, verbose=False)
         read = _geometry_read(con, raw_url, geom_col)
         rows = con.execute(f"""
-            SELECT ST_AsWKB(ST_Force2D(part.geom))
+            SELECT {as_wkb_sql("ST_Force2D(part.geom)")}
             FROM (
                 SELECT {read.expr} AS g
                 FROM read_parquet({sql_path(raw_url)})
@@ -1762,7 +1758,7 @@ def _check_bbox_contains_data(
         )
 
     try:
-        col_type = _describe_geom_type(con, raw_url, geom_col)
+        col_type = resolve_geometry_read(con, raw_url, geom_col).duckdb_type
         query = _build_bbox_query(raw_url, geom_col, col_type, xy, limit_clause, encoding)
         result = fetch_one(con.execute(query))
         check = _interpret_bbox_result(result, geom_col)
@@ -2616,7 +2612,7 @@ def _geojson_of(con, wkb):
     import json
 
     rows = con.execute(
-        "SELECT ST_AsGeoJSON(TRY(ST_GeomFromWKB(w))) FROM (SELECT UNNEST(?::BLOB[]) AS w)",
+        f"SELECT ST_AsGeoJSON(TRY({geom_from_wkb_sql('w')})) FROM (SELECT UNNEST(?::BLOB[]) AS w)",
         [[value for value in wkb.to_pylist() if value is not None]],
     ).fetchall()
     for (text,) in rows:

@@ -9,7 +9,6 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     uses_aws_profile,
 )
-from geoparquet_io.core.geo_metadata import sanitized_carried_geo_of_file
 from geoparquet_io.core.inspect_utils import (
     extract_file_info,
     extract_geo_info,
@@ -35,18 +34,6 @@ from geoparquet_io.core.remote import (
     needs_httpfs,
     validate_profile_for_urls,
 )
-
-
-def get_primary_geometry_column(parquet_file: str) -> str | None:
-    """Get primary geometry column for metadata highlighting.
-
-    Args:
-        parquet_file: Path to the parquet file
-
-    Returns:
-        Name of the primary geometry column, or None if not found
-    """
-    return sanitized_carried_geo_of_file(parquet_file).get("primary_column")
 
 
 def _build_columns_info(usable_columns: list[dict], primary_geom_col: str | None) -> list[dict]:
@@ -435,12 +422,8 @@ def display_metadata(
         format_all_metadata(parquet_file, json_output, effective_row_groups)
     elif specific_flags > 1:
         # Multiple specific flags - show each requested section
-        primary_col = get_primary_geometry_column(parquet_file)
-
         if parquet:
-            format_parquet_metadata_enhanced(
-                parquet_file, json_output, effective_row_groups, primary_col
-            )
+            format_parquet_metadata_enhanced(parquet_file, json_output, effective_row_groups)
         if parquet_geo:
             format_parquet_geo_metadata(parquet_file, json_output, effective_row_groups)
         if geoparquet:
@@ -448,10 +431,7 @@ def display_metadata(
     else:
         # Single specific flag
         if parquet:
-            primary_col = get_primary_geometry_column(parquet_file)
-            format_parquet_metadata_enhanced(
-                parquet_file, json_output, effective_row_groups, primary_col
-            )
+            format_parquet_metadata_enhanced(parquet_file, json_output, effective_row_groups)
         elif geoparquet:
             format_geoparquet_metadata(parquet_file, json_output)
         elif parquet_geo:

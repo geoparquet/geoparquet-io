@@ -26,11 +26,12 @@ from geoparquet_io.core.crs_utils import (
     extract_crs_from_parquet,
     transform_geom_sql,
 )
-from geoparquet_io.core.duckdb_utils import query_schema, quote_identifier
+from geoparquet_io.core.duckdb_utils import describe_query, quote_identifier
 from geoparquet_io.core.file_utils import handle_output_overwrite
+from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
-    STANDARD_GEOMETRY_NAMES,
-    find_primary_geometry_column,
+    primary_geometry_column,
+    require_geometry_column,
 )
 from geoparquet_io.core.logging_config import success
 from geoparquet_io.core.parquet_footer import patch_or_rewrite
@@ -139,15 +140,13 @@ def _add_metrics_streaming(
         verbose = False
 
     def make_query(source: str, con, source_crs: str | None, edges, metadata) -> str:
-        col_names = query_schema(con, f"SELECT * FROM {source}").names
-
-        geom_col = None
-        for name in STANDARD_GEOMETRY_NAMES:
-            if name in col_names:
-                geom_col = name
-                break
-        if not geom_col:
-            geom_col = "geometry"
+        # The owner over the source's typed columns and the carried block: a
+        # native geometry column answers whatever its name.
+        described = describe_query(con, f"SELECT * FROM {source}")
+        geom_col = require_geometry_column(
+            primary_geometry_column(described, geo=sanitized_carried_geo(metadata)),
+            "the input stream",
+        )
 
         # `source_crs` is the input's CRS as an AUTH:CODE string, read by
         # execute_transform from the file or the stream's geo metadata.
@@ -188,7 +187,9 @@ def _add_metrics_file_based(
     handle_output_overwrite(output_parquet, overwrite, input_parquet)
     require_single_file(input_parquet, "add geometry-metrics")
 
-    geom_col = find_primary_geometry_column(input_parquet, verbose)
+    geom_col = require_geometry_column(
+        primary_geometry_column(input_parquet, verbose=verbose), input_parquet
+    )
 
     # RAW path: extract_crs_from_parquet escapes its own argument (#718).
     source_crs = extract_crs_from_parquet(input_parquet, verbose, geometry_column=geom_col)

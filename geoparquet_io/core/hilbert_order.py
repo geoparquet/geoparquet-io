@@ -20,11 +20,10 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import RemoteAccessError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
-from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
+from geoparquet_io.core.geo_metadata import QuerySource, bounds_of, sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
-    STANDARD_GEOMETRY_NAMES,
-    find_primary_geometry_column,
     register_geometry_column,
+    resolve_geometry_column,
 )
 from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.optional_deps import load_module
@@ -44,7 +43,6 @@ from geoparquet_io.core.remote import (
 )
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
-    find_geometry_column_from_table,
     is_stdin,
     should_stream_output,
 )
@@ -241,9 +239,7 @@ def hilbert_order_table(
     Returns:
         New table with rows reordered by Hilbert curve
     """
-    geom_col = geometry_column or find_geometry_column_from_table(table)
-    if not geom_col:
-        geom_col = "geometry"
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table")
     idx_col = _row_index_name(geom_col)
     quoted_idx = quote_identifier(idx_col)
 
@@ -330,7 +326,7 @@ def _cleanup_temp_file(temp_file, verbose):
 def hilbert_order(
     input_parquet: str,
     output_parquet: str | None = None,
-    geometry_column: str = "geometry",
+    geometry_column: str | None = None,
     add_bbox_flag: bool = False,
     verbose: bool = False,
     compression: str | None = None,
@@ -352,7 +348,7 @@ def hilbert_order(
     Args:
         input_parquet: Path to input GeoParquet file (local, remote URL, or "-" for stdin)
         output_parquet: Path to output file, "-" for stdout, or None for auto-detect
-        geometry_column: Name of geometry column (default: 'geometry')
+        geometry_column: Name of geometry column (default: the primary geometry column)
         add_bbox_flag: Add bbox column before sorting if not present
         verbose: Print verbose output
         compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
@@ -424,15 +420,13 @@ def _hilbert_order_streaming(
 
     with open_input(input_path, verbose=verbose) as (source, metadata, is_stream, con):
         # Get column names from query result (works with both table names and read_parquet)
-        col_names = [name for name, _ in describe_query(con, f"SELECT * FROM {source}")]
+        described = describe_query(con, f"SELECT * FROM {source}")
 
-        # Find geometry column
-        geom_col = geometry_column
-        if geom_col == "geometry" or geom_col not in col_names:
-            for name in STANDARD_GEOMETRY_NAMES:
-                if name in col_names:
-                    geom_col = name
-                    break
+        # Find geometry column: the owner over the typed columns and the
+        # stream's own `geo` block, as the file path asks it.
+        geom_col = resolve_geometry_column(
+            described, geometry_column, geo=sanitized_carried_geo(metadata), where=input_path
+        )
         quoted_geom = quote_identifier(geom_col)
 
         if verbose:
@@ -548,8 +542,7 @@ def _hilbert_order_file_based(
     # the output shipped a bbox column nothing declared (#738).
     metadata, _ = get_parquet_metadata(working_parquet, verbose)
 
-    if geometry_column == "geometry":
-        geometry_column = find_primary_geometry_column(working_parquet, verbose)
+    geometry_column = resolve_geometry_column(working_parquet, geometry_column, verbose=verbose)
     if verbose:
         debug(f"Using geometry column: {geometry_column}")
 

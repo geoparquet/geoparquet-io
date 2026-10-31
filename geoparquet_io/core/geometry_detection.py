@@ -7,102 +7,61 @@ by examining GeoParquet metadata and column names.
 
 from __future__ import annotations
 
+import os
 import re
+import uuid
 from dataclasses import dataclass
+from typing import Literal, overload
 
 from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
     describe_query,
     duckdb_type_is_geometry,
     fetch_one,
+    geom_from_wkb_sql,
     is_interrupt,
     parse_duckdb_geo_type,
     quote_identifier,
     register_arrow,
     sql_path,
 )
+from geoparquet_io.core.exceptions import GeometryError, InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import carried_column_name
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.optional_deps import load_module
 from geoparquet_io.core.remote import needs_httpfs
 
-# Standard geometry column names for fallback detection
+#: The name gpio gives a geometry column it builds itself (a CSV's WKT or
+#: lat/lon, an ``ST_Read`` source): an output name, never a guess at an
+#: input's column -- that is ``primary_geometry_column``'s question.
+BUILT_GEOMETRY_COLUMN = "geometry"
+
+#: The one list of column names that mean "the geometry" for every source, in
+#: priority order. ``geo``/``geography`` are not on it: a ``geo`` column is as
+#: often a country code, and only a source whose own type is called GEOGRAPHY
+#: (BigQuery) can take the name as a geometry; such a source passes
+#: :data:`GEOGRAPHY_SOURCE_NAMES` as ``primary_geometry_column(extra_names=...)``,
+#: tried after these.
 STANDARD_GEOMETRY_NAMES = ["geometry", "geom", "wkb_geometry", "shape", "the_geom"]
 
+#: The extra candidates for a source whose geometry type is GEOGRAPHY
+#: (BigQuery): passed as ``extra_names``, so the names live here too.
+GEOGRAPHY_SOURCE_NAMES = ("geo", "geography")
 
-def detect_geometry_column_from_names(column_names) -> str | None:
-    """First standard geometry name present in ``column_names``, matched case-insensitively.
 
-    The name-based half of detection, split out so the callers that already
-    hold a schema -- an in-memory ``pa.Table`` in ``reproject``, a CRS reader
-    that has to answer "which column did the block mean?" -- do not fall back
-    to the literal string ``"geometry"`` and miss a ``geom`` file (#887 review).
+def _name_match(column_names, extra_names=()) -> str | None:
+    """Step 3 of the rule: the first standard geometry name present, case-insensitive.
+
+    :data:`STANDARD_GEOMETRY_NAMES` in their priority, then ``extra_names``;
+    the answer is the schema's own spelling.
     """
     by_lowered: dict[str, str] = {}
     for name in column_names:
         by_lowered.setdefault(str(name).lower(), name)
-    for std_name in STANDARD_GEOMETRY_NAMES:
+    for std_name in (*STANDARD_GEOMETRY_NAMES, *(str(n).lower() for n in extra_names)):
         if std_name in by_lowered:
             return by_lowered[std_name]
-    return None
-
-
-def detect_parquet_geometry_column(parquet_file: str, verbose: bool = False) -> str | None:
-    """
-    Detect the geometry column in a Parquet file.
-
-    Checks GeoParquet metadata first (primary_column), then falls back to
-    matching column names against standard geometry column names.
-
-    Args:
-        parquet_file: Path to the Parquet file (local or remote).
-        verbose: If True, print debug information.
-
-    Returns:
-        The name of the detected geometry column, or None if not found.
-    """
-    import duckdb
-
-    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
-    from geoparquet_io.core.geo_metadata import raw_geo_of_file
-
-    # Normalize path for consistent handling of URLs and local files
-    raw_url = resolve_file_url(parquet_file, verbose=False)
-
-    # 1. Check GeoParquet metadata first. A carried `primary_column` that is not
-    # a string is somebody else's malformed block: `carried_column_name` names
-    # the ignored key in a warning and answers None, so detection falls through
-    # to the schema rather than handing `quote_identifier` a number (#887).
-    geo_meta = raw_geo_of_file(parquet_file).block
-    if geo_meta:
-        primary = carried_column_name(geo_meta.get("primary_column"), source=str(parquet_file))
-        if primary:
-            if verbose:
-                debug(f"Detected geometry column from metadata: {primary}")
-            return primary
-
-    # 2. Fall back to name-based detection from schema using DuckDB
-    con = None
-    try:
-        con = get_duckdb_connection(load_httpfs=needs_httpfs(raw_url))
-        result = describe_query(con, f"SELECT * FROM read_parquet({sql_path(raw_url)})")
-        col = detect_geometry_column_from_names(row[0] for row in result)
-        if col:
-            if verbose:
-                debug(f"Detected geometry column from schema: {col}")
-            return col
-    except (OSError, duckdb.InvalidInputException) as e:
-        # OSError for file access issues
-        # InvalidInputException for DuckDB rejecting invalid GeoParquet metadata
-        if verbose:
-            debug(f"Failed to read schema: {e}")
-    finally:
-        if con:
-            con.close()
-
-    if verbose:
-        debug("No geometry column found in parquet file")
     return None
 
 
@@ -140,49 +99,308 @@ def _summarize_geo_metadata(geo_meta) -> str:
     )
 
 
-def find_primary_geometry_column(parquet_file: str, verbose: bool = False) -> str:
+class GeometryColumnNotFoundError(GeometryError):
+    """The one error for "this source has no geometry column".
+
+    :func:`primary_geometry_column` answers ``None`` rather than guessing; a
+    caller that cannot go on without a column raises this.
     """
-    Find the primary geometry column from GeoParquet metadata.
 
-    Looks up the geometry column name from GeoParquet metadata. Falls back
-    to detect_parquet_geometry_column() (which checks standard geometry column
-    names in the schema) if no metadata is present or if the primary column
-    is not specified. Final fallback is 'geometry'.
+    def __init__(self, source=None):
+        where = f" in {source}" if source is not None else ""
+        names = ", ".join(f"'{n}'" for n in STANDARD_GEOMETRY_NAMES[:-1])
+        names += f" or '{STANDARD_GEOMETRY_NAMES[-1]}'"
+        super().__init__(
+            f"No geometry column found{where}. Expected a 'geo' primary_column, a column "
+            f"named {names}, or a native geometry column. Name one with --geometry-column."
+        )
+        self.source = source
 
-    Args:
-        parquet_file: Path to the parquet file (local or remote URL)
-        verbose: Print verbose output
 
-    Returns:
-        str: Name of the primary geometry column (defaults to 'geometry')
+def _block_primary(block, source: str | None) -> str | None:
+    """The primary column a ``geo`` block names: ``primary_column``, or the
+    legacy list form's ``{"name": ..., "primary": true}`` entry. A non-string
+    name is ignored with a warning (#887), never handed on."""
+    if isinstance(block, dict):
+        return carried_column_name(block.get("primary_column"), source=source)
+    if isinstance(block, list):
+        for col in block:
+            if isinstance(col, dict) and col.get("primary", False):
+                name = carried_column_name(col.get("name"), key="name", source=source)
+                if name:
+                    return name
+    return None
+
+
+def _is_geometry_type(type_name) -> bool:
+    """A DuckDB GEOMETRY/GEOGRAPHY type, or a Parquet GEOMETRY/GEOGRAPHY logical type."""
+    if isinstance(type_name, bool):
+        return type_name
+    if not type_name:
+        return False
+    from geoparquet_io.core.duckdb_metadata import is_geometry_column
+
+    return duckdb_type_is_geometry(type_name) or is_geometry_column(str(type_name))
+
+
+def _block_declared(block) -> list[str]:
+    """The geometry columns a ``geo`` block declares, in its order."""
+    if isinstance(block, dict) and isinstance(block.get("columns"), dict):
+        return [name for name in block["columns"] if isinstance(name, str)]
+    if isinstance(block, list):
+        return [c["name"] for c in block if isinstance(c, dict) and isinstance(c.get("name"), str)]
+    return []
+
+
+def _in_schema(name: str, names: list) -> str | None:
+    """``name`` as the schema spells it: exactly, else case-insensitively."""
+    if name in names:
+        return name
+    folded = {str(n).lower(): n for n in reversed(names)}
+    return folded.get(name.lower())
+
+
+def _resolve_primary(primary: str | None, declared, columns, extra_names=()) -> str | None:
+    """The one rule. ``columns`` is ``[(name, is_geometry_typed)]``, or None when
+    the schema could not be read (then the block's word is all there is)."""
+    if columns is None:
+        return primary
+    names = [name for name, _ in columns]
+    for candidate in ([primary] if primary is not None else []) + list(declared):
+        found = _in_schema(candidate, names)
+        if found is not None:
+            return found
+    by_name = _name_match(names, extra_names)
+    if by_name is not None:
+        return by_name
+    return next((name for name, typed in columns if typed), None)
+
+
+def _arrow_columns(schema) -> list[tuple[str, bool]]:
+    """``[(name, is_geometry_typed)]``: a GeoArrow extension field is typed."""
+    return [(field.name, _is_geoarrow_field(field)) for field in schema]
+
+
+def _is_geoarrow_field(field) -> bool:
+    name = getattr(field.type, "extension_name", None)
+    return isinstance(name, str) and name.startswith("geoarrow.")
+
+
+def _file_columns(raw_url: str, con, verbose: bool) -> list[tuple[str, bool]] | None:
+    """``[(name, is_geometry_typed)]`` for a Parquet file's columns, None when unreadable.
+
+    The file's described columns, so a file answers as its ``describe_query``
+    does (a native ``location`` column with no ``geo`` key is the primary).
+    DuckDB's ``read_parquet`` first; when it refuses the file (a ``geo`` block
+    it will not open, #982) the footer's root columns and their logical types,
+    so a malformed block still reaches the schema rule.
     """
-    from geoparquet_io.core.geo_metadata import raw_geo_of_file
+    own = con is None
+    try:
+        if own:
+            from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
-    geo_meta = raw_geo_of_file(parquet_file).value
+            con = get_duckdb_connection(load_httpfs=needs_httpfs(raw_url))
+        described = describe_query(con, f"SELECT * FROM read_parquet({sql_path(raw_url)})")
+        return [(name, _is_geometry_type(type_)) for name, type_ in described]
+    except Exception as e:  # noqa: BLE001 - the footer, or the block, still answers
+        if is_interrupt(e):
+            raise
+        if verbose:
+            debug(f"Failed to read schema: {e}")
+    finally:
+        if own and con is not None:
+            con.close()
+    try:
+        from geoparquet_io.core.duckdb_metadata import get_schema_info
+        from geoparquet_io.core.parquet_schema import root_schema_columns
 
-    if verbose and geo_meta:
-        debug(f"Geo metadata: {_summarize_geo_metadata(geo_meta)}")
+        return [
+            (col["name"], _is_geometry_type(col.get("logical_type")))
+            for col in root_schema_columns(get_schema_info(raw_url))
+        ]
+    except Exception as e:  # noqa: BLE001 - nothing readable: the block's word stands
+        if is_interrupt(e):
+            raise
+        return None
 
-    # Only a string is a column name. A non-string one reaches
-    # `quote_identifier` and fails with a bare TypeError (#887), so
-    # `carried_column_name` warns that the key was ignored and the schema
-    # fallback below gives the answer the file's data supports.
-    source = str(parquet_file)
-    if geo_meta:
-        if isinstance(geo_meta, dict):
-            primary = carried_column_name(geo_meta.get("primary_column"), source=source)
-            if primary:
-                return primary
-        elif isinstance(geo_meta, list):
-            for col in geo_meta:
-                if isinstance(col, dict) and col.get("primary", False):
-                    name = carried_column_name(col.get("name"), key="name", source=source)
-                    if name:
-                        return name
 
-    # No geo metadata or no primary_column specified - use schema-based detection
-    detected = detect_parquet_geometry_column(parquet_file, verbose=verbose)
-    return detected if detected else "geometry"
+def _described_columns(source) -> list[tuple[str, bool]]:
+    columns = []
+    for item in source:
+        if isinstance(item, (tuple, list)):
+            columns.append((item[0], _is_geometry_type(item[1] if len(item) > 1 else None)))
+        else:
+            columns.append((item, False))
+    return columns
+
+
+def _source_schema(source, geo, con, verbose):
+    """``(block, label, [(name, is_geometry_typed)] or None)`` of any source the
+    resolver takes: "typed columns of a source", spelled once."""
+    import pyarrow as pa
+
+    if source is None:
+        # The block alone (no schema to read): its declared columns stand.
+        return geo, None, [(name, False) for name in _block_declared(geo)]
+    if isinstance(source, (str, os.PathLike)):
+        label = str(source)
+        if geo is None:
+            from geoparquet_io.core.geo_metadata import raw_geo_of_file
+
+            geo = raw_geo_of_file(label, con).value
+            if verbose and geo:
+                debug(f"Geo metadata: {_summarize_geo_metadata(geo)}")
+        return geo, label, _file_columns(resolve_file_url(label, verbose=False), con, verbose)
+    if isinstance(source, (pa.Table, pa.Schema)):
+        schema = source.schema if isinstance(source, pa.Table) else source
+        if geo is None:
+            from geoparquet_io.core.geo_metadata import sanitized_carried_geo
+
+            geo = sanitized_carried_geo(schema.metadata)
+        return geo, None, _arrow_columns(schema)
+    return geo, None, _described_columns(source)
+
+
+def primary_geometry_column(
+    source,
+    *,
+    geo=None,
+    extra_names=(),
+    con=None,
+    verbose: bool = False,
+) -> str | None:
+    """The primary geometry column of ``source``, or ``None`` when it has none.
+
+    The one resolver (#1367 concept 7). ``source`` is any of:
+
+    - a RAW Parquet path or URL (``str`` / ``os.PathLike``): the block is the
+      footer's ``geo`` key as the file holds it, the schema the file's
+      described columns and their types (both read on ``con`` when given);
+    - a ``pa.Table`` or ``pa.Schema``: the block is its sanitized carried
+      ``geo``, the schema its fields (a GeoArrow extension field is typed);
+    - an iterable of ``(name, type)`` pairs (a ``describe_query`` result, or
+      Parquet logical types): no block unless ``geo`` is given. Bare names are
+      accepted but carry no types: a caller holding a table, schema, path or
+      query hands the owner that instead (#1367);
+    - ``None`` with ``geo``: the block alone, for a reader with no schema
+      (a carried metadata dict): its primary, else its first declared column.
+
+    ``geo`` is a block the caller already holds; it replaces the source's own.
+    ``extra_names`` are a source's own candidate names, tried after the
+    standard ones (BigQuery's ``geo``/``geography``); never a second list.
+
+    The rule, one for every source and every caller:
+
+    1. the block's primary (``primary_column``, or the legacy list form's
+       primary entry; a non-string one is ignored with a warning, #887), if
+       the schema has it -- exactly, else case-insensitively, answered in the
+       schema's spelling. A block describes the data it was written with; a
+       column a projection or query dropped is not an answer;
+    2. else the first column the block declares that the schema has;
+    3. else the first standard geometry name (:data:`STANDARD_GEOMETRY_NAMES`,
+       in that priority, then ``extra_names``; case-insensitive);
+    4. else the first column typed as native geometry;
+    5. else ``None``. Never the literal ``"geometry"``: a caller that needs a
+       column raises :class:`GeometryColumnNotFoundError` on ``None`` (see
+       :func:`require_geometry_column`).
+
+    Only when the schema cannot be read at all does the block's primary stand
+    on its own.
+    """
+    geo, label, columns = _source_schema(source, geo, con, verbose)
+    primary = _block_primary(geo, label)
+    resolved = _resolve_primary(primary, _block_declared(geo), columns, extra_names)
+    if verbose:
+        debug(
+            f"Primary geometry column: {resolved}"
+            if resolved
+            else "No geometry column found in the source"
+        )
+    return resolved
+
+
+def require_geometry_column(column: str | None, source=None) -> str:
+    """``column``, or :class:`GeometryColumnNotFoundError` naming ``source`` when it is None.
+
+    The one hard failure for a caller that cannot go on without a geometry
+    column; it takes :func:`primary_geometry_column`'s *answer*, never a source.
+    """
+    if column is None:
+        raise GeometryColumnNotFoundError(source)
+    return column
+
+
+@overload
+def resolve_geometry_column(
+    source,
+    named: str | None = None,
+    *,
+    geo=None,
+    where=None,
+    required: Literal[True] = True,
+    con=None,
+    verbose: bool = False,
+) -> str: ...
+
+
+@overload
+def resolve_geometry_column(
+    source,
+    named: str | None = None,
+    *,
+    geo=None,
+    where=None,
+    required: bool,
+    con=None,
+    verbose: bool = False,
+) -> str | None: ...
+
+
+def resolve_geometry_column(
+    source,
+    named: str | None = None,
+    *,
+    geo=None,
+    where=None,
+    required: bool = True,
+    con=None,
+    verbose: bool = False,
+) -> str | None:
+    """The geometry column a command runs on: the one front door (#1367).
+
+    ``source`` is any source :func:`primary_geometry_column` takes (a RAW
+    path, an Arrow table or schema, ``(name, type)`` pairs). ``named`` is the
+    caller's explicit column: it is the answer when ``source`` has it, else an
+    :class:`InvalidParameterError` -- never silently swapped for another. With
+    no ``named``, the resolver's answer, or :class:`GeometryColumnNotFoundError`.
+    Only a *block's* primary falls through to the schema. ``where`` names the
+    source in the error (default: the path, for a file). ``required=False`` is
+    for a path that runs without a geometry column (an attribute table, the
+    aggregate bbox and point-column modes): no column is then ``None``, but a
+    named one that is missing still raises.
+    """
+    if named is None:
+        found = primary_geometry_column(source, geo=geo, con=con, verbose=verbose)
+        if not required:
+            return found
+        label = where if where is not None else _label_of(source)
+        return require_geometry_column(found, label)
+    _, label, columns = _source_schema(source, {} if geo is None else geo, con, verbose)
+    if columns is None or any(name == named for name, _ in columns):
+        return named
+    label = where if where is not None else label
+    in_where = f" in {label}" if label is not None else ""
+    # The columns it does have, so a typo or a stale name is fixable.
+    available = ", ".join(repr(name) for name, _ in columns) or "none"
+    raise InvalidParameterError(
+        "geometry_column",
+        f"geometry column '{named}' not found{in_where}; its columns are: {available}",
+    )
+
+
+def _label_of(source) -> str | None:
+    return str(source) if isinstance(source, (str, os.PathLike)) else None
 
 
 def native_geometry_types_from_query(con, query: str, verbose: bool = False) -> dict[str, str]:
@@ -231,57 +449,17 @@ def native_geometry_types_from_query(con, query: str, verbose: bool = False) -> 
 def _detect_geometry_from_query(
     con, query: str, original_metadata: dict | None = None, verbose: bool = False
 ) -> str | None:
-    """
-    Detect geometry column from a SQL query result.
-
-    Args:
-        con: DuckDB connection
-        query: SQL query to analyze
-        original_metadata: Optional GeoParquet metadata from source file
-        verbose: If True, print debug information
-
-    Returns:
-        The name of the detected geometry column, or None if not found.
-    """
-
+    """:func:`primary_geometry_column` of a query's output, ``original_metadata``
+    (the input's block) as the block. ``None`` when the query does not bind."""
     try:
-        describe_result = describe_query(con, query)
-        # Lowercase key -> the column's own spelling. The match below is
-        # case-insensitive, but what is returned has to be the name the schema
-        # actually carries: it becomes the `geo.columns` key, and a lowercased
-        # `GEOMETRY` names a column the written file does not contain (#1138).
-        columns = {row[0].lower(): row[0] for row in describe_result if row[0]}
-
-        if original_metadata and "primary_column" in original_metadata:
-            primary = original_metadata["primary_column"].lower()
-            if primary in columns:
-                if verbose:
-                    debug(f"Found original primary geometry column in query: {primary}")
-                return original_metadata["primary_column"]
-
-        for std_name in STANDARD_GEOMETRY_NAMES:
-            if std_name in columns:
-                if verbose:
-                    debug(f"Found geometry column by standard name in query: {columns[std_name]}")
-                return columns[std_name]
-
-        for row in describe_result:
-            col_name, col_type = row
-            if duckdb_type_is_geometry(col_type):
-                if verbose:
-                    debug(f"Found geometry column by type in query: {col_name}")
-                return col_name
-
-        if verbose:
-            debug("No geometry column detected in query result")
-        return None
-
+        described = describe_query(con, query)
     except Exception as e:
         if is_interrupt(e):
             raise
         if verbose:
             debug(f"Error detecting geometry from query: {e}")
         return None
+    return primary_geometry_column(described, geo=original_metadata, verbose=verbose)
 
 
 # =============================================================================
@@ -362,6 +540,11 @@ class GeometryRead:
         return self.kind in _READABLE_KINDS
 
     @property
+    def native(self) -> bool:
+        """The column already reaches SQL as GEOMETRY (or GEOGRAPHY): no decode."""
+        return self.kind == "native"
+
+    @property
     def quoted(self) -> str:
         return quote_identifier(self.column)
 
@@ -374,14 +557,14 @@ class GeometryRead:
         """
         if self.kind == "wkb" and self.flat:
             q = self.quoted
-            return f"(CASE WHEN octet_length({q}) > 0 THEN TRY(ST_GeomFromWKB({q})) END)"
+            return f"(CASE WHEN octet_length({q}) > 0 THEN TRY({geom_from_wkb_sql(q)}) END)"
         if self.kind == "wkb":
             # CASE, not a WHERE conjunct, so no evaluation order can hand a bad
             # value to ST_GeomFromWKB. The THEN branch reads a flat vector as
             # well. On a dictionary vector DuckDB evaluates a bare call over the
             # whole dictionary, ignoring the CASE, and raises on its bad entry.
             flat = f"list_extract([{self.quoted}], 1)"
-            return f"(CASE WHEN {self.parseable_sql} THEN ST_GeomFromWKB({flat}) END)"
+            return f"(CASE WHEN {self.parseable_sql} THEN {geom_from_wkb_sql(flat)} END)"
         if self.kind == "geoarrow":
             return self._geoarrow_point_expr()
         return self.quoted
@@ -417,10 +600,9 @@ class GeometryRead:
             return "TRUE"
         q = self.quoted
         if self.flat:
-            return f"(octet_length({q}) > 0 AND TRY(ST_GeomFromWKB({q})) IS NOT NULL)"
-        return (
-            f"(octet_length({q}) > 0 AND TRY(ST_GeomFromWKB(list_extract([{q}], 1))) IS NOT NULL)"
-        )
+            return f"(octet_length({q}) > 0 AND TRY({geom_from_wkb_sql(q)}) IS NOT NULL)"
+        flat = geom_from_wkb_sql(f"list_extract([{q}], 1)")
+        return f"(octet_length({q}) > 0 AND TRY({flat}) IS NOT NULL)"
 
     @property
     def empty_sql(self) -> str:
@@ -448,9 +630,16 @@ class GeometryRead:
             )
         return None
 
+    @property
+    def geoarrow_encoding(self) -> str | None:
+        """The GeoArrow native encoding (``point`` ... ``multipolygon``) of a
+        ``geoarrow`` column, from its coordinate struct's list depth; else None."""
+        if self.kind != "geoarrow":
+            return None
+        return _GEOARROW_ENCODING_BY_DEPTH[_geoarrow_struct_depth(self.duckdb_type) or 0]
+
     def _geoarrow_point_expr(self) -> str:
-        depth = _geoarrow_struct_depth(self.duckdb_type) or 0
-        encoding = _GEOARROW_ENCODING_BY_DEPTH[depth]
+        encoding = self.geoarrow_encoding or "point"
         _, _, _, _, cx, cy = _geoarrow_coord_exprs(self.quoted, encoding)
         return f"ST_Point({cx}, {cy})"
 
@@ -479,15 +668,50 @@ def _find_described_type(described, column: str) -> str | None:
     return folded.get(column.lower())
 
 
-def resolve_geometry_read(con, raw_url: str, column: str) -> GeometryRead:
+def resolve_geometry_read(
+    con, raw_url: str, column: str, *, relation: bool = False
+) -> GeometryRead:
     """How ``column`` of the Parquet file at RAW ``raw_url`` is read on ``con``.
+
+    The one producer of a geometry read expression (#1367 concept 7): every
+    path that has to turn a column into GEOMETRY asks here and uses the
+    answer's ``shape_expr`` / ``expr``, never ``"GEOMETRY" in col_type``.
+
+    With ``relation=True``, ``raw_url`` is instead SQL usable in a ``FROM``
+    clause -- a registered relation's name, ``read_parquet(...)``, a
+    parenthesized subquery -- and the column's type is read off it.
 
     The answer depends on the connection. With GeoParquet conversion on, DuckDB
     presents a WKB column as GEOMETRY and decodes it lazily, so a caller that
     must see the stored bytes calls ``disable_geoparquet_conversion`` first.
     """
-    described = describe_query(con, f"SELECT * FROM read_parquet({sql_path(raw_url)})")
+    source = raw_url if relation else f"read_parquet({sql_path(raw_url)})"
+    described = describe_query(con, f"SELECT * FROM {source}")
     return GeometryRead.for_type(column, _find_described_type(described, column))
+
+
+def create_geometry_view(con, relation: str, column: str, view: str | None = None) -> str:
+    """The relation to read ``column`` from as GEOMETRY: ``relation`` or a new view.
+
+    The one view builder (#1367 concept 7). A registered Arrow table, an IPC
+    stream or a file with no ``geo`` key reaches DuckDB with its WKB column as
+    ``BLOB``; this decodes it in place -- ``CREATE OR REPLACE TEMP VIEW view AS
+    SELECT * REPLACE (ST_GeomFromWKB(column) AS column) FROM relation`` -- so
+    every column keeps its position. A column that is not WKB (already native,
+    a GeoArrow struct, absent) needs no view and ``relation`` comes back
+    unchanged. ``view`` defaults to a fresh name. Malformed WKB raises when
+    the view is read, as every copy of this did.
+    """
+    read = resolve_geometry_read(con, relation, column, relation=True)
+    if read.kind != "wkb":
+        return relation
+    view = view or f"__gpio_geometry_{uuid.uuid4().hex}"
+    quoted = read.quoted
+    con.execute(
+        f"CREATE OR REPLACE TEMP VIEW {quote_identifier(view)} AS "
+        f"SELECT * REPLACE ({geom_from_wkb_sql(quoted)} AS {quoted}) FROM {relation}"
+    )
+    return view
 
 
 def register_geometry_column(

@@ -30,9 +30,11 @@ from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.edges import edges_of, state_edges
 from geoparquet_io.core.file_utils import unlink_released_file
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
 from geoparquet_io.core.index_ops import get_index_spec, validate_partition_arguments
 from geoparquet_io.core.logging_config import warn
+from geoparquet_io.core.process.aggregate.grid_common import BUCKET_POINT_GEOMETRY
 from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE
 from geoparquet_io.core.wfs import DEFAULT_WFS_PAGE_SIZE
 from geoparquet_io.core.write_funnels import write_geoparquet_table
@@ -141,30 +143,18 @@ def _calculate_bounds_from_table(
 def _surviving_geometry_column(current: str | None, result: pa.Table) -> str | None:
     """Which geometry column a projected table should report, if any.
 
-    A column projection can drop the geometry column the Table was pointing at.
-    Keeping the old name made ``write()`` ask the writer for a column that is no
-    longer there (#731), but collapsing straight to ``None`` was equally wrong
-    when the input declared more than one geometry column: the survivor's geo
-    metadata was then silently thrown away. So prefer the carried
-    ``primary_column`` (``extract_table`` has already re-pointed it at a
-    survivor), then any other declared geometry column, and only then ``None``
-    — the same state ``read()`` reports for a plain Parquet file.
+    A column projection can drop the geometry column the Table was pointing at
+    (#731). The column it still has is kept; otherwise the owner answers over
+    what survived (#1367) -- the carried block's primary (``extract_table`` has
+    already re-pointed it at a survivor), then any declared column, then the
+    schema -- and ``None`` when nothing is left, the state ``read()`` reports
+    for a plain Parquet file.
     """
     if current is not None and current in result.column_names:
         return current
+    from geoparquet_io.core.geometry_detection import primary_geometry_column
 
-    from geoparquet_io.core.geo_metadata import read_raw_geo
-
-    geo = read_raw_geo(result.schema.metadata).block
-    if not geo:
-        return None
-
-    declared = geo.get("columns")
-    candidates = [geo.get("primary_column")] + list(declared if isinstance(declared, dict) else [])
-    for name in candidates:
-        if isinstance(name, str) and name in result.column_names:
-            return name
-    return None
+    return primary_geometry_column(result)
 
 
 def read(path: str | Path, **kwargs) -> Table:
@@ -255,9 +245,9 @@ def read_partition(
         get_duckdb_connection,
         s3_config_scope,
     )
+    from geoparquet_io.core.geometry_detection import primary_geometry_column
     from geoparquet_io.core.partition.reader import build_read_parquet_expr
     from geoparquet_io.core.remote import needs_httpfs, resolve_s3_config
-    from geoparquet_io.core.streaming import find_geometry_column_from_table
 
     s3_config = resolve_s3_config(
         s3_endpoint=s3_endpoint,
@@ -286,7 +276,7 @@ def read_partition(
             con.close()
 
     # Detect geometry column from the combined table
-    geometry_column = find_geometry_column_from_table(arrow_table)
+    geometry_column = primary_geometry_column(arrow_table)
 
     return Table(arrow_table, geometry_column=geometry_column)
 
@@ -294,7 +284,7 @@ def read_partition(
 def convert(
     path: str | Path,
     *,
-    geometry_column: str = "geometry",
+    geometry_column: str = BUILT_GEOMETRY_COLUMN,
     wkt_column: str | None = None,
     lat_column: str | None = None,
     lon_column: str | None = None,
@@ -495,7 +485,7 @@ def extract_arcgis(
     # exclude_cols="geometry" leaves an attribute table with no geo block
     # (#966): report no geometry column, so write() emits plain Parquet on every
     # strategy instead of asking the writer for a column that is not there.
-    return Table(arrow_table, geometry_column=_surviving_geometry_column("geometry", arrow_table))
+    return Table(arrow_table, geometry_column=_surviving_geometry_column(None, arrow_table))
 
 
 class Table:
@@ -536,7 +526,14 @@ class Table:
                 claimed OGC:CRS84 for projected data (issue #625).
         """
         self._table = table
-        self._geometry_column = geometry_column or self._detect_geometry_column()
+        from geoparquet_io.core.geometry_detection import primary_geometry_column
+
+        # A Table may hold a name its table lacks (a derived table, #1176):
+        # ``write()`` refuses it through ``resolve_geometry_column`` and names
+        # what the table has, so only the unnamed case is answered here.
+        self._geometry_column = (
+            geometry_column if geometry_column is not None else primary_geometry_column(table)
+        )
         # Auto-version hint captured at read time (see read()): pq.read_table
         # demotes native geometry columns to plain binary when geoarrow isn't
         # registered, so the table alone can't always tell a native-geo-only
@@ -576,12 +573,6 @@ class Table:
     def _wrap_geographic(self, table: pa.Table, geometry_column: str | None) -> Table:
         """Wrap new grid or admin boundaries in their output CRS, not the source CRS."""
         return self._wrap(table, geometry_column, crs="OGC:CRS84" if geometry_column else None)
-
-    def _detect_geometry_column(self) -> str | None:
-        """Detect geometry column from metadata or common names."""
-        from geoparquet_io.core.streaming import find_geometry_column_from_table
-
-        return find_geometry_column_from_table(self._table)
 
     @classmethod
     def from_bigquery(
@@ -1323,17 +1314,9 @@ class Table:
         """
         if self._geometry_column is None:
             return
-        if self._geometry_column in self._table.column_names:
-            return
+        from geoparquet_io.core.geometry_detection import resolve_geometry_column
 
-        from geoparquet_io.core.exceptions import InvalidParameterError
-
-        available = ", ".join(repr(name) for name in self._table.column_names) or "none"
-        raise InvalidParameterError(
-            "geometry_column",
-            f"the table has no column named {self._geometry_column!r}; "
-            f"its columns are: {available}",
-        )
+        resolve_geometry_column(self._table, self._geometry_column, where="the table")
 
     def _write_geoparquet(
         self,
@@ -1965,7 +1948,7 @@ class Table:
         out_geometry: str = "polygon",
         where: str | None = None,
         metric_nodata: str | None = None,
-        bucket_point: str = "geometry",
+        bucket_point: str = BUCKET_POINT_GEOMETRY,
         bbox_column: str | None = None,
         breakdown_metric: str | None = None,
         memory_limit: str | None = None,
@@ -2012,7 +1995,9 @@ class Table:
             breakdown_metric=breakdown_metric,
             memory_limit=memory_limit,
         )
-        return self._wrap_geographic(result, "geometry" if out_geometry != "none" else None)
+        return self._wrap_geographic(
+            result, BUILT_GEOMETRY_COLUMN if out_geometry != "none" else None
+        )
 
     def aggregate_h3(
         self,
@@ -2023,7 +2008,7 @@ class Table:
         out_geometry: str = "polygon",
         where: str | None = None,
         metric_nodata: str | None = None,
-        bucket_point: str = "geometry",
+        bucket_point: str = BUCKET_POINT_GEOMETRY,
         bbox_column: str | None = None,
         breakdown_metric: str | None = None,
         memory_limit: str | None = None,
@@ -2070,7 +2055,9 @@ class Table:
             breakdown_metric=breakdown_metric,
             memory_limit=memory_limit,
         )
-        return self._wrap_geographic(result, "geometry" if out_geometry != "none" else None)
+        return self._wrap_geographic(
+            result, BUILT_GEOMETRY_COLUMN if out_geometry != "none" else None
+        )
 
     def aggregate_admin(
         self,
@@ -2081,7 +2068,7 @@ class Table:
         out_geometry: str = "polygon",
         where: str | None = None,
         metric_nodata: str | None = None,
-        bucket_point: str = "geometry",
+        bucket_point: str = BUCKET_POINT_GEOMETRY,
         bbox_column: str | None = None,
         breakdown_metric: str | None = None,
         memory_limit: str | None = None,
@@ -2127,7 +2114,9 @@ class Table:
             breakdown_metric=breakdown_metric,
             memory_limit=memory_limit,
         )
-        return self._wrap_geographic(result, "geometry" if out_geometry != "none" else None)
+        return self._wrap_geographic(
+            result, BUILT_GEOMETRY_COLUMN if out_geometry != "none" else None
+        )
 
     def overview(
         self,
@@ -2165,8 +2154,8 @@ class Table:
             scheme=scheme,
             memory_limit=memory_limit,
         )
-        has_geometry = "geometry" in result.column_names
-        return self._wrap_geographic(result, "geometry" if has_geometry else None)
+        has_geometry = BUILT_GEOMETRY_COLUMN in result.column_names
+        return self._wrap_geographic(result, BUILT_GEOMETRY_COLUMN if has_geometry else None)
 
     def add_s2(
         self,

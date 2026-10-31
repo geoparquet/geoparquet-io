@@ -19,7 +19,7 @@ from geoparquet_io.core.exceptions import (
 )
 from geoparquet_io.core.file_utils import get_all_parquet_files
 from geoparquet_io.core.geo_metadata import sanitize_geo_metadata, sanitized_carried_geo
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.remote import is_remote_url
 
@@ -226,7 +226,7 @@ def _add_projection_properties(item: pystac.Item, geo_meta: dict | None, parquet
     if not geo_meta:
         return
 
-    geom_col = find_primary_geometry_column(parquet_file, verbose=False)
+    geom_col = primary_geometry_column(parquet_file, verbose=False)
     columns = geo_meta.get("columns")
     if not isinstance(columns, dict) or geom_col not in columns:
         return

@@ -30,6 +30,7 @@ from geoparquet_io.core.geo_metadata import (
     sanitize_geo_metadata,
     sanitized_carried_geo,
 )
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 
 # One WKB point (1.0, 2.0), little-endian.
 POINT_WKB = struct.pack("<BI2d", 1, 1, 1.0, 2.0)
@@ -467,7 +468,7 @@ def test_geoparquet_crs_is_null_still_sees_an_explicit_null_crs(col, tmp_path):
 def test_geometry_detection_never_returns_a_non_string_column_name(col, tmp_path):
     """The column-name readers are shared with ``gpio check``, so they guard, not sanitize.
 
-    ``check spatial`` and ``check row-group`` ask ``find_primary_geometry_column``
+    ``check spatial`` and ``check row-group`` ask ``primary_geometry_column``
     what the file calls its geometry -- they must keep seeing the file as it is.
     But a name is a string: a carried ``primary_column: 123`` handed back here
     reaches ``quote_identifier`` and fails there with a bare ``TypeError``
@@ -475,10 +476,7 @@ def test_geometry_detection_never_returns_a_non_string_column_name(col, tmp_path
     or, when DuckDB will not open the file to describe it either, with ``None``,
     which the callers already turn into "No geometry column detected".
     """
-    from geoparquet_io.core.geometry_detection import (
-        detect_parquet_geometry_column,
-        find_primary_geometry_column,
-    )
+    from geoparquet_io.core.geometry_detection import primary_geometry_column
 
     reset_malformed_geo_warnings()
     readable = _file_with_geo(
@@ -491,8 +489,7 @@ def test_geometry_detection_never_returns_a_non_string_column_name(col, tmp_path
         },
         col=col,
     )
-    assert detect_parquet_geometry_column(readable) == col
-    assert find_primary_geometry_column(readable) == col
+    assert primary_geometry_column(readable) == col
 
     unreadable = _file_with_geo(
         tmp_path,
@@ -500,8 +497,8 @@ def test_geometry_detection_never_returns_a_non_string_column_name(col, tmp_path
         {"version": "1.1.0", "primary_column": 123, "columns": None},
         col=col,
     )
-    assert detect_parquet_geometry_column(unreadable) is None
-    assert find_primary_geometry_column(unreadable) == "geometry"
+    # DuckDB will not describe it, but the footer still names the column.
+    assert primary_geometry_column(unreadable) == col
 
 
 def test_geometry_detection_names_the_ignored_primary_column_key(tmp_path, caplog):
@@ -510,7 +507,6 @@ def test_geometry_detection_names_the_ignored_primary_column_key(tmp_path, caplo
     Without it ``gpio sort hilbert`` / ``check spatial`` / ``add bbox`` exit 0
     with nothing said, while ``gpio convert geoparquet`` on the same file warns.
     """
-    from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 
     reset_malformed_geo_warnings()
     src = _file_with_geo(
@@ -523,7 +519,7 @@ def test_geometry_detection_names_the_ignored_primary_column_key(tmp_path, caplo
         },
     )
     with caplog.at_level(logging.WARNING):
-        assert find_primary_geometry_column(src) == "geometry"
+        assert primary_geometry_column(src) == "geometry"
 
     messages = _malformed_warnings(caplog.records)
     assert any("'primary_column'" in m and "number" in m for m in messages), messages
@@ -536,7 +532,6 @@ def test_geometry_detection_warns_once_per_file_not_once_per_process(tmp_path, c
     ``for``) otherwise share one cache entry and the second file is ignored in
     silence (#887 review).
     """
-    from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 
     reset_malformed_geo_warnings()
     block = {
@@ -548,8 +543,8 @@ def test_geometry_detection_warns_once_per_file_not_once_per_process(tmp_path, c
     second = _file_with_geo(tmp_path, "second", block)
 
     with caplog.at_level(logging.WARNING):
-        find_primary_geometry_column(first)
-        find_primary_geometry_column(second)
+        primary_geometry_column(first)
+        primary_geometry_column(second)
 
     messages = _malformed_warnings(caplog.records)
     assert any("first.parquet" in m for m in messages), messages
@@ -561,13 +556,18 @@ def test_geometry_detection_warns_once_per_file_not_once_per_process(tmp_path, c
     [("string", "geom", "geom"), ("number", 123, "geometry")],
     ids=["a_string_name_is_used", "a_number_name_falls_back"],
 )
-def test_find_primary_geometry_column_guards_the_legacy_list_block(case, name, expected, tmp_path):
-    """The pre-1.0 list-shaped ``geo`` block needs the same string guard (#887)."""
-    from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+def test_primary_geometry_column_guards_the_legacy_list_block(case, name, expected, tmp_path):
+    """The pre-1.0 list-shaped ``geo`` block needs the same string guard (#887).
+
+    The file holds the column the answer names: a block primary the schema
+    lacks is not an answer (#1367), so a string name is used when it is there.
+    """
 
     reset_malformed_geo_warnings()
-    src = _file_with_geo(tmp_path, f"legacy_{case}", [{"name": name, "primary": True}])
-    assert find_primary_geometry_column(src) == expected
+    src = _file_with_geo(
+        tmp_path, f"legacy_{case}", [{"name": name, "primary": True}], col=expected
+    )
+    assert primary_geometry_column(src) == expected
 
 
 @pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
@@ -1194,14 +1194,13 @@ def test_reproject_table_readers_survive_a_malformed_block(col, case, block):
     """
     from geoparquet_io.core.reproject import (
         _detect_crs_from_table,
-        _detect_geometry_column_from_table,
         _table_geo_column_meta,
     )
 
     reset_malformed_geo_warnings()
     table = _table_with_geo(block, col=col)
 
-    detected = _detect_geometry_column_from_table(table)
+    detected = primary_geometry_column(table)
     assert isinstance(detected, str)
     assert isinstance(_detect_crs_from_table(table, detected), str)
     assert isinstance(_table_geo_column_meta(table, detected), dict)
@@ -1894,8 +1893,8 @@ def test_check_bbox_still_reads_the_version_of_a_well_formed_file(tmp_path):
 # The metadata-only column-name reader
 # =============================================================================
 #
-# `find_geometry_column_from_metadata` (since deleted for `carried_geometry_column`,
-# #1367) returned `primary_column` with no type
+# `find_geometry_column_from_metadata` (since deleted for
+# `geometry_detection.primary_geometry_column`, #1367) returned `primary_column` with no type
 # check, so `123` travelled through `extract` into `quote_identifier` and failed
 # there with `TypeError: argument of type 'int' is not iterable`, four frames
 # from anything a user can act on (#968). It is a column-name reader shared with
@@ -1909,32 +1908,31 @@ def test_check_bbox_still_reads_the_version_of_a_well_formed_file(tmp_path):
 
 
 @pytest.mark.parametrize("bad", [123, ["geometry"], {"name": "geometry"}, None, ""])
-def test_carried_geometry_column_never_returns_a_non_name(bad):
+def test_primary_geometry_column_never_returns_a_non_name(bad):
     """The column-name readers go through the sanitized carried decoder (#1367),
     so a malformed `primary_column` is dropped and, with one column declared,
     repaired to it (`_repair_primary_column`); with two the schema decides."""
-    from geoparquet_io.core.geo_metadata import carried_geometry_column, sanitized_carried_geo
+    from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 
     reset_malformed_geo_warnings()
     block = {"version": "1.1.0", "primary_column": bad, "columns": {"geom": {"encoding": "WKB"}}}
     geo = sanitized_carried_geo({b"geo": json.dumps(block).encode("utf-8")})
-    assert carried_geometry_column(geo, []) == "geom"
+    assert primary_geometry_column(["id", "geom"], geo=geo) == "geom"
     block["columns"]["other"] = {"encoding": "WKB"}
     geo = sanitized_carried_geo({b"geo": json.dumps(block).encode("utf-8")})
-    assert carried_geometry_column(geo, []) is None
-    assert carried_geometry_column(geo, ["id", "the_geom"]) == "the_geom"
+    assert primary_geometry_column([], geo=geo) is None
+    assert primary_geometry_column(["id", "the_geom"], geo=geo) == "the_geom"
 
 
 @pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
-def test_find_geometry_column_from_table_recovers_from_a_non_string_primary(col):
+def test_primary_geometry_column_of_a_table_recovers_from_a_non_string_primary(col):
     """The table-level reader asks the schema, and must find the real column."""
-    from geoparquet_io.core.streaming import find_geometry_column_from_table
 
     reset_malformed_geo_warnings()
     table = _table_with_geo(
         {"version": "1.1.0", "primary_column": 123, "columns": {col: {"encoding": "WKB"}}}, col=col
     )
-    assert find_geometry_column_from_table(table) == col
+    assert primary_geometry_column(table) == col
 
 
 @pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)

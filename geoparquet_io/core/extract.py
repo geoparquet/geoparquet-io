@@ -33,6 +33,7 @@ from geoparquet_io.core.duckdb_metadata import (
 )
 from geoparquet_io.core.duckdb_utils import (
     _get_query_columns,
+    as_wkb_sql,
     describe_query,
     fetch_one,
     get_duckdb_connection,
@@ -58,7 +59,6 @@ from geoparquet_io.core.file_utils import (
 )
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
-    carried_geometry_column,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
     sanitized_carried_geo_of_file,
@@ -66,7 +66,9 @@ from geoparquet_io.core.geo_metadata import (
     strip_orientation,
 )
 from geoparquet_io.core.geometry_detection import (
-    find_primary_geometry_column,
+    create_geometry_view,
+    primary_geometry_column,
+    resolve_geometry_column,
 )
 from geoparquet_io.core.geometry_repair import (
     nonplanar_edges_of_arrow_table,
@@ -86,7 +88,6 @@ from geoparquet_io.core.remote import (
 )
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
-    find_geometry_column_from_table,
     is_stdin,
     should_stream_output,
 )
@@ -640,7 +641,7 @@ def _get_table_column_info(
 ) -> tuple[list[str], str | None, dict]:
     """Get column information from an Arrow table."""
     all_columns = table.column_names
-    geometry_col = find_geometry_column_from_table(table)
+    geometry_col = primary_geometry_column(table)
 
     # Check for bbox column
     bbox_col = None
@@ -657,32 +658,6 @@ def _get_table_column_info(
     return all_columns, geometry_col, bbox_info
 
 
-def _setup_geometry_view(
-    con,
-    table: pa.Table,
-    geom_col: str,
-) -> tuple[str, bool]:
-    """
-    Setup geometry view if needed for BLOB geometry columns.
-
-    Returns (source_ref, needs_wkb_conversion).
-    """
-    columns_info = describe_query(con, "SELECT * FROM __input_table")
-    geom_is_blob = any(name == geom_col and "BLOB" in type_.upper() for name, type_ in columns_info)
-
-    if not (geom_is_blob and geom_col in table.column_names):
-        return "__input_table", False
-
-    # Create view with geometry conversion (quote column names for special chars)
-    other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
-    col_defs = other_cols + [
-        f"ST_GeomFromWKB({quote_identifier(geom_col)}) AS {quote_identifier(geom_col)}"
-    ]
-    view_query = f"CREATE VIEW __input_view AS SELECT {', '.join(col_defs)} FROM __input_table"
-    con.execute(view_query)
-    return "__input_view", True
-
-
 def _build_query_with_wkb_conversion(
     source_ref: str,
     selected_columns: list[str],
@@ -693,7 +668,7 @@ def _build_query_with_wkb_conversion(
 ) -> str:
     """Build query with WKB conversion for geometry column."""
     cols_with_wkb = [
-        f"ST_AsWKB({quote_identifier(geom_col)}) AS {quote_identifier(geom_col)}"
+        f"{as_wkb_sql(quote_identifier(geom_col))} AS {quote_identifier(geom_col)}"
         if c == geom_col
         else quote_identifier(c)
         for c in selected_columns
@@ -747,15 +722,10 @@ def extract_table(
             named ``geometry_column`` is absent, or if ``bbox`` is requested on a
             table that has no geometry column.
     """
-    all_columns, detected_geom, bbox_info = _get_table_column_info(table)
-    geom_col = geometry_column or detected_geom
+    all_columns, _, bbox_info = _get_table_column_info(table)
+    # None for an attribute table; a named column the table lacks raises.
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table", required=False)
     bbox_col = bbox_info.get("bbox_column_name")
-
-    if geom_col is not None and geom_col not in all_columns:
-        raise InvalidParameterError(
-            "geometry_column",
-            f"geometry_column '{geom_col}' not found in table columns: {list(all_columns)}",
-        )
 
     # A table with no geometry column is a legitimate input (an attribute table
     # from an earlier exclude_columns=['geometry'], say): project and filter its
@@ -789,9 +759,12 @@ def extract_table(
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         registered = register_arrow(con, "__input_table", table)
-        source_ref, needs_wkb = (
-            _setup_geometry_view(con, table, geom_col) if geom_col else ("__input_table", False)
+        source_ref = (
+            create_geometry_view(con, "__input_table", geom_col, "__input_view")
+            if geom_col
+            else "__input_table"
         )
+        needs_wkb = source_ref != "__input_table"
 
         if needs_wkb and keeps_geometry:
             query = _build_query_with_wkb_conversion(
@@ -943,12 +916,11 @@ def _extract_streaming(
     ) as (source, metadata, is_stream, con):
         # Get column names from query result (works with both table names and read_parquet)
         # One relation: its reader has already de-duplicated the names.
-        all_columns = [name for name, _ in describe_query(con, f"SELECT * FROM {source}")]
+        described = describe_query(con, f"SELECT * FROM {source}")
+        all_columns = [name for name, _ in described]
 
         # Find geometry column
-        geom_col = (
-            carried_geometry_column(sanitized_carried_geo(metadata), all_columns) or "geometry"
-        )
+        geom_col = primary_geometry_column(described, geo=sanitized_carried_geo(metadata))
 
         # Check for bbox column
         bbox_col = None
@@ -1398,7 +1370,7 @@ def _extract_impl(
     # expression is built, several DuckDB errors too late (#867).
     require_parquet_files(input_parquet)
     all_columns = get_schema_columns(input_parquet)
-    geometry_col = find_primary_geometry_column(input_parquet, verbose)
+    geometry_col = primary_geometry_column(input_parquet, verbose=verbose)
     bbox_info = check_bbox_structure(input_parquet, verbose=False)
     bbox_col = bbox_info.get("bbox_column_name")
 
