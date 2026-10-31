@@ -43,7 +43,7 @@ from geoparquet_io.core.parquet_writer import (
     WriteOptions,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
-    resolve_row_group_rows_for_table,
+    resolve_row_group_rows_for_sample,
     without_geometry_dictionary,
 )
 from geoparquet_io.core.remote import is_remote_url
@@ -618,17 +618,12 @@ def _simplify_file_streaming(
         schema = pa.schema(
             [f for f in schema if f.name not in drop_columns], metadata=schema.metadata
         )
-    # The facade's resolver decides the row count from the whole pair. A byte
-    # target is measured on the input's first row group: one group of memory,
-    # where the in-memory path would read the whole file to measure it.
+    # Batches are read at the facade's row count (an explicit one, else the
+    # default). The written groups follow the facade's answer for the whole
+    # pair: a byte target (rows is None) is measured on the leading simplified
+    # rows by resolve_row_group_rows_for_sample, the facade's bounded sample.
+    read_rows = resolve_row_group_rows(write.row_group_rows, None)
     rows = resolve_row_group_rows(write.row_group_rows, write.row_group_size_mb)
-    if rows is None:
-        first = pf.read_row_group(0) if pf.metadata.num_row_groups else schema.empty_table()
-        if drop_columns:
-            first = first.drop_columns([c for c in drop_columns if c in first.column_names])
-        rows = resolve_row_group_rows_for_table(
-            first, write.row_group_rows, write.row_group_size_mb
-        )
     writer_schema = schema.with_metadata(None)
     batch_stats: list[GeometryStats] = []
     # The output keeps the input's CRS, which decides how the batch extents fold.
@@ -650,10 +645,10 @@ def _simplify_file_streaming(
         # matching the in-memory path's whole-column scan.
         sample = _first_wkb(
             _first_wkb_of(sample_batch.column(geom_col))
-            for sample_batch in pf.iter_batches(batch_size=rows, columns=[geom_col])
+            for sample_batch in pf.iter_batches(batch_size=read_rows, columns=[geom_col])
         )
         forward, inverse = _simplify_crs_transformers(simplify_crs, src_crs, sample)
-    batches = pf.iter_batches(batch_size=rows)
+    batches = pf.iter_batches(batch_size=read_rows)
     with remote_write_context(output_parquet, is_directory=False, verbose=verbose) as (
         actual_output,
         is_remote,
@@ -678,6 +673,7 @@ def _simplify_file_streaming(
                 store_schema=False,
                 **without_geometry_dictionary(writer_kwargs, schema, [geom_col]),
             ) as writer:
+                grouper = _RowGrouper(writer, rows, write.row_group_size_mb)
                 for batch in batches:
                     table = pa.Table.from_batches([batch])
                     if drop_columns:
@@ -707,7 +703,9 @@ def _simplify_file_streaming(
                         row_bounds = row_bounds[keep]
                     table = _refresh_bbox_covering(table, geom_col, bounds=row_bounds)
                     batch_stats.append(geometry_stats_of(table, geom_col))
-                    writer.write_table(table, row_group_size=rows)
+                    grouper.add(table)
+                grouper.close(schema)
+                rows = grouper.rows
                 writer.add_key_value_metadata(
                     _footer_kv_via_funnel(
                         schema,
@@ -728,6 +726,50 @@ def _simplify_file_streaming(
     if dropped:
         info(f"dropped {dropped} empty geometries")
     debug(f"streamed simplify in {rows}-row batches to {output_parquet}")
+
+
+class _RowGrouper:
+    """Writes simplified tables as row groups of exactly ``rows`` rows.
+
+    Batches arrive at the read size and shrink under ``drop_empty``, so they
+    are buffered and cut at ``rows``; the last group takes the remainder, as
+    the table funnel's does. With a byte target, ``rows`` is unknown until
+    the facade has measured the leading rows (``resolve_row_group_rows_for_sample``),
+    so the buffer holds them until then.
+    """
+
+    def __init__(self, writer, rows: int | None, row_group_size_mb: float | None):
+        self.writer, self.rows, self.mb = writer, rows, row_group_size_mb
+        self.pending: list[pa.Table] = []
+        self.pending_rows = 0
+
+    def add(self, table: pa.Table) -> None:
+        self.pending.append(table)
+        self.pending_rows += table.num_rows
+        if self.rows is None:
+            self.rows = resolve_row_group_rows_for_sample(
+                pa.concat_tables(self.pending), None, self.mb, final=False
+            )
+        self._flush(final=False)
+
+    def close(self, schema: pa.Schema) -> None:
+        if self.rows is None:
+            sample = pa.concat_tables(self.pending) if self.pending else schema.empty_table()
+            self.rows = resolve_row_group_rows_for_sample(sample, None, self.mb)
+        self._flush(final=True)
+
+    def _flush(self, final: bool) -> None:
+        if self.rows is None or not self.pending:
+            return
+        buffered = pa.concat_tables(self.pending)
+        start = 0
+        while buffered.num_rows - start >= self.rows or (final and start < buffered.num_rows):
+            group = buffered.slice(start, self.rows)
+            self.writer.write_table(group, row_group_size=group.num_rows)
+            start += group.num_rows
+        rest = buffered.slice(start)
+        self.pending = [rest] if rest.num_rows else []
+        self.pending_rows = rest.num_rows
 
 
 def _simplify_file_in_memory(

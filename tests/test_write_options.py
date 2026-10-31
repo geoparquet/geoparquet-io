@@ -220,3 +220,30 @@ def test_the_table_funnels_take_the_whole_value(tmp_path):
         **full.funnel_kwargs(),
     )
     assert b"geo" in pq.ParquetFile(tmp_path / "g.parquet").schema_arrow.metadata
+
+
+def test_the_sample_resolver_owns_the_bound():
+    """resolve_row_group_rows_for_sample measures at most the facade's sample rows."""
+    import pyarrow as pa
+
+    from geoparquet_io.core.parquet_writer import (
+        _MB_ESTIMATE_SAMPLE_ROWS,
+        resolve_row_group_rows_for_sample,
+        resolve_row_group_rows_for_table,
+    )
+
+    small = pa.table({"s": ["x" * 10] * 1000})
+    assert resolve_row_group_rows_for_sample(small, None, 1) == resolve_row_group_rows_for_table(
+        small, None, 1
+    )
+    # Heavy rows after the sample do not move the answer.
+    head = pa.table({"s": ["x" * 10] * _MB_ESTIMATE_SAMPLE_ROWS})
+    tail = pa.table({"s": ["x" * 5000] * 1000})
+    mixed = pa.concat_tables([head, tail])
+    assert resolve_row_group_rows_for_sample(mixed, None, 1) == resolve_row_group_rows_for_table(
+        head, None, 1
+    )
+    # Below the bound with more rows to come, a byte target waits for them.
+    assert resolve_row_group_rows_for_sample(small, None, 1, final=False) is None
+    # An explicit row count wins, exactly as the facade resolves it.
+    assert resolve_row_group_rows_for_sample(mixed, 4096, None) == 4096

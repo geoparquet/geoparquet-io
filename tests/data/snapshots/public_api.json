@@ -599,6 +599,7 @@
     "resolve_row_group_rows",
     "resolve_row_group_rows_for_query",
     "resolve_row_group_rows_for_rewrite",
+    "resolve_row_group_rows_for_sample",
     "resolve_row_group_rows_for_table",
     "without_geometry_dictionary",
     "writable_geoparquet_version",

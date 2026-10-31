@@ -393,6 +393,43 @@ def resolve_row_group_rows_for_table(
     return _rows_for_byte_target(table, cast(float, row_group_size_mb), verbose)
 
 
+def resolve_row_group_rows_for_sample(
+    table,
+    row_group_rows: int | None,
+    row_group_size_mb: float | None,
+    *,
+    final: bool = True,
+    verbose: bool = False,
+) -> int | None:
+    """:func:`resolve_row_group_rows_for_table` on a bounded sample of ``table``.
+
+    For a writer that streams: ``table`` is the leading rows it is about to
+    write, and at most :data:`_MB_ESTIMATE_SAMPLE_ROWS` of them are measured
+    -- the bound :func:`resolve_row_group_rows_for_query` samples a query with
+    -- so no driver picks a sample size of its own. A table within the bound
+    is measured whole, which is exactly what the table funnel measures.
+
+    ``final=False`` says more rows are coming: below the bound the answer is
+    ``None`` (keep buffering) for a byte target, so the sample is the same one
+    whichever batch size the rows arrived in.
+    """
+    resolved = resolve_row_group_rows(row_group_rows, row_group_size_mb)
+    if resolved is not None:
+        return resolved
+    if not final and table.num_rows < _MB_ESTIMATE_SAMPLE_ROWS:
+        return None
+    if table.num_rows > _MB_ESTIMATE_SAMPLE_ROWS:
+        import pyarrow as pa
+        import pyarrow.compute as pc
+
+        # take() copies, so the buffer sizes are the sample's, not the
+        # whole table's buffers a zero-copy slice would still report.
+        table = pc.take(table, pa.array(range(_MB_ESTIMATE_SAMPLE_ROWS)))
+    return resolve_row_group_rows_for_table(
+        table, row_group_rows, row_group_size_mb, verbose=verbose
+    )
+
+
 def resolve_row_group_rows_for_query(
     con: duckdb.DuckDBPyConnection,
     query: str,

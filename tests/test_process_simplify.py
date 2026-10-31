@@ -478,9 +478,9 @@ class TestStreamingPlainMode:
 
     def test_streaming_honours_row_group_size_mb(self, tmp_path, monkeypatch):
         """--row-group-size-mb streams (bounded memory) and sizes the groups by
-        the facade's byte resolver, measured on the input's first row group."""
+        the facade's byte resolver on the simplified rows, as in memory."""
         import geoparquet_io.core.process.simplify as simp
-        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+        from geoparquet_io.core.parquet_writer import WriteOptions
 
         src = self._many_group_file(tmp_path, groups=4, rows_per=4096)
         streaming_runs = []
@@ -494,13 +494,28 @@ class TestStreamingPlainMode:
         out = tmp_path / "out.parquet"
         simplify_file(str(src), str(out), tolerance=0.05, row_group_size_mb=1)
         assert streaming_runs, "--row-group-size-mb fell back to the in-memory path"
-        expected_rows = resolve_row_group_rows_for_table(
-            pq.ParquetFile(str(src)).read_row_group(0), None, 1
+        # The same --row-group-size-mb gives the in-memory path's rows per group:
+        # both measure the simplified rows through the facade.
+        reference = tmp_path / "reference.parquet"
+        simp._simplify_file_in_memory(
+            str(src),
+            str(reference),
+            0.05,
+            WriteOptions(row_group_size_mb=1),
+            coverage=False,
+            preserve_topology=True,
+            simplify_boundary=True,
+            threads=None,
+            geometry_column=None,
+            drop_empty=False,
+            simplify_crs=None,
+            verbose=False,
         )
-        meta = pq.ParquetFile(str(out)).metadata
-        assert expected_rows < meta.num_rows
-        assert meta.num_row_groups == -(-meta.num_rows // expected_rows)
-        assert meta.row_group(0).num_rows == expected_rows
+        meta, ref = pq.ParquetFile(str(out)).metadata, pq.ParquetFile(str(reference)).metadata
+        assert meta.num_row_groups > 1
+        assert [meta.row_group(i).num_rows for i in range(meta.num_row_groups)] == [
+            ref.row_group(i).num_rows for i in range(ref.num_row_groups)
+        ]
 
     def test_streaming_matches_in_memory_reference(self, tmp_path, monkeypatch):
         """The streamed file is byte-equivalent in data and geo metadata to
