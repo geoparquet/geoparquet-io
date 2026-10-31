@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import mercantile
 import pyarrow as pa
 
@@ -13,6 +15,7 @@ from geoparquet_io.core.crs_utils import (
     is_projected,
 )
 from geoparquet_io.core.exceptions import GeoParquetError
+from geoparquet_io.core.geo_metadata import _non_finite_error
 from geoparquet_io.core.index_ops import IndexSpec, add_index_column, add_index_table
 from geoparquet_io.core.logging_config import (
     debug,
@@ -48,13 +51,19 @@ def _cell_expression(lon, lat, resolution):
 _POLE_SAFE_LAT = 89.9
 
 
-def _lat_lon_to_quadkey(lat: float, lon: float, level: int) -> str:
+def _lat_lon_to_quadkey(lat: float, lon: float, level: int) -> str | None:
     """Convert latitude and longitude to a quadkey string using mercantile.
 
     Web Mercator stops at about 85.05 degrees, and every latitude past it keys to
     the edge row. mercantile raises at a pole itself, where a spherical polar cap's
     point lies (#1293), so the latitude is held to 89.9, which keys to that row.
     """
+    if lat is None or lon is None:
+        return None
+    if math.isnan(lat) or math.isnan(lon):
+        return None
+    if not math.isfinite(lat) or not math.isfinite(lon):
+        raise _non_finite_error(None, repr((lon, lat)))
     lat = max(-_POLE_SAFE_LAT, min(_POLE_SAFE_LAT, lat))
     tile = mercantile.tile(lon, lat, level)
     return mercantile.quadkey(tile)
@@ -72,6 +81,7 @@ def register_quadkey_udf(con) -> None:
         _lat_lon_to_quadkey,
         ["DOUBLE", "DOUBLE", "INTEGER"],
         "VARCHAR",
+        null_handling="special",
     )
 
 

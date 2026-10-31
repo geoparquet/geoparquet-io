@@ -286,7 +286,7 @@ def add_index_column(
             write,
             use_centroid=use_centroid,
         )
-    handle_output_overwrite(output_parquet, overwrite, input_parquet)
+    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
     if not spec.multiple_files:
         require_single_file(input_parquet, f"add {spec.name}")
     validate_profile_for_urls(write.profile, input_parquet, output_parquet)

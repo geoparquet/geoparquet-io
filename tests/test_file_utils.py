@@ -790,7 +790,7 @@ class TestCopyFile:
         base_url, _served, _seen = recording_http_server
         dest = tmp_path / "dest.parquet"
 
-        with pytest.raises(Exception, match="404"):
+        with pytest.raises(GeoParquetError, match="not found"):
             copy_file(f"{base_url}/missing.parquet", str(dest))
 
         assert not dest.exists()

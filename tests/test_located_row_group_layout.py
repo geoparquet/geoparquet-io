@@ -35,3 +35,25 @@ def test_table_write_merges_unlocated_groups_without_reordering(tmp_path, strate
     if position == "all":
         # No layout can place a located row into a group when none exists.
         assert pf.num_row_groups == 2
+
+
+@pytest.mark.parametrize("strategy", ["duckdb-kv", "in-memory", "streaming", "disk-rewrite"])
+def test_spherical_layout_retains_footer_statistics(tmp_path, strategy):
+    from shapely import from_wkt, to_wkb
+
+    line = to_wkb(from_wkt("LINESTRING (-30 60, 30 60)"))
+    table = pa.table({"id": range(4096), "geometry": [line] * 2048 + [None] * 2048})
+    block = geo_block()
+    block["columns"]["geometry"]["edges"] = "spherical"
+    block["columns"]["geometry"]["geometry_types"] = ["LineString"]
+    src = write_with_geo(tmp_path / "source.parquet", table, block)
+    out = tmp_path / "out.parquet"
+    gpio.read(src).write(
+        out, write_strategy=strategy, geoparquet_version="2.0", row_group_rows=2048
+    )
+    metadata = pq.read_metadata(out)
+    assert metadata.num_row_groups == 1
+    assert pq.read_table(out)["id"].to_pylist() == list(range(4096))
+    stats = metadata.row_group(0).column(1).geo_statistics
+    assert stats is not None
+    assert stats.ymax == pytest.approx(63.43494982292201)

@@ -445,11 +445,18 @@ def make_request_with_retry(
             "dict[str, Any] | bytes",
             run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay),
         )
-    except (httpx.HTTPStatusError, RetryExhaustedError) as e:
+    except _request_failure_types() as e:
         error, cause = final_request_error(
             url, e, max_retries=max_retries, credentials=credentials, batch_size=batch_size
         )
         raise error from cause
+
+
+def _request_failure_types() -> tuple[type[Exception], ...]:
+    """The terminal failures from a request attempt run through the retry owner."""
+    import httpx
+
+    return httpx.HTTPStatusError, RetryExhaustedError
 
 
 def final_request_error(

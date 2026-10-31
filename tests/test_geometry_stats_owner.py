@@ -4,12 +4,11 @@
 one source union -- an Arrow table, a DuckDB query, or a Parquet file path --
 and every source answers the same question the same way:
 
-* NULL and EMPTY geometries are skipped, for the bbox *and* the types (a
-  geometry whose envelope is inverted -- what ``POINT(NaN NaN)``, ``POLYGON
-  EMPTY`` and a coordinate-free collection measure as -- is EMPTY).
-* An empty or all-degenerate input yields ``bbox=None`` and ``types=[]``:
-  never ``[0, 0, 0, 0]``, never an inverted ``[inf, inf, -inf, -inf]``,
-  never a raise.
+* NULL and EMPTY geometries contribute no bbox, but every non-NULL geometry
+  contributes its declared type, including EMPTY shapes.
+* An empty or all-degenerate input yields ``bbox=None``: never
+  ``[0, 0, 0, 0]``, never an inverted ``[inf, inf, -inf, -inf]``, never a raise.
+  Only empty or all-NULL input yields ``types=[]``.
 * A located geometry with an infinite coordinate is not measurable: every
   source raises one ``GeometryError`` naming it (#1165), so no write path
   can put ``Infinity`` into a ``geo`` bbox (#236).
@@ -74,17 +73,22 @@ ASTRIDE = _multipoly(_poly(179.5, 0.0, 180.0, 1.0), _poly(-180.0, 0.0, -179.5, 1
 CASES = {
     "empty": ([], None, [], None),
     "all-null": ([None, None], None, [], None),
-    "all-empty": ([EMPTY_POLYGON, EMPTY_POINT, EMPTY_COLLECTION], None, [], None),
+    "all-empty": (
+        [EMPTY_POLYGON, EMPTY_POINT, EMPTY_COLLECTION],
+        None,
+        ["GeometryCollection", "Point", "Polygon"],
+        None,
+    ),
     "mixed": (
         [_pt(1.0, 2.0), None, EMPTY_POLYGON, EMPTY_POINT, _pt(3.0, 4.0), _line(2.0, 2.0, 5.0, 1.0)],
         [1.0, 1.0, 5.0, 4.0],
-        ["LineString", "Point"],
+        ["LineString", "Point", "Polygon"],
         [1.0, 1.0, 5.0, 4.0],
     ),
     "antimeridian": (
         [ASTRIDE, None, EMPTY_POLYGON],
         [-180.0, 0.0, 180.0, 1.0],
-        ["MultiPolygon"],
+        ["MultiPolygon", "Polygon"],
         [179.5, 0.0, -179.5, 1.0],
     ),
 }

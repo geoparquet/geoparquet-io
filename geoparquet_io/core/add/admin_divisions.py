@@ -358,7 +358,7 @@ def add_admin_divisions_multi(
     effective_prefix = "vecorel" if vecorel else prefix
 
     # Check if output file exists and handle overwrite (fixes issue #278)
-    handle_output_overwrite(output_parquet, overwrite, input_parquet)
+    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
 
     # Check for partition input (not supported)
     require_single_file(input_parquet, "add admin-divisions")

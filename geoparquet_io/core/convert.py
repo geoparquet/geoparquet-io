@@ -2223,6 +2223,12 @@ def _convert_spatial_path(
                 geom_column,
             )
 
+    if is_parquet:
+        source = table_expr or f"read_parquet({sql_path(input_file)})"
+        read = resolve_geometry_read(con, source, geom_column, relation=True)
+        if read.kind == "wkb":
+            table_expr = f"(SELECT * REPLACE ({read.shape_expr} AS {read.quoted}) FROM {source})"
+
     # Determine if bbox should be skipped for this version
     skip_bbox = should_skip_bbox(geoparquet_version)
 

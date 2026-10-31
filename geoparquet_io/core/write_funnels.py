@@ -47,11 +47,13 @@ from geoparquet_io.core.arrow_geo_metadata import (
 )
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
+    PARQUET_UNKNOWN_CRS,
     _wrap_query_with_crs,
     crs_of,
     get_crs_display_name,
     is_geographic,
     is_unknown_type_crs,
+    table_crs_is_unknown,
 )
 from geoparquet_io.core.derive_geo_from_file import (
     derive_secondary_geometry_info,
@@ -1825,6 +1827,8 @@ def write_parquet_with_metadata(
         # invalidated (#601) were excluded at collection rather than
         # re-attached. The fast path's deferred V2 geo repair rides along, so
         # both edits cost one footer patch (#1270).
+        _ensure_located_row_groups(actual_output, geometry_column, compression, compression_level)
+        # Layout precedes the final GEOGRAPHY retype and statistics patch.
         apply_nonplanar_edges(
             edges_to_restore,
             actual_output,
@@ -1840,8 +1844,6 @@ def write_parquet_with_metadata(
             _auto_fix_vecorel_if_needed(
                 actual_output, extra_kv_metadata, original_metadata, compression_level
             )
-
-        _ensure_located_row_groups(actual_output, geometry_column, compression, compression_level)
 
         if is_remote:
             upload_if_remote(
@@ -1983,6 +1985,13 @@ def _write_table_with_strategy(strategy, **kwargs) -> None:
     with remote_write_context(destination, verbose=kwargs["verbose"]) as (local, _):
         kwargs["output_path"] = local
         strategy.write_from_table(**kwargs)
+        _ensure_located_row_groups(
+            kwargs["output_path"],
+            kwargs["geometry_column"],
+            kwargs["compression"],
+            kwargs["compression_level"],
+        )
+        # Layout precedes the final GEOGRAPHY retype and statistics patch.
         apply_nonplanar_edges(
             edges_by_col,
             kwargs["output_path"],
@@ -1990,12 +1999,6 @@ def _write_table_with_strategy(strategy, **kwargs) -> None:
             compression_level=kwargs["compression_level"],
             row_group_rows=kwargs["row_group_rows"],
             verbose=kwargs["verbose"],
-        )
-        _ensure_located_row_groups(
-            kwargs["output_path"],
-            kwargs["geometry_column"],
-            kwargs["compression"],
-            kwargs["compression_level"],
         )
 
         upload_if_remote(local, destination, profile=profile, verbose=kwargs["verbose"])
@@ -2082,7 +2085,11 @@ def write_geoparquet_table(
     original_metadata = table.schema.metadata
 
     if input_crs is None:
-        input_crs = crs_of(table, geometry_column=geometry_column, quiet=True)
+        input_crs = (
+            PARQUET_UNKNOWN_CRS
+            if table_crs_is_unknown(table, geometry_column)
+            else crs_of(table, geometry_column=geometry_column, quiet=True)
+        )
 
     # Validated and resolved once, by the owner; every write below takes it.
     codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
@@ -2159,6 +2166,8 @@ def write_geoparquet_table(
         # the GEOGRAPHY logical type, so the two never disagree (#1269).
         # A fallback rewrite keeps the groups just written: the count
         # write_arrow_table resolved, asked again of the same rows (silent).
+        _ensure_located_row_groups(actual_output, geometry_column, codec.name, codec.level)
+        # Layout precedes the final GEOGRAPHY retype and statistics patch.
         apply_nonplanar_edges(
             edges_by_col,
             actual_output,
@@ -2169,8 +2178,6 @@ def write_geoparquet_table(
             ),
             verbose=verbose,
         )
-
-        _ensure_located_row_groups(actual_output, geometry_column, codec.name, codec.level)
 
         # Upload to remote if needed
         if is_remote:

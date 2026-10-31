@@ -174,7 +174,11 @@ DEFAULT_MEMORY_FRACTION = 0.5
 
 
 def default_memory_limit() -> str | None:
-    """DuckDB memory limit for a write that names none; None if the ceiling is unknown."""
+    """DuckDB memory limit for a write that names none; None if the ceiling is unknown.
+
+    Binary units preserve the policy's 50% share; the former GB suffix on a
+    1024-based value understated that share by about 7%.
+    """
     ceiling = memory_ceiling()
     if ceiling is None:
         return None

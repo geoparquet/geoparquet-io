@@ -1798,15 +1798,13 @@ def _primary_encoding(options: GeoBlockOptions, col_meta: dict) -> str:
 # holds geometry in -- an Arrow table, a DuckDB query, a Parquet file -- with
 # one degenerate-geometry policy:
 #
-# * NULL and EMPTY geometries are skipped, for the bbox and for the types. A
-#   geometry is EMPTY when its envelope is inverted or absent: that is how
-#   ``POLYGON EMPTY``, ``POINT(NaN NaN)`` (WKB's empty point) and a
-#   coordinate-free collection measure, on DuckDB and on geoarrow alike.
-#   geoarrow cannot name the type of every EMPTY geometry, so counting their
-#   types made the two paths disagree.
-# * Empty or all-degenerate input yields ``bbox=None`` and ``[]`` types --
-#   never ``[0, 0, 0, 0]``, never the inverted ``[inf, inf, -inf, -inf]`` a
-#   min/max fold of EMPTY envelopes gives, never a raise.
+# * NULL and EMPTY geometries contribute no bbox. A geometry is EMPTY when
+#   its envelope is inverted or absent: ``POLYGON EMPTY``, ``POINT(NaN NaN)``
+#   (WKB's empty point) and a coordinate-free collection all measure this way.
+#   Every non-NULL geometry still contributes its declared type, EMPTY included.
+# * Empty or all-degenerate input yields ``bbox=None`` -- never ``[0, 0, 0, 0]``,
+#   never the inverted ``[inf, inf, -inf, -inf]`` a min/max fold of EMPTY
+#   envelopes gives, never a raise. Empty or all-NULL input yields ``[]`` types.
 # * A located geometry with an infinite coordinate has no bbox anyone can
 #   use. It raises :class:`GeometryError` naming the column and the geometry
 #   (#1165), so no write declares ``Infinity`` in a ``geo`` bbox (#236).
@@ -1928,21 +1926,22 @@ def row_group_geometry_stats(chunks, *, geographic: bool) -> GeometryStats:
     return merged_geometry_stats(parts, geographic=geographic)
 
 
-def _non_finite_message(column: str, example: str | None = None) -> str:
+def _non_finite_message(column: str | None, example: str | None = None) -> str:
     """The one sentence for a located geometry with an infinite coordinate (#1165).
 
     ``example`` names the offending value where the caller has one; the SQL
     struct expression raises it from inside a query, where it has none.
     """
     where = f", {example}," if example else ","
+    subject = f"Column '{column}' holds a geometry" if column is not None else "A geometry"
     return (
-        f"Column '{column}' holds a geometry with a non-finite (infinite) coordinate"
+        f"{subject} with a non-finite (infinite) coordinate"
         f"{where} so its bounds cannot be measured. Fix or remove that geometry and "
         "try again."
     )
 
 
-def _non_finite_error(column: str, example: str) -> Exception:
+def _non_finite_error(column: str | None, example: str) -> Exception:
     from geoparquet_io.core.exceptions import GeometryError
 
     return GeometryError(_non_finite_message(column, example))
@@ -1989,8 +1988,8 @@ def _envelope_columns(read) -> tuple[str, list[str]]:
     )
 
 
-def _located_rows_sql(con, query: str, geometry_column: str, bbox_column: str | None):
-    """A SELECT of ``(__t, __x0, __y0, __x1, __y1, __g)`` over the located rows, or None.
+def _geometry_rows_sql(con, query: str, geometry_column: str, bbox_column: str | None):
+    """A SELECT of ``(__t, __x0, __y0, __x1, __y1, __g)`` over all rows, or None.
 
     ``__t`` is the spec type name base from DuckDB (NULL when unknowable),
     ``__g`` the GEOMETRY (NULL on the struct paths). None when the column is
@@ -2019,7 +2018,6 @@ def _located_rows_sql(con, query: str, geometry_column: str, bbox_column: str | 
             SELECT {type_expr} AS __t, {", ".join(env)}, {geom} AS __g
             FROM ({query})
         ) AS __m(__t, __x0, __y0, __x1, __y1, __g)
-        WHERE {_located_sql("__x0", "__y0", "__x1", "__y1")}
     """
 
 
@@ -2031,9 +2029,10 @@ def _query_stats(
 ) -> tuple[GeometryStats, str | None]:
     """The stats of a query, and the located-rows SQL they came from (None: nothing to read)."""
     query = _strip_trailing_order_by(query)
-    located = _located_rows_sql(con, query, geometry_column, bbox_column)
-    if located is None:
+    measured = _geometry_rows_sql(con, query, geometry_column, bbox_column)
+    if measured is None:
         return _NO_STATS, None
+    located = f"SELECT * FROM ({measured}) WHERE {_located_sql('__x0', '__y0', '__x1', '__y1')}"
     rows = con.execute(f"""
         SELECT __t, MIN(__x0), MIN(__y0), MAX(__x1), MAX(__y1),
                COUNT(*) FILTER (WHERE NOT ({_FINITE_SQL}))
@@ -2049,7 +2048,11 @@ def _query_stats(
         """)
         )
         raise _non_finite_error(geometry_column, example[0] if example else "")
-    types = sorted({n for n in (geometry_type_name(r[0]) for r in rows) if n})
+    # EMPTY geometries still name a type; only the envelope excludes unlocated rows.
+    type_rows = con.execute(
+        f"SELECT DISTINCT __t FROM ({measured}) WHERE __t IS NOT NULL"
+    ).fetchall()
+    types = sorted({n for n in (geometry_type_name(r[0]) for r in type_rows) if n})
     if not rows:
         return GeometryStats(None, types), located
     bbox = [
@@ -2105,9 +2108,21 @@ def _antimeridian_wrap(con, located: str, bbox: list[float]) -> list[float]:
 
 def _arrow_types(wkb, verbose: bool) -> list[str]:
     import geoarrow.pyarrow as ga
+    import pyarrow.compute as pc
 
     try:
-        codes = geoarrow_wkb_codes(ga.unique_geometry_types(ga.as_wkb(wkb)))
+        parsed = ga.as_wkb(wkb)
+        codes = geoarrow_wkb_codes(ga.unique_geometry_types(parsed))
+        # GeoArrow's unique-types kernel visits coordinates, so EMPTY shapes
+        # contribute no type. Their WKB headers still declare type/dimensions.
+        for header in pc.unique(pc.binary_slice(parsed.storage, 0, 5)).to_pylist():
+            if header is None or len(header) != 5 or header[0] not in (0, 1):
+                continue
+            raw = int.from_bytes(header[1:], "little" if header[0] else "big")
+            code = raw & 0x0FFFFFFF
+            dimensions, base = divmod(code, 1000)
+            dimensions |= (1 if raw & 0x80000000 else 0) | (2 if raw & 0x40000000 else 0)
+            codes.append(base + dimensions * 1000)
     except Exception as e:  # geoarrow C++ errors, e.g. a type code of 0
         if verbose:
             debug(f"Could not compute geometry_types: {e}")
@@ -2317,12 +2332,14 @@ def _arrow_stats(
         return _NO_STATS
     storage, x0, y0, x1, y1 = found
     located = _located(x0, y0, x1, y1)
+    types = (
+        [] if storage is None else _arrow_types(pc.filter(storage, pc.is_valid(storage)), verbose)
+    )
     if not pc.any(located).as_py():
-        return _NO_STATS
+        return GeometryStats(None, types)
     bad = _unusable(located, x0, y0, x1, y1)
     if need_bbox and pc.any(bad).as_py():
         _raise_unusable(geometry_column, storage, bad, (x0, y0, x1, y1))
-    types = [] if storage is None else _arrow_types(pc.filter(storage, located), verbose)
     bbox = [
         pc.min(pc.filter(x0, located)).as_py(),
         pc.min(pc.filter(y0, located)).as_py(),
