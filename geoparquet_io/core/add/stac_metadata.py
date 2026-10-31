@@ -56,7 +56,7 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import handle_output_overwrite, is_same_file_path
 from geoparquet_io.core.logging_config import debug, success, warn
-from geoparquet_io.core.parquet_footer import FooterPatchUnsupported, patch_footer_kv
+from geoparquet_io.core.parquet_footer import patch_or_rewrite
 from geoparquet_io.core.remote import is_remote_url
 
 if TYPE_CHECKING:
@@ -371,7 +371,7 @@ def _existing_payload(parquet_file: str) -> "tuple[dict | None, list[str]]":
     pandas, geopandas, the kind of reader most likely to read this value back
     -- resolves metadata from that copy when the file carries one. Merging
     against whichever copy an Arrow reader would see is what keeps both copies
-    in agreement once :func:`patch_footer_kv` has updated them (see
+    in agreement once the footer patch has updated them (see
     ``core/parquet_footer.py``'s ``_arrow_schema_in_step``).
 
     The plain entry is read too: a file another tool patched at the Parquet
@@ -455,18 +455,14 @@ def add_stac_metadata(
     if verbose:
         debug(f"stac-geoparquet payload:\n{json.dumps(payload, indent=2)}")
 
-    try:
-        patch_footer_kv(
-            parquet_file,
-            {STAC_GEOPARQUET_KEY: serialized},
-            output_file=destination,
-            verbose=verbose,
-        )
-    except FooterPatchUnsupported as exc:
-        raise GeoParquetError(
-            f"Cannot write the stac-geoparquet key into {parquet_file}: {exc}.\n"
-            "Rewriting the file to add one footer key would cost its compression "
-            "level, so gpio stops here instead."
-        ) from exc
+    # `rewrite=None`: re-encoding a file to add one footer key would cost its
+    # compression level, so a footer that cannot be patched is refused.
+    patch_or_rewrite(
+        parquet_file,
+        {STAC_GEOPARQUET_KEY: serialized},
+        output_file=destination,
+        rewrite=None,
+        verbose=verbose,
+    )
 
     success(_summary(payload, added))

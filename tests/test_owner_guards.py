@@ -84,6 +84,7 @@ EXPECTED_COUNTS = {
     "G1.output_version": 0,
     "G1.geometry_stats": 0,
     "G1.edges": 0,
+    "G1.footer_patch": 0,
     "G2.exemptions": 12,
     "G3.pairs": 0,
     "G3.baseline": 0,
@@ -1743,6 +1744,36 @@ def _find_edges(m: _Module) -> Iterator[Hit]:
             yield m.hit(node)
 
 
+#: The footer patch's mechanism and its two refusals (``core/parquet_footer.py``).
+_FOOTER_PATCH_CALLS = frozenset({"patch_footer", "patch_footer_kv"})
+_FOOTER_PATCH_REFUSALS = frozenset({"FooterPatchUnsupported", "FooterPatchRaced"})
+
+
+def _caught_names(handler: ast.ExceptHandler) -> Iterator[str]:
+    kinds = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    for kind in kinds:
+        if isinstance(kind, ast.Name):
+            yield kind.id
+        elif isinstance(kind, ast.Attribute):
+            yield kind.attr
+
+
+def _find_footer_patch(m: _Module) -> Iterator[Hit]:
+    """A footer patch called, or its refusal caught, outside ``core/parquet_footer.py``
+    (#1367 concept 2): ``patch_footer(``/``patch_footer_kv(``, or ``except
+    FooterPatchUnsupported``/``FooterPatchRaced``. That pair is the
+    patch-else-rewrite decision ``parquet_footer.patch_or_rewrite`` owns; four
+    callers each hand-wrote it, one answered a race with a rewrite, one refused
+    where the others re-encoded, and each chose its own fallback codec (#1015).
+    """
+    for node in ast.walk(m.tree):
+        if isinstance(node, ast.Call) and _call_name(node) in _FOOTER_PATCH_CALLS:
+            yield m.hit(node)
+        elif isinstance(node, ast.ExceptHandler) and node.type is not None:
+            if any(name in _FOOTER_PATCH_REFUSALS for name in _caught_names(node)):
+                yield m.hit(node)
+
+
 @dataclass(frozen=True)
 class Arm:
     finder: Callable[..., Iterator[Hit]]
@@ -1786,6 +1817,7 @@ ARMS = {
     "output_version": Arm(_find_output_version, _VERSION_OWNERS),
     "geometry_stats": Arm(_find_geometry_stats, ("geoparquet_io/core/geo_metadata.py",)),
     "edges": Arm(_find_edges, ("geoparquet_io/core/edges.py",)),
+    "footer_patch": Arm(_find_footer_patch, ("geoparquet_io/core/parquet_footer.py",)),
 }
 
 
@@ -2294,6 +2326,11 @@ G1_PLANTS = {
     "scheme_test": 'def remote(p):\n    return p.startswith("s3://")\n',
     "output_version": ('def version(md):\n    return sanitized_carried_geo(md).get("version")\n'),
     "edges": 'def spherical(col):\n    return col.get("edges") is not None\n',
+    "footer_patch": (
+        "from geoparquet_io.core.parquet_footer import FooterPatchUnsupported\n\n"
+        "def add(path, rewrite):\n    try:\n        rewrite(path)\n"
+        "    except FooterPatchUnsupported:\n        rewrite(path)\n"
+    ),
     "overwrite_check": (
         "import os\n\ndef check(out, force):\n"
         "    if os.path.exists(out) and not force:\n        raise ValueError(out)\n"
@@ -2342,6 +2379,11 @@ G1_CLEAN = {
         "from geoparquet_io.core.edges import is_nonplanar, edges_of\n\n"
         'def spherical(col):\n    return is_nonplanar(edges_of(col))  # not "spherical"\n'
         'REPORT = {"edges": None, "note": "spherical edges"}\n'
+    ),
+    "footer_patch": (
+        "from geoparquet_io.core.parquet_footer import patch_or_rewrite\n\n"
+        "def add(path, rewrite):\n"
+        '    return patch_or_rewrite(path, {"k": "v"}, rewrite=rewrite)  # not patch_footer(\n'
     ),
     "overwrite_check": (
         "import os\n\ndef cleanup(tmp):\n    if os.path.exists(tmp):\n        os.remove(tmp)\n"
@@ -2543,6 +2585,34 @@ def test_g12_each_g1_arm_flags_its_pattern(arm_name, tmp_path):
     repo = _plant(tmp_path, arm_name, G1_PLANTS[arm_name])
     unexcused, _ = reconcile(arm_hits(repo, arm_name), [])
     assert len(unexcused) == 1, unexcused
+
+
+#: Every spelling of the hand-written patch-else-rewrite the four #1367 copies
+#: used (T2d), each of which the footer_patch arm must see once.
+FOOTER_PATCH_SHAPES = {
+    "kv patch call": (
+        "from geoparquet_io.core.parquet_footer import patch_footer_kv\n\n"
+        'def add(p):\n    patch_footer_kv(p, {"k": "v"})\n'
+    ),
+    "module-attribute patch call": (
+        "from geoparquet_io.core import parquet_footer\n\n"
+        "def add(p):\n    return parquet_footer.patch_footer(p, None)\n"
+    ),
+    "race caught": (
+        "from geoparquet_io.core import parquet_footer as pf\n\n"
+        "def add(p, f):\n    try:\n        f(p)\n    except pf.FooterPatchRaced:\n        f(p)\n"
+    ),
+    "refusal in a tuple": (
+        "def add(p, f):\n    try:\n        f(p)\n"
+        "    except (OSError, FooterPatchUnsupported):\n        return None\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(FOOTER_PATCH_SHAPES))
+def test_g12_footer_patch_arm_flags_every_shape(shape, tmp_path):
+    repo = _plant(tmp_path, "footer_patch", FOOTER_PATCH_SHAPES[shape])
+    assert len(arm_hits(repo, "footer_patch")) == 1
 
 
 #: The other shapes of a scheme test the arm must see (PR #1387 review).

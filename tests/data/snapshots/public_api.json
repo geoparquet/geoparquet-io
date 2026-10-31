@@ -578,7 +578,7 @@
     "FooterPatchUnsupported",
     "MAGIC",
     "patch_footer",
-    "patch_footer_kv",
+    "patch_or_rewrite",
     "read_footer_kv"
   ],
   "geoparquet_io.core.parquet_writer": [
@@ -649,6 +649,7 @@
     "declared_nonplanar_edges",
     "extract_preserved_kv_metadata",
     "read_preserved_kv_metadata",
+    "rewrite_footer_kv",
     "table_nonplanar_edges",
     "write_aggregate_table",
     "write_geoparquet_table",

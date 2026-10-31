@@ -254,7 +254,7 @@ def _duckdb_v2(path: Path, wkt: str) -> None:
 )
 def test_the_declared_orientation_decides_the_interior(tmp_path, orientation, expected):
     """A clockwise square is the square unoriented, and the rest of the globe if ccw."""
-    from geoparquet_io.core.parquet_footer import patch_footer_kv
+    from geoparquet_io.core.parquet_footer import patch_footer
     from geoparquet_io.core.write_funnels import apply_nonplanar_edges
 
     path = tmp_path / "square.parquet"
@@ -262,7 +262,7 @@ def test_the_declared_orientation_decides_the_interior(tmp_path, orientation, ex
     if orientation:
         geo = geo_block(path)
         geo["columns"]["geometry"]["orientation"] = orientation
-        patch_footer_kv(str(path), {"geo": json.dumps(geo)})
+        patch_footer(str(path), {"geo": json.dumps(geo)})
 
     apply_nonplanar_edges({"geometry": "spherical"}, str(path))
 

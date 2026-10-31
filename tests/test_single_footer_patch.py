@@ -161,7 +161,7 @@ def test_an_unpatchable_merged_footer_keeps_both_edits_in_the_block(
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("refused for the test")
 
-    monkeypatch.setattr(write_funnels, "patch_footer", refuse)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", refuse)
     out = tmp_path / "out.parquet"
     convert_to_geoparquet(str(xym_geography), str(out), skip_hilbert=True, geoparquet_version="2.0")
 
@@ -184,7 +184,7 @@ def test_a_raced_merged_patch_propagates_without_a_rewrite(xym_geography, tmp_pa
     def race(*args, **kwargs):
         raise FooterPatchRaced("changed for the test")
 
-    monkeypatch.setattr(write_funnels, "patch_footer", race)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", race)
     monkeypatch.setattr(
         write_funnels,
         "_rewrite_file_with_geo_metadata",

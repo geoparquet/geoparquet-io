@@ -624,7 +624,7 @@ class TestDirectCopyMemoryLimit:
         def refuse(*args, **kwargs):
             raise FooterPatchUnsupported("forced for the test")
 
-        monkeypatch.setattr(bm, "patch_footer_kv", refuse)
+        monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", refuse)
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
         seen = []
         self._spy_scoped_limit(monkeypatch, duckdb_kv, seen)

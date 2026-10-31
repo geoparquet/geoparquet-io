@@ -39,6 +39,12 @@ algorithm, and each of its chunks either has the bounding box in its
 edges (``geography_bbox``, #1272) or loses it (DuckDB measured vertices on a
 plane, which does not bound a geodesic edge; the type codes stay either way,
 since they do not depend on the edges). See :func:`_geography_splices`.
+
+Callers do not call the patch directly. :func:`patch_or_rewrite` is the one
+place that decides what a refusal means (#1367 concept 2): a footer that cannot
+be patched goes to the rewrite the caller passes in -- the write funnel's, since
+this module sits below it -- a race is never answered with one, and a caller
+that would rather stop says so with ``rewrite=None``.
 """
 
 from __future__ import annotations
@@ -48,7 +54,7 @@ import json
 import os
 import stat
 import struct
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import BinaryIO, TypeAlias
 
@@ -57,7 +63,8 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.edges import GEOGRAPHY_EDGE_ALGORITHMS, set_edges
 from geoparquet_io.core.exceptions import GeoParquetError
-from geoparquet_io.core.logging_config import debug
+from geoparquet_io.core.logging_config import debug, warn
+from geoparquet_io.core.remote import is_remote_url
 from geoparquet_io.core.write_strategies import atomic_write
 
 #: Keys to set or, with a ``None`` value, to remove. A caller spells them as
@@ -999,18 +1006,103 @@ def read_footer_kv(parquet_file: str) -> list[_Entry]:
     return []
 
 
-def patch_footer_kv(
-    parquet_file: str,
-    updates: dict[str, str | bytes | None],
-    *,
-    output_file: str | None = None,
-    verbose: bool = False,
-) -> None:
-    """Add, replace or remove footer key-value metadata, keeping the data bytes.
+#: The rewrite a caller falls back to: ``(source, destination, updates)``.
+#: ``write_funnels`` supplies it -- this module sits below the funnel in the
+#: import graph, so the fallback is passed in rather than imported.
+_Rewrite: TypeAlias = Callable[[str, str, Mapping[str, str | None]], None]
 
-    :func:`patch_footer` with no column retyped; see it for the guarantees.
+_REWRITE_NOTE = "Falling back to a rewrite, which re-encodes the data."
+
+
+def patch_or_rewrite(
+    parquet_file: str,
+    updates: Mapping[str, str | None],
+    *,
+    rewrite: _Rewrite | None,
+    output_file: str | None = None,
+    geography: Mapping[str, str] | None = None,
+    geography_bbox: Mapping[str, list] | None = None,
+    arrow_edges: Mapping[str, str] | None = None,
+    fallback_note: str = _REWRITE_NOTE,
+    verbose: bool = False,
+) -> list[str]:
+    """Write footer metadata by patch if the footer allows it, else by ``rewrite``.
+
+    The one patch-else-rewrite decision (#1367 concept 2). Four callers used to
+    hand-write it and answered the same refusal four ways: one rewrote after a
+    race, one refused where the others re-encoded, and each chose its own
+    fallback codec. Here:
+
+    * A local file whose footer can be read is patched (:func:`patch_footer`):
+      every page is copied verbatim, so codec, level, encodings, row groups and
+      every footer key the call does not name survive by construction.
+    * A footer that cannot be patched (:class:`FooterPatchUnsupported`), or a
+      remote path the patcher cannot read, is handed to ``rewrite`` -- the
+      funnel's re-encode, which decides which keys survive -- after a warning
+      ending in ``fallback_note`` (a remote path needs no warning). ``rewrite``
+      is skipped when ``updates`` is empty: there is no key to carry.
+    * ``rewrite=None`` is the caller's policy to stop instead: the refusal
+      becomes a :class:`GeoParquetError` naming the keys, and nothing is written.
+    * A race (:class:`FooterPatchRaced`) always propagates. The file changed
+      while it was being copied and nothing was written; a rewrite now would
+      read the bytes that arrived and stamp them with metadata derived from the
+      bytes that left.
+
+    Args:
+        parquet_file: The file to read.
+        updates: Keys to set; a ``None`` value removes a key.
+        rewrite: The fallback, called as ``rewrite(parquet_file, destination,
+            updates)``, or ``None`` to refuse.
+        output_file: Where to write; defaults to ``parquet_file``.
+        geography, geography_bbox, arrow_edges: Passed to :func:`patch_footer`.
+            A rewrite cannot retype a column, so they are dropped on the fallback.
+        fallback_note: The second sentence of the fallback's warning.
+        verbose: Report the footer sizes.
+
+    Returns:
+        The columns retyped GEOGRAPHY; none after a rewrite.
     """
-    patch_footer(parquet_file, updates, output_file=output_file, verbose=verbose)
+    destination = output_file or parquet_file
+    if is_remote_url(parquet_file) or is_remote_url(destination):
+        refusal = FooterPatchUnsupported(f"{destination} is remote and cannot be patched")
+        return _fall_back(parquet_file, destination, updates, rewrite, refusal, note=None)
+    try:
+        return patch_footer(
+            parquet_file,
+            dict(updates),
+            geography=geography,
+            geography_bbox=geography_bbox,
+            arrow_edges=arrow_edges,
+            output_file=output_file,
+            verbose=verbose,
+        )
+    except FooterPatchRaced:
+        raise
+    except FooterPatchUnsupported as exc:
+        return _fall_back(parquet_file, destination, updates, rewrite, exc, note=fallback_note)
+
+
+def _fall_back(
+    parquet_file: str,
+    destination: str,
+    updates: Mapping[str, str | None],
+    rewrite: _Rewrite | None,
+    refusal: FooterPatchUnsupported,
+    *,
+    note: str | None,
+) -> list[str]:
+    """The refusal's answer: the caller's ``rewrite``, or an error when it has none."""
+    if rewrite is None:
+        raise GeoParquetError(
+            f"Cannot write the {', '.join(updates)} key into {parquet_file}: {refusal}.\n"
+            "Rewriting the file to add one footer key would cost its compression "
+            "level, so gpio stops here instead."
+        ) from refusal
+    if note is not None:
+        warn(f"{refusal}. {note}")
+    if updates:
+        rewrite(parquet_file, destination, updates)
+    return []
 
 
 def patch_footer(

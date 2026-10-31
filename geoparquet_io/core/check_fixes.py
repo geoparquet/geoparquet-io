@@ -2,6 +2,7 @@
 
 import contextlib
 import copy
+import functools
 import json
 import os
 import shutil
@@ -18,6 +19,7 @@ from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_metadata import get_file_metadata
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
+    query_schema,
     quote_identifier,
     sql_path,
     uses_aws_profile,
@@ -33,12 +35,8 @@ from geoparquet_io.core.geo_metadata import (
     strip_bboxless_covering,
 )
 from geoparquet_io.core.hilbert_order import hilbert_order
-from geoparquet_io.core.logging_config import debug, info, progress, warn
-from geoparquet_io.core.parquet_footer import (
-    FooterPatchRaced,
-    FooterPatchUnsupported,
-    patch_footer_kv,
-)
+from geoparquet_io.core.logging_config import debug, info, progress
+from geoparquet_io.core.parquet_footer import patch_or_rewrite
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
     resolve_output_geoparquet_version,
@@ -49,7 +47,7 @@ from geoparquet_io.core.remote import (
     is_remote_url,
     needs_httpfs,
 )
-from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+from geoparquet_io.core.write_funnels import rewrite_footer_kv, write_parquet_with_metadata
 
 # Every fix below writes DEFAULT_ROW_GROUP_ROWS rows per row group.
 #
@@ -241,9 +239,34 @@ def fix_compression(
     return {"fix_applied": "Re-compressed with ZSTD", "success": True}
 
 
+def _arrow_schema_of(parquet_file: str):
+    """*parquet_file*'s Arrow schema; a remote one through DuckDB's probe.
+
+    The remote form reads the query the funnel's rewrite reads, through the one
+    schema probe (``query_schema``), so the gate below and the funnel's own see
+    the same columns.
+    """
+    if not is_remote_url(parquet_file):
+        return pq.read_schema(parquet_file)
+    url = resolve_file_url(parquet_file)
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
+    try:
+        return query_schema(
+            con, f"SELECT * FROM read_parquet({sql_path(url)}, hive_partitioning=false)"
+        )
+    finally:
+        con.close()
+
+
 def _supply_or_strip_bbox_member(parquet_file, geo_meta, verbose):
     """Add the missing ``bbox`` member when the file carries a declarable
     bbox column, else drop the covering.
+
+    A remote file is asked the same question through DuckDB's schema probe.
+    It used to be stripped unasked, because ``pq.read_schema`` cannot open a
+    URL; that was harmless only while the remote repair handed the funnel the
+    *original* block to decide on (the footer patch and its fallback now get
+    the one repaired block, through ``patch_or_rewrite``).
 
     Asks ``bbox_column_to_declare`` -- the gate ``_build_geo_block``
     (``arrow_geo_metadata``) and ``declare_carried_bbox_column``
@@ -256,8 +279,8 @@ def _supply_or_strip_bbox_member(parquet_file, geo_meta, verbose):
     """
     primary = geo_meta.get("primary_column")
     columns = geo_meta.get("columns") or {}
-    if primary and covering_lacks_bbox(columns.get(primary)) and not is_remote_url(parquet_file):
-        name = bbox_column_to_declare(pq.read_schema(parquet_file), geo_meta, verbose=verbose)
+    if primary and covering_lacks_bbox(columns.get(primary)):
+        name = bbox_column_to_declare(_arrow_schema_of(parquet_file), geo_meta, verbose=verbose)
         if name:
             repaired = copy.deepcopy(geo_meta)
             repaired["columns"][primary].setdefault("covering", {})["bbox"] = build_bbox_covering(
@@ -297,7 +320,9 @@ def fix_bboxless_covering(parquet_file, output_file, verbose=False, profile=None
     encodings, the bloom filters, the page index, the row-group boundaries and
     the row order all survive a repair that was never about the data. A footer
     that cannot be patched -- or a remote file, which the patcher does not read
-    -- falls back to a full rewrite.
+    -- falls back to the funnel's rewrite (``parquet_footer.patch_or_rewrite``
+    decides; ``write_funnels.rewrite_footer_kv`` re-encodes), with the same
+    repaired block either way.
 
     Recorded decision, not done here: in the NO-bbox-column shape at 1.x the
     ``check all --fix`` chain still drops the index entries in this step,
@@ -339,40 +364,12 @@ def fix_bboxless_covering(parquet_file, output_file, verbose=False, profile=None
         )
         fix_applied = "Dropped covering with no bbox member"
 
-    if not is_remote_url(parquet_file) and not is_remote_url(output_file):
-        try:
-            patch_footer_kv(
-                parquet_file,
-                {"geo": json.dumps(repaired)},
-                output_file=output_file,
-                verbose=verbose,
-            )
-            return {"fix_applied": fix_applied, "success": True}
-        except FooterPatchRaced:
-            # Before the general refusal below, and deliberately not handled:
-            # the patch refused because the input changed while it was being
-            # copied, and nothing was written. Falling back would read the bytes
-            # that arrived and stamp them with a `geo` block derived from the
-            # bytes that left -- another writer's rows described by our stats.
-            raise
-        except FooterPatchUnsupported as exc:
-            warn(f"{exc}. Falling back to a rewrite, which re-encodes the data.")
-
-    raw_url = resolve_file_url(parquet_file, verbose)
-    # `original_metadata` rather than the repaired block: the funnels own what
-    # reaches the `geo` key, and they re-derive the identical answer from the
-    # same gate -- declare, then strip. Handing them a block already repaired
-    # here would re-open the divergence on a remote input, where
-    # `_supply_or_strip_bbox_member` cannot read the schema and so always
-    # strips. The version is left to the facade, which answers it from
-    # `input_file` -- the file whose rows this reads (#1001).
-    _rewrite_through_staging(
+    patch_or_rewrite(
         parquet_file,
-        output_file,
-        f"SELECT * FROM read_parquet({sql_path(raw_url)}, hive_partitioning=false)",
+        {"geo": json.dumps(repaired)},
+        output_file=output_file,
+        rewrite=functools.partial(rewrite_footer_kv, verbose=verbose, profile=profile),
         verbose=verbose,
-        profile=profile,
-        original_metadata=original_metadata,
     )
 
     return {"fix_applied": fix_applied, "success": True}

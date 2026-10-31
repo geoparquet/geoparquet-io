@@ -218,13 +218,12 @@ def test_every_unsized_path_lands_on_the_default(path_name, source, tmp_path, mo
         _run("process", "overview", cells, "--levels", "14", "--output-dir", levels)
         (out,) = sorted(levels.glob("*.parquet"))
     else:
-        from geoparquet_io.core.add import bbox_metadata
         from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
 
         def refuse(*args, **kwargs):
             raise FooterPatchUnsupported("planted: take the fallback rewrite")
 
-        monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+        monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", refuse)
         # The same rows and layout with an undeclared `bbox` struct to declare.
         # Not made by `gpio add bbox`, whose own 49,152-row groups would hide
         # the input-average rule this rewrite used to apply.

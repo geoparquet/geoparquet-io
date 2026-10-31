@@ -21,10 +21,8 @@ import duckdb
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.add import bbox_metadata
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata
 from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
-from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
 
 GEO_NO_COVERING = json.dumps(
@@ -157,7 +155,7 @@ def test_a_footer_it_cannot_patch_falls_back_to_the_rewrite(zstd15_file, monkeyp
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("planted")
 
-    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", refuse)
     before = _data_section(zstd15_file)
 
     add_bbox_metadata(str(zstd15_file))
@@ -192,7 +190,7 @@ def test_the_fallback_on_a_native_file_writes_one_geo_entry(tmp_path, monkeypatc
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("planted")
 
-    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", refuse)
 
     add_bbox_metadata(str(path))
 
@@ -244,12 +242,14 @@ def test_a_failed_rewrite_closes_its_connection(zstd15_file, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("planted failure")
 
-    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
-    monkeypatch.setattr(bbox_metadata, "get_duckdb_connection", spy)
-    monkeypatch.setattr(bbox_metadata, "write_parquet_with_metadata", boom)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", refuse)
+    monkeypatch.setattr("geoparquet_io.core.write_funnels.get_duckdb_connection", spy)
+    monkeypatch.setattr("geoparquet_io.core.write_funnels.write_parquet_with_metadata", boom)
     before = zstd15_file.read_bytes()
 
-    with pytest.raises(GeoParquetError, match="planted failure"):
+    # The funnel's own error, unwrapped: the fallback is the funnel's rewrite
+    # (`write_funnels.rewrite_footer_kv`), not this command's (#1367 T2d).
+    with pytest.raises(RuntimeError, match="planted failure"):
         add_bbox_metadata(str(zstd15_file))
 
     assert len(opened) == 1
@@ -264,7 +264,7 @@ def test_a_verbose_fallback_reports_what_it_preserves(zstd15_file, monkeypatch, 
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("planted")
 
-    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", refuse)
 
     with caplog.at_level("DEBUG", logger="geoparquet_io"):
         add_bbox_metadata(str(zstd15_file), verbose=True)
@@ -317,7 +317,7 @@ def test_the_fallback_keeps_sidecar_keys_but_not_the_inputs_arrow_and_pandas_blo
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("planted")
 
-    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", refuse)
 
     add_bbox_metadata(str(path))
 

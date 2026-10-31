@@ -81,9 +81,9 @@ def test_geo_block_controls_the_stream_field(tmp_path, edges):
         "primary_column": "geometry",
         "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"], "edges": edges}},
     }
-    from geoparquet_io.core.parquet_footer import patch_footer_kv
+    from geoparquet_io.core.parquet_footer import patch_footer
 
-    patch_footer_kv(source, {"geo": json.dumps(geo)})
+    patch_footer(source, {"geo": json.dumps(geo)})
 
     output = _read_stream(_extract(source, "-").stdout)
     assert output.schema.field("geometry").type.edge_type.name.lower() == edges

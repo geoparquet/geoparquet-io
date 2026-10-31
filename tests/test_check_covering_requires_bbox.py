@@ -21,7 +21,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.check_fixes import fix_bboxless_covering
-from geoparquet_io.core.parquet_footer import patch_footer_kv
+from geoparquet_io.core.parquet_footer import patch_footer
 from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
 
 H3_ENTRY = {"column": "h3", "resolution": 9}
@@ -57,7 +57,7 @@ def _refooter(src, dest, covering, version="1.1.0"):
         column.pop("covering", None)
     else:
         column["covering"] = covering
-    patch_footer_kv(str(src), {"geo": json.dumps(geo)}, output_file=str(dest))
+    patch_footer(str(src), {"geo": json.dumps(geo)}, output_file=str(dest))
     return str(dest)
 
 
@@ -205,9 +205,7 @@ class TestFixDropsIt:
     def test_other_footer_keys_are_kept(self, buildings_test_file, tmp_path):
         """A metadata-only repair must not drop the keys beside ``geo``."""
         with_extra = tmp_path / "extra.parquet"
-        patch_footer_kv(
-            buildings_test_file, {"stac:collection": "mine"}, output_file=str(with_extra)
-        )
+        patch_footer(buildings_test_file, {"stac:collection": "mine"}, output_file=str(with_extra))
         bad = _refooter(with_extra, tmp_path / "bad.parquet", {"h3": H3_ENTRY})
         out = tmp_path / "fixed.parquet"
 
@@ -219,13 +217,12 @@ class TestFixDropsIt:
         self, bboxless, tmp_path, monkeypatch
     ):
         """The write funnels apply the same gate, so the fallback drops it too."""
-        from geoparquet_io.core import check_fixes
         from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
 
         def refuse(*args, **kwargs):
             raise FooterPatchUnsupported("pretend this footer is unreadable")
 
-        monkeypatch.setattr(check_fixes, "patch_footer_kv", refuse)
+        monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", refuse)
         out = tmp_path / "rewritten.parquet"
 
         fix_bboxless_covering(bboxless, str(out))
@@ -270,7 +267,6 @@ class TestFixSuppliesTheMissingMember:
         self, declarable, tmp_path, monkeypatch
     ):
         """The divergence this fix closes: same bytes, same covering, either arm."""
-        from geoparquet_io.core import check_fixes
         from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
 
         def refuse(*args, **kwargs):
@@ -278,7 +274,7 @@ class TestFixSuppliesTheMissingMember:
 
         patched = tmp_path / "patched.parquet"
         fix_bboxless_covering(declarable, str(patched))
-        monkeypatch.setattr(check_fixes, "patch_footer_kv", refuse)
+        monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", refuse)
         rewritten = tmp_path / "rewritten.parquet"
 
         fix_bboxless_covering(declarable, str(rewritten))
@@ -297,7 +293,7 @@ class TestFixSuppliesTheMissingMember:
 class TestARacedPatchIsNotAnsweredByARewrite:
     """A file that changed under the call is not an invitation to rewrite it.
 
-    ``patch_footer_kv`` refuses both a footer it cannot read and an input
+    ``patch_footer`` refuses both a footer it cannot read and an input
     another writer replaced mid-copy. Falling back to a rewrite is right for the
     first and wrong for the second: the rewrite re-reads whatever is on disk
     *now* and stamps those rows with a ``geo`` block derived from the bytes that
@@ -308,13 +304,12 @@ class TestARacedPatchIsNotAnsweredByARewrite:
     def test_the_repair_propagates_the_race_and_writes_nothing(
         self, bboxless, tmp_path, monkeypatch
     ):
-        from geoparquet_io.core import check_fixes
         from geoparquet_io.core.parquet_footer import FooterPatchRaced
 
         def raced(*args, **kwargs):
             raise FooterPatchRaced("pretend another writer landed mid-copy")
 
-        monkeypatch.setattr(check_fixes, "patch_footer_kv", raced)
+        monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", raced)
         out = tmp_path / "never_written.parquet"
 
         with pytest.raises(FooterPatchRaced):
@@ -469,11 +464,15 @@ class TestTheRemoteRepairPath:
 
         src = bboxless
         patched: list[str] = []
-        monkeypatch.setattr(cf, "patch_footer_kv", lambda *a, **k: patched.append("patched"))
+        monkeypatch.setattr(
+            "geoparquet_io.core.parquet_footer.patch_footer",
+            lambda *a, **k: patched.append("patched"),
+        )
         monkeypatch.setattr(cf, "is_remote_url", lambda p: str(p).startswith("s3://"))
         rewrote: list[str] = []
         monkeypatch.setattr(
-            cf, "write_parquet_with_metadata", lambda *a, **k: rewrote.append("rewrote")
+            "geoparquet_io.core.write_funnels.write_parquet_with_metadata",
+            lambda *a, **k: rewrote.append("rewrote"),
         )
 
         summary = cf.fix_bboxless_covering(str(src), "s3://bucket/out.parquet", verbose=False)
@@ -481,3 +480,26 @@ class TestTheRemoteRepairPath:
         assert patched == [], "a remote output must not be footer-patched"
         assert rewrote == ["rewrote"]
         assert summary["success"] is True
+
+    def test_a_remote_input_is_asked_the_same_question_through_duckdb(
+        self, declarable, monkeypatch
+    ):
+        """The remote repair supplies the member too, rather than stripping unasked.
+
+        The patch and its fallback now get one repaired block, so the remote
+        schema read (DuckDB's probe; ``pq.read_schema`` cannot open a URL) has
+        to answer the declaration gate exactly as the local read does. The
+        file is local; only the remote predicate is planted.
+        """
+        import geoparquet_io.core.check_fixes as cf
+        from geoparquet_io.core.common import get_parquet_metadata
+        from geoparquet_io.core.geo_metadata import sanitized_carried_geo
+
+        geo = sanitized_carried_geo(get_parquet_metadata(declarable)[0])
+        local = cf._supply_or_strip_bbox_member(declarable, geo, False)
+        monkeypatch.setattr(cf, "is_remote_url", lambda p: True)
+
+        remote = cf._supply_or_strip_bbox_member(declarable, geo, False)
+
+        assert remote == local
+        assert remote[1] == "bbox", remote

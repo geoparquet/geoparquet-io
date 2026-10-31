@@ -21,9 +21,12 @@ dependency runs one way and only one way: ``write_funnels`` imports
 Split out of ``common.py`` unchanged; every name is still importable from there.
 """
 
+import contextlib
 import copy
 import json
-from collections.abc import Collection
+import os
+import shutil
+from collections.abc import Collection, Iterator, Mapping
 
 import pyarrow.parquet as pq
 
@@ -57,6 +60,7 @@ from geoparquet_io.core.duckdb_metadata import (
 from geoparquet_io.core.duckdb_utils import (
     _get_query_column_type,
     _get_query_columns,
+    get_duckdb_connection,
     parse_duckdb_geo_type,
     sql_path,
 )
@@ -71,8 +75,12 @@ from geoparquet_io.core.edges import (
     requests_planar,
     restore_edges,
 )
-from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.file_utils import get_all_parquet_files, is_partition_path
+from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
+from geoparquet_io.core.file_utils import (
+    get_all_parquet_files,
+    is_partition_path,
+    resolve_file_url,
+)
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     SELF_EVIDENT_BBOX_COLUMN,
@@ -106,12 +114,7 @@ from geoparquet_io.core.logging_config import (
     warn,
 )
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
-from geoparquet_io.core.parquet_footer import (
-    FooterPatchRaced,
-    FooterPatchUnsupported,
-    patch_footer,
-    patch_footer_kv,
-)
+from geoparquet_io.core.parquet_footer import patch_or_rewrite
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.parquet_writer import (
     _CARRIED_SCHEMA_METADATA_KEYS,
@@ -123,13 +126,20 @@ from geoparquet_io.core.parquet_writer import (
     resolve_row_group_rows_for_query,
     write_arrow_table,
 )
-from geoparquet_io.core.remote import remote_write_context, upload_if_remote
+from geoparquet_io.core.remote import (
+    get_remote_error_hint,
+    is_remote_url,
+    needs_httpfs,
+    remote_write_context,
+    upload_if_remote,
+)
 from geoparquet_io.core.write_strategies import (
     WriteStrategy,
     WriteStrategyFactory,
     needs_metadata_rewrite,
 )
 from geoparquet_io.core.write_strategies.base import (
+    atomic_write,
     has_unknown_secondary,
     merge_secondary_geometry_metadata,
     wrap_query_with_secondary_crs,
@@ -209,10 +219,11 @@ def apply_nonplanar_edges(
       2.0 output whose block said spherical over a planar column, which
       ``check spec`` reports. A 1.x output has no logical type to retype.
 
-    Both go into the footer in one ``patch_footer`` call: the data pages are
+    Both go into the footer in one ``patch_or_rewrite`` call: the data pages are
     the same WKB either way, so nothing below the footer is re-encoded. The
     block-only rewrite this replaced cost a full pass and lost the compression
-    level; it stays as the fallback for a footer that cannot be read.
+    level; it stays as the fallback for a footer that cannot be read
+    (``_rewrite_own_output``), which leaves the columns planar.
 
     A retyped column gets its bounding boxes back (#1272): the row-group
     GeospatialStatistics and the block's ``bbox`` were vertex boxes on a plane,
@@ -255,30 +266,18 @@ def apply_nonplanar_edges(
     # column's embedded Arrow schema is stamped instead, or it says planar.
     arrow_edges = edges_by_col if geoparquet_1x else None
 
-    try:
-        retyped = patch_footer(
-            output_file,
-            geo_updates,
-            geography=geography,
-            geography_bbox=geography_bbox,
-            arrow_edges=arrow_edges,
-            verbose=verbose,
-        )
-    except FooterPatchRaced:
-        # Nothing was written, and a rewrite now would describe another
-        # writer's bytes (see _ensure_v2_geo_metadata).
-        raise
-    except FooterPatchUnsupported as exc:
-        retyped = []
-        warn(f"{exc}. Edge columns stay planar in the Parquet schema.")
-        if geo_updates:
-            _rewrite_file_with_geo_metadata(
-                output_file,
-                read_raw_geo(geo_updates).value,
-                compression,
-                compression_level,
-                row_group_rows,
-            )
+    # A footer that cannot be patched keeps the edges in the block only: a
+    # rewrite has no GEOGRAPHY type to write back.
+    retyped = patch_or_rewrite(
+        output_file,
+        geo_updates,
+        rewrite=_rewrite_own_output(compression, compression_level, row_group_rows),
+        geography=geography,
+        geography_bbox=geography_bbox,
+        arrow_edges=arrow_edges,
+        fallback_note="Edge columns stay planar in the Parquet schema.",
+        verbose=verbose,
+    )
 
     if geo_meta is None and not retyped and not _already_geography(output_file, edges_by_col):
         warn(
@@ -475,15 +474,15 @@ def _ensure_v2_geo_metadata(
     write but whose ``primary_column`` names its first geometry column rather
     than ``primary_column`` -- a secondary that comes before the primary.
 
-    One footer key does not need the data decoded, so the key goes in with
-    ``patch_footer_kv``: every byte below the footer is copied verbatim, which
+    One footer key does not need the data decoded, so the key goes in through
+    ``patch_or_rewrite``'s footer patch: every byte below the footer is copied verbatim, which
     keeps the codec, the *compression level* Parquet does not record, the
     encodings, the row-group boundaries the COPY just sized and the row order by
     construction (#1177). The rewrite it replaced had to re-derive all of those
     from pyarrow's own defaults, and came back both bigger than the COPY it was
     repairing and re-chunked -- so an XYM 2.0 output had a different layout from
     an XY one for the same command. It stays as the fallback for a footer that
-    cannot be read.
+    cannot be read (``_rewrite_own_output``).
 
     This lives here rather than beside the derivation because
     ``derive_geo_from_file`` sits below ``parquet_footer`` in the import
@@ -502,20 +501,12 @@ def _ensure_v2_geo_metadata(
             debug("Deferring the omitted geo metadata to the edges footer patch")
         return geo_meta
 
-    try:
-        patch_footer_kv(output_path, {"geo": json.dumps(geo_meta)}, verbose=verbose)
-    except FooterPatchRaced:
-        # The file changed while the patch was copying it, and nothing was
-        # written. The rewrite fallback below would read the bytes that have
-        # arrived and stamp them with a `geo` block derived from the bytes
-        # that have gone -- another writer's rows under our stats -- so the
-        # refusal propagates instead (#1173's repair takes the same stance).
-        raise
-    except FooterPatchUnsupported as exc:
-        warn(f"{exc}. Falling back to a rewrite, which re-encodes the data.")
-        _rewrite_file_with_geo_metadata(
-            output_path, geo_meta, compression, compression_level, row_group_rows
-        )
+    patch_or_rewrite(
+        output_path,
+        {"geo": json.dumps(geo_meta)},
+        rewrite=_rewrite_own_output(compression, compression_level, row_group_rows),
+        verbose=verbose,
+    )
     if verbose:
         debug(
             f"Wrote the geo metadata the writer omitted or mislabelled: {geo_meta['primary_column']!r} is primary"
@@ -876,6 +867,119 @@ def read_preserved_kv_metadata(parquet_file: str, verbose: bool = False) -> dict
     if verbose and preserved:
         debug(f"Preserving input KV metadata keys: {sorted(preserved)}")
     return preserved
+
+
+def _carried_with_updates(
+    metadata: Mapping[bytes, bytes] | None, updates: Mapping[str, str | None]
+) -> dict[bytes, bytes]:
+    """The input's footer keys with ``updates`` applied: set, or removed by ``None``."""
+    carried = dict(metadata or {})
+    for key, value in updates.items():
+        if value is None:
+            carried.pop(key.encode("utf-8"), None)
+        else:
+            carried[key.encode("utf-8")] = value.encode("utf-8")
+    return carried
+
+
+@contextlib.contextmanager
+def _replacing(destination: str) -> Iterator[str]:
+    """Where a rewrite writes, so that it replaces *destination* only once closed.
+
+    An existing local destination is staged beside itself and keeps its mode:
+    DuckDB moving its own ``tmp_`` file over a path its scan still holds open is
+    what Windows refuses (#1032), and a 0640 file should not come back with the
+    staging file's mode. A new or remote destination is written directly; the
+    funnel stages a remote one locally and uploads it.
+    """
+    if is_remote_url(destination) or not os.path.exists(destination):
+        yield destination
+        return
+    with atomic_write(destination) as staged:
+        yield staged
+        with contextlib.suppress(OSError):
+            shutil.copymode(destination, staged)
+
+
+def rewrite_footer_kv(
+    source: str,
+    destination: str,
+    updates: Mapping[str, str | None],
+    *,
+    verbose: bool = False,
+    profile: str | None = None,
+) -> None:
+    """Re-encode *source* to *destination* with ``updates`` applied to its footer keys.
+
+    The funnel's one metadata-only rewrite: the fallback
+    :func:`~geoparquet_io.core.parquet_footer.patch_or_rewrite` takes for a
+    footer it cannot patch. A rewrite decodes every page, so it is a write like
+    any other and takes the facade's policy for one -- codec and level, row
+    groups, output version (from ``source``, so a native 2.0 input stays native
+    and a 1.x one stays WKB, #712), one ``geo`` key (#1225) -- and the
+    funnel's rule for which footer keys survive: every sidecar key the input
+    carries (``extract_preserved_kv_metadata``) and the ``geo`` block, with
+    the keys ``updates`` names replaced or removed. The input's ``pandas`` and
+    ``ARROW:schema`` describe the input's rows and are not carried (#710).
+
+    Args:
+        source: The file to read.
+        destination: Where the result goes; may be *source*.
+        updates: Footer keys to set, as text; ``None`` removes a key.
+        verbose: Report the carried keys and the query.
+        profile: AWS profile for a remote *source* or *destination*.
+    """
+    import duckdb  # deferred: the embeddable import surface defers duckdb (#1307)
+
+    carried = _carried_with_updates(get_kv_metadata(source), updates)
+    url = resolve_file_url(source, verbose)
+    if verbose:
+        debug("\nPreserving file properties:")
+        debug(f"Existing metadata keys: {[bytes(key).decode() for key in carried]}")
+    with _replacing(destination) as staged:
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(source))
+        try:
+            write_parquet_with_metadata(
+                con=con,
+                query=f"SELECT * FROM read_parquet({sql_path(url)}, hive_partitioning=false)",
+                output_file=staged,
+                original_metadata=carried,
+                compression=None,
+                compression_level=None,
+                row_group_rows=None,
+                verbose=verbose,
+                show_sql=verbose,
+                profile=profile,
+                input_file=source,
+            )
+        except duckdb.IOException as e:
+            if is_remote_url(source):
+                hints = get_remote_error_hint(e, source)
+                raise RemoteAccessError(source, f"{hints}\n\nOriginal error: {str(e)}") from e
+            raise
+        finally:
+            con.close()
+
+
+def _rewrite_own_output(compression, compression_level, row_group_rows):
+    """The fallback for a repair of a file this funnel just wrote.
+
+    That file already carries exactly the keys the funnel chose, so the rewrite
+    keeps every one and replaces only the ``geo`` block, row group by row group
+    at the funnel's own codec, level and row-group count
+    (``derive_geo_from_file._rewrite_file_with_geo_metadata``).
+    """
+
+    def rewrite(_source: str, destination: str, updates: Mapping[str, str | None]) -> None:
+        _rewrite_file_with_geo_metadata(
+            destination,
+            read_raw_geo(dict(updates)).value,
+            compression,
+            compression_level,
+            row_group_rows,
+        )
+
+    return rewrite
 
 
 # Fields a carried `geo` block must still have for the 2.0 fast path to be able

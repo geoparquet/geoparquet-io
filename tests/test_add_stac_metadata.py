@@ -366,7 +366,7 @@ class TestTheCoreModule:
         def refuse(*args, **kwargs):
             raise FooterPatchUnsupported("encrypted footer")
 
-        monkeypatch.setattr(module, "patch_footer_kv", refuse)
+        monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", refuse)
         with pytest.raises(GeoParquetError, match="encrypted footer"):
             module.add_stac_metadata(str(parquet), COLLECTION)
 
@@ -606,7 +606,7 @@ class TestReviewFixes:
         # A Parquet-level patch can leave the plain entry and pyarrow's
         # ARROW:schema copy disagreeing; both copies' Collections survive.
         from geoparquet_io.core.add.stac_metadata import add_stac_metadata
-        from geoparquet_io.core.parquet_footer import patch_footer_kv
+        from geoparquet_io.core.parquet_footer import patch_footer
 
         path = tmp_path / "split.parquet"
         arrow_side = {"version": "1.1.0", "collections": {"A": {"id": "A"}}}
@@ -617,9 +617,7 @@ class TestReviewFixes:
         blob = pq.read_metadata(path).metadata[b"ARROW:schema"]
         plain_side = {"version": "1.1.0", "collections": {"P": {"id": "P"}}}
         # Naming ARROW:schema keeps the blob as-is, so only the plain entry moves.
-        patch_footer_kv(
-            str(path), {"stac-geoparquet": json.dumps(plain_side), "ARROW:schema": blob}
-        )
+        patch_footer(str(path), {"stac-geoparquet": json.dumps(plain_side), "ARROW:schema": blob})
 
         add_stac_metadata(str(path), {"id": "B"})
         plain = json.loads(pq.read_metadata(path).metadata[b"stac-geoparquet"])
@@ -677,15 +675,13 @@ class TestReviewFixes:
     def test_a_value_only_the_plain_entry_carries_is_kept(self, tmp_path):
         # The ARROW:schema copy has no stac-geoparquet key at all.
         from geoparquet_io.core.add.stac_metadata import add_stac_metadata
-        from geoparquet_io.core.parquet_footer import patch_footer_kv
+        from geoparquet_io.core.parquet_footer import patch_footer
 
         path = tmp_path / "plain-only.parquet"
         pq.write_table(pa.table({"id": ["a"]}), path)
         blob = pq.read_metadata(path).metadata[b"ARROW:schema"]
         plain_side = {"version": "1.1.0", "collections": {"P": {"id": "P"}}}
-        patch_footer_kv(
-            str(path), {"stac-geoparquet": json.dumps(plain_side), "ARROW:schema": blob}
-        )
+        patch_footer(str(path), {"stac-geoparquet": json.dumps(plain_side), "ARROW:schema": blob})
 
         add_stac_metadata(str(path), {"id": "B"})
         assert set(_meta(path)["collections"]) == {"P", "B"}
