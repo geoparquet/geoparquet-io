@@ -96,6 +96,15 @@ def crosses_antimeridian_sql(xmin: str, xmax: str, geographic: bool | None = Non
     return f"({xmin} > {xmax} AND {xmax} >= -180 AND {xmin} <= 180)"
 
 
+def within_wrapped_x_sql(x: str, xmin: str, xmax: str) -> str:
+    """SQL: ``x`` lies in a wrapped box's X range, ``[xmin, 180] U [-180, xmax]``.
+
+    The per-vertex membership test of :meth:`BBox.pieces` for a reader that
+    decides inside a query (one row, one vertex at a time).
+    """
+    return f"({x} >= {xmin} OR {x} <= {xmax})"
+
+
 def any_piece(bbox: BBox, condition: Callable[[BBox], str]) -> str:
     """One SQL condition for ``bbox``: ``condition`` of each piece, ORed when it wraps."""
     parts = [condition(piece) for piece in bbox.pieces()]

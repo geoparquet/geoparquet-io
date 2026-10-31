@@ -17,7 +17,7 @@ from typing import Any
 from rich.console import Console
 from rich.markup import escape
 
-from geoparquet_io.core.bbox_parse import BBox
+from geoparquet_io.core.bbox_parse import BBox, within_wrapped_x_sql
 from geoparquet_io.core.check_verdict import validation_verdict
 from geoparquet_io.core.crs_utils import (
     CRS_ABSENT,
@@ -1591,10 +1591,8 @@ def _x_within_sql(geom_expr: str, xmin, xmax) -> str:
     lo, hi = _sql_float(xmin), _sql_float(xmax)
     if xmin <= xmax:
         return f"ST_XMin({geom_expr}) >= {lo} AND ST_XMax({geom_expr}) <= {hi}"
-    return (
-        f"list_bool_and([ST_X(p.geom) <= {hi} OR ST_X(p.geom) >= {lo} "
-        f"FOR p IN ST_Dump(ST_Points({geom_expr}))])"
-    )
+    inside = within_wrapped_x_sql("ST_X(p.geom)", lo, hi)
+    return f"list_bool_and([{inside} FOR p IN ST_Dump(ST_Points({geom_expr}))])"
 
 
 def _build_bbox_query(

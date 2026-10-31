@@ -371,3 +371,21 @@ def test_preview_splits_a_wrapped_row_group_with_the_owner():
     assert _intersects(wrapped_group, parse_bbox("-175,0,-172,1"))
     assert _intersects(wrapped_group, parse_bbox("172,0,175,1"))
     assert not _intersects(wrapped_group, parse_bbox("0,0,1,1"))
+
+
+def test_within_wrapped_x_sql_is_the_lobe_membership():
+    import duckdb
+
+    from geoparquet_io.core.bbox_parse import within_wrapped_x_sql
+
+    sql = within_wrapped_x_sql("x", "170", "-170")
+    for x, inside in [(175, True), (-175, True), (180, True), (0, False), (169, False)]:
+        assert duckdb.sql(f"SELECT {sql} FROM (SELECT {x}::DOUBLE x)").fetchall() == [(inside,)]
+
+
+@pytest.mark.parametrize(("geographic", "noted"), [(True, True), (None, True), (False, False)])
+def test_partition_wrap_note_follows_the_predicate(geographic, noted):
+    from geoparquet_io.core.inspect_utils import _combined_bbox_wrap_note
+
+    assert bool(_combined_bbox_wrap_note([170.0, 0.0, -170.0, 1.0], geographic)) is noted
+    assert _combined_bbox_wrap_note([500000.0, 0.0, 400000.0, 1.0], geographic) == ""

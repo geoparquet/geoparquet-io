@@ -1449,7 +1449,7 @@ def _bbox_hint_lines(
 
 def _bbox_extent_lines(crs: str, layer_bbox: tuple[float, float, float, float] | None) -> list[str]:
     """The layer extent from capabilities, in lon/lat and in ``crs``."""
-    if not layer_bbox or layer_bbox[0] > layer_bbox[2]:
+    if not layer_bbox or BBox(*layer_bbox).crosses_antimeridian(geographic=True):
         return []
     line = f"Layer extent is {_format_bbox(layer_bbox)} in lon/lat"
     native = _layer_extent_in_crs(crs, layer_bbox)
@@ -1462,7 +1462,11 @@ def _layer_extent_in_crs(
     crs: str, layer_bbox: tuple[float, float, float, float] | None
 ) -> tuple[float, float, float, float] | None:
     """The lon/lat layer extent reprojected into a projected ``crs``, or None."""
-    if not layer_bbox or layer_bbox[0] > layer_bbox[2] or _is_geographic_crs(crs):
+    if (
+        not layer_bbox
+        or BBox(*layer_bbox).crosses_antimeridian(geographic=True)
+        or _is_geographic_crs(crs)
+    ):
         return None
     clipped = _clip_to_area_of_use_or_none(layer_bbox, crs)
     return _try_lon_lat_bbox_in_crs(clipped, crs) if clipped else None

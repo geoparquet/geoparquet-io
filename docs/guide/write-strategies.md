@@ -215,6 +215,9 @@ the buffers they build from it.
 `--write-memory` overrides the default on the commands that have the option, including the
 admin joins; `gpio pmtiles create`, `gpio add bbox-metadata` and the format exports do not
 have it, so they always use the default.
+Writes that pyarrow does rather than DuckDB accept a memory limit without effect: the
+ArcGIS, WFS and Carto extracts, `process contour`, `process polygonize`, `process simplify`
+and the BigQuery write. (`extract bigquery --write-memory` still bounds the BigQuery scan.)
 
 Sizes read the same way in every gpio option that takes one (`--write-memory`,
 `--row-group-size-mb`, `--min-size`): `KB`, `MB`, `GB` and `TB` are powers of 1000 and

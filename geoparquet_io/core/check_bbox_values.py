@@ -48,7 +48,7 @@ from typing import TypedDict, cast
 
 import duckdb
 
-from geoparquet_io.core.bbox_parse import crosses_antimeridian_sql
+from geoparquet_io.core.bbox_parse import crosses_antimeridian_sql, within_wrapped_x_sql
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.check_verdict import (
     FAILURE_GLYPH,
@@ -280,7 +280,7 @@ def _x_extent_sql(wrapped: str) -> tuple[str, str]:
     """
     xs = "[ST_X(p.geom) FOR p IN ST_Dump(ST_Points(geom))]"
     wrapped_short = (
-        "list_max([CASE WHEN x >= bxmin OR x <= bxmax THEN 0 "
+        f"list_max([CASE WHEN {within_wrapped_x_sql('x', 'bxmin', 'bxmax')} THEN 0 "
         f"ELSE least(bxmin - x, x - bxmax) END FOR x IN {xs}])"
     )
     shifted = f"[CASE WHEN x <= bxmax THEN x + 360 ELSE x END FOR x IN {xs}]"
