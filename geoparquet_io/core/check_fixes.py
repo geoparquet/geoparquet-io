@@ -141,11 +141,13 @@ def fix_compression(
 
 
 def _arrow_schema_of(parquet_file: str):
-    """*parquet_file*'s Arrow schema, as the funnel's rewrite of it would read it.
+    """*parquet_file*'s Arrow schema, read the same way for a local and a remote file.
 
-    One probe for a local and a remote file alike (``query_schema``) over the
-    funnel's own spelling of a whole-file read (``file_relation``), so the gate
-    below and the rewrite see the same columns.
+    DuckDB's schema probe (``duckdb_utils.query_schema``) over the one spelling
+    of a whole-file read (``write_funnels.file_relation``, which the ``COPY``
+    fixes here read through too). ``pq.read_schema`` cannot open a URL, and a
+    second branch for one is how the remote repair came to strip the member
+    the local one supplied.
     """
     url = resolve_file_url(parquet_file)
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))

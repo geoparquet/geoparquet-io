@@ -22,7 +22,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.bbox_structure import bbox_covering_column_for
-from geoparquet_io.core.compression import resolve_process_compression_level
+from geoparquet_io.core.compression import resolve_codec, resolve_process_compression_level
 from geoparquet_io.core.crs_utils import is_geographic_crs
 from geoparquet_io.core.edges import set_edges
 from geoparquet_io.core.exceptions import (
@@ -610,7 +610,6 @@ def _simplify_file_streaming(
     drop_columns: list[str] | None = None,
 ) -> None:
     """Stream-simplify batch by batch: memory is bounded by one row group."""
-    from geoparquet_io.core.derive_geo_from_file import _rewrite_writer_kwargs
     from geoparquet_io.core.remote import remote_write_context, upload_if_remote
 
     shapely = load_module("shapely")
@@ -690,7 +689,9 @@ def _simplify_file_streaming(
         actual_output,
         is_remote,
     ):
-        writer_kwargs = _rewrite_writer_kwargs(write.compression, write.compression_level)
+        writer_kwargs = resolve_codec(
+            write.compression, write.compression_level, context="write"
+        ).pyarrow_kwargs()
         # A local write streams into a pid-scoped sibling and is published by
         # os.replace only once the footer is complete: pyarrow's writer
         # finalizes a readable file even when the loop raises, and a mid-run

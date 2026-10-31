@@ -18,7 +18,6 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
     NULL_CRS_HINT,
     is_default_crs,
@@ -328,16 +327,3 @@ def derive_v2_geo_metadata(
         # Release the read handle before the caller writes to the file (Windows
         # refuses to replace a file that is still open).
         pf.close()
-
-
-def _rewrite_writer_kwargs(compression: str | None, compression_level: int | None) -> dict:
-    """ParquetWriter kwargs mirroring the codec the original writer used.
-
-    The codec and level resolve through the one owner
-    (:func:`~geoparquet_io.core.compression.resolve_codec`). An unset level is
-    not left out of the kwargs: leaving it out is pyarrow's own ZSTD default of
-    1, 14 levels below what the funnel writes from the same data, so a file
-    that reached this fallback came out 10-35% larger than the same file
-    written by any other path (#1299).
-    """
-    return resolve_codec(compression, compression_level, context="write").pyarrow_kwargs()

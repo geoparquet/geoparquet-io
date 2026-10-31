@@ -11,7 +11,8 @@ So the process group resolves an unset ZSTD level to 9, and every other
 command keeps 15.
 
 The second is that an unset level must reach pyarrow as a number at all.
-``_rewrite_writer_kwargs`` used to omit the key, which is not "the default" --
+A pyarrow writer's kwargs (``resolve_codec(...).pyarrow_kwargs()``, which the
+streaming simplify writer and the funnel's footer rewrite use) used to omit the key, which is not "the default" --
 it is pyarrow's own ZSTD default of 1, 14 levels below what the funnel writes
 from the same data. These tests fail if either default drifts, in either
 direction.
@@ -35,7 +36,6 @@ from geoparquet_io.core.compression import (
     resolve_codec,
     resolve_process_compression_level,
 )
-from geoparquet_io.core.derive_geo_from_file import _rewrite_writer_kwargs
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS, ParquetWriteSettings
 
 requires_coarsen = pytest.mark.skipif(
@@ -161,6 +161,11 @@ class TestGlobalDefaultIsUnchanged:
         assert caplog.text == ""
 
 
+def _rewrite_writer_kwargs(codec, level):
+    """The pyarrow writer kwargs the owner hands every pyarrow writer."""
+    return resolve_codec(codec, level, context="write").pyarrow_kwargs()
+
+
 class TestRewriteWriterKwargs:
     """An unset level must not fall through to pyarrow's own default of 1."""
 
@@ -244,9 +249,9 @@ class TestVecorelMetadataRewriteCodec:
 
         monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
         monkeypatch.setattr(gm, "rewrite_footer_kv", fake_rewrite)
-        gm._add_vecorel_metadata_to_file(
-            str(src), False, compression="GZIP", compression_level=None
-        )
+        from geoparquet_io.core.parquet_writer import WriteOptions
+
+        gm._add_vecorel_metadata_to_file(str(src), False, WriteOptions(compression="GZIP"))
         assert seen["compression"] == "GZIP"
         assert seen["compression_level"] is None
 

@@ -243,9 +243,7 @@ def _add_metrics_file_based(
     if vecorel:
         from geoparquet_io.core.constants import ensure_vecorel_columns
 
-        _add_vecorel_metadata_to_file(
-            output_parquet, verbose, write.compression, write.compression_level
-        )
+        _add_vecorel_metadata_to_file(output_parquet, verbose, write)
         ensure_vecorel_columns(
             output_parquet,
             verbose,
@@ -256,18 +254,14 @@ def _add_metrics_file_based(
     success(f"Added {AREA_COLUMN} and {PERIMETER_COLUMN} to: {output_parquet}")
 
 
-def _add_vecorel_metadata_to_file(
-    parquet_file: str,
-    verbose: bool,
-    compression: str | None = None,
-    compression_level: int | None = None,
-) -> None:
+def _add_vecorel_metadata_to_file(parquet_file: str, verbose: bool, write: WriteOptions) -> None:
     """Add the Vecorel ``collection`` key to the file this command just wrote.
 
     One footer key: a footer patch, every page kept as the command wrote it.
-    A footer that cannot be patched falls back to the funnel's rewrite at the
-    command's own codec (``patch_or_rewrite``); the caller's codec always goes
-    through, so a GZIP output is not re-encoded as ZSTD on that fallback.
+    A footer that cannot be patched falls back to the funnel's rewrite
+    (``patch_or_rewrite``), handed every write fact the command was given --
+    codec, level, row groups -- so a GZIP output is not re-encoded as ZSTD
+    (#1335) and ``--row-group-size`` is not dropped on that fallback.
     """
     metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
     extra_kv = _build_vecorel_metadata(metadata)
@@ -287,7 +281,12 @@ def _add_vecorel_metadata_to_file(
         parquet_file,
         extra_kv,
         rewrite=functools.partial(
-            rewrite_footer_kv, compression=compression, compression_level=compression_level
+            rewrite_footer_kv,
+            compression=write.compression,
+            compression_level=write.compression_level,
+            row_group_rows=write.row_group_rows,
+            row_group_size_mb=write.row_group_size_mb,
+            profile=write.profile,
         ),
         verbose=verbose,
     )

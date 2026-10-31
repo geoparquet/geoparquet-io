@@ -8,6 +8,15 @@ the columns the output actually has, preserving a non-planar ``edges``
 declaration across a rewrite that cannot carry it, and uploading a remote
 output.
 
+Beside them sits the one metadata-only rewrite, ``rewrite_footer_kv``: what
+``parquet_footer.patch_or_rewrite`` falls back to when a footer cannot be
+patched, for a user's file and for a repair of a file a funnel just wrote. It
+decides none of its policy itself: the codec and level come from
+``compression.resolve_codec``, the row groups from
+``parquet_writer.resolve_row_group_rows``, the surviving footer keys from
+``parquet_writer.output_schema_metadata``, and the staging from
+``staged_replacement`` (``write_strategies.base.atomic_write``).
+
 This is deliberately a **sibling** of ``core/parquet_writer.py`` rather than
 part of it. That module is the facade #990 introduced, and it owns four
 *decisions* -- row-group rows, output version, input CRS, whether a ``geo`` key
@@ -1004,6 +1013,18 @@ def _footer_keys(pf: pq.ParquetFile) -> dict[bytes, bytes]:
     return keys
 
 
+def _rewrite_row_group_rows(
+    pf: pq.ParquetFile, row_group_rows: int | None, row_group_size_mb: float | None
+) -> int:
+    """The facade's row count for a rewrite of *pf*; an MB target is measured
+    on its first row group, so the sizing stays bounded by one group."""
+    if row_group_rows is None and row_group_size_mb is not None and pf.num_row_groups:
+        sample = pf.read_row_group(0)
+    else:
+        sample = pa.table({})
+    return resolve_row_group_rows_for_table(sample, row_group_rows, row_group_size_mb)
+
+
 def rewrite_footer_kv(
     source: str,
     destination: str,
@@ -1012,6 +1033,7 @@ def rewrite_footer_kv(
     compression: str | None = None,
     compression_level: int | None = None,
     row_group_rows: int | None = None,
+    row_group_size_mb: float | None = None,
     verbose: bool = False,
     profile: str | None = None,
 ) -> None:
@@ -1025,8 +1047,10 @@ def rewrite_footer_kv(
 
     * the codec and level, from ``compression``/``compression_level`` through
       ``compression.resolve_codec`` (unset: the facade's ZSTD 15);
-    * the row groups, ``row_group_rows`` per group through
-      ``parquet_writer.resolve_row_group_rows`` (unset: the facade's default);
+    * the row groups, ``row_group_rows`` per group or a ``row_group_size_mb``
+      target measured on the first row group, through
+      ``parquet_writer.resolve_row_group_rows_for_table`` (unset: the facade's
+      default);
     * the footer keys, by the facade's one rule
       (``parquet_writer.output_schema_metadata``): every key the input carries
       survives with the keys ``updates`` names set or removed, except the
@@ -1043,6 +1067,7 @@ def rewrite_footer_kv(
         updates: Footer keys to set, as text; ``None`` removes a key.
         compression, compression_level: The codec to write; unset is the facade's.
         row_group_rows: Rows per group; unset is the facade's.
+        row_group_size_mb: A byte target per group, when no row count is given.
         verbose: Report the footer keys written.
         profile: AWS profile for a remote *destination*.
     """
@@ -1051,7 +1076,6 @@ def rewrite_footer_kv(
     import geoarrow.pyarrow  # noqa: F401
 
     write_kwargs = resolve_codec(compression, compression_level, context="write").pyarrow_kwargs()
-    rows = resolve_row_group_rows(row_group_rows, None)
     with remote_write_context(destination, verbose=verbose) as (local, _):
         with staged_replacement(local) as staged:
             # Every handle on *source* closes before the swap: Windows refuses
@@ -1062,6 +1086,7 @@ def rewrite_footer_kv(
                 # chunk `iter_batches` has read until the file closes, which grew
                 # to roughly the whole compressed file instead of one row group.
                 pf = stack.enter_context(pq.ParquetFile(handle, pre_buffer=False))
+                rows = _rewrite_row_group_rows(pf, row_group_rows, row_group_size_mb)
                 metadata = output_schema_metadata(
                     _carried_with_updates(_footer_keys(pf), updates), None
                 )

@@ -190,9 +190,12 @@ If your file already has a bbox column but lacks covering metadata (e.g., from e
         of 3: a file written at zstd 15 came back 11.6% bigger on the reported
         fixture and 36% bigger on a real one. A footer gpio cannot read — an
         encrypted one, or a thrift structure it does not recognise — still falls
-        back to a rewrite, with a warning saying so. That rewrite keeps the file's
-        codec and writes gpio's default level for it (zstd 15), not DuckDB's 3; a
-        file written at another level comes back at 15.
+        back to a rewrite, with a warning saying so. It is the same metadata-only
+        rewrite every footer write in gpio falls back to, and it is a write like
+        any other: the data is re-encoded at gpio's own codec and row groups
+        (zstd 15, 49,152 rows per group), not at the file's, and every footer key
+        the file carries survives except its `pandas` and `ARROW:schema` blocks.
+        This holds for the CLI and for `gpio.add_bbox_metadata()` alike.
 
     !!! note "Requires GeoParquet 1.1+"
 
@@ -347,11 +350,13 @@ The value written is:
     Like `gpio add bbox-metadata`, this rewrites the footer and copies every
     page below it byte for byte, so the compression codec *and its level*, the
     encodings, the bloom filters, the page index, the row-group boundaries and
-    the row order all come out as they went in. Unlike `add bbox-metadata`
-    there is no rewrite behind it: a footer gpio cannot patch is reported
-    rather than re-encoded, since re-encoding a whole file to add one key
-    would cost its compression level to buy nothing. The file is still copied
-    once, so the command needs room for a second copy beside it.
+    the row order all come out as they went in. A footer gpio cannot patch (an
+    encrypted one, or a thrift structure it does not recognise) falls back,
+    with a warning, to the same metadata-only rewrite `add bbox-metadata`
+    uses: the data is re-encoded at gpio's own codec and row groups (zstd 15,
+    49,152 rows per group), not at the file's. The CLI and
+    `gpio.add_stac_metadata()` behave the same. The file is still copied once,
+    so the command needs room for a second copy beside it.
 
     Remote URLs are not supported — download the file, add the key, upload it.
 

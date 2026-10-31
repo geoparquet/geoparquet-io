@@ -284,12 +284,15 @@ def _pages(path: Path) -> bytes:
 def test_the_vecorel_key_is_patched_onto_the_metrics_output(tmp_path, monkeypatch):
     """``add geometry-metrics`` writes once, then adds ``collection`` by patch."""
     from geoparquet_io.core.add import geometry_metrics
+    from geoparquet_io.core.parquet_writer import WriteOptions
 
     out = tmp_path / "metrics.parquet"
     write_with_geo(out, points_table(50), geo_block(), compression="gzip")
     before = _pages(out)
 
-    geometry_metrics._add_vecorel_metadata_to_file(str(out), False, "GZIP", None)
+    geometry_metrics._add_vecorel_metadata_to_file(
+        str(out), False, WriteOptions(compression="GZIP")
+    )
 
     assert _pages(out) == before, "the Vecorel key re-encoded the command's output"
     assert b"collection" in footer_kv(out)
@@ -298,15 +301,42 @@ def test_the_vecorel_key_is_patched_onto_the_metrics_output(tmp_path, monkeypatc
 def test_the_vecorel_fallback_keeps_the_commands_codec(tmp_path, monkeypatch):
     """#1335 through the owner: a GZIP output is not re-encoded as ZSTD."""
     from geoparquet_io.core.add import geometry_metrics
+    from geoparquet_io.core.parquet_writer import WriteOptions
 
     _plant(monkeypatch, FooterPatchUnsupported)
     out = tmp_path / "metrics.parquet"
     write_with_geo(out, points_table(50), geo_block(), compression="gzip")
 
-    geometry_metrics._add_vecorel_metadata_to_file(str(out), False, "GZIP", None)
+    geometry_metrics._add_vecorel_metadata_to_file(
+        str(out), False, WriteOptions(compression="GZIP")
+    )
 
     assert _layout(out)[0] == "GZIP", _layout(out)
     assert b"collection" in footer_kv(out)
+
+
+@pytest.mark.parametrize(
+    ("options", "groups"),
+    [({"row_group_rows": 10}, [10] * 5), ({"compression": "GZIP"}, [50])],
+    ids=["row-group-rows", "codec"],
+)
+def test_the_vecorel_fallback_takes_every_write_fact_of_the_command(
+    tmp_path, monkeypatch, options, groups
+):
+    """The fallback is handed the command's WriteOptions, not just its codec:
+    ``--row-group-size`` was ignored there."""
+    from geoparquet_io.core.add import geometry_metrics
+    from geoparquet_io.core.parquet_writer import WriteOptions
+
+    _plant(monkeypatch, FooterPatchUnsupported)
+    out = tmp_path / "metrics.parquet"
+    write_with_geo(out, points_table(50), geo_block(), compression="snappy")
+
+    geometry_metrics._add_vecorel_metadata_to_file(str(out), False, WriteOptions(**options))
+
+    codec, landed = _layout(out)
+    assert landed == groups, landed
+    assert codec == options.get("compression", "ZSTD"), codec
 
 
 def test_the_assume_crs84_copy_is_a_footer_patch(tmp_path):
