@@ -1,7 +1,8 @@
 # These numbers only go down; raising either needs a reason in the PR.
-# Reviewed baseline after the final audit fixes.
+# Reviewed baseline after the final audit fixes, plus the 18 fast tests the
+# main merge brought in with #1360 (a5 from Query.Farm): 14199 + 18.
 [fast_suite]
-max_collected = 14199
+max_collected = 14217
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",
