@@ -183,18 +183,16 @@ corners are swapped, and the bbox is refused.
 
 === "CLI"
 
-    <!-- doctest: skip="illustration; world.parquet is not a fixture" -->
     ```bash
-    gpio extract world.parquet pacific.parquet --bbox 170,-10,-170,10
+    gpio extract input.parquet pacific.parquet --bbox 170,-10,-170,10
     ```
 
 === "Python"
 
-    <!-- doctest: skip="illustration; world.parquet is not a fixture" -->
     ```python
     import geoparquet_io as gpio
 
-    gpio.read('world.parquet').extract(bbox=(170, -10, -170, 10)).write('pacific.parquet')
+    gpio.read('input.parquet').extract(bbox=(170, -10, -170, 10)).write('pacific.parquet')
     ```
 
 **CRS Awareness**: The tool detects coordinate system mismatches. If your bbox looks like lat/long coordinates but the data uses a projected CRS, you'll get a helpful warning showing the data's actual bounds.

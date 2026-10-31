@@ -292,9 +292,9 @@ OWNER = "core/duckdb_utils.py"
 # These sites filter rows against a constant geometry (a --bbox/--geometry
 # extract filter, or a remote service's SQL dialect); none joins two tables.
 FILTER_BASELINE = {
-    "core/carto.py": 2,
+    "core/carto.py": 1,
     "core/extract.py": 2,
-    "core/extract_bigquery.py": 4,
+    "core/extract_bigquery.py": 2,
     "core/wfs.py": 1,
 }
 
