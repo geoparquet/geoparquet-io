@@ -1104,8 +1104,7 @@ class TestFrontDoorDelegation:
 
 #: The front doors and every owner module of the #1367 concept table. A change
 #: to any of their public names is a diff to tests/data/snapshots/public_api.json,
-#: so nothing moves silently. Not yet created, and taken in when it exists:
-#: geoparquet_io.core.edges.
+#: so nothing moves silently.
 PUBLIC_API_MODULES = (
     "geoparquet_io.api",
     "geoparquet_io.api.ops",

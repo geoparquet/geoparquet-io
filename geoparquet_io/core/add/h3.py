@@ -59,7 +59,6 @@ SPEC = IndexSpec(
     cell_pattern=r"^[0-9a-fA-F]{15}$",
     column_option="--h3-name",
 )
-from geoparquet_io.core.write_funnels import collect_nonplanar_edges
 
 
 def add_h3_table(

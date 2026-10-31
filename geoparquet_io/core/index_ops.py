@@ -31,6 +31,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
     uses_aws_profile,
 )
+from geoparquet_io.core.edges import is_nonplanar, representative_point_sql
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError, PartitionError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo, sanitized_carried_geo_of_file
@@ -38,7 +39,7 @@ from geoparquet_io.core.geometry_detection import (
     detect_geometry_column_from_names,
     find_primary_geometry_column,
 )
-from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
+from geoparquet_io.core.geometry_repair import nonplanar_edges_of_arrow_table
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
@@ -58,6 +59,7 @@ from geoparquet_io.core.streaming import (
     is_stdin,
     should_stream_output,
 )
+from geoparquet_io.core.write_funnels import collect_nonplanar_edges
 
 
 @dataclass(frozen=True)
@@ -113,8 +115,20 @@ def validate_index_crs(spec, geo_meta, geom_col, source_crs, description, verbos
         spec.crs_validator(geo_meta, geom_col, verbose, source_description=description)
 
 
-def table_bbox_column(spec, table, source_crs, use_centroid):
-    if not spec.bbox_midpoint or use_centroid or source_crs is not None:
+def _keys_from_bbox(spec, use_centroid, source_crs, edges) -> bool:
+    """A stored bbox's midpoint keys the cell only for planar lon/lat input.
+
+    A bbox is in the input CRS, so not when the driver reprojects; and a planar
+    box's midpoint is not on a spherical shape, so not for non-planar edges
+    (#1293).
+    """
+    return (
+        spec.bbox_midpoint and not use_centroid and source_crs is None and not is_nonplanar(edges)
+    )
+
+
+def table_bbox_column(spec, table, source_crs, use_centroid, edges=None):
+    if not _keys_from_bbox(spec, use_centroid, source_crs, edges):
         return None
     from geoparquet_io.core.arrow_geo_metadata import _detect_bbox_column_from_table
 
@@ -132,14 +146,21 @@ def load_index(con, spec, verbose=False, *, feature=None):
         spec.register(con)
 
 
-def index_expression(spec, geom_col, resolution, source_crs=None, bbox_col=None):
+def index_expression(spec, geom_col, resolution, source_crs=None, bbox_col=None, edges=None):
+    """The one cell expression: ``spec.expression`` keyed from one lon/lat point.
+
+    A bbox midpoint when ``bbox_col`` is set; otherwise
+    ``edges.representative_point_sql`` of the (reprojected) geometry with the
+    column's ``edges``, which the driver read once per input (#1293).
+    """
     if bbox_col:
         bbox = quote_identifier(bbox_col)
         lat = f"(({bbox}.ymin + {bbox}.ymax) / 2.0)"
         lon = f"(({bbox}.xmin + {bbox}.xmax) / 2.0)"
     else:
         geom = transform_geom_sql(quote_identifier(geom_col), source_crs)
-        lat, lon = f"ST_Y(ST_Centroid({geom}))", f"ST_X(ST_Centroid({geom}))"
+        point = representative_point_sql(geom, edges)
+        lat, lon = f"ST_Y({point})", f"ST_X({point})"
     return spec.expression(lon, lat, resolution)
 
 
@@ -169,12 +190,12 @@ def add_index_table(spec, table, column_name, resolution, geometry_column=None, 
     validate_index_crs(
         spec, sanitized_carried_geo(table.schema.metadata), geom_col, source_crs, "table"
     )
-    bbox_col = table_bbox_column(spec, table, source_crs, use_centroid)
+    edges = nonplanar_edges_of_arrow_table(table, geom_col)
+    bbox_col = table_bbox_column(spec, table, source_crs, use_centroid, edges)
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         con.execute("SET geometry_always_xy = true;")
         load_index(con, spec)
-        warn_planar_math(f"add_{spec.name}", table, geom_col)
         registered = register_arrow(con, "__input_table", table)
         columns_info = describe_query(con, "SELECT * FROM __input_table")
         other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
@@ -189,7 +210,7 @@ def add_index_table(spec, table, column_name, resolution, geometry_column=None, 
             source = "__input_view"
         columns = other_cols + [
             f"ST_AsWKB({quote_identifier(geom_col)}) AS {quote_identifier(geom_col)}",
-            f"{index_expression(spec, geom_col, resolution, source_crs, bbox_col)} AS {quote_identifier(column_name)}",
+            f"{index_expression(spec, geom_col, resolution, source_crs, bbox_col, edges)} AS {quote_identifier(column_name)}",
         ]
         result = con.sql(f"SELECT {', '.join(columns)} FROM {source}").arrow().read_all()
         if table.schema.metadata:
@@ -218,7 +239,6 @@ def add_index_column(
     write = write or WriteOptions()
     validate_index_resolution(spec, resolution)
     preflight_index(spec, "add")
-    warn_planar_math_for_file(f"add_{spec.name}", input_parquet)
     if (is_stdin(input_parquet) or should_stream_output(output_parquet)) and not dry_run:
         return add_index_streaming(
             spec,
@@ -241,8 +261,9 @@ def add_index_column(
     validate_index_crs(
         spec, sanitized_carried_geo_of_file(input_parquet), geom_col, source_crs, "file", verbose
     )
+    edges = collect_nonplanar_edges(input_parquet).get(geom_col)
     bbox_col = None
-    if spec.bbox_midpoint and not use_centroid and source_crs is None:
+    if _keys_from_bbox(spec, use_centroid, source_crs, edges):
         advice = get_bbox_advice(input_parquet, "bounds_calculation", verbose)
         bbox_col = advice["bbox_column_name"] if advice["has_bbox_column"] else None
         if advice["needs_warning"] and not bbox_col:
@@ -260,7 +281,7 @@ def add_index_column(
         input_parquet,
         output_parquet,
         column_name,
-        index_expression(spec, geom_col, resolution, source_crs, bbox_col),
+        index_expression(spec, geom_col, resolution, source_crs, bbox_col, edges),
         dry_run=dry_run,
         verbose=verbose,
         custom_metadata={"covering": {spec.name: {"column": column_name, spec.unit: resolution}}},
@@ -294,7 +315,7 @@ def add_index_streaming(
 
     validate_index_resolution(spec, resolution)
 
-    def make_query(source, con, source_crs, metadata):
+    def make_query(source, con, source_crs, edges, metadata):
         con.execute("SET geometry_always_xy = true;")
         load_index(con, spec, verbose=verbose and not should_stream_output(output_path))
         schema = query_schema(con, f"SELECT * FROM {source}").empty_table()
@@ -310,11 +331,12 @@ def add_index_streaming(
             verbose and not should_stream_output(output_path),
         )
         schema = schema.replace_schema_metadata(metadata)
-        bbox_col = table_bbox_column(spec, schema, source_crs, use_centroid)
+        column_edges = edges.get(geom_col)
+        bbox_col = table_bbox_column(spec, schema, source_crs, use_centroid, column_edges)
         return computed_column_query(
             source,
             column_name,
-            index_expression(spec, geom_col, resolution, source_crs, bbox_col),
+            index_expression(spec, geom_col, resolution, source_crs, bbox_col, column_edges),
         )
 
     execute_transform(

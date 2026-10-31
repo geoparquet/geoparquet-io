@@ -535,16 +535,31 @@ def _build_transform_query(transform_query_fn, source, con, input_path, metadata
 
     A builder with a fourth parameter also gets the input's non-planar edges
     (``declared_nonplanar_edges``: the file, or a stream's own block), so a cell
-    key on stdin keys the way the file path does (#1293).
+    key on stdin keys the way the file path does (#1293); one that names a
+    ``metadata`` parameter gets the input's schema metadata too.
     """
     if not _wants_source_crs(transform_query_fn):
         return transform_query_fn(source, con)
     source_crs = _detect_transform_source_crs(input_path, metadata, is_stream)
-    import inspect
+    params = _query_fn_params(transform_query_fn)
+    if len(params) < 4:
+        return transform_query_fn(source, con, source_crs)
+    extra = {"metadata": metadata} if "metadata" in params else {}
+    return transform_query_fn(
+        source, con, source_crs, input_nonplanar_edges(input_path, metadata, is_stream), **extra
+    )
 
-    if "metadata" in inspect.signature(transform_query_fn).parameters:
-        return transform_query_fn(source, con, source_crs, metadata=metadata)
-    return transform_query_fn(source, con, source_crs)
+
+def input_nonplanar_edges(input_path: str, metadata: dict | None, is_stream: bool) -> dict:
+    """``{column: edges}`` for an ``open_input`` input's non-planar columns.
+
+    The one place a streamed cell-key builder learns its edges (#1293): the
+    file when there is one, otherwise the stream's own block
+    (``write_funnels.declared_nonplanar_edges``). ``_build_transform_query``
+    hands it to a four-parameter builder (``index_ops.add_index_streaming``, the
+    one driver for h3, s2, a5 and quadkey).
+    """
+    return declared_nonplanar_edges(None if is_stream else input_path, metadata)
 
 
 def execute_transform(

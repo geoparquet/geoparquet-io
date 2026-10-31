@@ -16,7 +16,6 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.add.quadkey import register_quadkey_udf
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.duckdb_utils import fetch_one, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError

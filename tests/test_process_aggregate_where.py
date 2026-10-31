@@ -244,7 +244,6 @@ def test_auto_empty_filter_result_names_the_filter(tmp_path):
 
 
 def test_probe_distinct_cell_counts_respects_where(tmp_path):
-    from geoparquet_io.core.add.quadkey import register_quadkey_udf
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
     from geoparquet_io.core.index_ops import get_index_spec, load_index
     from geoparquet_io.core.partition.auto_resolution import (
@@ -274,7 +273,6 @@ def test_probe_filters_beneath_the_sample(tmp_path):
     ``USING SAMPLE``, so a selective filter left only a fraction of the sample
     and --auto over-resolved (#612).
     """
-    from geoparquet_io.core.add.quadkey import register_quadkey_udf
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
     from geoparquet_io.core.index_ops import get_index_spec, load_index
     from geoparquet_io.core.partition.auto_resolution import (

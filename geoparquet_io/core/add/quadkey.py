@@ -124,13 +124,34 @@ def _cell_expression(lon, lat, resolution):
     return f"lat_lon_to_quadkey({lat}, {lon}, {resolution})"
 
 
+#: Past Web Mercator's edge, short of the pole mercantile cannot take.
+_POLE_SAFE_LAT = 89.9
+
+
 def _lat_lon_to_quadkey(lat: float, lon: float, level: int) -> str:
-    return str(mercantile.quadkey(mercantile.tile(lon, lat, level)))
+    """Convert latitude and longitude to a quadkey string using mercantile.
+
+    Web Mercator stops at about 85.05 degrees, and every latitude past it keys to
+    the edge row. mercantile raises at a pole itself, where a spherical polar cap's
+    point lies (#1293), so the latitude is held to 89.9, which keys to that row.
+    """
+    lat = max(-_POLE_SAFE_LAT, min(_POLE_SAFE_LAT, lat))
+    tile = mercantile.tile(lon, lat, level)
+    return mercantile.quadkey(tile)
 
 
-def _register(con):
+def register_quadkey_udf(con) -> None:
+    """Register :func:`_lat_lon_to_quadkey` as ``lat_lon_to_quadkey(lat, lon, level)``.
+
+    The one quadkey keyer and its one latitude bound, for every path that keys
+    a quadkey in SQL: add, sort and partition (through ``SPEC.register``), the
+    partition resolution probe, and the overview tile probe.
+    """
     con.create_function(
-        "lat_lon_to_quadkey", _lat_lon_to_quadkey, ["DOUBLE", "DOUBLE", "INTEGER"], "VARCHAR"
+        "lat_lon_to_quadkey",
+        _lat_lon_to_quadkey,
+        ["DOUBLE", "DOUBLE", "INTEGER"],
+        "VARCHAR",
     )
 
 
@@ -147,7 +168,7 @@ SPEC = IndexSpec(
     default_resolution=DEFAULT_QUADKEY_RESOLUTION,
     label="quadkey",
     column_option="--quadkey-column",
-    register=_register,
+    register=register_quadkey_udf,
     bbox_midpoint=True,
     crs_validator=_validate_crs_from_geo_metadata,
     prefix_partition=True,
@@ -156,21 +177,6 @@ SPEC = IndexSpec(
     multiple_files=True,
     report_count=False,
 )
-
-
-def register_quadkey_udf(con) -> None:
-    """Register :func:`_lat_lon_to_quadkey` as ``lat_lon_to_quadkey(lat, lon, level)``.
-
-    The one quadkey keyer and its one latitude bound, for every path that keys
-    a quadkey in SQL: add, sort and partition, the partition resolution probe,
-    and the overview tile probe.
-    """
-    con.create_function(
-        "lat_lon_to_quadkey",
-        _lat_lon_to_quadkey,
-        ["DOUBLE", "DOUBLE", "INTEGER"],
-        "VARCHAR",
-    )
 
 
 def add_quadkey_table(

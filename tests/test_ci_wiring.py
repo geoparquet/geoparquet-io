@@ -53,9 +53,7 @@ REQUIRED_CONTEXTS = ["all-checks", "pr-title"]
 # CODEOWNERS paths for owner modules that a later #1367 track creates. Each
 # entry must NOT exist yet; the track that creates the file deletes its entry
 # here in the same commit. This list only shrinks, and ends empty.
-PENDING_CODEOWNERS_PATHS = {
-    "geoparquet_io/core/edges.py",  # created by T3
-}
+PENDING_CODEOWNERS_PATHS: set[str] = set()
 
 CODEOWNER = "@nlebovits"
 
