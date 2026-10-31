@@ -43,6 +43,7 @@ from geoparquet_io.core.parquet_writer import (
     WriteOptions,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
+    resolve_row_group_rows_for_table,
     without_geometry_dictionary,
 )
 from geoparquet_io.core.remote import is_remote_url
@@ -585,14 +586,7 @@ def _footer_kv_via_funnel(
     fd, tmp_path = tempfile.mkstemp(suffix=".parquet", prefix="gpio_simplify_footer_")
     os.close(fd)
     try:
-        write_geoparquet_table(
-            empty,
-            tmp_path,
-            geometry_column=geom_col,
-            compression=write.compression,
-            compression_level=write.compression_level,
-            geoparquet_version=write.geoparquet_version,
-        )
+        write_geoparquet_table(empty, tmp_path, geometry_column=geom_col, **write.funnel_kwargs())
         footer = pq.ParquetFile(tmp_path).schema_arrow.metadata or {}
     finally:
         os.remove(tmp_path)
@@ -624,7 +618,17 @@ def _simplify_file_streaming(
         schema = pa.schema(
             [f for f in schema if f.name not in drop_columns], metadata=schema.metadata
         )
-    rows = resolve_row_group_rows(write.row_group_rows, None)
+    # The facade's resolver decides the row count from the whole pair. A byte
+    # target is measured on the input's first row group: one group of memory,
+    # where the in-memory path would read the whole file to measure it.
+    rows = resolve_row_group_rows(write.row_group_rows, write.row_group_size_mb)
+    if rows is None:
+        first = pf.read_row_group(0) if pf.metadata.num_row_groups else schema.empty_table()
+        if drop_columns:
+            first = first.drop_columns([c for c in drop_columns if c in first.column_names])
+        rows = resolve_row_group_rows_for_table(
+            first, write.row_group_rows, write.row_group_size_mb
+        )
     writer_schema = schema.with_metadata(None)
     batch_stats: list[GeometryStats] = []
     # The output keeps the input's CRS, which decides how the batch extents fold.
@@ -793,8 +797,9 @@ def simplify_file(
     shared edges — splitting a coverage pass measurably introduces gaps and
     overlaps along the seam — so it reads the whole table; partition first
     (``gpio partition``) for coverage simplification at global scale. The
-    in-memory path is also taken for native/2.0 outputs and byte-sized row
-    group targets, which only the funnel resolves.
+    in-memory path is also taken for native/2.0 outputs. A byte-sized row
+    group target streams too: the facade's resolver measures it on the
+    input's first row group.
     """
     if not is_remote_url(input_parquet) and not os.path.exists(input_parquet):
         raise FileNotFoundGeoParquetError(input_parquet)
@@ -836,7 +841,7 @@ def _simplify_file(
         kwargs["simplify_crs"],
         kwargs["verbose"],
     )
-    if coverage or write.row_group_size_mb is not None:
+    if coverage:
         _simplify_file_in_memory(
             input_parquet, output_parquet, tolerance, write, drop_columns=_drop_columns, **kwargs
         )

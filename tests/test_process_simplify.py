@@ -476,6 +476,32 @@ class TestStreamingPlainMode:
         assert pq.ParquetFile(str(src)).metadata.num_row_groups == groups
         return src
 
+    def test_streaming_honours_row_group_size_mb(self, tmp_path, monkeypatch):
+        """--row-group-size-mb streams (bounded memory) and sizes the groups by
+        the facade's byte resolver, measured on the input's first row group."""
+        import geoparquet_io.core.process.simplify as simp
+        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+
+        src = self._many_group_file(tmp_path, groups=4, rows_per=4096)
+        streaming_runs = []
+        real_streaming = simp._simplify_file_streaming
+
+        def spy(*args, **kwargs):
+            streaming_runs.append(True)
+            return real_streaming(*args, **kwargs)
+
+        monkeypatch.setattr(simp, "_simplify_file_streaming", spy)
+        out = tmp_path / "out.parquet"
+        simplify_file(str(src), str(out), tolerance=0.05, row_group_size_mb=1)
+        assert streaming_runs, "--row-group-size-mb fell back to the in-memory path"
+        expected_rows = resolve_row_group_rows_for_table(
+            pq.ParquetFile(str(src)).read_row_group(0), None, 1
+        )
+        meta = pq.ParquetFile(str(out)).metadata
+        assert expected_rows < meta.num_rows
+        assert meta.num_row_groups == -(-meta.num_rows // expected_rows)
+        assert meta.row_group(0).num_rows == expected_rows
+
     def test_streaming_matches_in_memory_reference(self, tmp_path, monkeypatch):
         """The streamed file is byte-equivalent in data and geo metadata to
         simplify_table + the write funnel on the same input.
