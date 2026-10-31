@@ -92,10 +92,12 @@ class DocExampleItem(pytest.Item):
         self.add_marker(pytest.mark.docs_example)
         if directives.network:
             self.add_marker(pytest.mark.network)
-        # Whole-pipeline examples are slow, including fast directives (#1402).
+            # The network job caps a test at 180 s; a network block's own
+            # subprocess budget is longer, so pytest must outlast it.
+            self.add_marker(pytest.mark.timeout(NETWORK_BLOCK_TIMEOUT_SECONDS + 60))
+        # Whole-pipeline examples are slow, including fast directives (#1402);
+        # the slow and docs-examples jobs pass --timeout=600 for the lane.
         self.add_marker(pytest.mark.slow)
-        # Whole-pipeline checks use the slow lane; 60 s is the fast lane's cap (#1402).
-        self.add_marker(pytest.mark.timeout(600))
         if directives.skip:
             reason = directives.skip_reason or "marked skip by a doctest directive"
             self.add_marker(pytest.mark.skip(reason=reason))

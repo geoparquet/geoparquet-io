@@ -8,6 +8,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 BUDGET = REPO / "tests" / "suite_budget.toml"
@@ -76,6 +77,25 @@ def test_default_timeout_is_pinned():
     options = tomllib.loads((REPO / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"]
     assert options["timeout"] == 60
     assert "timeout" not in str(options.get("addopts", "")).lower()
+    # Unset, pytest-timeout uses SIGALRM where it exists (an expiry is a failing
+    # test with a traceback) and the thread method only on Windows. "thread"
+    # everywhere reads as a dead xdist worker; "signal" breaks Windows.
+    assert "timeout_method" not in options
+    # The whole-pipeline lanes' 600 s cap is the job's, not a per-module mark: a
+    # slow test the marks missed hit the 60 s default and killed its worker
+    # (run 41245796685).
+    for job_id in ("slow-tests", "docs-examples"):
+        for line in _job_pytest_lines(job_id):
+            assert "--timeout=600" in line, f"{job_id}: {line}"
+
+
+def _job_pytest_lines(job_id):
+    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "tests.yml").read_text())
+    steps = workflow["jobs"][job_id]["steps"]
+    script = "\n".join(step.get("run", "") for step in steps)
+    lines = [line for line in script.splitlines() if "uv run pytest" in line]
+    assert lines, f"{job_id} runs no pytest"
+    return lines
 
 
 def test_fast_collection_budget():

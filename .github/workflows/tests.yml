@@ -442,7 +442,7 @@ jobs:
           # example -- add.md:L62 alone passes in 14.5s. The same selection run
           # serially was 235 passed / 0 failed in 271s. -n 4 matches what the
           # harness README and every other job here already use.
-          uv run pytest -n 4 -m "docs_example and not network" \
+          uv run pytest -n 4 -m "docs_example and not network" --timeout=600 \
             --no-cov --tb=short --durations=15 --durations-min=1.0
 
   slow-tests:
@@ -551,6 +551,10 @@ jobs:
           # in tests/test_security.py, which records why it must stay owned by
           # the dedicated `security` job and never come back as a pytest test.
 
+          # --timeout=600 is this lane's per-test cap. The 60 s default in
+          # pyproject.toml is the fast lane's; a slow test is whole-pipeline by
+          # definition, so the cap is set here for the lane, not per module.
+          #
           # word-splitting intended: COV_ARGS is a flag list (or --no-cov).
           # The directive binds to the NEXT command, so it has to sit here and
           # not at the top of the block (where it would bind to the assignment
@@ -558,11 +562,11 @@ jobs:
           # shellcheck disable=SC2086
           if [ "$RUNNER_OS" == "Windows" ]; then
             # Use loadfile distribution on Windows to reduce DuckDB extension conflicts
-            uv run pytest -n 4 --dist=loadfile -m "(slow or meta) and not network" -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
+            uv run pytest -n 4 --dist=loadfile -m "(slow or meta) and not network" --timeout=600 -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
           elif [ "$RUNNER_OS" == "macOS" ]; then
-            uv run pytest -n 3 -m "(slow or meta) and not network" -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
+            uv run pytest -n 3 -m "(slow or meta) and not network" --timeout=600 -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
           else
-            uv run pytest -n 4 -m "(slow or meta) and not network" -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
+            uv run pytest -n 4 -m "(slow or meta) and not network" --timeout=600 -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
           fi
 
       - name: Upload slow test coverage to Codecov

@@ -2,7 +2,7 @@
 # Reviewed baseline after the final audit fixes.
 [fast_suite]
 max_collected = 14199
-max_timeout_marks = 4
+max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",
   "e2e/test_journeys.py::<module>",

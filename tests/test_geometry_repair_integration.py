@@ -165,5 +165,9 @@ def test_pmtiles_from_invalid_geometry_does_not_crash(tmp_path):
     assert _invalid_count(raw) == 2
 
     out = str(tmp_path / "out.pmtiles")
-    create_pmtiles_from_geoparquet(raw, out, force=True)
+    # A fixed low max zoom: the property is that tippecanoe copes with the
+    # geometry, which z0-z4 exercises. Left to -zg, tippecanoe 2.79 (macOS
+    # runners) guesses a deep zoom for three tiny overlapping polygons and
+    # spent 277 s tiling them; 2.53 (ubuntu) took 1.6 s.
+    create_pmtiles_from_geoparquet(raw, out, force=True, min_zoom=0, max_zoom=4)
     assert (tmp_path / "out.pmtiles").exists()
