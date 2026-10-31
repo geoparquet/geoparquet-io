@@ -35,7 +35,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any, cast
 
@@ -102,8 +102,8 @@ def _retry_after_date(value: str, now: datetime | None) -> float | None:
     except (TypeError, ValueError):
         return None
     if when.tzinfo is None:  # the "-0000" zone; HTTP dates are always UTC
-        when = when.replace(tzinfo=timezone.utc)
-    current = now or datetime.now(timezone.utc)
+        when = when.replace(tzinfo=UTC)
+    current = now or datetime.now(UTC)
     return max(0.0, (when - current).total_seconds())
 
 

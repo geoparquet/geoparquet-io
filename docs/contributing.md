@@ -50,7 +50,7 @@ Before you ask for a merge, check that your PR clears this bar:
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - [uv](https://docs.astral.sh/uv/)
 
 ## Setup

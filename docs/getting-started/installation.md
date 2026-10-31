@@ -46,7 +46,7 @@ uv sync --all-extras
 
 ## Requirements
 
-- **Python**: 3.10+
+- **Python**: 3.11+
 - **PyArrow**: 12.0.0+
 - **DuckDB**: >=1.5.6,<1.6 (the range the `geography` extension is published for)
 
@@ -115,7 +115,7 @@ uv remove geoparquet-io           # Library
 ## Platform Support
 
 - **OS**: Linux, macOS, Windows
-- **Python**: 3.10, 3.11, 3.12, 3.13
+- **Python**: 3.11, 3.12, 3.13
 - **Arch**: x86_64, ARM64
 
 ## Troubleshooting

@@ -18,6 +18,7 @@ must leave the list.
 from __future__ import annotations
 
 import ast
+import tomllib
 from collections import defaultdict
 from pathlib import Path
 
@@ -25,7 +26,6 @@ import click
 import pytest
 
 from geoparquet_io.cli.main import cli
-from scripts.toml_utils import load_toml
 from tests.test_cli_column_name_guard import _iter_options
 
 REPO = Path(__file__).resolve().parents[1]
@@ -135,7 +135,9 @@ def describe(group: click.Command, name: str) -> str:
 
 
 def _pinned() -> dict[str, dict]:
-    entries = load_toml(EXEMPTIONS_FILE).get("G13", {}).get("options", [])
+    entries = (
+        tomllib.loads(EXEMPTIONS_FILE.read_text(encoding="utf-8")).get("G13", {}).get("options", [])
+    )
     return {e["option"]: e for e in entries}
 
 
@@ -336,7 +338,11 @@ def inline_bbox_parsers(repo: Path = REPO) -> list[tuple[str, str]]:
 
 
 def _pinned_bbox_parsers() -> dict[tuple[str, str], str]:
-    entries = load_toml(EXEMPTIONS_FILE).get("G13", {}).get("bbox_parsers", [])
+    entries = (
+        tomllib.loads(EXEMPTIONS_FILE.read_text(encoding="utf-8"))
+        .get("G13", {})
+        .get("bbox_parsers", [])
+    )
     return {(e["path"], e["name"]): e["reason"] for e in entries}
 
 

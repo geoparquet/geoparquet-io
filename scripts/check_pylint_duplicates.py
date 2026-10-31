@@ -22,13 +22,9 @@ import functools
 import re
 import subprocess
 import sys
+import tomllib
 from collections import Counter
 from pathlib import Path
-
-if __name__ == "__main__" and not __package__:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from scripts.toml_utils import load_toml
 
 _REPORT = re.compile(r"\n(?=\S+: R0801:)")
 _SIDE = re.compile(r"^==([\w.]+):\[(\d+):(\d+)\]", re.M)
@@ -80,7 +76,7 @@ def parse_report(output: str, repo: Path | None = None) -> Counter[str]:
 
 
 def pinned(exemptions: Path) -> Counter[str]:
-    entries = load_toml(exemptions).get("G3", {}).get("pylint", [])
+    entries = tomllib.loads(exemptions.read_text(encoding="utf-8")).get("G3", {}).get("pylint", [])
     return Counter({e["block"]: e.get("count", 1) for e in entries})
 
 

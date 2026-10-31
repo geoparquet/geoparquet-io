@@ -7,7 +7,7 @@ name = "geoparquet-io"
 version = "1.7.0"
 description = "Fast I/O and transformation tools for GeoParquet files"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [
     { name = "Chris Holmes", email = "cholmes@9eo.org" }
@@ -19,7 +19,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -55,7 +54,7 @@ dependencies = [
     # runs on both 1.5.x and 2.0, and the `test-duckdb-2` CI job exercises 2.0
     # on every push (not a required check yet)
     # (#1345), but 'geography' is not published for 2.0 yet, so the cap stays
-    # until it is (#1346). 2.0 wheels need Python 3.11+, so 3.10 stays on 1.5.x.
+    # until it is (#1346).
     "duckdb>=1.5.6,<1.6",
     "pandas>=1.0.0",
     "fsspec>=2023.9.0",
@@ -110,7 +109,6 @@ dev = [
     "ruff>=0.8.0",
     "pre-commit>=4.3.0",
     "mypy>=1.0.0",
-    "tomli>=2.0.0;python_version<'3.11'",
     "vulture>=2.14",
     "pylint==4.1.3",
     "radon>=6.0.1",
@@ -140,7 +138,7 @@ simplify = [
 raster = [
     # contourrs ships wheels only for CPython 3.12-3.14; the marker keeps
     # `uv sync --all-extras` and `pip install 'geoparquet-io[raster]'` working on
-    # 3.10/3.11 (core/optional_deps.py explains the floor at runtime there).
+    # 3.11 (core/optional_deps.py explains the floor at runtime there).
     "contourrs>=0.8.0; python_version >= '3.12'",  # raster polygonize/contour (ADR-0007)
     "rasterio>=1.3",  # GeoTIFF input for gpio process polygonize/contour
 ]
@@ -197,7 +195,7 @@ markers = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = [
@@ -270,7 +268,7 @@ ignore = [
 known-first-party = ["geoparquet_io"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
@@ -397,7 +395,7 @@ module = [
 disable_error_code = ["arg-type", "index", "misc", "union-attr"]
 
 # contourrs pins numpy>=2.5.3, whose stubs use PEP 695 `type` statements that
-# mypy's python_version = "3.10" target refuses to parse — and duckdb's stubs
+# mypy's python_version = "3.11" target refuses to parse — and duckdb's stubs
 # import numpy, so on a Python >= 3.12 venv every mypy run loads them and dies
 # on numpy's own files (the 3.11 CI meta leg resolves numpy 2.4.6 and never
 # saw this). Skipping types numpy as Any, the same footing as any unstubbed
@@ -656,8 +654,6 @@ ignore = ["DEP002"]
 # Exclude virtual env, tests, benchmarks and plugin packages (own dependency
 # definitions) from analysis
 exclude = [".venv", "tests", "geoparquet_io/benchmarks", "plugins"]
-# Known transitive dependencies that appear unused but are required
-per_rule_ignores = {DEP003 = ["tomli"]}
 
 [tool.menard]
 mode = "block"

@@ -2052,7 +2052,7 @@ class _DuckDBFieldWrapper:
 
 
 _TIMESTAMPTZ = "TIMESTAMP WITH TIME ZONE"
-_UTC = datetime.timezone.utc
+_UTC = datetime.UTC
 
 
 def _as_subquery(sql: str) -> str:

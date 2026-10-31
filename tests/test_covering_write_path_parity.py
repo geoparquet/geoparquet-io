@@ -267,6 +267,21 @@ class TestTheFastPathKeepsALegalCoveringAfterInvalidation:
         assert bbox_covering_column(out) == "bbox"
         assert spec_failures(out) == {}
 
+    def test_enum_strategy_keeps_its_name_in_memory_limit_error(self):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.write_funnels import _memory_limit_for_strategy
+        from geoparquet_io.core.write_strategies import WriteStrategy
+
+        assert str(WriteStrategy.ARROW_MEMORY) == "WriteStrategy.ARROW_MEMORY"
+        with pytest.raises(InvalidParameterError, match="not 'WriteStrategy.ARROW_MEMORY'"):
+            _memory_limit_for_strategy(
+                "2GB",
+                WriteStrategy.ARROW_MEMORY,
+                WriteStrategy.ARROW_MEMORY,
+                auto_routed_strategy=False,
+                funnel_forced_rewrite=False,
+            )
+
     def test_a_rewrite_the_user_asked_for_still_refuses_it(
         self, v2_with_declared_covering, tmp_path
     ):

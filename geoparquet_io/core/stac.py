@@ -5,7 +5,7 @@ STAC Item and Collection generation for GeoParquet files.
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pystac
@@ -319,10 +319,10 @@ def get_file_datetime(parquet_file: str) -> datetime:
     """
     if os.path.exists(parquet_file):
         mtime = os.path.getmtime(parquet_file)
-        return datetime.fromtimestamp(mtime, tz=timezone.utc)
+        return datetime.fromtimestamp(mtime, tz=UTC)
     else:
         # Fallback to current time for remote files
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
 
 def generate_stac_item(

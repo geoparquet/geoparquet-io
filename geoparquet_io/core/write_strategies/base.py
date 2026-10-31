@@ -179,7 +179,7 @@ def written_block_encoding(geoparquet_version: str) -> str | None:
     return None if geoparquet_version == "1.1-geoarrow" else "WKB"
 
 
-class WriteStrategy(str, Enum):
+class WriteStrategy(str, Enum):  # noqa: UP042 - Preserve str(member) in public messages.
     """Available write strategies for GeoParquet metadata writes."""
 
     ARROW_MEMORY = "in-memory"

@@ -82,7 +82,7 @@ GENERAL_ROW_COUNT_RANGE = (10_000, 200_000)
 SPATIAL_ROW_COUNT_RANGE = (10_000, 50_000)
 
 
-class CheckProfile(str, Enum):
+class CheckProfile(str, Enum):  # noqa: UP042 - Preserve str(member) in public messages.
     """
     Profiles for checking parquet file structure
     based on specific use cases

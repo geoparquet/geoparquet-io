@@ -583,16 +583,16 @@ class TestGetModuleExports:
 
         code = textwrap.dedent("""\
             try:
-                import tomllib
+                import json
             except ImportError:
-                import tomli as tomllib
+                import ast as syntax_tree
 
             def foo():
                 pass
         """)
         tree = ast.parse(code)
         exports = _get_module_exports(tree)
-        assert "tomllib" in exports
+        assert "json" in exports
         assert "foo" in exports
 
     def test_finds_names_in_if_blocks(self):
@@ -601,14 +601,14 @@ class TestGetModuleExports:
 
         code = textwrap.dedent("""\
             import sys
-            if sys.version_info >= (3, 11):
-                import tomllib
+            if sys.platform == "linux":
+                import json
             else:
-                import tomli as tomllib
+                import ast as syntax_tree
         """)
         tree = ast.parse(code)
         exports = _get_module_exports(tree)
-        assert "tomllib" in exports
+        assert "json" in exports
         assert "sys" in exports
 
     def test_finds_aliased_imports(self):

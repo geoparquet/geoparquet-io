@@ -95,7 +95,7 @@ The test suite is automatically run on every commit via GitHub Actions (`.github
 
 The CI runs tests on:
 - Multiple operating systems (Ubuntu, macOS, Windows)
-- Multiple Python versions (3.9, 3.10, 3.11, 3.12)
+- Multiple Python versions (3.11, 3.12, 3.13)
 
 ## Adding New Tests
 
