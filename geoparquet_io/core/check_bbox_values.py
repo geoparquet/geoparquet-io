@@ -60,7 +60,6 @@ from geoparquet_io.core.check_verdict import (
     could_not_run,
     worst,
 )
-from geoparquet_io.core.column_selection import named_entries
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet, is_geographic_crs
 from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.duckdb_utils import (
@@ -80,7 +79,11 @@ from geoparquet_io.core.geometry_detection import (
     resolve_geometry_read,
 )
 from geoparquet_io.core.logging_config import debug, error, info, progress, success, warn
-from geoparquet_io.core.parquet_schema import root_schema_columns, schema_direct_children
+from geoparquet_io.core.parquet_schema import (
+    root_schema_columns,
+    root_schema_index,
+    schema_direct_children,
+)
 from geoparquet_io.core.remote import needs_httpfs
 
 #: Rows compared when the caller does not say otherwise.
@@ -233,10 +236,11 @@ def _could_not_compare(reason, bbox_column, geometry_column) -> dict:
 
 def _bbox_field_types(schema_info, bbox_column: str) -> set[str]:
     """The lower-cased types of the bbox struct's direct children."""
+    index = root_schema_index(schema_info, bbox_column)
+    if index is None:
+        return set()
     return {
-        str(child.get("type", "")).lower()
-        for index in named_entries(schema_info, bbox_column)
-        for child in schema_direct_children(schema_info, index)
+        str(child.get("type", "")).lower() for child in schema_direct_children(schema_info, index)
     }
 
 
@@ -711,7 +715,7 @@ def _row_source(schema_info, raw_url: str) -> tuple[str, str]:
     took the name.
     """
     path = sql_path(raw_url)
-    if any(column.get("name") == _ROW_NUMBER_COLUMN for column in schema_info):
+    if root_schema_index(schema_info, _ROW_NUMBER_COLUMN) is not None:
         return f"read_parquet({path})", "row_number() OVER () - 1"
     return f"read_parquet({path}, file_row_number=true)", quote_identifier(_ROW_NUMBER_COLUMN)
 

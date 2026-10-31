@@ -55,7 +55,6 @@ __all__ = [
     "has_column",
     "join_column_list",
     "matching_columns",
-    "named_entries",
     "reject_blank_column_entries",
     "resolve_columns_against_schema",
     "same_column",
@@ -110,18 +109,6 @@ def find_column(name: str, columns: Iterable[str], *, option_name: str = "column
             "differ only in case cannot be told apart. Rename one of the columns.",
         )
     return found[0] if found else None
-
-
-def named_entries(schema_info: list[dict], name: str) -> list[int]:
-    """Indexes of the rows of a depth-first schema listing whose ``name`` is ``name``.
-
-    For code that walks :func:`~geoparquet_io.core.duckdb_metadata.get_schema_info`
-    rows by a name it already holds (a declared bbox or geometry column). Exact on
-    purpose, and not :func:`find_column`: the listing carries nested children, so
-    two entries may share a name -- or differ only in case -- without being the
-    twins of one top-level column.
-    """
-    return [index for index, col in enumerate(schema_info) if col.get("name") == name]
 
 
 def has_column(columns: Iterable[str], name: str) -> bool:

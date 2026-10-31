@@ -153,7 +153,6 @@
     "has_column",
     "join_column_list",
     "matching_columns",
-    "named_entries",
     "reject_blank_column_entries",
     "resolve_columns_against_schema",
     "same_column",

@@ -20,7 +20,7 @@ again.
 import json
 from typing import Literal, TypedDict, cast
 
-from geoparquet_io.core.column_selection import matching_columns, named_entries, unique_name
+from geoparquet_io.core.column_selection import matching_columns, unique_name
 from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.geo_metadata import (
@@ -34,7 +34,11 @@ from geoparquet_io.core.geo_metadata import (
     raw_geo_of_file,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, error, info, warn
-from geoparquet_io.core.parquet_schema import root_schema_columns, schema_direct_children
+from geoparquet_io.core.parquet_schema import (
+    root_schema_columns,
+    root_schema_index,
+    schema_direct_children,
+)
 
 #: Struct fields a bbox covering column must expose.
 _BBOX_REQUIRED_FIELDS = frozenset({"xmin", "ymin", "xmax", "ymax"})
@@ -106,12 +110,11 @@ def _schema_struct_children(
     flat ``parquet_schema()`` listing is depth-first, so a nested child's own
     children must not be read as siblings.
     """
-    for index in named_entries(schema_info, column_name):
-        if (schema_info[index].get("num_children") or 0) < 1:
-            return None
-        children = schema_direct_children(schema_info, index)
-        return [c.get("name", "") for c in children], [str(c.get("type", "")) for c in children]
-    return None
+    index = root_schema_index(schema_info, column_name)
+    if index is None or (schema_info[index].get("num_children") or 0) < 1:
+        return None
+    children = schema_direct_children(schema_info, index)
+    return [c.get("name", "") for c in children], [str(c.get("type", "")) for c in children]
 
 
 def _schema_struct_child_field_names(schema_info, column_name) -> list[str] | None:

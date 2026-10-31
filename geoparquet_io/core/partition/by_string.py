@@ -6,6 +6,7 @@ from geoparquet_io.core.column_selection import find_column
 from geoparquet_io.core.duckdb_metadata import get_schema_info, get_usable_column_names
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
+from geoparquet_io.core.parquet_schema import root_schema_index
 from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.common import (
     partition_by_column,
@@ -44,11 +45,10 @@ def validate_column_exists(parquet_file: str, column_name: str, verbose: bool = 
 
     if verbose:
         schema_info = get_schema_info(parquet_file)
-        for col in schema_info:
-            if col.get("name") == resolved:
-                column_type = col.get("type", "unknown")
-                debug(f"Found column '{resolved}' with type: {column_type}")
-                break
+        index = root_schema_index(schema_info, resolved)
+        if index is not None:
+            column_type = schema_info[index].get("type", "unknown")
+            debug(f"Found column '{resolved}' with type: {column_type}")
 
 
 def partition_by_string(

@@ -372,16 +372,3 @@ def test_breakdown_names_that_differ_only_in_case_from_a_metric_column_are_suffi
     assert build_breakdown_column_names(["a"], reserved={"sum_x_a"}, prefix="sum_height") == [
         ("a", "sum_height_a")
     ]
-
-
-def test_named_entries_is_exact_over_a_depth_first_listing():
-    """Nested children share names with other columns; the listing is read exactly."""
-    listing = [
-        {"name": "bbox", "num_children": 2},
-        {"name": "xmin"},
-        {"name": "BBOX"},
-        {"name": "xmin"},
-    ]
-    assert cs.named_entries(listing, "xmin") == [1, 3]
-    assert cs.named_entries(listing, "bbox") == [0]
-    assert cs.named_entries(listing, "Bbox") == []

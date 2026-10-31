@@ -19,7 +19,6 @@ from typing import Any, Literal
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.column_selection import named_entries
 from geoparquet_io.core.crs_utils import (
     _projjson_from_authority,
     column_is_geographic,
@@ -46,7 +45,7 @@ from geoparquet_io.core.file_utils import (
 )
 from geoparquet_io.core.geo_metadata import row_group_geometry_stats
 from geoparquet_io.core.geoarrow_compat import srid_crs_as_text
-from geoparquet_io.core.parquet_schema import root_schema_columns
+from geoparquet_io.core.parquet_schema import root_schema_columns, root_schema_index
 from geoparquet_io.core.remote import is_remote_url, is_s3_url, needs_httpfs
 
 # =============================================================================
@@ -914,9 +913,8 @@ def native_geo_type(logical_type: object) -> str | None:
 def is_native_geo_column(schema_info: list[dict] | None, column: str) -> str | None:
     """:func:`native_geo_type` of ``column`` in :func:`get_schema_info` rows; None if absent."""
     rows = schema_info or []
-    for index in named_entries(rows, column):
-        return native_geo_type(rows[index].get("logical_type"))
-    return None
+    index = root_schema_index(rows, column)
+    return native_geo_type(rows[index].get("logical_type")) if index is not None else None
 
 
 def is_geometry_column(logical_type: str) -> bool:
