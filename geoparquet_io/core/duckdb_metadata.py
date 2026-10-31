@@ -1522,68 +1522,33 @@ def _format_geo_types(geo_types: list) -> list[str]:
         3007: "GeometryCollection ZM",
     }
 
-    formatted = []
-    for t in geo_types:
-        if isinstance(t, int):
-            # WKB integer code
-            formatted.append(WKB_TYPE_CODES.get(t, f"Unknown({t})"))
-        elif isinstance(t, str):
-            # DuckDB returns lowercase strings like 'polygon'
-            # Capitalize properly
-            t_lower = t.lower()
-            if t_lower == "point":
-                formatted.append("Point")
-            elif t_lower == "linestring":
-                formatted.append("LineString")
-            elif t_lower == "polygon":
-                formatted.append("Polygon")
-            elif t_lower == "multipoint":
-                formatted.append("MultiPoint")
-            elif t_lower == "multilinestring":
-                formatted.append("MultiLineString")
-            elif t_lower == "multipolygon":
-                formatted.append("MultiPolygon")
-            elif t_lower == "geometrycollection":
-                formatted.append("GeometryCollection")
-            elif t_lower.endswith(" zm") or t_lower.endswith("zm"):
-                # Handle ZM variants (check first - most specific)
-                if t_lower.endswith(" zm"):
-                    base = t_lower[:-3]  # Strip " zm"
-                else:
-                    base = t_lower[:-2]  # Strip "zm"
-                formatted.append(_capitalize_geom_type(base) + " ZM")
-            elif t_lower.endswith(" z") or t_lower.endswith("z"):
-                # Handle Z variants
-                if t_lower.endswith(" z"):
-                    base = t_lower[:-2]  # Strip " z"
-                else:
-                    base = t_lower[:-1]  # Strip "z"
-                formatted.append(_capitalize_geom_type(base) + " Z")
-            elif t_lower.endswith(" m") or t_lower.endswith("m"):
-                # Handle M variants
-                if t_lower.endswith(" m"):
-                    base = t_lower[:-2]  # Strip " m"
-                else:
-                    base = t_lower[:-1]  # Strip "m"
-                formatted.append(_capitalize_geom_type(base) + " M")
-            else:
-                # Fallback: just capitalize
-                formatted.append(t.title())
-        else:
-            formatted.append(str(t))
-
-    return sorted(set(formatted))
+    formatted = (
+        WKB_TYPE_CODES.get(t) if isinstance(t, int) else _spec_type_from_string(str(t))
+        for t in geo_types
+    )
+    # A name that is not a GeoParquet geometry type (code 0, an unknown code
+    # or string) is dropped: geometry_types holds only spec values.
+    return sorted({name for name in formatted if name})
 
 
-def _capitalize_geom_type(name: str) -> str:
-    """Capitalize geometry type name properly."""
-    name_map = {
-        "point": "Point",
-        "linestring": "LineString",
-        "polygon": "Polygon",
-        "multipoint": "MultiPoint",
-        "multilinestring": "MultiLineString",
-        "multipolygon": "MultiPolygon",
-        "geometrycollection": "GeometryCollection",
-    }
-    return name_map.get(name.lower().strip(), name.title())
+def _spec_type_from_string(raw: str) -> str | None:
+    """DuckDB's ``polygon`` / ``polygon_z`` / ``multipolygon zm`` as the spec name."""
+    lowered = raw.lower().replace("_", " ").strip()
+    for suffix in (" zm", " z", " m", "zm", "z", "m", ""):
+        if not lowered.endswith(suffix):
+            continue
+        base = _GEOM_TYPE_NAMES.get(lowered[: len(lowered) - len(suffix)].strip())
+        if base:
+            return base + (f" {suffix.strip().upper()}" if suffix else "")
+    return None
+
+
+_GEOM_TYPE_NAMES = {
+    "point": "Point",
+    "linestring": "LineString",
+    "polygon": "Polygon",
+    "multipoint": "MultiPoint",
+    "multilinestring": "MultiLineString",
+    "multipolygon": "MultiPolygon",
+    "geometrycollection": "GeometryCollection",
+}

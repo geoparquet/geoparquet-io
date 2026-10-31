@@ -391,9 +391,16 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
     if parquet_type != "No Parquet geo logical type":
         native_stats = get_aggregated_native_geo_stats(parquet_file, primary_column, con=con)
 
-        # Use native bbox if GeoParquet bbox not available
+        # Use native bbox if GeoParquet bbox not available. Native statistics
+        # order Z after XY ([xmin, ymin, xmax, ymax, zmin, zmax]); this bbox is
+        # read as GeoParquet's interleaved form downstream, so reorder it.
         if not effective_bbox and native_stats.get("bbox"):
-            effective_bbox = native_stats["bbox"]
+            native = native_stats["bbox"]
+            effective_bbox = (
+                [native[0], native[1], native[4], native[2], native[3], native[5]]
+                if len(native) == 6
+                else native
+            )
 
         # Use native geometry_types if GeoParquet geometry_types not available
         if not effective_geometry_types and native_stats.get("geometry_types"):

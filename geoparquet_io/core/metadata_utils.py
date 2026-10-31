@@ -13,6 +13,7 @@ from rich.text import Text
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.duckdb_metadata import (
+    aggregate_native_geo_stats,
     detect_geometry_columns,
     get_bbox_from_row_group_stats,
     get_file_metadata,
@@ -30,19 +31,20 @@ from geoparquet_io.core.sizing import format_size
 
 
 def _calculate_overall_bbox(row_group_stats: list[dict]) -> dict[str, float] | None:
-    """Calculate overall bbox from row group statistics."""
-    overall = {"xmin": None, "ymin": None, "xmax": None, "ymax": None}
-    for rg_stat in row_group_stats:
-        if not all(k in rg_stat for k in ["xmin", "ymin", "xmax", "ymax"]):
-            continue
-        if overall["xmin"] is None:
-            overall = {k: rg_stat[k] for k in ["xmin", "ymin", "xmax", "ymax"]}
-        else:
-            overall["xmin"] = min(overall["xmin"], rg_stat["xmin"])
-            overall["ymin"] = min(overall["ymin"], rg_stat["ymin"])
-            overall["xmax"] = max(overall["xmax"], rg_stat["xmax"])
-            overall["ymax"] = max(overall["ymax"], rg_stat["ymax"])
-    return overall if overall["xmin"] is not None else None
+    """The file's bbox from its row-group extents, through the one row-group fold.
+
+    ``aggregate_native_geo_stats`` merges the X ranges on the circle, so a row
+    group that wraps the antimeridian (xmin > xmax) is not inverted into its
+    complement, as a plain min/max did.
+    """
+    keys = ("xmin", "ymin", "xmax", "ymax")
+    chunks = [
+        {**{k: rg[k] for k in keys}, "zmin": None, "zmax": None, "geometry_types": []}
+        for rg in row_group_stats
+        if all(rg.get(k) is not None for k in keys)
+    ]
+    bbox = aggregate_native_geo_stats(chunks).get("bbox")
+    return dict(zip(keys, bbox[:4], strict=True)) if bbox else None
 
 
 def has_parquet_geo_row_group_stats(parquet_file: str, geometry_column: str | None = None) -> dict:

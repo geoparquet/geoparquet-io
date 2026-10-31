@@ -45,7 +45,16 @@ def _declared_bbox(path):
 
 
 def _rewrite_geo(path, out_path, *, version=None, **column_updates):
-    """Copy a GeoParquet file with its geo metadata version/column fields edited."""
+    """Copy a GeoParquet file with its geo metadata version/column fields edited.
+
+    The geometry column keeps its Parquet Geometry logical type whatever else the
+    process has imported: pyarrow only reads it back as the ``geoarrow.wkb``
+    extension (and so only writes it out again) once that extension is
+    registered, which ``geoarrow.pyarrow`` does on import. Without this the file
+    came out as plain BLOB or as GEOMETRY depending on test order (HANDOFFS 52).
+    """
+    import geoarrow.pyarrow  # noqa: F401  -- registers geoarrow.wkb
+
     table = pq.read_table(path)
     meta = dict(table.schema.metadata or {})
     geo = json.loads(meta[b"geo"])
@@ -353,9 +362,15 @@ class TestPartitionSummaryBbox:
         assert summary["combined_bbox"] == [170.0, -10.0, -170.0, 10.0]
 
     def test_short_bbox_is_ignored(self, tmp_path, xyz_file):
+        """The malformed declared bbox is dropped; the native statistics answer.
+
+        With the Geometry logical type kept, the file's geospatial statistics
+        carry the true extent. Their 6-element form puts Z after XY, so reading
+        it as GeoParquet's interleaved bbox gave ``[0, 0, 12, 5]`` (zmin as ymax).
+        """
         broken = _rewrite_geo(xyz_file, tmp_path / "broken.parquet", bbox=[0.0, 0.0, 1.0])
         summary = extract_partition_summary([str(broken)])
-        assert summary["combined_bbox"] is None
+        assert summary["combined_bbox"] == [0.0, 0.0, 12.0, 12.0]
 
 
 def _stats(monkeypatch, bbox):
