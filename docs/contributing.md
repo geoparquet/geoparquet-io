@@ -64,6 +64,13 @@ uv run pre-commit install
 
 ## Tests
 
+The collected-count ratchet in `tests/test_suite_budget.py` limits the fast suite using
+`tests/suite_budget.toml`; its numbers only go down, and raising one needs a reason in the PR.
+The per-test time cap is `timeout = 60` in `pyproject.toml`, with explicit timeout marks
+ratcheted by `max_timeout_marks` in `tests/suite_budget.toml`.
+The duplicate-body gate in `tests/test_duplicate_tests.py` checks test bodies and their
+execution context to prevent identical tests from growing back.
+
 ```bash
 uv run pytest                                              # Full suite
 uv run pytest tests/test_yourfile.py -v                   # Single file

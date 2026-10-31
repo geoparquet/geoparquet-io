@@ -26,11 +26,6 @@ from tests.conftest import safe_unlink
 class TestGetKvMetadata:
     """Tests for get_kv_metadata function."""
 
-    def test_returns_dict(self, places_test_file):
-        """Test that get_kv_metadata returns a dict."""
-        result = get_kv_metadata(places_test_file)
-        assert b"geo" in result
-
     def test_contains_geo_key(self, places_test_file):
         """Test that GeoParquet file contains geo key."""
         result = get_kv_metadata(places_test_file)

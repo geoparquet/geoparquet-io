@@ -212,6 +212,13 @@ Additional patterns (not yet enforced):
 <!-- freshness: last-verified: 2026-04-03, maps-to: pyproject.toml -->
 ## Testing
 
+The collected-count ratchet in `tests/test_suite_budget.py` limits the fast suite using
+`tests/suite_budget.toml`; its numbers only go down, and raising one needs a reason in the PR.
+The per-test time cap is `timeout = 60` in `pyproject.toml`, with explicit timeout marks
+ratcheted by `max_timeout_marks` in `tests/suite_budget.toml`.
+The duplicate-body gate in `tests/test_duplicate_tests.py` checks test bodies and their
+execution context to prevent identical tests from growing back.
+
 Config in `pyproject.toml [tool.pytest.ini_options]`.
 
 The fast lane runs `uv run pytest -n auto -m "not slow and not network and not meta"`;

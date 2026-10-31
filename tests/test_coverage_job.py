@@ -293,15 +293,3 @@ class TestCoverageLegStillEnforcesTheGates:
             "diff-cover must be passed --branch-coverage, or partial branches on "
             "changed lines pass the 90% gate as if fully covered"
         )
-
-
-def test_supported_python_matrix():
-    """Python 3.10 reached EOL on 2026-10-04; CI starts at the 3.11 floor."""
-    workflow = yaml.safe_load(
-        (PROJECT_ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
-    )
-    assert workflow["jobs"]["test"]["strategy"]["matrix"]["python-version"] == [
-        "3.11",
-        "3.12",
-        "3.13",
-    ]
