@@ -17,11 +17,8 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from geoparquet_io.core.bbox_structure import check_bbox_structure, dataset_bounds
-from geoparquet_io.core.bbox_parse import parse_bbox
-from geoparquet_io.core.bbox_parse import BBox, any_piece, parse_bbox
 from geoparquet_io.core import bbox_parse
-from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.bbox_structure import check_bbox_structure, dataset_bounds
 from geoparquet_io.core.column_selection import (
     reject_blank_column_entries,
     split_column_list,

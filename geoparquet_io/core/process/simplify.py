@@ -550,11 +550,6 @@ def _footer_kv_via_funnel(
     schema: pa.Schema,
     geom_col: str,
     stats: GeometryStats,
-    geoparquet_version: str | None,
-    compression: str | None,
-    compression_level: int | None,
-    types: set,
-    bbox: list,
     write: WriteOptions,
 ) -> dict[str, str]:
     """The streamed file's footer metadata, produced by the real funnel.
@@ -714,11 +709,6 @@ def _simplify_file_streaming(
                         schema,
                         geom_col,
                         merged_geometry_stats(batch_stats, geographic=geographic),
-                        geoparquet_version,
-                        compression,
-                        compression_level,
-                        types,
-                        bbox,
                         write,
                     )
                 )

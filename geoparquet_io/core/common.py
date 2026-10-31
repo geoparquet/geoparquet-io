@@ -26,9 +26,6 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.duckdb_utils import (
     _DuckDBSchemaWrapper,
-    _get_query_column_type,
-    _get_query_columns,
-    _strip_trailing_order_by,
     computed_column_query,
     fetch_one,
     get_duckdb_connection,

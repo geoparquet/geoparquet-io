@@ -428,7 +428,8 @@ reason = "CRS equality copy (approved change 9); T4c"
 # tests/test_owner_guards.py fails when the two lists differ.
 [G3]
 baseline = "scripts/duplicate_pairs_baseline.txt"
-
+# Every near-duplicate pair is gone; the list stays, empty, so a new one has nowhere to hide.
+pairs = []
 
 # pylint R0801 (scripts/check_pylint_duplicates.py, the pylint-duplicates hook).
 # One entry per reported block, keyed by the module and the function (or class,
