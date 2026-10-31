@@ -31,6 +31,7 @@ answers mean is this module's.
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping, MutableMapping
+from typing import TypeGuard
 
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.logging_config import warn
@@ -63,7 +64,7 @@ class EdgesConflictError(GeoParquetError):
     """The files of one input declare different edges for the same column."""
 
 
-def is_nonplanar(edges: object) -> bool:
+def is_nonplanar(edges: object) -> TypeGuard[str]:
     """Whether ``edges`` is a GeoParquet non-planar algorithm (a typo is not)."""
     return isinstance(edges, str) and edges in GEOGRAPHY_EDGE_ALGORITHMS
 
@@ -231,7 +232,9 @@ def detect_edges(
 
     A planar column is left out: the answer is what a write must carry.
     """
-    edges_by_col = {name: edges for name, edges in (native or {}).items() if is_nonplanar(edges)}
+    edges_by_col: dict[str, str] = {
+        name: edges for name, edges in (native or {}).items() if is_nonplanar(edges)
+    }
     for name, declared in (block or {}).items():
         if declared == PLANAR:
             edges_by_col.pop(name, None)
