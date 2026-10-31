@@ -301,7 +301,9 @@ def test_every_documented_concept_owner_has_codeowners():
 
 def test_supported_python_matrix():
     """Python 3.10 reached EOL on 2026-10-04; CI starts at the 3.11 floor."""
-    workflow = yaml.safe_load((PROJECT_ROOT / ".github/workflows/tests.yml").read_text())
+    workflow = yaml.safe_load(
+        (PROJECT_ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
+    )
     assert workflow["jobs"]["test"]["strategy"]["matrix"]["python-version"] == [
         "3.11",
         "3.12",

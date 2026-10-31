@@ -19,6 +19,10 @@ from geoparquet_io.core.check_parquet_structure import (
 )
 
 
+def test_check_profile_string_preserves_public_enum_name():
+    assert str(CheckProfile.web) == "CheckProfile.web"
+
+
 class TestAssessRowGroupSize:
     """Tests for assess_row_group_size function."""
 
