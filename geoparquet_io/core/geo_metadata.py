@@ -9,7 +9,7 @@ Usage in core modules:
     from geoparquet_io.core.geo_metadata import (
         read_raw_geo,           # what a file literally holds (check, inspect)
         sanitized_carried_geo,  # what a write/transform path may carry
-        create_geo_metadata,
+        compose_geo_block,      # the only geo block composer
     )
 
 Those two are the only ``geo`` decoders (#1367 concept 3): nothing outside this
@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cache, lru_cache
 from typing import TYPE_CHECKING
@@ -35,10 +35,14 @@ from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     query_schema,
     quote_identifier,
+    sql_literal,
 )
 from geoparquet_io.core.edges import (
+    EDGES,
     carry_edges,
+    declares_edges,
     edges_for_version,
+    edges_of,
     implied_orientation,
     strip_edges,
 )
@@ -296,6 +300,25 @@ def carried_version(value, source: str | None = None) -> str | None:
         f"'version' is {_article(_json_type_name(value))}, expected a string", source
     )
     return None
+
+
+def declared_version(
+    geo_meta: Mapping | None, default: str | None = "", source: str | None = None
+) -> str | None:
+    """The ``version`` string a decoded ``geo`` block declares (*default* when it gives none).
+
+    The one reader of an *input's* declared version -- ``gpio inspect``
+    printing it, ``Table.geoparquet_version``, ``add bbox-metadata`` refusing a
+    1.0 file, ``add bbox``'s advice, ``file_type``'s ``geo_version`` and ``check
+    spec``'s outdated-version issue; never for choosing the output's, which is
+    ``parquet_writer.resolve_output_geoparquet_version``. A version that is not
+    a string is no version (:func:`carried_version` names it once, against
+    ``source`` when given, #979), so every reader of a declared version gets the
+    same answer for the same block.
+    """
+    if not isinstance(geo_meta, Mapping):
+        return default
+    return carried_version(geo_meta.get("version"), source=source) or default
 
 
 def _decode_geo_json(raw) -> tuple[object, str | None, str]:
@@ -665,65 +688,6 @@ def _article(type_name: str) -> str:
 # =============================================================================
 
 
-def _initialize_geo_metadata(geo_meta: dict | None, geom_col: str, version: str = "1.1.0") -> dict:
-    """
-    Initialize or upgrade geo metadata structure.
-
-    Creates a minimal valid GeoParquet metadata structure if none exists,
-    or ensures existing metadata has the required structure.
-
-    Args:
-        geo_meta: Existing geo metadata dict or None
-        geom_col: Name of the geometry column
-        version: GeoParquet version string (e.g., "1.0.0", "1.1.0", "2.0.0")
-
-    Returns:
-        Initialized geo metadata structure
-    """
-    if not geo_meta:
-        return {"version": version, "primary_column": geom_col, "columns": {geom_col: {}}}
-
-    # Set the specified version
-    geo_meta["version"] = version
-    # `primary_column` is required by every version of the spec. A carried block
-    # can arrive without one -- absent in the input, or dropped by
-    # `sanitize_geo_metadata` because it was not a string (#771) -- and the
-    # output would then be invalid. Matches `write_strategies.base`.
-    if "primary_column" not in geo_meta:
-        geo_meta["primary_column"] = geom_col
-    if "columns" not in geo_meta:
-        geo_meta["columns"] = {}
-    if geom_col not in geo_meta["columns"]:
-        geo_meta["columns"][geom_col] = {}
-
-    return geo_meta
-
-
-def _add_bbox_covering(
-    geo_meta: dict, geom_col: str, bbox_info: dict | None, verbose: bool
-) -> None:
-    """
-    Add bbox covering metadata to geometry column.
-
-    Updates geo_meta in place with bbox covering information that points
-    to the bbox struct column fields.
-
-    Args:
-        geo_meta: Geo metadata dict to update
-        geom_col: Name of the geometry column
-        bbox_info: Result from check_bbox_structure, or None
-        verbose: Print verbose output
-    """
-    if not bbox_info or not bbox_info.get("has_bbox_column"):
-        return
-
-    geo_meta["columns"][geom_col].setdefault("covering", {})["bbox"] = build_bbox_covering(
-        bbox_info["bbox_column_name"]
-    )
-    if verbose:
-        debug(f"Added bbox covering metadata for column '{bbox_info['bbox_column_name']}'")
-
-
 def is_geoparquet_1x(geo_version: object) -> bool:
     """Whether ``geo_version`` is a GeoParquet 1.x version: the edges gate.
 
@@ -756,11 +720,9 @@ def strip_unsupported_covering(geo_meta: dict, version: str | None, verbose: boo
     also catches coverings carried in from a 1.1 source file or supplied through
     ``custom_metadata`` (h3/s2/a5/quadkey).
 
-    Never mutates its input. The assembled metadata still aliases the caller's
-    column dicts through the shallow copy in ``_initialize_geo_metadata``, and
-    partition loops reuse one ``original_metadata`` dict across many writes, so
-    popping in place would strip the shared dict permanently and silently cost a
-    later 1.1 write its covering.
+    Never mutates its input: partition loops reuse one ``original_metadata``
+    dict across many writes, so popping in place would strip the shared dict
+    permanently and silently cost a later 1.1 write its covering.
     """
     if covering_supported(version):
         return geo_meta
@@ -803,7 +765,7 @@ def covering_lacks_bbox(col_meta: object) -> bool:
 
     The one definition of the illegal shape, shared by the write gate
     (:func:`strip_bboxless_covering`), the read-side verdict
-    (``validate._check_covering_has_bbox``) and the ``check --fix`` repair, so
+    (``validate._check_cover_has_bbox``) and the ``check --fix`` repair, so
     what gpio refuses to write, what it fails, and what it drops cannot drift
     apart (#954, #1173).
 
@@ -844,9 +806,9 @@ def strip_bboxless_covering(geo_meta: dict, verbose: bool = False) -> dict:
     indexes ``covering["bbox"]["xmin"][0]`` unguarded, so ``partition quadkey``
     wrote a dataset ``geopandas.read_parquet`` could not open at all (#954).
 
-    Single gate shared by every write path, applied after metadata assembly and
-    after the bbox-declaring steps (``_add_bbox_covering``,
-    ``declare_carried_bbox_column``) have had their chance to supply the member.
+    Step 13 of :func:`compose_geo_block`, the last gate: it runs after the
+    composer's bbox-covering step (step 9) has had its chance to supply the
+    member.
 
     Never mutates its input, for the same aliasing reason as
     :func:`strip_unsupported_covering`: partition loops reuse one metadata dict
@@ -861,27 +823,32 @@ def strip_bboxless_covering(geo_meta: dict, verbose: bool = False) -> dict:
     )
 
 
+def _with_covering(col_meta: dict, remaining: dict) -> dict:
+    """``col_meta`` with its ``covering`` replaced by ``remaining`` where it stood.
+
+    The key keeps its position (a gate removes members, it does not reorder the
+    entry), and goes when nothing is left. Never mutates its input.
+    """
+    return {
+        key: (remaining if key == "covering" else value)
+        for key, value in col_meta.items()
+        if key != "covering" or remaining
+    }
+
+
 def strip_illegal_bbox_covering(geo_meta: dict, schema: pa.Schema) -> dict:
     """Return ``geo_meta`` without any ``covering.bbox`` naming a struct the spec forbids.
 
-    The *drop* half of :func:`bbox_column_to_declare`'s rule 2, for the write
-    paths that build their block from an Arrow schema. The DuckDB paths get it
-    from :func:`declare_carried_bbox_column`, which probes the output query for
-    a schema and pops the same member on the same verdict; this asks the same
-    question of a schema the caller already has.
-
-    Without it those paths asked the gate only "may I declare this column?",
-    acted on the "no" by not declaring anything, and then wrote the entry the
-    *input* had already declared -- warning "so it is not written" first (#1172).
+    The *drop* half of :func:`bbox_column_to_declare`'s rule 2: step 12 of
+    :func:`compose_geo_block`, over the source's output schema. A write that
+    may not declare a column must not write the entry the *input* had already
+    declared either (#1172).
 
     Only the ``bbox`` member goes: an ``h3``/``quadkey`` entry beside it is not
-    what the validator rejected, and :func:`strip_bboxless_covering` -- the gate
-    every path runs after this one -- decides whether what is left may stand
-    alone (#954). A covering naming a column the schema does not have is somebody
-    else's question: :func:`prune_geo_metadata_to_columns` on the DuckDB funnel,
-    which prunes the carried block before any strategy sees it, and
-    :func:`strip_absent_covering` immediately before this gate on the Arrow table
-    funnel, which that prune never reached.
+    what the validator rejected, and :func:`strip_bboxless_covering` (step 13)
+    decides whether what is left may stand alone (#954). A covering naming a
+    column the schema does not have is step 11's question
+    (:func:`strip_absent_covering`).
 
     Never mutates its input, for the aliasing reason
     :func:`strip_unsupported_covering` gives.
@@ -901,11 +868,9 @@ def strip_illegal_bbox_covering(geo_meta: dict, schema: pa.Schema) -> dict:
             stripped[col_name] = col_meta
             continue
         _note_undeclarable_bbox_column(bbox_column, problem, True)
-        remaining = {k: v for k, v in covering.items() if k != "bbox"}
-        pruned = {k: v for k, v in col_meta.items() if k != "covering"}
-        if remaining:
-            pruned["covering"] = remaining
-        stripped[col_name] = pruned
+        stripped[col_name] = _with_covering(
+            col_meta, {k: v for k, v in covering.items() if k != "bbox"}
+        )
         changed = True
 
     if not changed:
@@ -947,10 +912,7 @@ def strip_absent_covering(geo_meta: dict, columns: Collection[str]) -> dict:
         if len(remaining) == len(covering):
             stripped[col_name] = col_meta
             continue
-        pruned = {k: v for k, v in col_meta.items() if k != "covering"}
-        if remaining:
-            pruned["covering"] = remaining
-        stripped[col_name] = pruned
+        stripped[col_name] = _with_covering(col_meta, remaining)
         changed = True
 
     if not changed:
@@ -958,60 +920,6 @@ def strip_absent_covering(geo_meta: dict, columns: Collection[str]) -> dict:
     result = dict(geo_meta)
     result["columns"] = stripped
     return result
-
-
-def gate_illegal_bbox_covering(geo_meta: dict, con: duckdb.DuckDBPyConnection, query: str) -> dict:
-    """:func:`strip_illegal_bbox_covering` for the three DuckDB write paths.
-
-    The 2.0 fast path, duckdb-kv and disk-rewrite build their block from the
-    input's and then run :func:`declare_carried_bbox_column`, which is scoped to
-    the PRIMARY column. A secondary column's ``covering`` over an illegal struct
-    was therefore never judged by any of them, and shipped verbatim into a file
-    ``gpio check spec`` rejects (#1035/#1172). This is the same gate the Arrow
-    builders run, asked of every column, over the schema the write's own query
-    produces.
-
-    Probes only when some column actually declares a ``covering.bbox``: with
-    nothing to judge the answer cannot differ, and ``declare_carried_bbox_column``
-    settles the common "the output has no bbox column" case from
-    ``output_columns`` without a probe, which a gate that always probed would
-    undo.
-    """
-    if not any(
-        isinstance(col_meta, dict)
-        and isinstance(col_meta.get("covering"), dict)
-        and "bbox" in col_meta["covering"]
-        for col_meta in (geo_meta.get("columns") or {}).values()
-    ):
-        return geo_meta
-    return strip_illegal_bbox_covering(geo_meta, query_schema(con, query))
-
-
-def _add_custom_covering(
-    geo_meta: dict, geom_col: str, custom_metadata: dict | None, verbose: bool
-) -> None:
-    """
-    Add custom covering metadata (e.g., H3, S2).
-
-    Updates geo_meta in place with custom covering information for spatial
-    indices like H3 or S2.
-
-    Args:
-        geo_meta: Geo metadata dict to update
-        geom_col: Name of the geometry column
-        custom_metadata: Dict with custom metadata including 'covering' key
-        verbose: Print verbose output
-    """
-    if not custom_metadata or "covering" not in custom_metadata:
-        return
-
-    if "covering" not in geo_meta["columns"][geom_col]:
-        geo_meta["columns"][geom_col]["covering"] = {}
-
-    geo_meta["columns"][geom_col]["covering"].update(custom_metadata["covering"])
-    if verbose:
-        for key in custom_metadata["covering"]:
-            debug(f"Added {key} covering metadata")
 
 
 #: Per-column geo metadata keys that are derived from the data itself and are
@@ -1040,9 +948,9 @@ def _decode_geo_value(raw):
 def _encode_geo_value(geo_dict: dict, like):
     """Re-encode ``geo_dict`` in the same form (bytes/str/dict) as ``like``."""
     if isinstance(like, bytes):
-        return json.dumps(geo_dict).encode("utf-8")
+        return geo_key_value(geo_dict).encode("utf-8")
     if isinstance(like, str):
-        return json.dumps(geo_dict)
+        return geo_key_value(geo_dict)
     return geo_dict
 
 
@@ -1073,28 +981,35 @@ def _rewrite_geo_metadata(metadata: dict | None, rewrite) -> dict | None:
     return result
 
 
-def gate_carried_covering(
-    metadata: dict | None, schema: pa.Schema, verbose: bool = False
+def compose_carried_geo(
+    metadata: dict | None, schema: pa.Schema, version: str, verbose: bool = False
 ) -> dict | None:
-    """Both covering gates, on a Parquet KV ``metadata`` dict and an output schema.
+    """A Parquet KV ``metadata`` dict with its carried block composed for ``schema``.
 
-    :func:`strip_illegal_bbox_covering` then :func:`strip_bboxless_covering`, in
-    the order every write path runs them, for a path that carries the input's
-    whole block forward instead of rebuilding it: the Arrow IPC stream
-    ``gpio ... -`` writes to stdout.
+    For a path that carries the input's whole block forward instead of
+    rebuilding it: the Arrow IPC stream ``gpio ... -`` writes to stdout. A
+    stream is read and persisted exactly like the file a gpio write makes --
+    ``pq.write_table`` of one is how it becomes that file -- so its block is a
+    write block at the output ``version`` the caller resolved: every covering
+    gate in the composer's order (``gpio extract geoparquet f.parquet -
+    --exclude-cols bbox`` used to stream a covering with only a spatial-index
+    entry left, the shape ``geopandas.read_parquet`` cannot open, #954/#1172),
+    and a conventional bbox column declared as every file write declares it.
 
-    A stream is read and persisted exactly like the file a gpio write makes, and
-    ``pq.write_table`` of one is how it becomes that file -- but it reached
-    neither gate, so ``gpio extract geoparquet f.parquet - --exclude-cols bbox``
-    streamed a covering whose only remaining member was a spatial-index entry,
-    the shape ``geopandas.read_parquet`` cannot open (#954/#1172).
-
+    A block that names no primary column it describes is left as it is.
     Returns a copy; the input is never mutated.
     """
-    return _rewrite_geo_metadata(
-        metadata,
-        lambda geo: strip_bboxless_covering(strip_illegal_bbox_covering(geo, schema), verbose),
-    )
+
+    def _compose(geo: dict) -> dict:
+        primary = geo.get("primary_column")
+        if not isinstance(primary, str) or primary not in (geo.get("columns") or {}):
+            return geo
+        return compose_geo_block(
+            SchemaSource(schema, with_geo_key(None, geo)),
+            GeoBlockOptions(geometry_column=primary, version=version, verbose=verbose),
+        )
+
+    return _rewrite_geo_metadata(metadata, _compose)
 
 
 def strip_derived_stats(
@@ -1266,17 +1181,6 @@ def _covering_column(covering_entry) -> str | None:
     return None
 
 
-def _prune_coverings(col_meta, columns: set[str]) -> None:
-    """Drop ``covering`` entries pointing at columns not in ``columns``."""
-    covering = col_meta.get("covering") if isinstance(col_meta, dict) else None
-    if not isinstance(covering, dict):
-        return
-    for key in [k for k, v in covering.items() if _covering_column(v) not in columns]:
-        del covering[key]
-    if not covering:
-        del col_meta["covering"]
-
-
 def _prune_geo_dict_to_columns(geo_dict: dict, columns: set[str], repoint_primary: bool = False):
     """Drop column entries and coverings that reference absent columns.
 
@@ -1321,9 +1225,7 @@ def _prune_geo_dict_to_columns(geo_dict: dict, columns: set[str], repoint_primar
             return _DROP_GEO
         geo_dict["primary_column"] = next(iter(col_entries))
 
-    for col_meta in col_entries.values():
-        _prune_coverings(col_meta, columns)
-    return geo_dict
+    return strip_absent_covering(geo_dict, columns)
 
 
 def prune_geo_metadata_to_columns(
@@ -1351,74 +1253,6 @@ def prune_geo_metadata_to_columns(
     )
 
 
-def create_geo_metadata(
-    original_metadata: dict | None,
-    geom_col: str,
-    bbox_info: dict | None,
-    custom_metadata: dict | None = None,
-    verbose: bool = False,
-    version: str | None = "1.1.0",
-    edges: str | None = None,
-    encoding: str = "WKB",
-    strip_bboxless: bool = True,
-) -> dict:
-    """
-    Create or update GeoParquet metadata with spatial index covering information.
-
-    Builds a complete GeoParquet metadata structure from existing metadata
-    and new covering information.
-
-    Args:
-        original_metadata: Original parquet metadata dict
-        geom_col: Name of the geometry column
-        bbox_info: Result from check_bbox_structure
-        custom_metadata: Optional dict with custom metadata (e.g., H3 info)
-        verbose: Whether to print verbose output
-        version: GeoParquet version string (e.g., "1.0.0", "1.1.0", "2.0.0")
-        edges: Edge interpretation, one of ``edges.EDGES`` (default None = planar).
-               Use "spherical" for data from BigQuery or other S2-based sources.
-        encoding: The primary's ``encoding`` when the carried block names none.
-        strip_bboxless: Run :func:`strip_bboxless_covering` here. ``False`` for
-               a caller that declares a bbox column afterwards and gates then.
-
-    Returns:
-        Updated geo metadata dict
-    """
-    geo_meta = sanitized_carried_geo(original_metadata)
-    geo_meta = _initialize_geo_metadata(geo_meta, geom_col, version=version)
-
-    # Add encoding if not present (required by GeoParquet spec)
-    if "encoding" not in geo_meta["columns"][geom_col]:
-        geo_meta["columns"][geom_col]["encoding"] = encoding
-
-    # Carried edges as every writer says them, then the requested edges (for
-    # spherical geometry from BigQuery, etc.) in what the block's version can say.
-    carry_edges(
-        geo_meta,
-        {geom_col: edges_for_version(edges, is_geoparquet_1x(version))} if edges else None,
-    )
-    orientation = implied_orientation(edges)
-    if orientation:
-        geo_meta["columns"][geom_col]["orientation"] = orientation
-
-    # Add bbox covering if needed
-    _add_bbox_covering(geo_meta, geom_col, bbox_info, verbose)
-
-    # Add custom covering if needed
-    _add_custom_covering(geo_meta, geom_col, custom_metadata, verbose)
-
-    # Add any top-level custom metadata
-    if custom_metadata:
-        for key, value in custom_metadata.items():
-            if key != "covering":
-                geo_meta[key] = value
-
-    # Applied after _add_bbox_covering, so a covering is only dropped when no
-    # bbox column exists to give it the one member the spec defines (#954).
-    geo_meta = strip_unsupported_covering(geo_meta, version, verbose)
-    return strip_bboxless_covering(geo_meta, verbose) if strip_bboxless else geo_meta
-
-
 @dataclass(frozen=True)
 class ArrowTableSource:
     """:func:`compose_geo_block` source: an Arrow table (its schema and metadata)."""
@@ -1436,125 +1270,486 @@ class SchemaSource:
 
 @dataclass(frozen=True)
 class QuerySource:
-    """:func:`compose_geo_block` source: a DuckDB query (its output columns) plus carried metadata."""
+    """:func:`compose_geo_block` source: a DuckDB query (its output schema) plus carried metadata."""
 
     con: duckdb.DuckDBPyConnection
     query: str
     metadata: Mapping | None = None
 
 
-@dataclass(frozen=True)
-class CarriedSource:
-    """:func:`compose_geo_block` source: carried KV metadata, output columns not known.
-
-    For a write path whose funnel already pruned the carried block to the
-    output's columns (``write_parquet_with_metadata`` runs
-    :func:`prune_geo_metadata_to_columns` before any strategy sees it), so the
-    absent-covering gate has nothing to ask and is skipped.
-    """
-
-    metadata: Mapping | None = None
+GeoBlockSource = ArrowTableSource | SchemaSource | QuerySource
 
 
-GeoBlockSource = ArrowTableSource | SchemaSource | QuerySource | CarriedSource
+class _Sentinel:
+    """A named option value no caller can spell by accident."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def __repr__(self) -> str:
+        return self._name
+
+
+#: ``GeoBlockOptions.covering``: decide the bbox covering from the source's schema.
+DETECT_BBOX_COLUMN = _Sentinel("DETECT_BBOX_COLUMN")
+#: ``GeoBlockOptions.crs``: leave the carried ``crs`` exactly as it is.
+KEEP_CRS = _Sentinel("KEEP_CRS")
 
 
 @dataclass(frozen=True)
 class GeoBlockOptions:
     """What a write asks :func:`compose_geo_block` to declare.
 
-    ``bbox_column`` is the covering request: the bbox struct column to declare
-    as the primary's ``covering.bbox`` (``None``: declare none; a carried one
-    still passes the gates). ``custom_metadata`` holds a ``covering`` mapping
-    (h3/s2/a5/quadkey entries) and/or top-level keys. ``version`` is the
-    metadata form ("1.0.0", "1.1.0", "2.0.0"; ``None`` for a block that is
-    never written, parquet-geo-only); ``edges`` the primary's edges, made
-    representable in ``version``; ``encoding`` the primary's encoding when the
-    carried block names none.
+    ``version`` is an output-version key (``"1.0"``, ``"1.1"``,
+    ``"1.1-geoarrow"``, ``"2.0"``, ``"parquet-geo-only"``), resolved by the
+    write facade (``parquet_writer.resolve_output_geoparquet_version``) before
+    composing; the block gets that key's metadata form (``None`` for
+    parquet-geo-only, whose block is built only to key the native types and
+    never written). ``None`` (or ``describe=True``) makes an in-memory
+    *description* of a table (a stream's carried block, a block a repair
+    edits), which keeps the version the carried block declares
+    (:func:`declared_version`) and which the write at the other end
+    re-composes. The composer decides no version itself: a description of a
+    source that declares none takes ``version``, the facade's answer
+    (``parquet_writer.version_to_describe``), and raises without one. A
+    description records its ``edges`` and ``crs`` as declared.
 
-    ``defer_bboxless_gate`` leaves :func:`strip_bboxless_covering` to the
-    caller, for the DuckDB paths that declare a conventional bbox column after
-    composing (``declare_carried_bbox_column``) and gate after that, so an
-    index entry beside a real bbox column is not dropped first (#954).
+    ``covering`` is the bbox covering request: :data:`DETECT_BBOX_COLUMN` (the
+    default) declares the one column the source's schema and the block's own
+    provenance allow (:func:`bbox_column_to_declare`), a column name declares
+    that column, and ``None`` declares none. Every value still runs every gate.
+
+    ``custom_metadata``'s ``covering`` mapping (h3/s2/a5/quadkey, or a bbox a
+    caller computed) is merged one entry deep into the primary's ``covering``;
+    any other key goes to the top level of the block. ``edges`` is the
+    primary's requested edges, made representable in ``version``, with the
+    orientation a spherical request implies. ``column_edges`` is
+    ``{column: edges}`` as each column's data already has them (a post-write
+    restore, a stream's resolved edges): mapped the same way, implying nothing.
+    The two are distinct inputs -- a request versus a fact about the data --
+    so naming the primary in ``column_edges`` with a value other than
+    ``edges`` is a contradiction the composer refuses (``ValueError``).
+    ``encoding`` is the primary's output encoding as the writer
+    knows it; with none given, 1.1-geoarrow keeps the native encoding the input
+    declared (``geometry_info``'s), and otherwise the carried one stays, or WKB.
+    ``crs`` is the requested output CRS as
+    :func:`~geoparquet_io.core.crs_utils.apply_output_crs` takes it (``None``:
+    unchanged but normalized), or for a description (``version=None``) the CRS
+    the source declares, recorded as it is; :data:`KEEP_CRS` leaves the carried
+    value alone. ``column_crs`` is ``{column: crs}`` for other columns, by the
+    same rule (a repair that resolves every unknown CRS at once).
+    ``stats`` maps a column to the measured ``bbox`` and/or ``geometry_types``
+    it declares (a key absent from the inner mapping is left as carried; a
+    ``None`` value removes the key).
+    ``geometry_info`` names the secondary geometry columns and what the input
+    declared for each. Each declared entry is an input to the steps, never an
+    entry pasted in: its ``encoding``, ``edges``, ``crs`` and stats go through
+    steps 3, 4, 5 and 8 wherever the carried entry says nothing, and only its
+    other keys (``epoch``, ``orientation``, ...) are carried as declared. The
+    primary is never a secondary: naming it there raises.
+    ``covering_provenance`` is the KV metadata whose block says which column
+    the primary's covering names, for a source that carries no block of its
+    own (a table DuckDB built from a query, #953); a carried block wins.
+    ``describe`` makes the block a description of a table, not a file's
+    block, even with a ``version`` (which is then only the facade's answer for
+    a source that declares none). It is not a version switch: beyond keeping
+    the declared version, a description records ``crs`` and ``edges`` as
+    declared -- no output CRS rule, no mapping of edges to the version, no
+    implied orientation -- so the write at the other end decides those. The
+    gates run either way. A block that is written (a repair, a patch) is never
+    a description: it takes ``version`` from the facade's repair policy
+    (``resolve_output_geoparquet_version(..., preserve_input=True)``).
+
+    ``geometry_info`` declares each column's entry. The carried-wins rule for
+    the primary's declared entry applies in description mode only; on a write
+    the primary entry describes the input and the composer builds the output.
+    ``primary_column`` relabels the block's primary (a repair of DuckDB's
+    first-column pick); otherwise the carried primary stays, or
+    ``geometry_column`` is named. ``geometry_column`` is the column the
+    options describe, which a write of a transformed secondary (``process
+    simplify --geometry-column``) does not make the primary.
+    ``measure_missing`` is called with the block once steps 1-8 have applied
+    every carried and given stat; the stats it returns (``{column: {bbox,
+    geometry_types}}``, for what the block still lacks) are applied as step 8
+    is -- so a writer that measures only the gaps composes once.
     """
 
     geometry_column: str
-    bbox_column: str | None = None
-    custom_metadata: dict | None = None
-    version: str | None = "1.1.0"
+    version: str | None = None
+    covering: object = DETECT_BBOX_COLUMN
+    custom_metadata: Mapping | None = None
     edges: str | None = None
-    encoding: str = "WKB"
-    defer_bboxless_gate: bool = False
+    column_edges: Mapping[str, str | None] | None = None
+    encoding: str | None = None
+    crs: object = KEEP_CRS
+    column_crs: Mapping[str, object] | None = None
+    stats: Mapping[str, Mapping[str, object]] | None = None
+    geometry_info: Mapping | None = None
+    covering_provenance: Mapping | None = None
+    describe: bool = False
+    primary_column: str | None = None
+    measure_missing: Callable[[dict], Mapping] | None = None
     verbose: bool = False
 
 
-def _source_metadata_and_columns(
-    source: GeoBlockSource,
-) -> tuple[Mapping | None, list[str] | None]:
-    """The carried metadata and the output's column names (``None``: not known)."""
-    if isinstance(source, ArrowTableSource):
-        return source.table.schema.metadata, list(source.table.column_names)
-    if isinstance(source, SchemaSource):
-        return source.metadata, list(source.schema.names)
-    if isinstance(source, QuerySource):
-        return source.metadata, list(query_schema(source.con, source.query).names)
-    if isinstance(source, CarriedSource):
-        return source.metadata, None
-    raise TypeError(f"compose_geo_block: unsupported source {type(source).__name__}")
+class _SourceView:
+    """The carried metadata and the output schema of a source, probed at most once."""
+
+    def __init__(self, source: GeoBlockSource) -> None:
+        if isinstance(source, ArrowTableSource):
+            self.metadata, self._schema = source.table.schema.metadata, source.table.schema
+        elif isinstance(source, SchemaSource):
+            self.metadata, self._schema = source.metadata, source.schema
+        elif isinstance(source, QuerySource):
+            self.metadata, self._schema = source.metadata, None
+        else:
+            raise TypeError(f"compose_geo_block: unsupported source {type(source).__name__}")
+        self._source = source
+
+    @property
+    def schema(self) -> pa.Schema:
+        if self._schema is None:
+            self._schema = query_schema(self._source.con, self._source.query)
+        return self._schema
+
+
+def _metadata_version(options: GeoBlockOptions, carried: dict) -> str | None:
+    """The block's ``version`` for an output-version key (see :class:`GeoBlockOptions`).
+
+    A description keeps the version the carried block declares; the facade
+    decides every other one, so a description with none to keep takes the
+    caller's ``version`` and is refused without one.
+    """
+    version = options.version
+    if version is None or options.describe:
+        declared = declared_version(carried, default=None)
+        if declared is not None:
+            return declared
+    if version is None:
+        raise ValueError(
+            "compose_geo_block: a description keeps the carried block's version, and "
+            "this source declares none; pass the version "
+            "parquet_writer.version_to_describe resolves"
+        )
+    if version not in GEOPARQUET_VERSIONS:
+        raise ValueError(
+            f"compose_geo_block: version must be one of {sorted(GEOPARQUET_VERSIONS)}, "
+            f"not {version!r}"
+        )
+    return GEOPARQUET_VERSIONS[version]["metadata_version"]
+
+
+#: The keys of a declared secondary entry the steps decide, not carry.
+_STEP_KEYS = frozenset({"encoding", "edges", "crs", "bbox", "geometry_types"})
+
+
+@dataclass
+class _Secondaries:
+    """What ``geometry_info`` declares for the secondaries, as inputs to steps 3/4/5/8."""
+
+    edges: dict
+    crs: dict
+    stats: dict
+    other: dict
+
+
+def _secondary_inputs(
+    geo_meta: dict, geometry_info: Mapping | None, primary: str, described: bool
+) -> _Secondaries:
+    """Step 2's secondary entries, and what each column's declared entry says for the steps.
+
+    One rule for every column ``geometry_info`` declares: only what the
+    carried entry does not already say is an input (the carried keys win), and
+    an option the caller set wins over it. The primary's declared entry is an
+    input to a *description* only (a stream's or a read's block, which no
+    later step re-measures): a write decides its primary's CRS and stats
+    itself, and a declared entry handed down the write path describes the
+    input, not the output (a forced-2D write, a rewrite of stale stats). The
+    primary's declared ``encoding`` and other keys are never inputs: step 3
+    decides its encoding.
+    """
+    found = _Secondaries({}, {}, {}, {})
+    if not geometry_info:
+        return found
+    declared_by_col = geometry_info.get("metadata") or {}
+    columns = geo_meta["columns"]
+    for column in geometry_info.get("secondary") or ():
+        if column == primary:
+            raise ValueError(
+                f"compose_geo_block: {column!r} is the primary geometry column, not a secondary"
+            )
+        entry = columns.setdefault(column, {})
+        declared = declared_by_col.get(column) or {}
+        if "encoding" not in entry:
+            entry["encoding"] = declared.get("encoding") or "WKB"
+        _declared_gaps(found, column, entry, declared)
+        found.other[column] = {k: v for k, v in declared.items() if k not in _STEP_KEYS}
+    if described and isinstance(declared_by_col.get(primary), Mapping):
+        _declared_gaps(found, primary, columns[primary], declared_by_col[primary])
+    return found
+
+
+def _declared_gaps(found: _Secondaries, column: str, entry: dict, declared: Mapping) -> None:
+    """``declared``'s edges, crs and stats where the carried ``entry`` says nothing."""
+    if declares_edges(declared) and not declares_edges(entry):
+        # A value outside the vocabulary says nothing (#1288).
+        if edges_of(declared) in EDGES:
+            found.edges[column] = edges_of(declared)
+    if "crs" in declared and "crs" not in entry:
+        found.crs[column] = declared["crs"]
+    stats = {k: declared[k] for k in ("bbox", "geometry_types") if k in declared}
+    stats = {k: v for k, v in stats.items() if k not in entry}
+    if stats:
+        found.stats[column] = stats
+
+
+def _merge_custom_metadata(geo_meta: dict, col_meta: dict, custom_metadata, verbose) -> None:
+    """Step 6: ``custom_metadata``'s coverings onto the primary, its other keys on top.
+
+    ``covering`` is merged one entry deep rather than replaced: it holds one
+    entry per covering kind (bbox, h3, s2, a5, quadkey), and callers supply
+    only the one they just produced. Replacing the dict made ``gpio sort
+    quadkey`` destroy the bbox covering its input declared while adding its own
+    (#738). Individual entries still win, so a caller can correct one.
+    """
+    for key, value in (custom_metadata or {}).items():
+        if key != "covering":
+            geo_meta[key] = value
+            continue
+        if not isinstance(value, Mapping):
+            continue
+        existing = col_meta.get("covering")
+        col_meta["covering"] = {**existing, **value} if isinstance(existing, dict) else dict(value)
+        if verbose:
+            for name in value:
+                debug(f"Added {name} covering metadata")
+
+
+def _apply_stats(geo_meta: dict, stats) -> None:
+    """Step 8: each column's measured ``bbox`` and ``geometry_types``, in that order.
+
+    A measured ``None`` is "nothing to declare": the key goes, which is how the
+    spec spells an unknown ``bbox`` (and lets a write's own empty-table rule
+    decide ``geometry_types``).
+    """
+    for column, measured in (stats or {}).items():
+        col_meta = geo_meta["columns"].setdefault(column, {})
+        for key in ("bbox", "geometry_types"):
+            if key not in measured:
+                continue
+            if measured[key] is None:
+                col_meta.pop(key, None)
+            else:
+                col_meta[key] = measured[key]
+
+
+def _declare_bbox_covering(
+    geo_meta, col_meta, covering, view, version, provenance, verbose
+) -> None:
+    """Step 9: the bbox covering request, for a version that can say it.
+
+    A requested column is declared as the caller asked (the illegal-struct gate
+    still judges it). :data:`DETECT_BBOX_COLUMN` asks
+    :func:`bbox_column_to_declare` of ``provenance`` (the block so far, or the
+    caller's ``covering_provenance`` when nothing was carried) -- the one rule
+    for a carried, a computed or a conventional bbox column -- and leaves a
+    ``covering.bbox`` that already names that column as it came (#738).
+    """
+    if covering is None or not covering_supported(version):
+        return
+    if covering is DETECT_BBOX_COLUMN:
+        name = bbox_column_to_declare(view.schema, provenance, verbose=verbose)
+        if name is None or _declared_bbox_column(geo_meta) == name:
+            return
+    else:
+        name = covering
+    col_meta.setdefault("covering", {})["bbox"] = build_bbox_covering(name)
+    if verbose:
+        debug(f"Added bbox covering metadata for column '{name}'")
+
+
+def _covering_gates(geo_meta: dict, view: _SourceView, version, verbose: bool) -> dict:
+    """Steps 10-13, the covering gates, in their one order. Each returns a copy."""
+    geo_meta = strip_unsupported_covering(geo_meta, version, verbose)
+    if _declares_a_covering(geo_meta):
+        geo_meta = strip_absent_covering(geo_meta, view.schema.names)
+    if _declares_a_bbox_covering(geo_meta):
+        geo_meta = strip_illegal_bbox_covering(geo_meta, view.schema)
+    return strip_bboxless_covering(geo_meta, verbose)
+
+
+def declares_covering_member(col_meta: object, member: str | None = None) -> bool:
+    """Is this column's ``covering`` an object (with a ``member`` key, when named)?
+
+    A string ``covering`` satisfies ``"bbox" in covering`` too (#1062), so the
+    object test comes first; ``covering_is_object`` reports that shape.
+    """
+    covering = col_meta.get("covering") if isinstance(col_meta, dict) else None
+    return isinstance(covering, dict) and (member is None or member in covering)
+
+
+def _declares_a_covering(geo_meta: dict, member: str | None = None) -> bool:
+    return any(
+        declares_covering_member(col_meta, member)
+        for col_meta in (geo_meta.get("columns") or {}).values()
+    )
+
+
+def _declares_a_bbox_covering(geo_meta: dict) -> bool:
+    return _declares_a_covering(geo_meta, "bbox")
 
 
 def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
-    """Compose the ``geo`` block a write declares, running every gate in one order.
+    """Compose the ``geo`` block a write declares. The only composer (#1367 concept 4).
 
-    The single composer agreed for #1367 (concept 4). Its first caller is
-    ``write_strategies.base.build_geo_metadata``; T3e moves the remaining
-    hand-built blocks and gate compositions onto it and folds
-    :func:`create_geo_metadata` in, so each gate then runs once. For now it
-    wraps :func:`create_geo_metadata`, and the gates actually run in this order:
+    Every ``geo`` block gpio writes or describes a table with comes from here,
+    in this one order:
 
-    1. covering build (the carried block, sanitized; ``bbox_column``; custom
-       coverings; ``edges`` mapped by :func:`~geoparquet_io.core.edges.edges_for_version`), inside
-       :func:`create_geo_metadata`;
-    2. :func:`strip_unsupported_covering` (no ``covering`` before 1.1), inside
-       :func:`create_geo_metadata`;
-    3. :func:`strip_bboxless_covering` (no covering without a ``bbox`` member),
-       inside :func:`create_geo_metadata` unless ``defer_bboxless_gate``;
-    4. :func:`strip_absent_covering` (no covering entry naming a column the
-       source does not have; skipped for a :class:`CarriedSource`);
-    5. :func:`strip_bboxless_covering` again, since step 4 can leave a covering
-       with no ``bbox`` member (skipped with ``defer_bboxless_gate``: the
-       caller gates after its bbox declare).
+    1. the carried block, sanitized (:func:`sanitized_carried_geo`), copied;
+    2. ``version`` (the metadata form of the output-version key, or the
+       declared one for a description), ``primary_column`` (the requested
+       relabel, else the carried one, else ``geometry_column``), the primary
+       entry, and an entry for every
+       secondary ``geometry_info`` names, with what it declares split into the
+       inputs of steps 3, 4, 5 and 8;
+    3. the ``encoding`` (:func:`_primary_encoding`; a secondary's declared one);
+    4. ``edges`` -- the carried ones as every writer says them, then each
+       column's (``column_edges``, a secondary's declared ones) and the
+       primary's request, mapped by
+       :func:`~geoparquet_io.core.edges.edges_for_version` -- and the
+       ``orientation`` a spherical *request* (``edges``) implies; the data's
+       own edges (``column_edges``) imply none, and the two disagreeing on the
+       primary raise (a description records the edges as declared and
+       implies nothing);
+    5. the ``crs`` (:func:`~geoparquet_io.core.crs_utils.apply_output_crs`, the
+       one CRS writer; a description records the CRS its source declares);
+    6. ``custom_metadata``: coverings merged into the primary's, other keys on top;
+    7. the secondaries' other declared keys (``epoch``, ``orientation``, ...);
+    8. stats per column: a secondary's declared ones, then the measured ``stats``;
+    9. the bbox covering request (``covering``);
+    10. :func:`strip_unsupported_covering` (no ``covering`` before 1.1);
+    11. :func:`strip_absent_covering` (no entry naming a column the source lacks);
+    12. :func:`strip_illegal_bbox_covering` (no ``covering.bbox`` over a struct
+        the spec forbids);
+    13. :func:`strip_bboxless_covering` (no covering without a ``bbox``, #954).
 
-    ``source`` supplies the carried KV metadata and the output's column names:
-    an Arrow table, a schema plus metadata, a DuckDB connection and query
-    (probed with :func:`~geoparquet_io.core.duckdb_utils.query_schema`), or the
-    carried metadata alone. Never mutates the source's metadata.
+    ``source`` supplies the carried KV metadata and the output's schema: an
+    Arrow table, a schema plus metadata, or a DuckDB connection and query (its
+    schema probed once with :func:`~geoparquet_io.core.duckdb_utils.query_schema`,
+    and only when step 9 or a gate needs it). There is no second entry point and
+    no gate a caller can skip: every option has the gates as its consequence.
+    Never mutates the source's metadata.
     """
-    metadata, columns = _source_metadata_and_columns(source)
-    bbox_info = {
-        "has_bbox_column": options.bbox_column is not None,
-        "bbox_column_name": options.bbox_column,
-    }
-    # Steps 1 and 2, and 3 unless deferred.
-    geo_meta = create_geo_metadata(
-        dict(metadata) if metadata else None,
-        options.geometry_column,
-        bbox_info,
-        options.custom_metadata,
-        options.verbose,
-        version=options.version,
-        edges=options.edges,
-        encoding=options.encoding,
-        strip_bboxless=not options.defer_bboxless_gate,
+    from geoparquet_io.core.crs_utils import apply_output_crs
+
+    view = _SourceView(source)
+    # Step 1.
+    carried = sanitized_carried_geo(view.metadata)
+    geo_meta = copy.deepcopy(carried)
+    primary = options.geometry_column
+    described = options.version is None or options.describe
+    # Step 2.
+    version = _metadata_version(options, geo_meta)
+    geo_meta["version"] = version
+    if options.primary_column is not None:
+        geo_meta["primary_column"] = options.primary_column
+    else:
+        geo_meta.setdefault("primary_column", primary)
+    geo_meta.setdefault("columns", {})
+    col_meta = geo_meta["columns"].setdefault(primary, {})
+    secondaries = _secondary_inputs(geo_meta, options.geometry_info, primary, described)
+    if options.crs is not KEEP_CRS:
+        secondaries.crs.pop(primary, None)  # the caller's CRS wins over the declared one
+    # Step 3.
+    col_meta["encoding"] = _primary_encoding(options, col_meta)
+    # Step 4. A description (``version=None``) records the requested edges as
+    # declared: its version is not an output decision, and the write that
+    # re-composes it maps them to what the output can say.
+    carry_edges(geo_meta, None)
+    _refuse_contradicting_edges(options, primary)
+    by_col = {**secondaries.edges, **(options.column_edges or {})}
+    if options.edges:
+        by_col[primary] = options.edges
+    by_col = {column: edges for column, edges in by_col.items() if edges}
+    if not described:
+        by_col = {c: edges_for_version(e, is_geoparquet_1x(version)) for c, e in by_col.items()}
+    carry_edges(geo_meta, by_col)
+    orientation = None if described else implied_orientation(options.edges)
+    if orientation:
+        col_meta["orientation"] = orientation
+    # Step 5. A description records the CRS its source declares; a write's
+    # block says it the way the output rule does (the default by omission).
+    if options.crs is KEEP_CRS:
+        pass
+    elif described:
+        col_meta["crs"] = options.crs
+    else:
+        apply_output_crs(col_meta, options.crs)
+    for column, crs in secondaries.crs.items():
+        geo_meta["columns"][column]["crs"] = crs
+        if not described:
+            apply_output_crs(geo_meta["columns"][column], None)
+    for column, crs in (options.column_crs or {}).items():
+        entry = geo_meta["columns"].get(column)
+        if not isinstance(entry, dict):
+            continue
+        if described:
+            entry["crs"] = crs
+        else:
+            apply_output_crs(entry, crs)
+    # Steps 6-9.
+    _merge_custom_metadata(geo_meta, col_meta, options.custom_metadata, options.verbose)
+    for column, other in secondaries.other.items():
+        for key, value in other.items():
+            geo_meta["columns"][column].setdefault(key, value)
+    _apply_stats(geo_meta, secondaries.stats)
+    _apply_stats(geo_meta, options.stats)
+    if options.measure_missing is not None:
+        _apply_stats(geo_meta, options.measure_missing(geo_meta))
+    provenance = geo_meta if carried else sanitized_carried_geo(options.covering_provenance)
+    _declare_bbox_covering(
+        geo_meta, col_meta, options.covering, view, version, provenance, options.verbose
     )
-    if columns is None:
-        return geo_meta
-    # Step 4, then 5 unless deferred: dropping an absent column's entry can
-    # leave a covering with no bbox member.
-    geo_meta = strip_absent_covering(geo_meta, columns)
-    if options.defer_bboxless_gate:
-        return geo_meta
-    return strip_bboxless_covering(geo_meta, options.verbose)
+    # Steps 10-13.
+    return _covering_gates(geo_meta, view, version, options.verbose)
+
+
+def _refuse_contradicting_edges(options: GeoBlockOptions, primary: str) -> None:
+    """``edges`` (the request) and ``column_edges`` (the data) must agree on the primary."""
+    data = (options.column_edges or {}).get(primary, options.edges)
+    if options.edges and primary in (options.column_edges or {}) and data != options.edges:
+        raise ValueError(
+            f"compose_geo_block: edges={options.edges!r} is requested for '{primary}' "
+            f"but column_edges says its data has {data!r}"
+        )
+
+
+def composes_a_covering(source: GeoBlockSource, options: GeoBlockOptions) -> bool:
+    """Whether the composer's block for ``source`` declares a covering on the column.
+
+    The one answer to "would a write declare a covering here?", asked of the
+    composer rather than predicted beside it: every gate has run (#954).
+    """
+    return "covering" in compose_geo_block(source, options)["columns"][options.geometry_column]
+
+
+def _primary_encoding(options: GeoBlockOptions, col_meta: dict) -> str:
+    """Step 3: the primary's ``encoding``, the one rule for every writer.
+
+    The writer's own answer -- the encoding it actually writes -- when it
+    gives one. Otherwise 1.1-geoarrow keeps the native encoding the input
+    declared (``geometry_info``'s), and every block keeps the carried one, or
+    says WKB.
+    """
+    if options.encoding is not None:
+        return options.encoding
+    if options.version == "1.1-geoarrow":
+        declared = ((options.geometry_info or {}).get("metadata") or {}).get(
+            options.geometry_column
+        ) or {}
+        if declared.get("encoding"):
+            return declared["encoding"]
+    return col_meta.get("encoding") or "WKB"
 
 
 # =============================================================================
@@ -1700,21 +1895,48 @@ def row_group_geometry_stats(chunks, *, geographic: bool) -> GeometryStats:
     return merged_geometry_stats(parts, geographic=geographic)
 
 
+def _non_finite_message(column: str, example: str | None = None) -> str:
+    """The one sentence for a located geometry with an infinite coordinate (#1165).
+
+    ``example`` names the offending value where the caller has one; the SQL
+    struct expression raises it from inside a query, where it has none.
+    """
+    where = f", {example}," if example else ","
+    return (
+        f"Column '{column}' holds a geometry with a non-finite (infinite) coordinate"
+        f"{where} so its bounds cannot be measured. Fix or remove that geometry and "
+        "try again."
+    )
+
+
 def _non_finite_error(column: str, example: str) -> Exception:
     from geoparquet_io.core.exceptions import GeometryError
 
-    return GeometryError(
-        f"Column '{column}' holds a geometry with a non-finite (infinite) coordinate, "
-        f"{example}, so its bounds cannot be measured. Fix or remove that geometry and "
-        "try again."
-    )
+    return GeometryError(_non_finite_message(column, example))
+
+
+def _located_sql(x0: str, y0: str, x1: str, y1: str) -> str:
+    """The SQL rule for "this envelope is a location": not NaN, not inverted.
+
+    The SQL twin of the Arrow kernel's ``_located``. NaN is no location:
+    Arrow compares it false, but DuckDB orders it last and calls
+    ``NaN <= NaN`` true, so it is said explicitly. A NULL or EMPTY geometry
+    (an absent or inverted envelope) is not located either.
+    """
+    no_nan = " AND ".join(f"NOT isnan({v})" for v in (x0, y0, x1, y1))
+    return f"({no_nan} AND {x0} <= {x1} AND {y0} <= {y1})"
+
+
+def _finite_sql(*envelope: str) -> str:
+    """The SQL rule for a located envelope whose bounds can be measured."""
+    return " AND ".join(f"isfinite({v})" for v in envelope)
 
 
 # -- DuckDB ------------------------------------------------------------------
 
 
-def _envelope_columns(read) -> tuple[str, str] | None:
-    """``(type expression, the four envelope expressions)`` of one row, or None.
+def _envelope_columns(read) -> tuple[str, list[str]]:
+    """``(type expression, the four envelope expressions)`` of one row.
 
     ``read`` is the owner's :class:`~geoparquet_io.core.geometry_detection.GeometryRead`.
     The type expression is NULL where SQL cannot name the type (a GeoArrow
@@ -1726,11 +1948,11 @@ def _envelope_columns(read) -> tuple[str, str] | None:
         # A GeoArrow EMPTY carries NaN coordinates instead of none.
         xmin_e, ymin_e = (f"nullif({e}, 'NaN'::DOUBLE)" for e in (xmin_e, ymin_e))
         xmax_e, ymax_e = (f"nullif({e}, 'NaN'::DOUBLE)" for e in (xmax_e, ymax_e))
-        return "NULL::VARCHAR", f"{xmin_e}, {ymin_e}, {xmax_e}, {ymax_e}"
+        return "NULL::VARCHAR", [xmin_e, ymin_e, xmax_e, ymax_e]
     g = read.shape_expr
     return (
         f"ST_GeometryType({g}) || {zm_suffix_sql(g)}",
-        f"ST_XMin({g}), ST_YMin({g}), ST_XMax({g}), ST_YMax({g})",
+        [f"ST_{axis}({g})" for axis in ("XMin", "YMin", "XMax", "YMax")],
     )
 
 
@@ -1752,7 +1974,7 @@ def _located_rows_sql(con, query: str, geometry_column: str, bbox_column: str | 
     if bbox_column is not None:
         type_expr, env = (
             "NULL::VARCHAR",
-            ", ".join(f"{quoted}.{f}" for f in ("xmin", "ymin", "xmax", "ymax")),
+            [f"{quoted}.{f}" for f in ("xmin", "ymin", "xmax", "ymax")],
         )
         geom = "NULL::GEOMETRY"
     else:
@@ -1761,14 +1983,14 @@ def _located_rows_sql(con, query: str, geometry_column: str, bbox_column: str | 
         geom = "NULL::GEOMETRY" if read.kind == "geoarrow" else read.shape_expr
     return f"""
         SELECT * FROM (
-            SELECT {type_expr} AS __t, {env}, {geom} AS __g
+            SELECT {type_expr} AS __t, {", ".join(env)}, {geom} AS __g
             FROM ({query})
         ) AS __m(__t, __x0, __y0, __x1, __y1, __g)
-        WHERE __x0 <= __x1 AND __y0 <= __y1
+        WHERE {_located_sql("__x0", "__y0", "__x1", "__y1")}
     """
 
 
-_FINITE_SQL = "isfinite(__x0) AND isfinite(__y0) AND isfinite(__x1) AND isfinite(__y1)"
+_FINITE_SQL = _finite_sql("__x0", "__y0", "__x1", "__y1")
 
 
 def _query_stats(
@@ -1863,9 +2085,87 @@ def _arrow_types(wkb, verbose: bool) -> list[str]:
     return names
 
 
+def bbox_struct_type():
+    """The bbox struct gpio computes: four doubles, in the spec's field order."""
+    import pyarrow as pa
+
+    return pa.struct([(f, pa.float64()) for f in ("xmin", "ymin", "xmax", "ymax")])
+
+
+#: ``(x0, y0, x1, y1)``: the order every envelope tuple here is in.
+_ENVELOPE_ORDER = ("xmin", "ymin", "xmax", "ymax")
+
+
+def _row_envelopes(table: pa.Table, geometry_column: str):
+    """``(storage, x0, y0, x1, y1)``: every row's WKB and envelope, NULL rows null."""
+    import geoarrow.pyarrow as ga
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    wkb = ga.as_wkb(table.column(geometry_column)).combine_chunks()
+    storage = wkb.storage if isinstance(wkb, pa.ExtensionArray) else wkb
+    box = ga.box(ga.as_wkb(storage)).storage
+    return (storage, *(pc.struct_field(box, f) for f in _ENVELOPE_ORDER))
+
+
+def _row_envelopes_of_readable(table: pa.Table, geometry_column: str):
+    """:func:`_row_envelopes`, with a row whose bytes are not WKB measured as NULL.
+
+    The kernel refuses a whole array over one unreadable row; only then is it
+    asked row by row, so a clean column pays nothing for the tolerance.
+    """
+    try:
+        return _row_envelopes(table, geometry_column)
+    except Exception:  # geoarrow C++ errors on malformed WKB
+        import geoarrow.pyarrow as ga
+        import pyarrow as pa
+        import pyarrow.compute as pc
+
+        wkb = ga.as_wkb(table.column(geometry_column)).combine_chunks()
+        storage = wkb.storage if isinstance(wkb, pa.ExtensionArray) else wkb
+        readable = []
+        for i in range(len(storage)):
+            try:
+                ga.box(ga.as_wkb(storage.slice(i, 1)))
+                readable.append(storage[i].is_valid)
+            except Exception:
+                readable.append(False)
+        storage = pc.if_else(pa.array(readable), storage, pa.scalar(None, storage.type))
+        box = ga.box(ga.as_wkb(storage)).storage
+        return (storage, *(pc.struct_field(box, f) for f in _ENVELOPE_ORDER))
+
+
+def _located(x0, y0, x1, y1):
+    """The one EMPTY rule: an envelope is a location when it is not inverted (or NULL)."""
+    import pyarrow.compute as pc
+
+    return pc.fill_null(pc.and_(pc.less_equal(x0, x1), pc.less_equal(y0, y1)), False)
+
+
+def _unusable(located, x0, y0, x1, y1):
+    """The located rows with an infinite coordinate: no bbox anyone can use (#1165)."""
+    import pyarrow.compute as pc
+
+    finite = pc.and_(
+        pc.and_(pc.is_finite(x0), pc.is_finite(y0)), pc.and_(pc.is_finite(x1), pc.is_finite(y1))
+    )
+    return pc.and_(located, pc.invert(finite))
+
+
+def _raise_unusable(geometry_column: str, storage, bad, envelope) -> None:
+    """Raise the degenerate-geometry error naming the first unusable row."""
+    import pyarrow.compute as pc
+
+    example = "envelope " + str([pc.filter(v, bad)[0].as_py() for v in envelope])
+    if storage is not None:
+        import geoarrow.pyarrow as ga
+
+        example = ga.as_wkt(ga.as_wkb(pc.filter(storage, bad)))[0].as_py()
+    raise _non_finite_error(geometry_column, example)
+
+
 def _arrow_envelopes(table: pa.Table, geometry_column: str, bbox_column: str | None):
     """``(storage, x0, y0, x1, y1)`` of the non-NULL rows as flat arrays, or None."""
-    import pyarrow as pa
     import pyarrow.compute as pc
 
     if bbox_column is not None:
@@ -1873,15 +2173,97 @@ def _arrow_envelopes(table: pa.Table, geometry_column: str, bbox_column: str | N
         storage = storage.filter(pc.is_valid(storage))
         fields = [pc.struct_field(storage, f) for f in ("xmin", "ymin", "xmax", "ymax")]
         return (None, *fields)
-    import geoarrow.pyarrow as ga
-
-    wkb = ga.as_wkb(table.column(geometry_column)).combine_chunks()
-    storage = wkb.storage if isinstance(wkb, pa.ExtensionArray) else wkb
-    storage = storage.filter(pc.is_valid(storage))
-    if len(storage) == 0:
+    storage, *envelope = _row_envelopes(table, geometry_column)
+    valid = pc.is_valid(storage)
+    if not pc.any(valid).as_py():
         return None
-    box = ga.box(ga.as_wkb(storage)).storage
-    return (storage, *(pc.struct_field(box, f) for f in ("xmin", "ymin", "xmax", "ymax")))
+    return (storage.filter(valid), *(pc.filter(v, valid) for v in envelope))
+
+
+def geo_key_value(geo: dict) -> str:
+    """``geo`` serialized as a ``geo`` key's value (the footer-patch form)."""
+    return json.dumps(geo)
+
+
+def with_geo_key(metadata: Mapping | None, geo: dict) -> dict:
+    """A copy of KV ``metadata`` with ``geo`` as its ``geo`` key, every other key kept."""
+    out = dict(metadata or {})
+    out.pop("geo", None)
+    out[b"geo"] = geo_key_value(geo).encode("utf-8")
+    return out
+
+
+def with_geo_block(table: pa.Table, geo: dict) -> pa.Table:
+    """``table`` with ``geo`` as its schema's ``geo`` key, every other key kept."""
+    return table.replace_schema_metadata(with_geo_key(table.schema.metadata, geo))
+
+
+def bbox_struct_array(table: pa.Table, geometry_column: str, struct_type: pa.DataType):
+    """Each row's bbox of ``geometry_column`` as a bbox struct of ``struct_type``.
+
+    The per-row half of the stats owner, on the same envelopes and the same
+    degenerate-geometry rule the file ``bbox`` folds (:func:`_row_envelopes`,
+    :func:`_located`): a NULL, EMPTY or unreadable geometry is a NULL struct, and a located
+    geometry with an infinite coordinate raises (#1165). The struct has the
+    field order and child types ``struct_type`` names (the input's own bbox
+    column, for a write that rebuilds it over new geometry); a float32 child is
+    rounded outward, so the box never shrinks past the geometry.
+    """
+    import pyarrow as pa
+
+    from geoparquet_io.core.optional_deps import load_module
+
+    np = load_module("numpy")
+    storage, *envelope = _row_envelopes_of_readable(table, geometry_column)
+    located = _located(*envelope)
+    bad = _unusable(located, *envelope)
+    if bad.true_count:
+        _raise_unusable(geometry_column, storage, bad, envelope)
+    mask = located.to_numpy(zero_copy_only=False)
+    corners = dict(zip(_ENVELOPE_ORDER, envelope, strict=True))
+    children = []
+    for field in struct_type:
+        values = np.where(mask, corners[field.name].to_numpy(zero_copy_only=False), 0.0)
+        if pa.types.is_float32(field.type):
+            values = _outward_float32(np, values, field.name.endswith("min"))
+        children.append(pa.array(values, type=field.type))
+    return pa.StructArray.from_arrays(
+        children, fields=list(struct_type), mask=pa.array(~mask) if not mask.all() else None
+    )
+
+
+def bbox_struct_sql(geometry_sql: str, column: str, read=None) -> str:
+    """SQL for each row's bbox struct of a GEOMETRY expression: the SQL twin of
+    :func:`bbox_struct_array`, with the stats path's one degenerate-geometry rule.
+
+    A NULL or EMPTY geometry (an inverted, absent or NaN envelope:
+    :func:`_located_sql`) is a NULL struct, and a located geometry with an
+    infinite coordinate stops the query with the stats owner's error
+    (:func:`_non_finite_message`, #1165). ``read`` is the owner's
+    :class:`~geoparquet_io.core.geometry_detection.GeometryRead` of a column
+    DuckDB does not measure with ``ST_XMin`` (a GeoArrow coordinate struct);
+    its envelope is the stats path's (``_envelope_columns``). ``column`` names
+    the column in the error.
+    """
+    if read is not None and read.kind == "geoarrow":
+        _, envelope = _envelope_columns(read)
+    else:
+        envelope = [f"ST_{axis}({geometry_sql})" for axis in ("XMin", "YMin", "XMax", "YMax")]
+    x0, y0, x1, y1 = envelope
+    message = sql_literal(_non_finite_message(column))
+    return f"""(CASE
+        WHEN {_located_sql(x0, y0, x1, y1)} IS NOT TRUE THEN NULL
+        WHEN NOT ({_finite_sql(*envelope)}) THEN error({message})
+        ELSE STRUCT_PACK(xmin := {x0}, ymin := {y0}, xmax := {x1}, ymax := {y1})
+    END)"""
+
+
+def _outward_float32(np, values, is_min: bool):
+    """``values`` as float32, each rounded away from the box's inside."""
+    cast = values.astype(np.float32)
+    short = cast.astype(np.float64) > values if is_min else cast.astype(np.float64) < values
+    toward = np.float32(-np.inf) if is_min else np.float32(np.inf)
+    return np.where(short, np.nextafter(cast, toward), cast)
 
 
 def _arrow_stats(
@@ -1901,20 +2283,12 @@ def _arrow_stats(
     if found is None:
         return _NO_STATS
     storage, x0, y0, x1, y1 = found
-    located = pc.fill_null(pc.and_(pc.less_equal(x0, x1), pc.less_equal(y0, y1)), False)
+    located = _located(x0, y0, x1, y1)
     if not pc.any(located).as_py():
         return _NO_STATS
-    finite = pc.and_(
-        pc.and_(pc.is_finite(x0), pc.is_finite(y0)), pc.and_(pc.is_finite(x1), pc.is_finite(y1))
-    )
-    bad = pc.and_(located, pc.invert(finite))
+    bad = _unusable(located, x0, y0, x1, y1)
     if need_bbox and pc.any(bad).as_py():
-        example = "envelope " + str([pc.filter(v, bad)[0].as_py() for v in (x0, y0, x1, y1)])
-        if storage is not None:
-            import geoarrow.pyarrow as ga
-
-            example = ga.as_wkt(ga.as_wkb(pc.filter(storage, bad)))[0].as_py()
-        raise _non_finite_error(geometry_column, example)
+        _raise_unusable(geometry_column, storage, bad, (x0, y0, x1, y1))
     types = [] if storage is None else _arrow_types(pc.filter(storage, located), verbose)
     bbox = [
         pc.min(pc.filter(x0, located)).as_py(),
@@ -2114,7 +2488,25 @@ def bbox_struct_child_names_match(names: Collection[str]) -> bool:
     replace an Overture-order ``xmin, xmax, ymin, ymax`` column in place, which
     is the repair :data:`BBOX_REWRITE_HINT` points at.
     """
-    return _BBOX_STRUCT_FIELDS <= set(names)
+    return not missing_bbox_struct_fields(names)
+
+
+def missing_bbox_struct_fields(names: Collection[str]) -> list[str]:
+    """The bbox corners a struct's children, as spelled, lack (sorted; empty: none).
+
+    The other half of :func:`bbox_struct_child_names_match`, for a caller that
+    names what is missing in its refusal.
+    """
+    return sorted(_BBOX_STRUCT_FIELDS - set(names))
+
+
+def is_bbox_struct_field(field: pa.Field) -> bool:
+    """Whether an Arrow field is a struct whose children are a bbox's four corners."""
+    import pyarrow as pa
+
+    return pa.types.is_struct(field.type) and bbox_struct_child_names_match(
+        [child.name for child in field.type]
+    )
 
 
 def bbox_covering_problem(
@@ -2248,6 +2640,17 @@ def carried_covering_as_provenance(
     return carried or None
 
 
+def may_hold_a_self_evident_bbox(output_columns: Collection[str] | None) -> bool:
+    """Whether an output with these column names could carry a bbox column
+    :func:`bbox_column_to_declare` declares by its name alone.
+
+    ``None`` (the columns are not known) could. A write that knows its output
+    names asks this to skip the schema probe the declare step would otherwise
+    run; the name rule stays here, beside the gate it shortcuts.
+    """
+    return output_columns is None or SELF_EVIDENT_BBOX_COLUMN in output_columns
+
+
 def bbox_column_to_declare(
     schema: pa.Schema, geo_meta: dict | None = None, *, verbose: bool = False
 ) -> str | None:
@@ -2360,86 +2763,13 @@ def _self_evident_bbox_column(schema: pa.Schema, verbose: bool = False) -> str |
     :func:`~geoparquet_io.core.arrow_geo_metadata._detect_bbox_column_from_table`)
     now come here.
     """
-    import pyarrow as pa
 
     field = _unambiguous_field(schema, SELF_EVIDENT_BBOX_COLUMN)
-    if field is None:
-        return None
-    if not (
-        pa.types.is_struct(field.type)
-        and _BBOX_STRUCT_FIELDS.issubset({f.name for f in field.type})
-    ):
+    if field is None or not is_bbox_struct_field(field):
         return None
     if verbose:
         debug(f"Found conventional bbox column in table: {SELF_EVIDENT_BBOX_COLUMN}")
     return SELF_EVIDENT_BBOX_COLUMN
-
-
-def declare_carried_bbox_column(
-    con: duckdb.DuckDBPyConnection,
-    query: str,
-    col_meta: dict,
-    verbose: bool,
-    geoparquet_version: str,
-    output_columns: list[str] | None = None,
-    geo_meta: dict | None = None,
-) -> bool:
-    """Declare a conventional ``bbox`` column the output carries but nothing declared.
-
-    This is the 1.0 -> 1.1 upgrade path: a 1.0 file cannot declare a covering,
-    so its bbox column arrives undeclared and would otherwise stay that way
-    forever. Callers that *computed* a bbox column, or read a covering from the
-    input, supply it through ``custom_metadata`` instead and never reach the
-    branch below.
-
-    Shared by both write paths — the metadata rewrite and the 2.0 no-rewrite
-    fast path — so that the same input gets the same covering either way (#772).
-    Mutates ``col_meta`` in place; returns whether a covering was added.
-
-    ``output_columns``, when the caller already knows the output's column names,
-    settles the common "no bbox column at all" case without paying for the
-    schema probe below. ``geo_meta``, the whole block ``col_meta`` belongs to,
-    lets a ``bbox`` that another column's covering already names stay that
-    column's (#953).
-
-    The struct's field *order* decides, not just its field names: see
-    :data:`BBOX_COVERING_FIELD_ORDERS`.
-    """
-
-    if not covering_supported(geoparquet_version):
-        if verbose:
-            debug(f"Skipping 1.1-only covering metadata for version {geoparquet_version}")
-        return False
-
-    covering = col_meta.get("covering") if isinstance(col_meta.get("covering"), dict) else None
-    declared = _covering_column(covering.get("bbox")) if covering else None
-    name = declared or SELF_EVIDENT_BBOX_COLUMN
-    if output_columns is not None and name not in output_columns:
-        return False
-    if declared is None and _bbox_claimed_by_another_column(geo_meta, name):
-        return False
-    schema = query_schema(con, query)
-    if name not in schema.names:
-        return False
-
-    problem = arrow_bbox_covering_problem(name, schema.field(name))
-    if problem is not None:
-        _note_undeclarable_bbox_column(name, problem, declared is not None)
-        if covering is not None:
-            # An illegal covering the input declared is not carried: gpio must
-            # not write a file its own validator rejects (#1035).
-            covering.pop("bbox", None)
-            if not covering:
-                del col_meta["covering"]
-        return False
-    if declared is not None:
-        # A legal covering that arrived with provenance is kept as it is (#738).
-        return False
-
-    col_meta.setdefault("covering", {})["bbox"] = build_bbox_covering(name)
-    if verbose:
-        debug(f"Declared the carried conventional bbox column '{name}'")
-    return True
 
 
 # =============================================================================

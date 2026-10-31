@@ -75,13 +75,19 @@ import struct
 from collections.abc import Iterable, Mapping
 from typing import Any, NamedTuple
 
-from geoparquet_io.core.edges import ANDOYER, SPHERICAL, THOMAS, is_ellipsoidal, is_nonplanar
+from geoparquet_io.core.edges import (
+    ANDOYER,
+    COUNTERCLOCKWISE,
+    SPHERICAL,
+    THOMAS,
+    is_ellipsoidal,
+    is_nonplanar,
+)
 from geoparquet_io.core.optional_deps import load_module
 
 Box = tuple[float, float, float, float]
 
 _APPROXIMATE_ALGORITHMS = frozenset({THOMAS, ANDOYER})
-COUNTERCLOCKWISE = "counterclockwise"
 
 #: Outward margin on a geodesic vertex latitude (~0.1 m). The floating-point
 #: error of the vertex computation is below 1e-8 degrees for every edge not

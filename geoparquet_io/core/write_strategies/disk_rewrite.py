@@ -11,7 +11,6 @@ Speed: Slower (reads file twice, writes twice)
 
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 from typing import TYPE_CHECKING
@@ -28,12 +27,12 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.geo_metadata import (
+    GeoBlockOptions,
     QuerySource,
-    declare_carried_bbox_column,
-    gate_illegal_bbox_covering,
+    compose_geo_block,
     geometry_stats_of,
     sanitized_carried_geo,
-    strip_bboxless_covering,
+    with_geo_key,
 )
 from geoparquet_io.core.geoarrow_encoding import native_wkb_type
 from geoparquet_io.core.geometry_detection import create_geometry_view
@@ -51,8 +50,8 @@ from geoparquet_io.core.remote import is_remote_url, remote_write_context, uploa
 from geoparquet_io.core.write_strategies.arrow_streaming import to_geoarrow_column
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
-    build_geo_metadata,
     native_geometry_crs,
+    written_block_encoding,
 )
 
 if TYPE_CHECKING:
@@ -207,36 +206,25 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                         f"{pf.metadata.num_row_groups} row groups"
                     )
 
-            geo_meta = build_geo_metadata(
-                geometry_column=geometry_column,
-                geoparquet_version=geoparquet_version,
-                original_metadata=original_metadata,
-                input_crs=input_crs,
-                custom_metadata=custom_metadata,
-                bbox=bbox,
-                geometry_types=geometry_types,
-                geometry_info=geometry_info,
+            # The composer declares a conventional bbox column the output
+            # carries (and drops a carried covering over an illegal struct)
+            # before the #954 gate, for every column, as every write path does.
+            measured = {"geometry_types": geometry_types}
+            if bbox is not None:
+                measured["bbox"] = bbox
+            geo_meta = compose_geo_block(
+                QuerySource(con, query, original_metadata),
+                GeoBlockOptions(
+                    geometry_column=geometry_column,
+                    version=geoparquet_version,
+                    custom_metadata=custom_metadata,
+                    encoding=written_block_encoding(geoparquet_version),
+                    crs=input_crs,
+                    stats={geometry_column: measured},
+                    geometry_info=geometry_info,
+                    verbose=verbose,
+                ),
             )
-            # The same declare step duckdb-kv runs: a conventional bbox column
-            # the output carries gets its covering (and a carried covering over
-            # an illegal struct is dropped) before the #954 gate below, so an
-            # index entry beside a real bbox column is not thrown away.
-            declare_carried_bbox_column(
-                con,
-                query,
-                geo_meta["columns"][geometry_column],
-                verbose,
-                geoparquet_version,
-                geo_meta=geo_meta,
-            )
-            # That declare is primary-scoped, so a SECONDARY column's covering
-            # over an illegal struct reached the output verbatim and `gpio check
-            # spec` failed the file gpio had just written (#1172/#1035). Same
-            # gate the Arrow builders run, over every column.
-            geo_meta = gate_illegal_bbox_covering(geo_meta, con, query)
-            # A covering still without a bbox member is one geopandas cannot
-            # read (#954).
-            geo_meta = strip_bboxless_covering(geo_meta, verbose)
 
             # 2.0 and parquet-geo-only require a native Parquet GEOMETRY logical
             # type; 1.0/1.1 require plain BYTE_ARRAY WKB and forbid it. Every
@@ -490,7 +478,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         # before the merge, so the caller's extras still have the last word.
         metadata = dict(schema.metadata or {})
         if geo_meta is not None:
-            metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+            metadata = with_geo_key(metadata, geo_meta)
         new_meta = output_schema_metadata(
             metadata,
             None if geo_meta is not None else "parquet-geo-only",

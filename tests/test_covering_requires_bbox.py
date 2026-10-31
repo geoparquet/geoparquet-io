@@ -25,6 +25,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.add.quadkey import add_quadkey_column
 from geoparquet_io.core.geo_metadata import strip_bboxless_covering
+from tests.conftest import fast_path_query
 
 
 def _geo(path):
@@ -212,7 +213,10 @@ def test_v2_fast_path_does_not_carry_a_bboxless_covering(tmp_path):
     }
     # With the bbox-less covering gone the block says nothing DuckDB would not,
     # so there is nothing to carry.
-    assert _geo_block_to_carry_on_fast_path(carried, "geometry", "2.0") is None
+    assert (
+        _geo_block_to_carry_on_fast_path(carried, "geometry", "2.0", **fast_path_query("h3"))
+        is None
+    )
 
 
 def test_v2_fast_path_carries_the_rest_of_the_block_without_the_covering():
@@ -236,7 +240,7 @@ def test_v2_fast_path_carries_the_rest_of_the_block_without_the_covering():
             }
         )
     }
-    block = _geo_block_to_carry_on_fast_path(carried, "geometry", "2.0")
+    block = _geo_block_to_carry_on_fast_path(carried, "geometry", "2.0", **fast_path_query("h3"))
     assert block is not None
     column = block["columns"]["geometry"]
     assert column["orientation"] == "counterclockwise"
@@ -312,7 +316,7 @@ def test_add_kdtree_writes_no_bboxless_covering(buildings_test_file, tmp_path):
 
 
 def test_a_secondary_columns_bboxless_covering_is_gated_on_the_arrow_path():
-    """Secondary entries merge in after create_geo_metadata; the gate runs again."""
+    """Secondary entries go through the composer's steps; its gates judge them too."""
     import pyarrow as pa
 
     from geoparquet_io.core.arrow_geo_metadata import _build_geo_block
@@ -325,7 +329,7 @@ def test_a_secondary_columns_bboxless_covering_is_gated_on_the_arrow_path():
             "geom2": {"encoding": "WKB", "covering": {"h3": {"column": "h3", "resolution": 9}}}
         },
     }
-    geo = _build_geo_block(table, "geometry", None, None, None, "1.1.0", None, geometry_info, False)
+    geo = _build_geo_block(table, "geometry", None, None, None, "1.1", None, geometry_info, False)
 
     assert "geom2" in geo["columns"]
     assert "covering" not in geo["columns"]["geom2"]

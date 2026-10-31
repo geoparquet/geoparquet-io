@@ -16,6 +16,7 @@ single copies in ``geo_metadata``.
 
 from typing import Any
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.crs_utils import (
@@ -30,8 +31,12 @@ from geoparquet_io.core.duckdb_metadata import (
     parse_geometry_logical_type,
     resolve_crs_reference,
 )
-from geoparquet_io.core.edges import declares_edges, logical_type_edges, set_edges
+from geoparquet_io.core.edges import declares_edges, edges_of, logical_type_edges, set_edges
 from geoparquet_io.core.geo_metadata import (
+    KEEP_CRS,
+    GeoBlockOptions,
+    SchemaSource,
+    compose_geo_block,
     read_raw_geo,
     row_group_geometry_stats,
     sanitized_carried_geo_of_file,
@@ -201,7 +206,7 @@ def derive_secondary_geometry_info(
     Every geometry column the input carries beyond ``primary_column`` — native
     Parquet ``GEOMETRY``/``GEOGRAPHY`` logical types, plus anything the input's
     own ``geo`` block declares — becomes a secondary, so
-    ``merge_secondary_geometry_metadata`` finally learns it exists (#1000). What
+    the composer's secondary steps finally learn it exists (#1000). What
     a native column's type adds is described in :func:`_native_secondary_meta`.
     Derived stats are otherwise absent: for a declared column they flow through
     ``original_metadata``, where the caller's invalidation (#934) has already
@@ -255,19 +260,31 @@ def derive_secondary_geometry_info(
     return {"primary": primary_column, "secondary": secondary, "metadata": metadata}
 
 
-def _with_primary_column(raw_geo: bytes, primary_column: str | None) -> dict | None:
-    """``raw_geo`` relabelled to name ``primary_column``, or None if it already does.
+def _with_primary_column(
+    raw_geo: bytes, primary_column: str | None, schema: pa.Schema
+) -> dict | None:
+    """``raw_geo`` composed to name ``primary_column``, or None if it already does.
 
     None too when the block cannot be read or does not describe
     ``primary_column``: naming a column the block has no entry for would make it
     invalid, and a block this cannot parse is not this repair's to rewrite.
+    DuckDB's stats are kept as written; the composer only takes the caller's
+    primary (step 2) and runs its gates.
     """
     geo = read_raw_geo({b"geo": raw_geo}).block
     if geo is None or not isinstance(geo.get("columns"), dict):
         return None
     if primary_column not in geo["columns"] or geo.get("primary_column") == primary_column:
         return None
-    return {**geo, "primary_column": primary_column}
+    return compose_geo_block(
+        SchemaSource(schema, {b"geo": raw_geo}),
+        GeoBlockOptions(
+            geometry_column=primary_column,
+            primary_column=primary_column,
+            version="2.0",
+            covering=None,
+        ),
+    )
 
 
 def derive_v2_geo_metadata(
@@ -303,7 +320,7 @@ def derive_v2_geo_metadata(
     try:
         kv = pf.metadata.metadata or {}
         if b"geo" in kv:
-            return _with_primary_column(kv[b"geo"], primary_column)
+            return _with_primary_column(kv[b"geo"], primary_column, pf.schema_arrow)
         schema = pf.metadata.schema
         geo_cols: dict[int, tuple[str, str]] = {}
         for i in range(len(schema)):
@@ -326,7 +343,25 @@ def derive_v2_geo_metadata(
             [(name, geo_cols_logical[name]) for name in sorted(columns)],
             geo={"primary_column": primary_column} if primary_column else None,
         )
-        return {"version": "2.0.0", "primary_column": primary, "columns": columns}
+        # Each column's entry is what its logical type and statistics say: the
+        # primary's goes in as the composer's crs and stats and as the data's
+        # edges (``column_edges``: a fact, not a request, so no orientation);
+        # the secondaries' as their declared metadata. No covering: none is
+        # derivable from a logical type.
+        declared = columns[primary]
+        secondary = [name for name in columns if name != primary]
+        return compose_geo_block(
+            SchemaSource(pf.schema_arrow),
+            GeoBlockOptions(
+                geometry_column=primary,
+                version="2.0",
+                covering=None,
+                column_edges={primary: edges_of(declared)} if declares_edges(declared) else None,
+                crs=declared["crs"] if "crs" in declared else KEEP_CRS,
+                stats={primary: {k: declared.get(k) for k in ("bbox", "geometry_types")}},
+                geometry_info={"secondary": secondary, "metadata": columns},
+            ),
+        )
     finally:
         # Release the read handle before the caller writes to the file (Windows
         # refuses to replace a file that is still open).

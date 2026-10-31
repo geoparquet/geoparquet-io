@@ -311,6 +311,23 @@ class TestDeclareComputedBbox:
     """add_bbox_table records the covering only where there is a block to record it in."""
 
     @staticmethod
+    def _table(kv):
+        import pyarrow as pa
+
+        bounds = pa.array(
+            [{"xmin": 0.0, "ymin": 0.0, "xmax": 1.0, "ymax": 1.0}],
+            pa.struct([(f, pa.float64()) for f in ("xmin", "ymin", "xmax", "ymax")]),
+        )
+        table = pa.table(
+            {
+                "geometry": pa.array([b"\x00"], pa.binary()),
+                "bounds": bounds,
+                "h3": ["8928308280fffff"],
+            }
+        )
+        return table.replace_schema_metadata(kv)
+
+    @staticmethod
     def _geo_kv(columns):
         geo = {"version": "1.1.0", "primary_column": "geometry", "columns": columns}
         return {b"geo": json.dumps(geo).encode("utf-8"), b"other": b"kept"}
@@ -320,8 +337,9 @@ class TestDeclareComputedBbox:
 
         h3 = {"column": "h3", "resolution": 9}
         kv = self._geo_kv({"geometry": {"encoding": "WKB", "covering": {"h3": h3}}})
+        table = self._table(kv)
 
-        result = _declare_computed_bbox(kv, "geometry", "bounds")
+        result = _declare_computed_bbox(table, "geometry", "bounds").schema.metadata
 
         covering = json.loads(result[b"geo"])["columns"]["geometry"]["covering"]
         assert covering["h3"] == h3
@@ -343,7 +361,8 @@ class TestDeclareComputedBbox:
     def test_leaves_metadata_it_cannot_record_into_alone(self, kv):
         from geoparquet_io.core.add.bbox import _declare_computed_bbox
 
-        assert _declare_computed_bbox(kv, "geometry", "bounds") is kv
+        table = self._table(kv)
+        assert _declare_computed_bbox(table, "geometry", "bounds") is table
 
 
 # ---------------------------------------------------------------------------

@@ -101,14 +101,6 @@ reason = "permanent: ArcGIS JSON error-body code 500 marks page pressure (halve 
 # PROJJSON, GeoJSON data), not a report; a new report in one of them is not
 # caught, which is the price of not listing 60 serializer lines one by one.
 [[G1.json_dumps]]
-path = "geoparquet_io/core/add/bbox.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/add/bbox_metadata.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block (and its debug dump)"
-[[G1.json_dumps]]
 path = "geoparquet_io/core/add/stac_metadata.py"
 count = "*"
 reason = "metadata serialization, not a report: stac-geoparquet footer payload"
@@ -117,21 +109,9 @@ path = "geoparquet_io/core/arcgis.py"
 count = "*"
 reason = "metadata serialization, not a report: geo block and a staged ArcGIS JSON document"
 [[G1.json_dumps]]
-path = "geoparquet_io/core/arrow_geo_metadata.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
 path = "geoparquet_io/core/bbox_structure.py"
 count = "*"
 reason = "metadata serialization, not a report: debug dump of the geo block"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/carto.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/check_fixes.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block repair"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/constants.py"
 count = "*"
@@ -189,53 +169,26 @@ path = "geoparquet_io/core/process/overview/overview_file.py"
 count = "*"
 reason = "metadata serialization, not a report: geo block and overviews footer key"
 [[G1.json_dumps]]
-path = "geoparquet_io/core/process/raster/output.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/process/simplify.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/reproject.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
 path = "geoparquet_io/core/stac.py"
 count = "*"
 reason = "metadata serialization, not a report: STAC item/collection JSON file"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/stream_io.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/streaming.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/wfs.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/write_funnels.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/write_strategies/arrow_streaming.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/write_strategies/base.py"
 count = "*"
 reason = "metadata serialization, not a report: PROJJSON literal for SQL"
 [[G1.json_dumps]]
-path = "geoparquet_io/core/write_strategies/disk_rewrite.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
 path = "geoparquet_io/core/write_strategies/duckdb_kv.py"
 count = "*"
-reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
+reason = "metadata serialization, not a report: PROJJSON for SQL"
+
+# Who owns one key of a geo block's column entry (#1367 concept 4). The
+# geo_compose arm reads this table: an edit of a LISTED key in its module is the
+# composer's delegated step (step 5's CRS output rule, step 4's edges), not a
+# second composer. An ownership statement, not an exemption: it carries no
+# count, and any other key edited in these modules is still a hit.
+[G1.geo_compose_entry_key_owners]
+"geoparquet_io/core/crs_utils.py" = ["crs"]
+"geoparquet_io/core/edges.py" = ["edges", "orientation"]
 
 # A geometry column chosen outside core/geometry_detection.py (#1367 concept 7).
 # Seed baseline recorded when the arm was created (#1392 pass 3): counts only
@@ -253,10 +206,6 @@ reason = "permanent: the validator checks the block's primary_column claim itsel
 path = "geoparquet_io/core/validate.py"
 name = "_check_primary_column_in_columns"
 reason = "permanent: the validator checks the block's primary_column claim itself"
-[[G1.geometry_identity]]
-path = "geoparquet_io/core/check_fixes.py"
-name = "_supply_or_strip_bbox_member"
-reason = "repairs the bbox member of the block entry the block declares primary; a block edit, not a column choice"
 [[G1.geometry_identity]]
 path = "geoparquet_io/core/derive_geo_from_file.py"
 name = "_with_primary_column"
@@ -298,12 +247,11 @@ reason = "the GeoJSON properties column's type (unnest a STRUCT), not a geometry
 "version_for_*" = ["geoparquet_io/core/parquet_writer.py"]
 "_version_of_*" = ["geoparquet_io/core/parquet_writer.py"]
 "*version_upgrade*" = ["geoparquet_io/core/parquet_writer.py"]
-# Covering *builders* only. The wider *covering* also caught 19 checks,
-# predicates, lookups and repairs that read a covering and are not copies of
-# build_bbox_covering (T0b audit), so the family is narrowed to the builder shapes.
-"build_*covering*" = ["geoparquet_io/core/geo_metadata.py", "geoparquet_io/core/bbox_structure.py"]
-"*covering_for" = ["geoparquet_io/core/geo_metadata.py", "geoparquet_io/core/bbox_structure.py"]
-"*covering_metadata" = ["geoparquet_io/core/geo_metadata.py", "geoparquet_io/core/bbox_structure.py"]
+# Every covering name: the composer (geo_metadata) and the covering lookups
+# (bbox_structure) own them. The checks, predicates and repairs that read a
+# covering elsewhere are named for what they check (``*cover*``), so the T0b
+# narrowing to builder shapes is gone (#1367 T3e, HANDOFFS row 16).
+"*covering*" = ["geoparquet_io/core/geo_metadata.py", "geoparquet_io/core/bbox_structure.py"]
 "parse_size*" = ["geoparquet_io/core/sizing.py"]
 "format_size*" = ["geoparquet_io/core/sizing.py"]
 # atomic_write lives in write_strategies/base.py until T2f moves it to
@@ -401,14 +349,6 @@ reason = "the GeoJSON properties column's type (unnest a STRUCT), not a geometry
 # The definitions outside their owner today, each with the track that deletes
 # it. count = how many defs of that name the file holds (default 1); the check
 # fails when the tree differs.
-[[G2.exemptions]]
-path = "geoparquet_io/core/add/bbox.py"
-name = "_bbox_covering_metadata"
-reason = "covering builder copy of build_bbox_covering; T3e"
-[[G2.exemptions]]
-path = "geoparquet_io/core/add/bbox_metadata.py"
-name = "_covering_for"
-reason = "covering builder copy of build_bbox_covering; T3e"
 [[G2.exemptions]]
 path = "geoparquet_io/core/add/quadkey.py"
 name = "_is_geographic_crs"
@@ -529,9 +469,6 @@ reason = "aggregation options (metric, breakdown, bucket-point, ...) forwarded t
 [[G3.pylint]]
 block = "core.process.raster.contour:contour_file|core.process.raster.polygonize:polygonize_file"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.sort_quadkey:sort_by_quadkey_table|core.str_order:str_order_table"
-reason = "sort result read back with the input's schema metadata carried verbatim (replace_schema_metadata), copied per sort; the version and geo handling of a sorted table is T2b/T3e's, not a row-group or raw-write question"
 
 # ---------------------------------------------------------------------------
 # G13: shared-option consistency (tests/test_cli_shared_options.py)

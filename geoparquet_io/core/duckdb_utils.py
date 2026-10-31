@@ -2104,6 +2104,34 @@ def duckdb_type_contains_geometry(type_name: object) -> bool:
     return "GEOMETRY" in str(type_name or "").upper()
 
 
+def file_relation(url: str) -> str:
+    """The one ``read_parquet`` spelling a whole-file read goes through.
+
+    ``hive_partitioning=false``: a file under a ``key=value`` directory is one
+    file, not a partition whose key would become a column of the rewrite.
+    """
+    return f"read_parquet({sql_path(url)}, hive_partitioning=false)"
+
+
+def file_schema(url: str, *, geoparquet_conversion: bool = True) -> pa.Schema:
+    """A Parquet file's Arrow schema, local or remote: :func:`query_schema` of
+    :func:`file_relation` (#1367 concept 17).
+
+    The one "what columns does this file have" probe in DuckDB terms, for a
+    caller that cannot use ``pq.read_schema`` (a URL). ``geoparquet_conversion
+    =False`` reads the columns as stored (geometry as a BLOB): DuckDB's
+    GeoParquet reader rejects a ``crs: null`` block outright, which is what the
+    null-CRS repair has to read past. ``url`` is RAW (#718).
+    """
+    con = get_duckdb_connection(load_spatial=geoparquet_conversion, load_httpfs=needs_httpfs(url))
+    try:
+        if not geoparquet_conversion:
+            con.execute("SET enable_geoparquet_conversion = false")
+        return query_schema(con, f"SELECT * FROM {file_relation(url)}")
+    finally:
+        con.close()
+
+
 def query_schema(con, sql: str, params=None) -> pa.Schema:
     """The Arrow schema ``sql`` produces, without reading a row (#1367 concept 17).
 
@@ -2641,6 +2669,20 @@ class RegisteredArrow:
     def __init__(self, name: str, fields: dict) -> None:
         self.name = name
         self.fields = fields
+
+    def read_back(self, con, query: str, metadata: dict | None):
+        """``query``'s rows as an Arrow table that passes the input's rows through.
+
+        For a query that reorders or filters the registered rows and keeps their
+        geometry (a sort): the result gets the caller's input ``metadata`` --
+        its ``geo`` key is the write facade's witness for the table, which
+        decides the output's block when it is written -- and every pass-through
+        geometry column its registered field back (:meth:`restore_edges`).
+        """
+        result = con.sql(query).arrow().read_all()
+        if metadata:
+            result = result.replace_schema_metadata(metadata)
+        return self.restore_edges(result)
 
     @property
     def edges(self) -> dict[str, str]:

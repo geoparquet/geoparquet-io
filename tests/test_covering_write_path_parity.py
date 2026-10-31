@@ -310,7 +310,7 @@ class TestTheFastPathKeepsALegalCoveringAfterInvalidation:
 class TestASecondaryColumnsIllegalCoveringIsGatedEverywhere:
     """The struct-shape gate is per *column*, and every path has to run it.
 
-    Each DuckDB path's declare step (``declare_carried_bbox_column``) is scoped
+    Each DuckDB path's declare step (the composer's bbox-covering step) is scoped
     to the primary, so a SECONDARY column's ``covering`` over an Overture-order
     struct was never judged at all: the fast path and the two DuckDB rewrite
     strategies wrote it verbatim and ``gpio check spec`` then failed the file

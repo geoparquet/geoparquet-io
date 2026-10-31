@@ -40,7 +40,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import parquet_footer
-from geoparquet_io.core.check_fixes import fix_bboxless_covering
+from geoparquet_io.core.check_fixes import fix_bboxless_cover
 from geoparquet_io.core.parquet_footer import FooterPatchRaced, FooterPatchUnsupported
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
 from tests._defrag_fixtures import SIDECAR_KEYS, footer_kv, geo_block, points_table, write_with_geo
@@ -112,7 +112,7 @@ def _run(name: str, tmp_path: Path):
     # fixes that would re-encode the fixture for reasons of their own; the
     # repair is called directly so the cell shows only the footer write.
     try:
-        return src, out, fix_bboxless_covering(str(src), str(out))
+        return src, out, fix_bboxless_cover(str(src), str(out))
     except Exception as exc:  # noqa: BLE001 - the raced cell asserts on it
         return src, out, exc
 

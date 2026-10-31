@@ -460,11 +460,11 @@ class TestCheckAllReadsTheGeoBlockOnce:
     def test_a_check_called_on_its_own_still_reads_for_itself(self, places_test_file):
         """``geo_meta`` is an optimisation, not a new requirement on callers."""
         from geoparquet_io.core.check_parquet_structure import (
-            check_covering_encoding,
+            check_cover_encoding,
             check_metadata_and_bbox,
         )
 
-        covering = check_covering_encoding(places_test_file, return_results=True, quiet=True)
+        covering = check_cover_encoding(places_test_file, return_results=True, quiet=True)
         bbox = check_metadata_and_bbox(places_test_file, return_results=True, quiet=True)
 
         assert covering["passed"] is True
@@ -472,7 +472,7 @@ class TestCheckAllReadsTheGeoBlockOnce:
 
     def test_a_caller_supplied_block_is_the_one_judged(self, places_test_file):
         """Non-vacuity: the parameter is used, not accepted and ignored."""
-        from geoparquet_io.core.check_parquet_structure import check_covering_encoding
+        from geoparquet_io.core.check_parquet_structure import check_cover_encoding
 
         broken = {
             "version": "1.1.0",
@@ -480,7 +480,7 @@ class TestCheckAllReadsTheGeoBlockOnce:
             "columns": {"geometry": {"encoding": "WKB", "covering": {"h3": {"column": "h3"}}}},
         }
 
-        result = check_covering_encoding(
+        result = check_cover_encoding(
             places_test_file, return_results=True, quiet=True, geo_meta=broken
         )
 

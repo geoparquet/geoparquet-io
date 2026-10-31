@@ -10,10 +10,10 @@ from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.validate import (
     CheckStatus,
-    _check_covering_bbox_column_exists,
-    _check_covering_bbox_field_types,
-    _check_covering_bbox_paths,
-    _check_covering_bbox_structure,
+    _check_cover_bbox_column_exists,
+    _check_cover_bbox_field_types,
+    _check_cover_bbox_paths,
+    _check_cover_bbox_structure,
     validate_geoparquet,
 )
 
@@ -46,10 +46,10 @@ def _covering_checks(path, con=None):
     col_meta = json.loads(pq.read_metadata(path).metadata[b"geo"])["columns"]["geometry"]
     schema_info = get_schema_info(path, con=con)
     return {
-        "paths": _check_covering_bbox_paths(col_meta, "geometry"),
-        "exists": _check_covering_bbox_column_exists(col_meta, "geometry", schema_info),
-        "structure": _check_covering_bbox_structure(col_meta, "geometry", schema_info),
-        "types": _check_covering_bbox_field_types(col_meta, "geometry", schema_info),
+        "paths": _check_cover_bbox_paths(col_meta, "geometry"),
+        "exists": _check_cover_bbox_column_exists(col_meta, "geometry", schema_info),
+        "structure": _check_cover_bbox_structure(col_meta, "geometry", schema_info),
+        "types": _check_cover_bbox_field_types(col_meta, "geometry", schema_info),
     }
 
 

@@ -31,6 +31,7 @@ from geoparquet_io.core.geo_metadata import (
     sanitized_carried_geo,
 )
 from geoparquet_io.core.geometry_detection import primary_geometry_column
+from tests.conftest import fast_path_query
 
 # One WKB point (1.0, 2.0), little-endian.
 POINT_WKB = struct.pack("<BI2d", 1, 1, 1.0, 2.0)
@@ -262,12 +263,17 @@ def test_an_absent_geo_block_still_works(caplog):
 
 @pytest.mark.parametrize(("case", "columns", "_hint"), MALFORMED_COLUMNS)
 def test_strategy_base_reader_sanitizes(case, columns, _hint):
-    """``write_strategies.base`` builds metadata through its own reader (#771)."""
-    from geoparquet_io.core.write_strategies.base import build_geo_metadata
+    """The composer reads a carried block through the one shape check (#771)."""
+    import pyarrow as pa
+
+    from geoparquet_io.core.geo_metadata import GeoBlockOptions, SchemaSource, compose_geo_block
 
     reset_malformed_geo_warnings()
     raw = json.dumps({"primary_column": "geometry", "columns": columns}).encode("utf-8")
-    geo = build_geo_metadata("geometry", "1.1", original_metadata={b"geo": raw})
+    schema = pa.schema([("geometry", pa.binary())])
+    geo = compose_geo_block(
+        SchemaSource(schema, {b"geo": raw}), GeoBlockOptions("geometry", version="1.1", crs=None)
+    )
     _assert_fresh_and_valid(geo)
 
 
@@ -1350,7 +1356,7 @@ def test_fast_path_carry_survives_a_malformed_block(col, case, block):
 
     reset_malformed_geo_warnings()
     metadata = {"geo": json.dumps(block)}
-    carried = _geo_block_to_carry_on_fast_path(metadata, col, "2.0")
+    carried = _geo_block_to_carry_on_fast_path(metadata, col, "2.0", **fast_path_query())
     assert carried is None or isinstance(carried["columns"], dict)
 
 
@@ -1366,12 +1372,15 @@ def test_fast_path_carry_drops_a_wrong_typed_value_before_writing_it():
             "geometry": {
                 "encoding": "WKB",
                 "geometry_types": ["Point"],
+                "bbox": [0, 0, 1, 1],
                 "crs": 42,
                 "orientation": "counterclockwise",
             }
         },
     }
-    carried = _geo_block_to_carry_on_fast_path({"geo": json.dumps(block)}, "geometry", "2.0")
+    carried = _geo_block_to_carry_on_fast_path(
+        {"geo": json.dumps(block)}, "geometry", "2.0", **fast_path_query()
+    )
     assert carried is not None
     assert "crs" not in carried["columns"]["geometry"]
 
@@ -1814,7 +1823,7 @@ def test_check_spec_reports_a_malformed_block_instead_of_crashing(col, case, blo
 def test_check_spec_columns_guard_does_not_hide_a_declared_covering(bad, tmp_path):
     """The 1.1-only 'covering' check must survive a non-object `columns` (#968).
 
-    It crashed at `_columns_declaring_covering` with
+    It crashed at `_columns_declaring_cover` with
     `'list' object has no attribute 'items'` before reaching any of the checks
     that would have told the user what was wrong.
     """

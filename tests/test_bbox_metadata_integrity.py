@@ -593,3 +593,72 @@ class TestBlobConversionWrapperDefensivePaths:
         )
 
         assert query.count('ST_AsWKB("geometry")') == 1
+
+
+def test_the_patched_block_is_a_written_block_not_a_description(tmp_path):
+    """``add bbox-metadata`` writes the block, so it takes the repair-policy version.
+
+    A file declaring ``1.1`` with a projected CRS and spherical edges: the
+    patched footer must be exactly what the composer writes for that file at
+    ``resolve_output_geoparquet_version(None, original_metadata=…,
+    preserve_input=True)`` -- the version in its metadata form, the CRS and
+    edges kept -- not a description that keeps the declared spelling (T3e
+    audit pass 3, finding 1).
+    """
+    import json
+    import struct
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+    from geoparquet_io.core.geo_metadata import (
+        GeoBlockOptions,
+        SchemaSource,
+        compose_geo_block,
+    )
+    from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+
+    crs = {"id": {"authority": "EPSG", "code": 3857}}
+    geo = {
+        "version": "1.1",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {
+                "encoding": "WKB",
+                "geometry_types": ["Point"],
+                "crs": crs,
+                "edges": "spherical",
+            }
+        },
+    }
+    bbox_type = pa.struct([(k, pa.float64()) for k in ("xmin", "ymin", "xmax", "ymax")])
+    table = pa.table(
+        {
+            "geometry": pa.array([struct.pack("<BIdd", 1, 1, 1.0, 2.0)], pa.binary()),
+            "bbox": pa.array([{"xmin": 1.0, "ymin": 2.0, "xmax": 1.0, "ymax": 2.0}], bbox_type),
+        }
+    )
+    path = tmp_path / "in.parquet"
+    pq.write_table(table.replace_schema_metadata({b"geo": json.dumps(geo).encode()}), path)
+    carried = pq.read_schema(path).metadata
+
+    result = CliRunner().invoke(cli, ["add", "bbox-metadata", str(path)])
+    assert result.exit_code == 0, result.output
+
+    written = json.loads(pq.read_schema(path).metadata[b"geo"])
+    expected = compose_geo_block(
+        SchemaSource(table.schema, carried),
+        GeoBlockOptions(
+            geometry_column="geometry",
+            covering="bbox",
+            version=resolve_output_geoparquet_version(
+                None, original_metadata=carried, preserve_input=True
+            ),
+        ),
+    )
+    assert written == expected
+    assert written["version"] == "1.1.0"
+    assert written["columns"]["geometry"]["crs"] == crs
+    assert written["columns"]["geometry"]["edges"] == "spherical"

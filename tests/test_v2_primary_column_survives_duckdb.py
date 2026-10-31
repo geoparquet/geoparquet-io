@@ -183,9 +183,12 @@ class TestDeriveV2GeoMetadata:
     ids=["not-json", "not-utf8", "not-an-object", "columns-not-an-object"],
 )
 def test_an_unreadable_block_is_left_alone(raw):
+    import pyarrow as pa
+
     from geoparquet_io.core.derive_geo_from_file import _with_primary_column
 
-    assert _with_primary_column(raw, "geometry") is None
+    schema = pa.schema([("geometry", pa.binary()), ("centroid", pa.binary())])
+    assert _with_primary_column(raw, "geometry", schema) is None
 
 
 @pytest.mark.parametrize("verbose", [False, True], ids=["quiet", "verbose"])

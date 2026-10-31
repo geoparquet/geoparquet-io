@@ -20,7 +20,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.check_fixes import fix_bboxless_covering
+from geoparquet_io.core.check_fixes import fix_bboxless_cover
 from geoparquet_io.core.parquet_footer import _patch_footer_file
 from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
 
@@ -168,7 +168,7 @@ class TestFixDropsIt:
     def test_the_covering_is_gone_and_the_rest_of_the_block_survives(self, bboxless, tmp_path):
         out = tmp_path / "fixed.parquet"
 
-        summary = fix_bboxless_covering(bboxless, str(out))
+        summary = fix_bboxless_cover(bboxless, str(out))
 
         assert summary["success"] is True
         assert summary["fix_applied"] is not None
@@ -184,7 +184,7 @@ class TestFixDropsIt:
         gpd = pytest.importorskip("geopandas")
         out = tmp_path / "fixed.parquet"
 
-        fix_bboxless_covering(bboxless, str(out))
+        fix_bboxless_cover(bboxless, str(out))
 
         assert _failed(validate_geoparquet(str(out), validate_data=False)) == []
         assert len(gpd.read_parquet(str(out))) > 0
@@ -196,7 +196,7 @@ class TestFixDropsIt:
         before = _covering(legal)
         out = tmp_path / "untouched.parquet"
 
-        summary = fix_bboxless_covering(legal, str(out))
+        summary = fix_bboxless_cover(legal, str(out))
 
         assert summary["fix_applied"] is None
         assert _covering(legal) == before
@@ -211,7 +211,7 @@ class TestFixDropsIt:
         bad = _refooter(with_extra, tmp_path / "bad.parquet", {"h3": H3_ENTRY})
         out = tmp_path / "fixed.parquet"
 
-        fix_bboxless_covering(bad, str(out))
+        fix_bboxless_cover(bad, str(out))
 
         assert _kv(out)[b"stac:collection"] == b"mine"
 
@@ -227,7 +227,7 @@ class TestFixDropsIt:
         monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
         out = tmp_path / "rewritten.parquet"
 
-        fix_bboxless_covering(bboxless, str(out))
+        fix_bboxless_cover(bboxless, str(out))
 
         assert "covering" not in _geo(out)["columns"]["geometry"]
         assert pq.read_table(str(out)).num_rows == pq.read_table(bboxless).num_rows
@@ -248,7 +248,7 @@ class TestFixSuppliesTheMissingMember:
     def test_the_member_is_supplied_and_the_index_entry_survives(self, declarable, tmp_path):
         out = tmp_path / "fixed.parquet"
 
-        summary = fix_bboxless_covering(declarable, str(out))
+        summary = fix_bboxless_cover(declarable, str(out))
 
         assert summary["success"] is True
         covering = _covering(out)
@@ -259,7 +259,7 @@ class TestFixSuppliesTheMissingMember:
     def test_the_fix_summary_names_the_column_it_declared(self, declarable, tmp_path):
         out = tmp_path / "fixed.parquet"
 
-        summary = fix_bboxless_covering(declarable, str(out))
+        summary = fix_bboxless_cover(declarable, str(out))
 
         assert "bbox" in summary["fix_applied"], summary
         assert "'bbox'" in summary["fix_applied"], summary
@@ -275,11 +275,11 @@ class TestFixSuppliesTheMissingMember:
             raise FooterPatchUnsupported("pretend this footer is unreadable")
 
         patched = tmp_path / "patched.parquet"
-        fix_bboxless_covering(declarable, str(patched))
+        fix_bboxless_cover(declarable, str(patched))
         monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
         rewritten = tmp_path / "rewritten.parquet"
 
-        fix_bboxless_covering(declarable, str(rewritten))
+        fix_bboxless_cover(declarable, str(rewritten))
 
         assert _covering(rewritten) == _covering(patched)
         assert pq.read_table(str(rewritten)).num_rows == pq.read_table(declarable).num_rows
@@ -287,7 +287,7 @@ class TestFixSuppliesTheMissingMember:
     def test_the_repaired_file_validates_clean(self, declarable, tmp_path):
         out = tmp_path / "fixed.parquet"
 
-        fix_bboxless_covering(declarable, str(out))
+        fix_bboxless_cover(declarable, str(out))
 
         assert _failed(validate_geoparquet(str(out), validate_data=False)) == []
 
@@ -315,7 +315,7 @@ class TestARacedPatchIsNotAnsweredByARewrite:
         out = tmp_path / "never_written.parquet"
 
         with pytest.raises(FooterPatchRaced):
-            fix_bboxless_covering(bboxless, str(out))
+            fix_bboxless_cover(bboxless, str(out))
 
         assert not out.exists(), "a raced repair rewrote the file anyway"
 
@@ -388,11 +388,11 @@ class TestOnePredicateBehindAllThreeVerdicts:
     )
     def test_the_verdict_fails_exactly_what_the_predicate_selects(self, covering):
         from geoparquet_io.core.geo_metadata import covering_lacks_bbox
-        from geoparquet_io.core.validate import _check_covering_has_bbox
+        from geoparquet_io.core.validate import _check_cover_has_bbox
 
         col_meta = {"encoding": "WKB", "covering": covering}
 
-        verdict = _check_covering_has_bbox(col_meta, "geometry")
+        verdict = _check_cover_has_bbox(col_meta, "geometry")
 
         assert (verdict.status == CheckStatus.FAILED) is covering_lacks_bbox(col_meta)
 
@@ -430,16 +430,16 @@ class TestTheRepairOnAFileThatDoesNotNeedIt:
         out = tmp_path / "never_written.parquet"
 
         with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
-            summary = fix_bboxless_covering(str(src), str(out), verbose=True)
+            summary = fix_bboxless_cover(str(src), str(out), verbose=True)
 
         assert summary == {"fix_applied": None, "success": True}
         assert not out.exists()
         assert "nothing to drop" in caplog.text.lower()
 
     def test_the_fix_step_keeps_the_input_when_the_repair_finds_nothing(self, tmp_path):
-        """`_apply_covering_fix`'s disagreement arm: the check said yes, the
+        """`_apply_cover_fix`'s disagreement arm: the check said yes, the
         repair says no, so the pipeline keeps using the file it had."""
-        from geoparquet_io.core.check_fixes import _apply_covering_fix
+        from geoparquet_io.core.check_fixes import _apply_cover_fix
 
         src = tmp_path / "plain.parquet"
         CliRunner().invoke(cli, ["convert", "tests/data/buildings_test.parquet", str(src)])
@@ -448,7 +448,7 @@ class TestTheRepairOnAFileThatDoesNotNeedIt:
         # the two disagree, so the pipeline must keep the file it had.
         check_results = {"covering": {"fix_available": True}}
 
-        current, applied = _apply_covering_fix(
+        current, applied = _apply_cover_fix(
             check_results, str(src), temp_files, verbose=False, profile=None
         )
 
@@ -476,7 +476,7 @@ class TestTheRemoteRepairPath:
             cf, "rewrite_footer_kv", lambda src, dst, updates, **k: rewrote.append((dst, *updates))
         )
 
-        summary = cf.fix_bboxless_covering(str(src), "s3://bucket/out.parquet", verbose=False)
+        summary = cf.fix_bboxless_cover(str(src), "s3://bucket/out.parquet", verbose=False)
 
         assert patched == [], "a remote output must not be footer-patched"
         assert rewrote == [("s3://bucket/out.parquet", "geo")]
@@ -484,24 +484,26 @@ class TestTheRemoteRepairPath:
 
     def test_the_gate_reads_the_schema_the_funnels_rewrite_reads(self, declarable, monkeypatch):
         """One probe for a local and a remote file: ``query_schema`` over the
-        funnel's ``file_relation``, so the declaration gate and the rewrite see
+        owner's ``duckdb_utils.file_relation`` (``file_schema``), so the declaration gate and the rewrite see
         the same columns (``pq.read_schema`` cannot open a URL, and a second
         branch for it is how the remote repair used to strip unasked)."""
         import geoparquet_io.core.check_fixes as cf
+        import geoparquet_io.core.duckdb_utils as du
         from geoparquet_io.core.common import get_parquet_metadata
         from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 
         queries: list[str] = []
-        real = cf.query_schema
+        real = du.query_schema
 
         def spy(con, query):
             queries.append(query)
             return real(con, query)
 
-        monkeypatch.setattr(cf, "query_schema", spy)
-        geo = sanitized_carried_geo(get_parquet_metadata(declarable)[0])
+        monkeypatch.setattr(du, "query_schema", spy)
+        metadata = get_parquet_metadata(declarable)[0]
+        geo = sanitized_carried_geo(metadata)
 
-        repaired = cf._supply_or_strip_bbox_member(declarable, geo, False)
+        repaired = cf._repaired_cover_block(declarable, metadata, geo, False)
 
         assert len(queries) == 1, queries
         assert "hive_partitioning=false" in queries[0], queries

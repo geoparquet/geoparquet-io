@@ -85,14 +85,7 @@ def sort_by_quadkey_table(
             select_clause = "*"
 
         query = f"SELECT {select_clause} FROM __input_table ORDER BY {quote_identifier(quadkey_column_name)}"
-        result = con.sql(query).arrow().read_all()
-
-        # Preserve metadata
-        if table.schema.metadata:
-            result = result.replace_schema_metadata(table.schema.metadata)
-
-        result = registered.restore_edges(result)
-        return result
+        return registered.read_back(con, query, table.schema.metadata)
     finally:
         con.close()
 

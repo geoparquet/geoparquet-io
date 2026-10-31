@@ -17,10 +17,15 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.compression import resolve_process_compression_level
-from geoparquet_io.core.duckdb_utils import fetch_one, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, query_schema, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
-from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
+from geoparquet_io.core.geo_metadata import (
+    QuerySource,
+    bbox_column_to_declare,
+    bounds_of,
+    sanitized_carried_geo_of_file,
+)
 from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.index_ops import get_index_spec, load_index
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
@@ -47,6 +52,7 @@ from geoparquet_io.core.process.overview.rollup import (
     admin_parent_expr,
     build_level_sql,
     validate_level,
+    with_input_bbox,
 )
 from geoparquet_io.core.write_funnels import write_aggregate_table
 
@@ -309,6 +315,7 @@ def create_overviews(
             geoparquet_version=geoparquet_version,
             verbose=verbose,
             show_sql=show_sql,
+            input_parquet=input_parquet,
         )
 
 
@@ -330,6 +337,21 @@ def _refuse_existing(paths: list[str], force: bool) -> None:
         handle_output_overwrite(path, force, flag="--force", remove=False)
 
 
+def _input_bbox_field(con, source_sql: str, input_parquet: str | None, info) -> pa.Field | None:
+    """The input's bbox column a rolled-up level carries too, or None (#1121).
+
+    The column the composer would declare for the input (its declared covering,
+    or the conventional ``bbox`` struct): a level that dropped it lost the
+    covering every other write of the same data declares.
+    """
+    if info.out_geometry == "none":
+        return None
+    schema = query_schema(con, source_sql)
+    geo = sanitized_carried_geo_of_file(input_parquet) if input_parquet else None
+    name = bbox_column_to_declare(schema, geo)
+    return schema.field(name) if name else None
+
+
 def _build_levels(
     con,
     relation: str,
@@ -342,9 +364,11 @@ def _build_levels(
     geoparquet_version: str | None,
     verbose: bool,
     show_sql: bool,
+    input_parquet: str | None = None,
 ) -> list[tuple[int | str, str]]:
     """Roll the input up to each level and write it as a sibling file."""
     source_sql = f"SELECT * FROM {relation}"
+    bbox_field = _input_bbox_field(con, source_sql, input_parquet, info)
     results: list[tuple[int | str, str]] = []
     for out_path in outputs:
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -352,7 +376,7 @@ def _build_levels(
         sql = build_level_sql(con, info, source_sql, level)
         if show_sql or verbose:
             debug(sql)
-        table = con.sql(sql).arrow().read_all()
+        table = with_input_bbox(con.sql(sql).arrow().read_all(), bbox_field)
         _write_overview(
             table,
             out_path,
@@ -455,6 +479,7 @@ def create_overview_file(
             geoparquet_version=geoparquet_version,
             verbose=verbose,
             show_sql=show_sql,
+            input_parquet=input_parquet,
         )
         # Coarse first: the built ladder, then the base, which is the input
         # itself and always the finest (OVERVIEWS_SPEC 4.2).

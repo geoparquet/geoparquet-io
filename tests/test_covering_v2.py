@@ -28,7 +28,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.duckdb_utils import fetch_one
-from tests.conftest import get_geo_metadata
+from tests.conftest import fast_path_query, get_geo_metadata
 
 BBOX_COVERING = {
     "xmin": ["bbox", "xmin"],
@@ -474,7 +474,9 @@ def test_fast_path_carry_declines_a_geo_block_too_thin_to_stand_in(tmp_path):
             }
         )
     }
-    assert _geo_block_to_carry_on_fast_path(thin, "geometry", "2.0") is None
+    assert (
+        _geo_block_to_carry_on_fast_path(thin, "geometry", "2.0", **fast_path_query("bbox")) is None
+    )
 
 
 def test_fast_path_carry_declines_a_block_duckdb_would_write_itself():
@@ -490,7 +492,7 @@ def test_fast_path_carry_declines_a_block_duckdb_would_write_itself():
             }
         )
     }
-    assert _geo_block_to_carry_on_fast_path(plain, "geometry", "2.0") is None
+    assert _geo_block_to_carry_on_fast_path(plain, "geometry", "2.0", **fast_path_query()) is None
 
 
 def test_a_non_bbox_covering_survives_a_write_that_adds_a_bbox_covering(tmp_path):
