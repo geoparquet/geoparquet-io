@@ -324,20 +324,14 @@ class TestNativeGeoStatsWrap:
         assert stats["bbox"] == [-5.0, 0.0, 10.0, 20.0]
 
     def test_check_accepts_data_inside_a_wrapping_stat(self, antimeridian_file, con, monkeypatch):
-        monkeypatch.setattr(
-            "geoparquet_io.core.duckdb_metadata.get_aggregated_native_geo_stats",
-            lambda *a, **k: {"bbox": [170.0, -10.0, -170.0, 10.0]},
-        )
+        _stats(monkeypatch, [170.0, -10.0, -170.0, 10.0])
         check = _check_native_geo_stats_contains_data(str(antimeridian_file), "geometry", con, 0)
         assert check.status == CheckStatus.PASSED, check.message
         assert "antimeridian" in check.message
 
     def test_check_still_fails_geometry_in_the_wrap_gap(self, tmp_path, con, monkeypatch):
         path = _write_v2(tmp_path / "gap_stats.parquet", ["POINT (175 0)", "POINT (0 0)"])
-        monkeypatch.setattr(
-            "geoparquet_io.core.duckdb_metadata.get_aggregated_native_geo_stats",
-            lambda *a, **k: {"bbox": [170.0, -10.0, -170.0, 10.0]},
-        )
+        _stats(monkeypatch, [170.0, -10.0, -170.0, 10.0])
         check = _check_native_geo_stats_contains_data(str(path), "geometry", con, 0)
         assert check.status == CheckStatus.FAILED
         assert "1 of 2" in check.message
@@ -376,10 +370,10 @@ class TestPartitionSummaryBbox:
 
 
 def _stats(monkeypatch, bbox):
-    """Force the aggregated native geospatial statistics to ``bbox``."""
+    """Force the native geospatial statistics to one row group spanning ``bbox``."""
     monkeypatch.setattr(
-        "geoparquet_io.core.duckdb_metadata.get_aggregated_native_geo_stats",
-        lambda *a, **k: {"bbox": bbox},
+        "geoparquet_io.core.duckdb_metadata.get_native_geo_stats_by_row_group",
+        lambda *a, **k: [_chunk(*bbox)],
     )
 
 

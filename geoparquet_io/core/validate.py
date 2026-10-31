@@ -2877,20 +2877,22 @@ def _check_native_geo_statistics(
         )
 
 
-def _projected_inverted_row_group(parquet_file: str, geom_col: str, con, crs) -> int | None:
-    """The first row group whose statistics have xmin > xmax under a projected CRS, or None."""
-    from geoparquet_io.core.duckdb_metadata import get_native_geo_stats_by_row_group
+def _projected_inverted_row_group(chunks: list[dict], crs) -> int | None:
+    """The first row group whose statistics have xmin > xmax under a projected CRS, or None.
 
+    The one arm for a projected wrap: the fold of a projected extent is plain
+    min/max, so it is never inverted unless a chunk is.
+    """
     if is_geographic_crs(crs):
         return None
-    for chunk in get_native_geo_stats_by_row_group(parquet_file, geom_col, con) or []:
+    for chunk in chunks:
         xmin, xmax = chunk.get("xmin"), chunk.get("xmax")
         if xmin is not None and xmax is not None and xmin > xmax:
             return chunk.get("row_group_id")
     return None
 
 
-def _projected_wrap_failure(geom_col: str, where: str = "") -> ValidationCheck:
+def _projected_wrap_failure(geom_col: str, where: str) -> ValidationCheck:
     return ValidationCheck(
         name=f"native_geo_stats_contains_data_{geom_col}",
         status=CheckStatus.FAILED,
@@ -2916,7 +2918,10 @@ def _check_native_geo_stats_contains_data(
     "this wraparound occurs only when the corresponding bounding box crosses the
     antimeridian line".
     """
-    from geoparquet_io.core.duckdb_metadata import get_aggregated_native_geo_stats
+    from geoparquet_io.core.duckdb_metadata import (
+        aggregate_native_geo_stats,
+        get_native_geo_stats_by_row_group,
+    )
 
     try:
         # For remote files, skip (may be slow)
@@ -2930,18 +2935,23 @@ def _check_native_geo_stats_contains_data(
 
         raw_url = resolve_file_url(parquet_file, verbose=False)
 
+        # One read of the row-group statistics feeds both questions below.
+        # Unreadable statistics are "none to validate against", as before.
+        try:
+            chunks = get_native_geo_stats_by_row_group(parquet_file, geom_col, con) or []
+        except Exception:
+            chunks = []
+
         # A projected extent folds plainly, which can hide one row group's
         # xmin > xmax behind a wider one; each chunk is checked on its own.
-        inverted = _projected_inverted_row_group(parquet_file, geom_col, con, crs)
+        inverted = _projected_inverted_row_group(chunks, crs)
         if inverted is not None:
             return _projected_wrap_failure(geom_col, f" (row group {inverted})")
 
         # The sample below spans the whole file, so it is judged against the
         # whole file's statistics -- the union over every row group, not the
         # bounds of whichever one happens to come first.
-        stats = get_aggregated_native_geo_stats(
-            parquet_file, geom_col, con, geographic=is_geographic_crs(crs)
-        )
+        stats = aggregate_native_geo_stats(chunks, geographic=is_geographic_crs(crs))
 
         if not stats:
             return ValidationCheck(
@@ -2987,10 +2997,9 @@ def _check_native_geo_stats_contains_data(
         ymax = geo_bbox["ymax"]
         # Parquet's geospatial statistics may legally wrap the antimeridian
         # (xmin > xmax), the same reading _check_bbox_contains_data applies --
-        # and, like there, only for a geographic CRS.
+        # and, like there, only for a geographic CRS: a projected wrap was
+        # refused per row group above.
         wrapped = xmin > xmax
-        if wrapped and not is_geographic_crs(crs):
-            return _projected_wrap_failure(geom_col)
 
         limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
 

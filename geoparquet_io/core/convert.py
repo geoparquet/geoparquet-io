@@ -53,9 +53,11 @@ from geoparquet_io.core.file_utils import (
 )
 from geoparquet_io.core.geo_metadata import (
     QuerySource,
+    bbox_xy,
     bounds_of,
     build_bbox_covering,
     sanitized_carried_geo_of_file,
+    split_zm_suffix,
 )
 from geoparquet_io.core.geojson_datetimes import DatetimeRead, plan_datetime_read
 from geoparquet_io.core.geometry_detection import (
@@ -235,9 +237,6 @@ def _parquet_geometry_expr(con, source: str, geom_column: str) -> tuple[str, boo
     return f"ST_GeomFromWKB({quoted})", False
 
 
-_DIMENSION_SUFFIX_RE = re.compile(r" (Z|M|ZM)$")
-
-
 def _flatten_geometry_metadata(column_meta: dict) -> dict:
     """The input's declared facts about a geometry column, corrected for 2D.
 
@@ -250,11 +249,11 @@ def _flatten_geometry_metadata(column_meta: dict) -> dict:
     meta = dict(column_meta)
     types = meta.get("geometry_types")
     if isinstance(types, list):
-        flat = [_DIMENSION_SUFFIX_RE.sub("", t) for t in types if isinstance(t, str)]
+        flat = [split_zm_suffix(t)[0] for t in types if isinstance(t, str)]
         meta["geometry_types"] = list(dict.fromkeys(flat))
     bbox = meta.get("bbox")
-    if isinstance(bbox, list) and len(bbox) == 6:
-        meta["bbox"] = [bbox[0], bbox[1], bbox[3], bbox[4]]
+    if isinstance(bbox, list) and len(bbox) in (6, 8):
+        meta["bbox"] = list(bbox_xy(bbox))
     return meta
 
 
