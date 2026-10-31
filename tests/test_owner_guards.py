@@ -3149,9 +3149,11 @@ def _builds_a_path(m: _Module, call: ast.AST) -> bool:
             isinstance(n, ast.Name)
             and isinstance(n.ctx, ast.Load)
             and n.id in targets
-            and _builds_a_path(m, n)
+            and (_builds_a_path(m, n) or _directory_parameter_builds_path(m, n))
             for n in ast.walk(scope)
         )
+    if isinstance(up, ast.Attribute) and up.attr == "name":
+        return _builds_a_path(m, up)
     while isinstance(up, ast.Call) and m.dotted(up.func) in _PATH_JOINS:
         if m.dotted(up.func) == "os.path.join":
             return True
@@ -3162,6 +3164,35 @@ def _builds_a_path(m: _Module, call: ast.AST) -> bool:
     # it mid-sentence is a message.
     joined = m.parents.get(id(up)) if isinstance(up, ast.FormattedValue) else None
     return isinstance(joined, ast.JoinedStr) and joined.values[0] is up
+
+
+def _directory_parameter_builds_path(m: _Module, name: ast.Name) -> bool:
+    """Follow a directory passed to a local helper that joins its ``.name``."""
+    call = m.parents.get(id(name))
+    if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+        return False
+    for function in ast.walk(m.tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if function.name != call.func.id:
+            continue
+        parameters = [arg.arg for arg in function.args.posonlyargs + function.args.args]
+        bound = {
+            parameters[index]
+            for index, arg in enumerate(call.args)
+            if arg is name and index < len(parameters)
+        }
+        bound.update(k.arg for k in call.keywords if k.value is name and k.arg)
+        if any(
+            isinstance(node, ast.Attribute)
+            and node.attr == "name"
+            and isinstance(node.value, ast.Name)
+            and node.value.id in bound
+            and _builds_a_path(m, node)
+            for node in ast.walk(function)
+        ):
+            return True
+    return False
 
 
 def _keeps_its_file(call: ast.Call) -> bool:
@@ -6469,6 +6500,7 @@ def test_migrated_arm_repository(arm):
 
 
 STAGING_SHAPES = {
+    "temporary_directory_parameter_name": "import tempfile\nfrom pathlib import Path\n\ndef download(directory):\n    return Path(directory.name) / 'response.gml'\n\ndef f():\n    d = tempfile.TemporaryDirectory()\n    return download(d)\n",
     "mkdtemp_join": "import os, tempfile\n\ndef f():\n    d = tempfile.mkdtemp()\n    return os.path.join(d, 'x.parquet')\n",
     "temporary_directory_div": "import tempfile\nfrom pathlib import Path\n\ndef f():\n    with tempfile.TemporaryDirectory() as d:\n        return Path(d) / 'x.parquet'\n",
     "replace": "import os\n\ndef f(a, b):\n    os.replace(a, b)\n",

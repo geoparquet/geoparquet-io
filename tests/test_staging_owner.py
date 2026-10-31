@@ -229,3 +229,24 @@ def test_a_second_in_place_fix_keeps_the_first_backup(tmp_path):
     assert backups == ["f.parquet.bak", "f.parquet.bak.1"], backups
     assert Path(f"{target}.bak.1").read_bytes() == fixed_once
     assert f"Created backup: {target}.bak.1" in second.output
+
+
+def test_scratch_dir_retries_a_released_leftover(monkeypatch):
+    from geoparquet_io.core.file_utils import scratch_dir
+
+    real_unlink = os.unlink
+    failures = []
+
+    def unlink(path, *args, **kwargs):
+        if os.path.basename(path) == "response.gfs" and not failures:
+            failures.append(path)
+            raise PermissionError("handle still closing")
+        return real_unlink(path, *args, **kwargs)
+
+    with scratch_dir() as directory:
+        leftover = Path(directory) / "response.gfs"
+        leftover.write_text("schema")
+        monkeypatch.setattr(os, "unlink", unlink)
+    assert failures
+    assert not leftover.exists()
+    assert not Path(directory).exists()

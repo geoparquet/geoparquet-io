@@ -559,6 +559,9 @@ def scratch_dir(*, prefix: str = "gpio_", directory: str | None = None) -> Itera
     try:
         yield str(scratch)
     finally:
+        for leftover in scratch.rglob("*"):
+            if leftover.is_file() or leftover.is_symlink():
+                unlink_released_file(leftover)
         shutil.rmtree(scratch, ignore_errors=True)
 
 
