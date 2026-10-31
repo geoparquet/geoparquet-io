@@ -13,9 +13,12 @@ DuckDB as the SQL token ``nan``), or when ``ymin > ymax``. Every refusal is an
 :class:`~geoparquet_io.core.exceptions.InvalidParameterError` naming the
 caller's parameter.
 
-``xmin > xmax`` is not a refusal: it is the antimeridian wrap (RFC 7946 5.2),
-the reading ``validate`` and ``check_bbox_values`` give a declared bbox.
-:attr:`BBox.crosses_antimeridian` is the one predicate for it. A consumer that
+``xmin > xmax`` is not a refusal when it is the antimeridian wrap (RFC 7946
+5.2). :meth:`BBox.crosses_antimeridian` is the whole wrap rule, for every
+reader in gpio (this parser, ``validate``, ``check bbox``, the preview, the
+longitude-range union, ``check stac``): xmin > xmax, both x longitudes in
+[-180, 180], and a CRS that is geographic or unknown. A per-row SQL reader uses
+its one SQL form, :func:`crosses_antimeridian_sql`. A consumer that
 builds a filter asks :meth:`BBox.pieces` for the one or two non-wrapping boxes
 and ORs them (:func:`any_piece`); a service whose request has no wrapped form
 calls :func:`refuse_wrap`, which raises :class:`AntimeridianBBoxError`.
@@ -38,14 +41,24 @@ class BBox(NamedTuple):
     xmax: float
     ymax: float
 
-    @property
-    def crosses_antimeridian(self) -> bool:
-        """Whether the X range wraps the antimeridian (``xmin > xmax``)."""
-        return self.xmin > self.xmax
+    def crosses_antimeridian(self, geographic: bool | None = None) -> bool:
+        """Whether the X range wraps the antimeridian: the one wrap rule.
 
-    def pieces(self) -> tuple[BBox, ...]:
+        True when ``xmin > xmax``, both are longitudes (in [-180, 180]), and
+        the CRS is geographic -- ``geographic=None`` (not known, as for a
+        ``--bbox`` the caller typed) does not rule the wrap out; ``False`` (a
+        projected CRS, where the spec gives minima then maxima) does.
+        """
+        return (
+            self.xmin > self.xmax
+            and -180.0 <= self.xmax
+            and self.xmin <= 180.0
+            and geographic is not False
+        )
+
+    def pieces(self, geographic: bool | None = None) -> tuple[BBox, ...]:
         """The box itself, or its two lobes ``[xmin, 180]`` and ``[-180, xmax]`` when it wraps."""
-        if not self.crosses_antimeridian:
+        if not self.crosses_antimeridian(geographic):
             return (self,)
         return (
             BBox(self.xmin, self.ymin, 180.0, self.ymax),
@@ -72,6 +85,17 @@ class AntimeridianBBoxError(InvalidParameterError):
         )
 
 
+def crosses_antimeridian_sql(xmin: str, xmax: str, geographic: bool | None = None) -> str:
+    """:meth:`BBox.crosses_antimeridian` as a SQL predicate over two x expressions.
+
+    For a reader that has to decide per row, inside a query. The CRS gate is
+    applied here, in Python: a projected CRS gives the constant ``FALSE``.
+    """
+    if geographic is False:
+        return "FALSE"
+    return f"({xmin} > {xmax} AND {xmax} >= -180 AND {xmin} <= 180)"
+
+
 def any_piece(bbox: BBox, condition: Callable[[BBox], str]) -> str:
     """One SQL condition for ``bbox``: ``condition`` of each piece, ORed when it wraps."""
     parts = [condition(piece) for piece in bbox.pieces()]
@@ -80,7 +104,7 @@ def any_piece(bbox: BBox, condition: Callable[[BBox], str]) -> str:
 
 def refuse_wrap(bbox: BBox, service: str, param: str = "bbox") -> BBox:
     """``bbox`` unchanged, or :class:`AntimeridianBBoxError` when it wraps."""
-    if bbox.crosses_antimeridian:
+    if bbox.crosses_antimeridian():
         raise AntimeridianBBoxError(service, bbox, param)
     return bbox
 
@@ -126,15 +150,16 @@ def parse_bbox(bbox: str | Sequence[float], param: str = "bbox") -> BBox:
             f"coordinates appear to be reversed. ymin ({ymin}) must be <= ymax ({ymax}) "
             "(only X may wrap, across the antimeridian). Expected order: xmin,ymin,xmax,ymax.",
         )
-    if xmin > xmax and not (-180.0 <= xmax and xmin <= 180.0):
-        # Only a longitude wraps: x = 500000 with xmin > xmax is swapped, not a wrap.
+    box = BBox(xmin, ymin, xmax, ymax)
+    if xmin > xmax and not box.crosses_antimeridian():
+        # Reversed and not the wrap (x = 500000 is no longitude): swapped corners.
         raise InvalidParameterError(
             param,
             f"coordinates appear to be reversed. xmin ({xmin}) > xmax ({xmax}) is read as an "
             "antimeridian wrap only for longitudes in [-180, 180]. "
             "Expected order: xmin,ymin,xmax,ymax.",
         )
-    return BBox(xmin, ymin, xmax, ymax)
+    return box
 
 
 def parse_optional_bbox(bbox: str | Sequence[float] | None, param: str = "bbox") -> BBox | None:

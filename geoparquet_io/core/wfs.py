@@ -3167,7 +3167,7 @@ def _get_tiling_bbox(
         return user_bbox
     if not layer_info.bbox:
         return None
-    if BBox(*layer_info.bbox).crosses_antimeridian:
+    if BBox(*layer_info.bbox).crosses_antimeridian(geographic=True):
         warn("The layer bbox crosses the antimeridian, so auto-tiling is off.")
         return None
     if _crs_matches(crs, "EPSG:4326"):

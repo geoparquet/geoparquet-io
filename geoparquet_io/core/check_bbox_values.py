@@ -48,6 +48,7 @@ from typing import TypedDict, cast
 
 import duckdb
 
+from geoparquet_io.core.bbox_parse import crosses_antimeridian_sql
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.check_verdict import (
     FAILURE_GLYPH,
@@ -314,8 +315,7 @@ def _classified_rows(read: GeometryRead, geographic: bool) -> str:
     return f"""
         SELECT {_ROW} AS row_index, geom, bad, absent, bbox_null, bbox_nan,
                NOT (bad OR absent OR bbox_null OR bbox_nan) AS comparable,
-               {"TRUE" if geographic else "FALSE"} AND bxmin > bxmax
-                   AND bxmin <= 180 AND bxmax >= -180 AS wrapped,
+               {crosses_antimeridian_sql("bxmin", "bxmax", geographic)} AS wrapped,
                bxmin, bymin, bxmax, bymax
         FROM (
             SELECT {_ROW}, geom, bad,

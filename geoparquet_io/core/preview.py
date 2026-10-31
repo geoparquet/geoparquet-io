@@ -212,20 +212,16 @@ def _matching_row_groups(
 def _intersects(stat: dict, bbox: tuple[float, float, float, float]) -> bool:
     """Whether a row group's bbox statistics intersect the query bbox (edges count).
 
-    A query bbox that wraps the antimeridian intersects when either lobe does.
+    Either box may wrap the antimeridian: the query bbox, and a group's
+    statistics, which Parquet permits to have xmin > xmax (see
+    aggregate_native_geo_stats). Each is split into its lobes by the owner
+    (``BBox.pieces``) and they intersect when any two lobes do; pruning a
+    wrapped group as an empty interval would drop rows the real read returns.
     """
-    return any(_intersects_piece(stat, piece) for piece in BBox(*bbox).pieces())
+    group = BBox(stat["xmin"], stat["ymin"], stat["xmax"], stat["ymax"])
+    return any(_boxes_meet(g, q) for g in group.pieces() for q in BBox(*bbox).pieces())
 
 
-def _intersects_piece(stat: dict, bbox: BBox) -> bool:
-    """:func:`_intersects` for one non-wrapping query box."""
-    xmin, ymin, xmax, ymax = bbox
-    if stat["ymax"] < ymin or stat["ymin"] > ymax:
-        return False
-    if stat["xmin"] > stat["xmax"]:
-        # The Parquet geospatial statistics permit xmin > xmax for a group
-        # wrapping the antimeridian (see aggregate_native_geo_stats): the X
-        # range is the two lobes [xmin, 180] and [-180, xmax], not an empty
-        # interval. Pruning it as empty would drop rows the real read returns.
-        return bool(stat["xmin"] <= xmax or stat["xmax"] >= xmin)
-    return not (stat["xmax"] < xmin or stat["xmin"] > xmax)
+def _boxes_meet(a: BBox, b: BBox) -> bool:
+    """Whether two non-wrapping boxes intersect (edges count)."""
+    return not (a.xmax < b.xmin or a.xmin > b.xmax or a.ymax < b.ymin or a.ymin > b.ymax)

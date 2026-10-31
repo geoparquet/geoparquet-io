@@ -140,6 +140,7 @@
     "AntimeridianBBoxError",
     "BBox",
     "any_piece",
+    "crosses_antimeridian_sql",
     "parse_bbox",
     "parse_optional_bbox",
     "refuse_wrap"

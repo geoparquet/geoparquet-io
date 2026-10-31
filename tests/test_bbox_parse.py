@@ -140,10 +140,10 @@ def test_the_wrap_predicate_and_pieces():
 
     plain = parse_bbox("0,0,1,1")
     assert isinstance(plain, BBox)
-    assert not plain.crosses_antimeridian
+    assert not plain.crosses_antimeridian()
     assert plain.pieces() == (plain,)
     wrapped = parse_bbox("170,-10,-170,10")
-    assert wrapped.crosses_antimeridian
+    assert wrapped.crosses_antimeridian()
     assert wrapped.pieces() == (BBox(170.0, -10.0, 180.0, 10.0), BBox(-180.0, -10.0, -170.0, 10.0))
 
 
@@ -285,3 +285,89 @@ def test_the_api_parses_with_the_owner(entry, monkeypatch):
     with pytest.raises(InvalidParameterError) as exc:
         getattr(ops, entry)(*args, bbox=(0, 0, float("nan"), 1))
     assert exc.value.param_name == "bbox"
+
+
+# --- One wrap rule, three gates (#1367 audit pass 2) ------------------------
+#
+# xmin > xmax is the wrap only when (1) both x are longitudes in [-180, 180]
+# and (2) the CRS is geographic or unknown. BBox.crosses_antimeridian is the
+# whole rule; every reader of a wrapped bbox (parse_bbox, validate, check bbox,
+# preview, merge_longitude_ranges, check stac) asks it.
+
+WRAP_TABLE = [
+    # (box, geographic, wraps)
+    ((170, -10, -170, 10), True, True),
+    ((170, -10, -170, 10), None, True),
+    ((170, -10, -170, 10), False, False),
+    ((0, 0, 1, 1), True, False),
+    ((0, 0, 1, 1), None, False),
+    ((0, 0, 1, 1), False, False),
+    ((500000, 0, 400000, 1), True, False),
+    ((500000, 0, 400000, 1), None, False),
+    ((500000, 0, 400000, 1), False, False),
+    ((190, 0, 170, 1), True, False),
+    ((-170, 0, -190, 1), None, False),
+]
+
+
+@pytest.mark.parametrize(("box", "geographic", "wraps"), WRAP_TABLE)
+def test_the_one_wrap_rule(box, geographic, wraps):
+    from geoparquet_io.core.bbox_parse import BBox
+
+    b = BBox(*map(float, box))
+    assert b.crosses_antimeridian(geographic) is wraps
+    assert len(b.pieces(geographic)) == (2 if wraps else 1)
+
+
+@pytest.mark.parametrize(("box", "geographic", "wraps"), WRAP_TABLE)
+def test_the_sql_form_agrees(box, geographic, wraps):
+    import duckdb
+
+    from geoparquet_io.core.bbox_parse import crosses_antimeridian_sql
+
+    xmin, _, xmax, _ = box
+    sql = crosses_antimeridian_sql("a", "b", geographic)
+    got = duckdb.sql(f"SELECT {sql} FROM (SELECT {xmin}::DOUBLE a, {xmax}::DOUBLE b)").fetchall()
+    assert got == [(wraps,)]
+
+
+def test_parse_bbox_reads_the_predicate():
+    """parse_bbox has no longitude rule of its own: refused exactly when it is reversed and no wrap."""
+    for box, geographic, wraps in WRAP_TABLE:
+        if geographic is not None:
+            continue
+        text = ",".join(map(str, box))
+        if box[0] > box[2] and not wraps:
+            with pytest.raises(InvalidParameterError):
+                parse_bbox(text)
+        else:
+            assert parse_bbox(text) == tuple(map(float, box))
+
+
+def test_stac_item_with_a_wrapped_bbox_is_valid():
+    """RFC 7946 5.2 allows a wrapped bbox; base reported 'Invalid bbox ordering'."""
+    from geoparquet_io.core.stac_check import _validate_geometry_bbox
+
+    item = {"type": "Feature", "geometry": {"type": "Point"}, "bbox": [170, -10, -170, 10]}
+    results = {"errors": [], "valid": True}
+    _validate_geometry_bbox(item, results)
+    assert results == {"errors": [], "valid": True}
+    swapped = {**item, "bbox": [500000, -10, 400000, 10]}
+    _validate_geometry_bbox(swapped, results)
+    assert not results["valid"]
+
+
+def test_merge_longitude_ranges_splits_with_the_owner():
+    from geoparquet_io.core.crs_utils import merge_longitude_ranges
+
+    assert merge_longitude_ranges([(170.0, -170.0), (-175.0, -160.0)]) == (170.0, -160.0)
+    assert merge_longitude_ranges([(0.0, 1.0), (2.0, 3.0)]) == (0.0, 3.0)
+
+
+def test_preview_splits_a_wrapped_row_group_with_the_owner():
+    from geoparquet_io.core.preview import _intersects
+
+    wrapped_group = {"xmin": 170.0, "ymin": 0.0, "xmax": -170.0, "ymax": 1.0}
+    assert _intersects(wrapped_group, parse_bbox("-175,0,-172,1"))
+    assert _intersects(wrapped_group, parse_bbox("172,0,175,1"))
+    assert not _intersects(wrapped_group, parse_bbox("0,0,1,1"))
