@@ -21,6 +21,7 @@ from geoparquet_io.core.duckdb_utils import fetch_one, quote_identifier, sql_pat
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.index_ops import get_index_spec, load_index
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.logging_config import info as log_info
@@ -109,7 +110,7 @@ def _admin_cells_probe_sql(con, info: AggregateInfo, source_sql: str, level: str
             "without geometry; pass explicit levels",
         )
     qcol = quote_identifier(info.cell_column)
-    geom_expr = geometry_to_geom_expr(con, f"({source_sql})", "geometry")
+    geom_expr = geometry_to_geom_expr(con, f"({source_sql})", BUILT_GEOMETRY_COLUMN)
     centroids = (
         f"SELECT {qcol}, ST_X(__c) AS lon, ST_Y(__c) AS lat FROM ("
         f"SELECT {qcol}, ST_Centroid({geom_expr}) AS __c FROM ({source_sql}) "
@@ -231,7 +232,7 @@ def _overview_geo_bbox(con, table: pa.Table, info: AggregateInfo) -> list[float]
     con.register("__overview_result", table)
     try:
         source = QuerySource(con, "SELECT geometry FROM __overview_result")
-        return bounds_of(source, "geometry", antimeridian=True)
+        return bounds_of(source, BUILT_GEOMETRY_COLUMN, antimeridian=True)
     except duckdb.Error as exc:  # pragma: no cover - defensive
         debug(f"Could not compute an antimeridian-aware bbox: {exc}")
         return None

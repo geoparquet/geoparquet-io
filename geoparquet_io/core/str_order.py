@@ -12,6 +12,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
+    as_wkb_sql,
     describe_query,
     fetch_one,
     get_duckdb_connection,
@@ -24,8 +25,9 @@ from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessErr
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
-    STANDARD_GEOMETRY_NAMES,
-    find_primary_geometry_column,
+    create_geometry_view,
+    primary_geometry_column,
+    require_geometry_column,
 )
 
 # These three helpers are private to hilbert_order.py but are shared by convention
@@ -55,7 +57,6 @@ from geoparquet_io.core.remote import (
 )
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
-    find_geometry_column_from_table,
     is_stdin,
     should_stream_output,
 )
@@ -167,32 +168,6 @@ def _count_spatial_rows(con: duckdb.DuckDBPyConnection, source: str, geometry_co
     return int(result[0]) if result else 0
 
 
-def _geometry_source(
-    con: duckdb.DuckDBPyConnection,
-    source: str,
-    geometry_column: str,
-) -> str:
-    """Return a queryable source whose geometry column has DuckDB GEOMETRY type."""
-    geometry_type = next(
-        (
-            type_
-            for name, type_ in describe_query(con, f"SELECT * FROM {source}")
-            if name == geometry_column
-        ),
-        None,
-    )
-    if geometry_type is None or "BLOB" not in geometry_type.upper():
-        return source
-
-    geom = quote_identifier(geometry_column)
-    view_name = quote_identifier(f"__gpio_str_geometry_{uuid.uuid4().hex}")
-    con.execute(
-        f"CREATE TEMP VIEW {view_name} AS "
-        f"SELECT * REPLACE (ST_GeomFromWKB({geom}) AS {geom}) FROM {source}"
-    )
-    return view_name
-
-
 def str_order_table(
     table: pa.Table,
     geometry_column: str | None = None,
@@ -211,13 +186,15 @@ def str_order_table(
     group", not as an exact tile capacity.
     """
     _validate_tile_size(tile_size)
-    geom_col = geometry_column or find_geometry_column_from_table(table) or "geometry"
+    geom_col = geometry_column or require_geometry_column(
+        primary_geometry_column(table), "the table"
+    )
     geom = quote_identifier(geom_col)
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         registered = register_arrow(con, "__input_table", table)
-        source = _geometry_source(con, "__input_table", geom_col)
+        source = create_geometry_view(con, "__input_table", geom_col)
 
         row_count = _count_spatial_rows(con, source, geom_col)
         if row_count == 0:
@@ -232,7 +209,7 @@ def str_order_table(
             )
 
         output_expressions = [
-            f"ST_AsWKB({geom}) AS {geom}" if column == geom_col else quote_identifier(column)
+            f"{as_wkb_sql(geom)} AS {geom}" if column == geom_col else quote_identifier(column)
             for column in table.column_names
         ]
         query = _str_order_query(
@@ -254,7 +231,7 @@ def str_order_table(
 def str_order(
     input_parquet: str,
     output_parquet: str | None = None,
-    geometry_column: str = "geometry",
+    geometry_column: str | None = None,
     add_bbox_flag: bool = False,
     verbose: bool = False,
     compression: str | None = None,
@@ -320,7 +297,7 @@ def str_order(
 def _str_order_streaming(
     input_path: str,
     output_path: str | None,
-    geometry_column: str,
+    geometry_column: str | None,
     tile_size: int,
     verbose: bool,
     write: WriteOptions,
@@ -329,23 +306,20 @@ def _str_order_streaming(
         verbose = False
 
     with open_input(input_path, verbose=verbose) as (source, metadata, _is_stream, con):
-        column_names = [name for name, _ in describe_query(con, f"SELECT * FROM {source}")]
+        described = describe_query(con, f"SELECT * FROM {source}")
+        column_names = [name for name, _ in described]
         geom_col = geometry_column
-        if geom_col == "geometry" or geom_col not in column_names:
+        if geom_col is None or geom_col not in column_names:
             # The stream carries its own `geo` metadata, so prefer the file's
             # declared primary column over the conventional-name guess. Without
             # this a file whose primary column is e.g. `footprint` binder-errors
             # in stream mode while working in file mode.
-            geo_meta = sanitized_carried_geo(metadata)
-            primary_column = geo_meta.get("primary_column")
-            if primary_column in column_names:
-                geom_col = primary_column
-            else:
-                geom_col = next(
-                    (name for name in STANDARD_GEOMETRY_NAMES if name in column_names), geom_col
-                )
+            geom_col = require_geometry_column(
+                primary_geometry_column(described, geo=sanitized_carried_geo(metadata)),
+                input_path,
+            )
 
-        source = _geometry_source(con, source, geom_col)
+        source = create_geometry_view(con, source, geom_col)
         row_count = _count_spatial_rows(con, source, geom_col)
         reordered = row_count > 0
         if not reordered:
@@ -380,7 +354,7 @@ def _str_order_streaming(
 def _str_order_file_based(
     input_parquet: str,
     output_parquet: str | None,
-    geometry_column: str,
+    geometry_column: str | None,
     tile_size: int,
     add_bbox_flag: bool,
     verbose: bool,
@@ -397,12 +371,14 @@ def _str_order_file_based(
 
     source = sql_path(resolve_file_url(working_parquet, verbose))
     metadata, _ = get_parquet_metadata(working_parquet, verbose)
-    if geometry_column == "geometry":
-        geometry_column = find_primary_geometry_column(working_parquet, verbose)
+    if geometry_column is None:
+        geometry_column = require_geometry_column(
+            primary_geometry_column(working_parquet, verbose=verbose), working_parquet
+        )
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working_parquet))
     try:
-        geometry_source = _geometry_source(con, source, geometry_column)
+        geometry_source = create_geometry_view(con, source, geometry_column)
         row_count = _count_spatial_rows(con, geometry_source, geometry_column)
         reordered = row_count > 0
         if not reordered:

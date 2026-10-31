@@ -39,7 +39,6 @@ DEFAULT_QUADKEY_PARTITION_RESOLUTION  # unused variable (geoparquet_io/core/cons
 DEFAULT_S2_TARGET_ROWS  # unused variable (geoparquet_io/core/constants.py:38) -- dead: T0e deletes
 FIBOA_CORE_SCHEMA  # unused variable (geoparquet_io/core/constants.py:44) -- dead: T0e deletes (no package caller; only tests)
 NULL_CRS_NO_FLAG_ERROR  # unused variable (geoparquet_io/core/crs_utils.py:518) -- dead: T0e deletes
-ERROR_NO_GEOMETRY  # unused variable (geoparquet_io/core/format_writers.py:58) -- dead: T0e deletes
 has_estimate  # unused variable (geoparquet_io/core/preview.py:60) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
 stats_source  # unused variable (geoparquet_io/core/preview.py:64) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
 est_rows  # unused variable (geoparquet_io/core/preview.py:68) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape

@@ -10,6 +10,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.constants import DEFAULT_H3_COLUMN_NAME
+from geoparquet_io.core.duckdb_utils import as_wkb_sql, geom_from_wkb_sql
 from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.grid_common import (
     GridScheme,
@@ -28,10 +29,10 @@ H3_SCHEME = GridScheme(
     # The WKB form parses straight to a GEOMETRY -- no WKT round trip. Every
     # vertex comes back wrapped into [-180, 180], so a cell straddling the
     # antimeridian arrives torn; the shared builder repairs it.
-    boundary_template="ST_GeomFromWKB(h3_cell_to_boundary_wkb({cell}))",
+    boundary_template=geom_from_wkb_sql("h3_cell_to_boundary_wkb({cell})"),
     latlng_template="h3_cell_to_latlng({cell})",
     # h3_cell_to_latlng returns [lat, lng]; ST_Point wants (lng, lat).
-    centroid_wkb_template="ST_AsWKB(ST_Point({ll}[2], {ll}[1]))",
+    centroid_wkb_template=as_wkb_sql("ST_Point({ll}[2], {ll}[1])"),
     # H3 is *not* equal-area -- a cell near a pole is about a quarter smaller
     # than one at the equator -- so `pct_cell` divides each cell by its own
     # measured area rather than a per-resolution average (#1181).

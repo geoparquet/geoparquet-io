@@ -46,9 +46,9 @@ from geoparquet_io.core.compression import resolve_codec, resolve_process_compre
 from geoparquet_io.core.geo_metadata import (
     OVERVIEW_LEVEL_COLUMN,
     OVERVIEWS_KEY,
-    carried_geometry_column,
     sanitized_carried_geo,
 )
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.parquet_writer import (
     apply_output_kv_metadata,
@@ -274,7 +274,7 @@ def _output_schema(
     empty = _empty(data_schema.append(level_field))
 
     geo_meta = sanitized_carried_geo(base_meta, source=str(base_path))
-    geometry_column = carried_geometry_column(geo_meta, data_schema.names)
+    geometry_column = primary_geometry_column(data_schema.names, geo=geo_meta)
     if geometry_column is not None:
         col_meta = geo_meta.get("columns", {}).get(geometry_column, {})
         bbox, types = _union_geo(files, geometry_column)
@@ -372,8 +372,8 @@ def write_overview_file(
         )
         os.close(fd)
         try:
-            geometry_column = carried_geometry_column(
-                sanitized_carried_geo(schema.metadata), schema.names
+            geometry_column = primary_geometry_column(
+                schema.names, geo=sanitized_carried_geo(schema.metadata)
             )
             # OVERVIEWS_SPEC 4.5: no dictionary encoding on the geometry.
             writer_kwargs = without_geometry_dictionary(

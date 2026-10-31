@@ -27,6 +27,12 @@ import io
 import sys
 from typing import TYPE_CHECKING
 
+from geoparquet_io.core.geometry_detection import (
+    create_geometry_view,
+    primary_geometry_column,
+    require_geometry_column,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from typing import TextIO
@@ -44,7 +50,6 @@ from geoparquet_io.core.duckdb_utils import (
     describe_query,
     duckdb_capabilities,
     duckdb_type_contains_geometry,
-    duckdb_type_is_geometry,
     fetch_one,
     quote_identifier,
     register_arrow,
@@ -61,15 +66,10 @@ from geoparquet_io.core.file_utils import (
     resolve_file_url,
 )
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo
-from geoparquet_io.core.geometry_detection import (
-    STANDARD_GEOMETRY_NAMES,
-    find_primary_geometry_column,
-)
 from geoparquet_io.core.geometry_repair import repair_geometry_sql
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.remote import needs_httpfs
-from geoparquet_io.core.stream_io import _create_view_with_geometry
 from geoparquet_io.core.streaming import is_stdin
 from geoparquet_io.core.write_funnels import collect_nonplanar_edges, table_nonplanar_edges
 
@@ -121,7 +121,7 @@ def require_planar_geojson_file(
     if not edges:
         return
     if geometry_column is None and use_primary_geometry:
-        geometry_column = find_primary_geometry_column(input_path)
+        geometry_column = primary_geometry_column(input_path)
     if geometry_column is None:
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
@@ -697,25 +697,11 @@ def _find_geometry_column(
         Name of geometry column
 
     Raises:
-        ValueError: If no geometry column found
+        GeometryColumnNotFoundError: If no geometry column found
     """
-    # Look for common geometry column names
-    described = describe_query(con, f"SELECT * FROM {source_ref}")
-    columns = [name for name, _ in described]
-
-    for name in STANDARD_GEOMETRY_NAMES:
-        for col in columns:
-            if col.lower() == name:
-                return col
-
-    # Otherwise the first column DuckDB types as GEOMETRY
-    for col, col_type in described:
-        if duckdb_type_is_geometry(col_type):
-            return col
-
-    raise ValueError(
-        "Could not find geometry column. "
-        "Expected column named 'geometry', 'geom', 'wkb_geometry', or 'the_geom'."
+    # The query's own schema: a standard name, else the first GEOMETRY column.
+    return require_geometry_column(
+        primary_geometry_column(describe_query(con, f"SELECT * FROM {source_ref}"))
     )
 
 
@@ -813,6 +799,11 @@ def convert_to_geojson_stream(
         # Get property columns
         property_columns = _get_property_columns(con, source_ref, geometry_column)
         debug(f"Property columns: {', '.join(property_columns)}")
+
+        # A WKB column DuckDB does not read as GEOMETRY -- a file with no `geo`
+        # key, such as the one DuckDB writes for zero rows -- is decoded once,
+        # here, so the repair and serialization chain below sees GEOMETRY (#1359).
+        source_ref = create_geometry_view(con, source_ref, geometry_column, "__gpio_geojson_source")
 
         count = _maybe_native_feature_collection(
             con,
@@ -913,7 +904,6 @@ def _convert_from_stream(
     """
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
     from geoparquet_io.core.streaming import (
-        find_geometry_column_from_table,
         read_arrow_stream,
     )
 
@@ -925,15 +915,10 @@ def _convert_from_stream(
     debug(f"Read {table.num_rows} rows from stream")
 
     # Find geometry column
-    geometry_column = find_geometry_column_from_table(table)
-    if not geometry_column:
-        available_columns = ", ".join(table.column_names)
-        raise ValueError(
-            f"No geometry column found in Arrow stream. "
-            f"Available columns: [{available_columns}]. "
-            "Expected a column named 'geometry', 'geom', 'wkb_geometry', or 'the_geom', "
-            "or a column with GeoParquet 'geo' metadata."
-        )
+    geometry_column = require_geometry_column(
+        primary_geometry_column(table),
+        f"the Arrow stream (columns: [{', '.join(table.column_names)}])",
+    )
 
     debug(f"Using geometry column: {geometry_column}")
 
@@ -959,7 +944,11 @@ def _convert_from_stream(
         register_arrow(con, "input_stream", table)
 
         # Create view with proper geometry type
-        source_ref = _create_view_with_geometry(con, "input_stream", geometry_column)
+        source_ref = (
+            create_geometry_view(con, "input_stream", geometry_column, "input_stream_geom")
+            if geometry_column
+            else "input_stream"
+        )
 
         count = _maybe_native_feature_collection(
             con,

@@ -1324,24 +1324,25 @@ CASES_BY_ID = {case.id: case for case in CASES}
 KNOWN_PARITY_GAPS: dict[tuple[str, str, str, str, str], str] = {
     (
         "sort hilbert",
-        "ops",
+        "table",
         "geometry_column",
-        "'geometry'",
         "None",
+        "'geometry'",
     ): (
-        "CLI --geometry-column defaults to the conventional name 'geometry'; ops.sort_hilbert "
-        "passes None so core auto-detects. Table.sort_hilbert does not have this gap because a "
-        "Table already knows its geometry column. Also listed in the #661 allowlist."
+        "CLI --geometry-column defaults to None, the file's primary geometry column "
+        "(geometry_detection.primary_geometry_column, #1367 T3c); Table.sort_hilbert passes the "
+        "column the Table already tracks. Same column, resolved where each front end knows it."
     ),
     (
         "sort str",
-        "ops",
+        "table",
         "geometry_column",
-        "'geometry'",
         "None",
+        "'geometry'",
     ): (
-        "CLI --geometry-column defaults to the conventional name 'geometry'; ops.sort_str "
-        "passes None so core auto-detects. Table.sort_str already knows its geometry column."
+        "CLI --geometry-column defaults to None, the file's primary geometry column "
+        "(geometry_detection.primary_geometry_column, #1367 T3c); Table.sort_str passes the "
+        "column the Table already tracks. Same column, resolved where each front end knows it."
     ),
     (
         "sort str",

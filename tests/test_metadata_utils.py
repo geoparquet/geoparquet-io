@@ -165,9 +165,7 @@ class TestFormatParquetMetadataEnhanced:
     """format_parquet_metadata_enhanced: full Parquet file metadata section."""
 
     def test_terminal_output(self, places_test_file, capsys):
-        format_parquet_metadata_enhanced(
-            places_test_file, json_output=False, primary_geom_col="geometry"
-        )
+        format_parquet_metadata_enhanced(places_test_file, json_output=False)
         out = capsys.readouterr().out
         assert "Parquet File Metadata" in out
         assert "Total Rows: 766" in out

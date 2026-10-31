@@ -23,6 +23,7 @@ from geoparquet_io.core.arrow_geo_metadata import table_geometry_info
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
     _wrap_query_with_wkb_conversion,
+    geom_from_wkb_sql,
     get_duckdb_connection,
     quote_identifier,
     register_arrow,
@@ -347,7 +348,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 query = "SELECT * FROM input_table"
             else:
                 query = f"""
-                    SELECT * REPLACE (ST_GeomFromWKB({quote_identifier(geometry_column)}) AS {quote_identifier(geometry_column)})
+                    SELECT * REPLACE ({geom_from_wkb_sql(quote_identifier(geometry_column))} AS {quote_identifier(geometry_column)})
                     FROM input_table
                 """
 

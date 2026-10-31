@@ -27,7 +27,7 @@ class TestBoundsOfAFile:
         assert 49 < ymin < 51
 
     def test_auto_detects_geometry_column(self, buildings_test_file):
-        """geometry_column=None triggers find_primary_geometry_column for a file."""
+        """geometry_column=None triggers primary_geometry_column for a file."""
         explicit = bounds_of(buildings_test_file, "geometry")
         auto = bounds_of(buildings_test_file, None)
 

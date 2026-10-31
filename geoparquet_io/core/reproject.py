@@ -32,6 +32,7 @@ from geoparquet_io.core.crs_utils import (
 )
 from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.duckdb_utils import (
+    as_wkb_sql,
     fetch_one,
     get_duckdb_connection,
     quote_identifier,
@@ -44,12 +45,15 @@ from geoparquet_io.core.edges import edges_of, is_geodesic, strip_edges
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     _bbox_claimed_by_another_column,
-    carried_geometry_column,
     sanitized_carried_geo,
     sanitized_carried_geo_of_file,
     strip_derived_stats,
 )
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import (
+    create_geometry_view,
+    primary_geometry_column,
+    require_geometry_column,
+)
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.parquet_footer import patch_or_rewrite
@@ -80,25 +84,6 @@ class ReprojectResult:
     source_crs: str
     target_crs: str
     feature_count: int
-
-
-def _detect_geometry_column_from_table(table: pa.Table) -> str:
-    """Detect geometry column from table metadata.
-
-    Args:
-        table: PyArrow Table with geo metadata
-
-    Returns:
-        Geometry column name — the block's primary column, else the standard
-        name the table's own schema carries, else 'geometry'.
-    """
-
-    # Sanitizing may have dropped a malformed `primary_column` without being
-    # able to repair it from a single column; `carried_geometry_column` then
-    # asks the schema, because falling back to the literal "geometry" would
-    # name a column the table may not have (#887 review).
-    geo_meta = sanitized_carried_geo(table.schema.metadata)
-    return carried_geometry_column(geo_meta, table.schema.names) or "geometry"
 
 
 def _detect_crs_from_table(table: pa.Table, geom_col: str) -> str:
@@ -237,7 +222,9 @@ def reproject_table(
             API never silently treats unknown data as the default.
     """
     # Detect geometry column
-    geom_col = geometry_column or _detect_geometry_column_from_table(table)
+    geom_col = geometry_column or require_geometry_column(
+        primary_geometry_column(table), "the table"
+    )
 
     # Resolve source CRS. An unknown CRS is not the default, so mirror the CLI
     # contract: require source_crs or assume_crs84, else raise, rather than
@@ -258,26 +245,7 @@ def reproject_table(
         warn_planar_math("reproject", table, geom_col)
         register_arrow(con, "__input_table", table)
 
-        # Check if geometry column is BLOB type (needs conversion to GEOMETRY)
-        geom_is_blob = False
-        if geom_col in table.column_names:
-            col_idx = table.column_names.index(geom_col)
-            col_type = str(table.schema.field(col_idx).type)
-            geom_is_blob = "large_binary" in col_type.lower() or "binary" in col_type.lower()
-
-        # Create view with geometry conversion if needed
-        source_table = "__input_table"
-        if geom_is_blob:
-            # Quote all column names to handle special characters (colons, spaces, etc.)
-            other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
-            col_defs = other_cols + [
-                f"ST_GeomFromWKB({quote_identifier(geom_col)}) AS {quote_identifier(geom_col)}"
-            ]
-            view_query = (
-                f"CREATE VIEW __input_view AS SELECT {', '.join(col_defs)} FROM __input_table"
-            )
-            con.execute(view_query)
-            source_table = "__input_view"
+        source_table = create_geometry_view(con, "__input_table", geom_col, "__input_view")
 
         # Build reprojection query
         # Use ST_AsWKB to convert back to WKB format for GeoParquet compatibility
@@ -285,16 +253,11 @@ def reproject_table(
         # free-form strings, so they are escaped like any other SQL literal.
         source_crs_literal = sql_literal(effective_source_crs)
         target_crs_literal = sql_literal(target_crs)
+        transformed = f"ST_Transform({quote_identifier(geom_col)}, {source_crs_literal}, {target_crs_literal})"
         query = f"""
             SELECT
                 * EXCLUDE ({quote_identifier(geom_col)}),
-                ST_AsWKB(
-                    ST_Transform(
-                        {quote_identifier(geom_col)},
-                        {source_crs_literal},
-                        {target_crs_literal}
-                    )
-                ) AS {quote_identifier(geom_col)}
+                {as_wkb_sql(transformed)} AS {quote_identifier(geom_col)}
             FROM {source_table}
         """
 
@@ -531,7 +494,9 @@ def reproject_impl(
 
     try:
         # Detect geometry column
-        geom_col = find_primary_geometry_column(read_source, verbose=verbose)
+        geom_col = require_geometry_column(
+            primary_geometry_column(read_source, verbose=verbose), read_source
+        )
         warn_planar_math_for_file("reproject", read_source, geom_col)
         log(f"Geometry column: {geom_col}")
 
@@ -762,7 +727,9 @@ def _reproject_streaming(
 
         try:
             # Detect geometry column
-            geom_col = find_primary_geometry_column(working_file, verbose=False)
+            geom_col = require_geometry_column(
+                primary_geometry_column(working_file, verbose=False), working_file
+            )
             warn_planar_math_for_file("reproject", working_file, geom_col)
 
             # Detect source CRS

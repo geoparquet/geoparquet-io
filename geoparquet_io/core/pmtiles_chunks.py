@@ -57,7 +57,10 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geo_metadata import is_levelled_overview, sanitized_carried_geo
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import (
+    primary_geometry_column,
+    require_geometry_column,
+)
 from geoparquet_io.core.logging_config import debug, success, warn
 from geoparquet_io.core.parquet_writer import WriteOptions, resolve_output_geoparquet_version
 from geoparquet_io.core.partition.staging import (
@@ -363,7 +366,9 @@ def create_pmtiles_chunked(
             "level into the same tiles. Tile it with `tylertoo export-pmtiles`, or chunk "
             "the single-level source instead.",
         )
-    geometry_column = find_primary_geometry_column(input_path, verbose)
+    geometry_column = require_geometry_column(
+        primary_geometry_column(input_path, verbose=verbose), input_path
+    )
     bounds = _dataset_bounds(input_path, metadata, geometry_column, verbose)
     debug(f"Dataset bounds: {bounds}; chunking {nx}x{ny}")
 

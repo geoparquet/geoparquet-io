@@ -30,6 +30,9 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 import duckdb
 import pyarrow as pa
 
+from geoparquet_io.core.duckdb_utils import as_wkb_sql, geom_from_wkb_sql
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
+
 # Public API
 __all__ = [
     "DEFAULT_WFS_PAGE_SIZE",
@@ -543,7 +546,7 @@ def _validate_crs_coordinates(
 
     try:
         # The fetched geometry is WKB; the bounds owner measures it on the Arrow path.
-        measured = bounds_of(table, "geometry")
+        measured = bounds_of(table, BUILT_GEOMETRY_COLUMN)
         if measured is None:
             return True, None
         bbox = (measured[0], measured[1], measured[2], measured[3])
@@ -754,12 +757,14 @@ def _detect_geometry_column(wfs, typename: str) -> str:
         typename: Layer typename
 
     Returns:
-        Geometry column name (default: "geometry")
+        Geometry column name; when the server describes none, the name gpio
+        gives the geometry it reads (``BUILT_GEOMETRY_COLUMN``, the column every
+        WFS read writes)
     """
     try:
         schema = _describe_schema(wfs, typename)
         if schema and "geometry" in schema:
-            return str(schema.get("geometry_column", "geometry"))
+            return str(schema.get("geometry_column") or BUILT_GEOMETRY_COLUMN)
         # Check for common geometry column names in properties
         if schema and "properties" in schema:
             for prop_name, prop_type in schema["properties"].items():
@@ -769,9 +774,9 @@ def _detect_geometry_column(wfs, typename: str) -> str:
                 ):
                     return str(prop_name)
     except Exception:
-        pass  # Fall back to default
+        pass  # Nothing described: gpio's own name for it
 
-    return "geometry"
+    return BUILT_GEOMETRY_COLUMN
 
 
 def _detect_sortable_attribute(wfs, typename: str) -> str | None:
@@ -792,7 +797,7 @@ def _detect_sortable_attribute(wfs, typename: str) -> str | None:
     try:
         schema = _describe_schema(wfs, typename)
         if schema and "properties" in schema:
-            geometry_col = schema.get("geometry_column", "geometry")
+            geometry_col = schema.get("geometry_column") or BUILT_GEOMETRY_COLUMN
             for prop_name, prop_type in schema["properties"].items():
                 # Skip geometry columns
                 if prop_name == geometry_col:
@@ -1558,9 +1563,7 @@ def _build_local_bbox_filter(
     # for every name that reaches here -- it is used anyway so the quoting rule
     # is enforced at the interpolation site rather than by a distant allowlist
     # that a later edit could loosen (#936).
-    return (
-        f"ST_Intersects(ST_GeomFromWKB({quote_identifier(safe_column)}), ST_GeomFromText('{wkt}'))"
-    )
+    return f"ST_Intersects({geom_from_wkb_sql(quote_identifier(safe_column))}, ST_GeomFromText('{wkt}'))"
 
 
 def _reproject_bbox_for_local_filter(
@@ -1876,11 +1879,11 @@ def _build_wfs_feature_query(
             extracted AS (
                 SELECT
                     {fid_col}
-                    ST_AsWKB(ST_GeomFromGeoJSON(feature.geometry)) AS geometry,
+                    {as_wkb_sql("ST_GeomFromGeoJSON(feature.geometry)")} AS {quote_identifier(BUILT_GEOMETRY_COLUMN)},
                     feature.properties AS props
                 FROM features
             )
-            SELECT {fid_select} geometry, unnest(props) FROM extracted
+            SELECT {fid_select} {quote_identifier(BUILT_GEOMETRY_COLUMN)}, unnest(props) FROM extracted
         """
     else:
         # Fallback: properties are empty/null/missing (MAP, JSON, or MISSING type),
@@ -1892,7 +1895,7 @@ def _build_wfs_feature_query(
             )
             SELECT
                 {fid_col}
-                ST_AsWKB(ST_GeomFromGeoJSON(feature.geometry)) AS geometry
+                {as_wkb_sql("ST_GeomFromGeoJSON(feature.geometry)")} AS {quote_identifier(BUILT_GEOMETRY_COLUMN)}
             FROM features
         """
 
@@ -2156,12 +2159,12 @@ def _parse_gml_response(
     # ``described is None`` branch is the fallback for platforms that raise.
     if _is_empty_gml_collection(body):
         debug("Empty GML response, returning empty table")
-        return pa.table({"geometry": pa.array([], type=pa.binary())})
+        return pa.table({BUILT_GEOMETRY_COLUMN: pa.array([], type=pa.binary())})
 
     described = _gml_geometry_column(con, tmp_path, content_type)
     if described is None:
         debug("Empty GML response, returning empty table")
-        return pa.table({"geometry": pa.array([], type=pa.binary())})
+        return pa.table({BUILT_GEOMETRY_COLUMN: pa.array([], type=pa.binary())})
     geometry_column, other_columns, server_crs = described
 
     # OGC_FID is synthesized by GDAL as a per-file row number, not server data.
@@ -2170,7 +2173,9 @@ def _parse_gml_response(
     if "OGC_FID" in other_columns:
         excluded.append("OGC_FID")
 
-    select_parts = [f"ST_AsWKB({quote_identifier(geometry_column)}) AS geometry"]
+    select_parts = [
+        f"{as_wkb_sql(quote_identifier(geometry_column))} AS {quote_identifier(BUILT_GEOMETRY_COLUMN)}"
+    ]
     # gml:id is the GML equivalent of a GeoJSON feature id, used to deduplicate
     # features that straddle two spatial tiles. GDAL synthesizes gml_id = ''
     # (not NULL) for features with no gml:id; NULLIF sends those to the
@@ -2355,7 +2360,7 @@ def _fetch_wfs_page(
 
         if feature_count == 0:
             debug("Empty response, returning empty table")
-            empty = pa.table({"geometry": pa.array([], type=pa.binary())})
+            empty = pa.table({BUILT_GEOMETRY_COLUMN: pa.array([], type=pa.binary())})
             return _with_server_crs(empty, server_crs)
 
         # Detect property type and build extraction query
@@ -3511,7 +3516,7 @@ def wfs_to_table(
         filter_bbox: tuple[float, float, float, float] = bbox
         if server_crs and not _crs_matches(server_crs, crs):
             filter_bbox = _reproject_bbox_for_local_filter(bbox, crs, server_crs)
-        filter_sql = _build_local_bbox_filter(filter_bbox, "geometry")
+        filter_sql = _build_local_bbox_filter(filter_bbox, BUILT_GEOMETRY_COLUMN)
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
             con.register("features", table)
@@ -3526,7 +3531,7 @@ def wfs_to_table(
     # geometry. The helper repairs on native GEOMETRY in DuckDB and restores the
     # table's schema metadata (including the server-CRS marker, issue #499).
     if table.num_rows > 0:
-        table, _ = repair_arrow_table_geometry(table, "geometry", repair=repair_geometry)
+        table, _ = repair_arrow_table_geometry(table, BUILT_GEOMETRY_COLUMN, repair=repair_geometry)
 
     # Resolve the CRS to label/reproject to. Trust the server's declared CRS
     # when it gave one; otherwise fall back to a coordinate-range guess.
@@ -3541,9 +3546,9 @@ def wfs_to_table(
     # omitted: an absent crs key means OGC:CRS84 (#1046).
     geo_meta = {
         "version": "1.0.0",
-        "primary_column": "geometry",
+        "primary_column": BUILT_GEOMETRY_COLUMN,
         "columns": {
-            "geometry": {
+            BUILT_GEOMETRY_COLUMN: {
                 "encoding": "WKB",
                 "crs": _output_crs_projjson(crs),
             }
@@ -3647,7 +3652,7 @@ def convert_wfs_to_geoparquet(
         progress("Applying Hilbert curve ordering...")
         from geoparquet_io.core.hilbert_order import hilbert_order_table
 
-        table = hilbert_order_table(table, geometry_column="geometry")
+        table = hilbert_order_table(table, geometry_column=BUILT_GEOMETRY_COLUMN)
         debug("Hilbert sort complete")
 
     # Add bbox column (unless skipped)
@@ -3655,7 +3660,7 @@ def convert_wfs_to_geoparquet(
         progress("Adding bbox column...")
         from geoparquet_io.core.add.bbox import add_bbox_table
 
-        table = add_bbox_table(table, geometry_column="geometry")
+        table = add_bbox_table(table, geometry_column=BUILT_GEOMETRY_COLUMN)
         debug("Bbox column added")
 
     # Write output

@@ -364,17 +364,6 @@ def test_raw_geo_of_file_reports_the_list_and_has_no_block(tmp_path):
     assert raw.present and raw.value == [1, 2] and raw.block is None
 
 
-def test_inspect_primary_column_highlight_reads_the_sanitized_block(tmp_path):
-    """``inspect meta`` reads the block one way: the highlight repairs a
-    malformed ``primary_column`` from the lone declared column, as the geo
-    section does."""
-    from geoparquet_io.core.inspect import get_primary_geometry_column
-
-    block = {"version": "1.1.0", "primary_column": 5, "columns": {"geometry": {}}}
-    path = _parquet_with_geo(tmp_path / "p.parquet", json.dumps(block).encode())
-    assert get_primary_geometry_column(path) == "geometry"
-
-
 # ---------------------------------------------------------------------------
 # The G1.geo_parse arm (tests/test_owner_guards.py) sees every spelling
 # ---------------------------------------------------------------------------

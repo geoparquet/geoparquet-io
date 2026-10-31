@@ -31,7 +31,13 @@ from geoparquet_io.core.crs_utils import (
     parse_crs_string_to_projjson,
     projjson_from_wkt,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path, uses_aws_profile
+from geoparquet_io.core.duckdb_utils import (
+    as_wkb_sql,
+    get_duckdb_connection,
+    quote_identifier,
+    sql_path,
+    uses_aws_profile,
+)
 from geoparquet_io.core.exceptions import (
     BatchTooLargeError,
     GeoParquetError,
@@ -43,6 +49,7 @@ from geoparquet_io.core.geo_metadata import (
     geometry_types_of,
     prune_geo_metadata_to_columns,
 )
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
     DEFAULT_TIMEOUT,
@@ -1089,7 +1096,7 @@ def _tag_output_crs(
     verbose: bool,
 ) -> pa.Table:
     """Attach the ``geo`` block: CRS84 on the GeoJSON path, the server's SR on the outSR path."""
-    if "geometry" not in table.column_names:
+    if BUILT_GEOMETRY_COLUMN not in table.column_names:
         # --exclude-cols dropped the geometry: an attribute table, with no CRS
         # to resolve (or warn about) and no geo block to attach. Any carried
         # block goes through the same pruner `gpio extract geoparquet` uses (#966).
@@ -1125,9 +1132,9 @@ def _tag_output_crs(
 
     geo_metadata = {
         "version": "1.1.0",
-        "primary_column": "geometry",
+        "primary_column": BUILT_GEOMETRY_COLUMN,
         "columns": {
-            "geometry": {
+            BUILT_GEOMETRY_COLUMN: {
                 "encoding": "WKB",
                 "crs": crs,
                 "geometry_types": _resolve_geometry_types(table, geometry_type, verbose),
@@ -1162,7 +1169,7 @@ def _resolve_field_selection(
     if include_list != ["*"]:
         include_list = resolve_columns_against_schema(include_list, field_names, "--include-cols")
     exclude_list = resolve_columns_against_schema(
-        exclude_list, ["geometry", *field_names], "--exclude-cols"
+        exclude_list, [BUILT_GEOMETRY_COLUMN, *field_names], "--exclude-cols"
     )
     return include_list, exclude_list
 
@@ -1204,7 +1211,7 @@ def _build_schema_from_layer_info(layer_info: ArcGISLayerInfo) -> pa.Schema:
 
     # Geometry column always comes first (WKB binary)
     # Some features may have null geometries (attributes without spatial data)
-    fields.append(pa.field("geometry", pa.binary(), nullable=True))
+    fields.append(pa.field(BUILT_GEOMETRY_COLUMN, pa.binary(), nullable=True))
 
     # Add attribute fields based on layer metadata
     for field_info in layer_info.fields:
@@ -1239,7 +1246,11 @@ def _target_schema(layer_info: ArcGISLayerInfo, out_fields: str) -> pa.Schema:
         return schema
     requested = {f.strip().lower() for f in out_fields.split(",")}
     return pa.schema(
-        [field for field in schema if field.name == "geometry" or field.name.lower() in requested]
+        [
+            field
+            for field in schema
+            if field.name == BUILT_GEOMETRY_COLUMN or field.name.lower() in requested
+        ]
     )
 
 
@@ -1302,7 +1313,7 @@ def _json_doc_to_table(doc: dict, exclude: str, suffix: str, con=None) -> pa.Tab
 
         query = f"""
             SELECT
-                ST_AsWKB(geom) as geometry,
+                {as_wkb_sql("geom")} as {quote_identifier(BUILT_GEOMETRY_COLUMN)},
                 * EXCLUDE ({exclude})
             FROM ST_Read({sql_path(temp_file)})
         """
@@ -1567,7 +1578,7 @@ def _resolve_geometry_types(table: pa.Table, esri_geometry_type: str, verbose: b
     """
     # Only reached with a geometry column: an excluded one (--exclude-cols) never
     # gets a geo block at all (#966, see _tag_output_crs).
-    geometry = table.column("geometry")
+    geometry = table.column(BUILT_GEOMETRY_COLUMN)
     if len(geometry) == 0:
         # An empty layer or filter result: already reported, nothing to describe.
         return []
@@ -1575,7 +1586,7 @@ def _resolve_geometry_types(table: pa.Table, esri_geometry_type: str, verbose: b
         warn("Fetched data holds no geometries; declaring geometry_types as [] (types not known).")
         return []
 
-    computed = geometry_types_of(table, "geometry", verbose=verbose)
+    computed = geometry_types_of(table, BUILT_GEOMETRY_COLUMN, verbose=verbose)
     if not computed:
         warn(
             "Fetched geometry could not be read, so geometry_types is declared as [] "
@@ -1784,7 +1795,9 @@ def arcgis_to_table(
         # that is actually written. The helper preserves schema metadata, so it
         # is equally safe on either side of the block.
         if table.num_rows > 0:
-            table, _ = repair_arrow_table_geometry(table, "geometry", repair=repair_geometry)
+            table, _ = repair_arrow_table_geometry(
+                table, BUILT_GEOMETRY_COLUMN, repair=repair_geometry
+            )
 
         table = _tag_output_crs(table, detected_sr, output_wkid, layer_info.geometry_type, verbose)
 
@@ -1910,7 +1923,7 @@ def convert_arcgis_to_geoparquet(
 
     # --exclude-cols geometry leaves an attribute table: nothing to Hilbert-sort
     # or bbox, and the write below is plain Parquet with no geo block (#966).
-    has_geometry = "geometry" in table.column_names
+    has_geometry = BUILT_GEOMETRY_COLUMN in table.column_names
 
     # Apply Hilbert ordering if not skipped
     if not skip_hilbert and table.num_rows > 0 and has_geometry:
@@ -1924,14 +1937,16 @@ def convert_arcgis_to_geoparquet(
         progress("Adding bbox column for spatial query optimization...")
         from geoparquet_io.core.add.bbox import add_bbox_table
 
-        table = add_bbox_table(table, bbox_column_name="bbox", geometry_column="geometry")
+        table = add_bbox_table(
+            table, bbox_column_name="bbox", geometry_column=BUILT_GEOMETRY_COLUMN
+        )
 
     # Write to GeoParquet
     progress(f"Writing to {output_file}...")
     write_geoparquet_table(
         table,
         output_file,
-        geometry_column="geometry",
+        geometry_column=BUILT_GEOMETRY_COLUMN,
         compression=compression,
         compression_level=compression_level,
         row_group_size_mb=row_group_size_mb,

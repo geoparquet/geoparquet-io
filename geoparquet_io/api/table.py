@@ -30,6 +30,7 @@ from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.edges import edges_of, state_edges
 from geoparquet_io.core.file_utils import unlink_released_file
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
 from geoparquet_io.core.index_ops import get_index_spec, validate_partition_arguments
 from geoparquet_io.core.logging_config import warn
@@ -141,30 +142,18 @@ def _calculate_bounds_from_table(
 def _surviving_geometry_column(current: str | None, result: pa.Table) -> str | None:
     """Which geometry column a projected table should report, if any.
 
-    A column projection can drop the geometry column the Table was pointing at.
-    Keeping the old name made ``write()`` ask the writer for a column that is no
-    longer there (#731), but collapsing straight to ``None`` was equally wrong
-    when the input declared more than one geometry column: the survivor's geo
-    metadata was then silently thrown away. So prefer the carried
-    ``primary_column`` (``extract_table`` has already re-pointed it at a
-    survivor), then any other declared geometry column, and only then ``None``
-    — the same state ``read()`` reports for a plain Parquet file.
+    A column projection can drop the geometry column the Table was pointing at
+    (#731). The column it still has is kept; otherwise the owner answers over
+    what survived (#1367) -- the carried block's primary (``extract_table`` has
+    already re-pointed it at a survivor), then any declared column, then the
+    schema -- and ``None`` when nothing is left, the state ``read()`` reports
+    for a plain Parquet file.
     """
     if current is not None and current in result.column_names:
         return current
+    from geoparquet_io.core.geometry_detection import primary_geometry_column
 
-    from geoparquet_io.core.geo_metadata import read_raw_geo
-
-    geo = read_raw_geo(result.schema.metadata).block
-    if not geo:
-        return None
-
-    declared = geo.get("columns")
-    candidates = [geo.get("primary_column")] + list(declared if isinstance(declared, dict) else [])
-    for name in candidates:
-        if isinstance(name, str) and name in result.column_names:
-            return name
-    return None
+    return primary_geometry_column(result)
 
 
 def read(path: str | Path, **kwargs) -> Table:
@@ -255,9 +244,9 @@ def read_partition(
         get_duckdb_connection,
         s3_config_scope,
     )
+    from geoparquet_io.core.geometry_detection import primary_geometry_column
     from geoparquet_io.core.partition.reader import build_read_parquet_expr
     from geoparquet_io.core.remote import needs_httpfs, resolve_s3_config
-    from geoparquet_io.core.streaming import find_geometry_column_from_table
 
     s3_config = resolve_s3_config(
         s3_endpoint=s3_endpoint,
@@ -286,7 +275,7 @@ def read_partition(
             con.close()
 
     # Detect geometry column from the combined table
-    geometry_column = find_geometry_column_from_table(arrow_table)
+    geometry_column = primary_geometry_column(arrow_table)
 
     return Table(arrow_table, geometry_column=geometry_column)
 
@@ -294,7 +283,7 @@ def read_partition(
 def convert(
     path: str | Path,
     *,
-    geometry_column: str = "geometry",
+    geometry_column: str = BUILT_GEOMETRY_COLUMN,
     wkt_column: str | None = None,
     lat_column: str | None = None,
     lon_column: str | None = None,
@@ -495,7 +484,7 @@ def extract_arcgis(
     # exclude_cols="geometry" leaves an attribute table with no geo block
     # (#966): report no geometry column, so write() emits plain Parquet on every
     # strategy instead of asking the writer for a column that is not there.
-    return Table(arrow_table, geometry_column=_surviving_geometry_column("geometry", arrow_table))
+    return Table(arrow_table, geometry_column=_surviving_geometry_column(None, arrow_table))
 
 
 class Table:
@@ -579,9 +568,9 @@ class Table:
 
     def _detect_geometry_column(self) -> str | None:
         """Detect geometry column from metadata or common names."""
-        from geoparquet_io.core.streaming import find_geometry_column_from_table
+        from geoparquet_io.core.geometry_detection import primary_geometry_column
 
-        return find_geometry_column_from_table(self._table)
+        return primary_geometry_column(self._table)
 
     @classmethod
     def from_bigquery(
@@ -2012,7 +2001,9 @@ class Table:
             breakdown_metric=breakdown_metric,
             memory_limit=memory_limit,
         )
-        return self._wrap_geographic(result, "geometry" if out_geometry != "none" else None)
+        return self._wrap_geographic(
+            result, BUILT_GEOMETRY_COLUMN if out_geometry != "none" else None
+        )
 
     def aggregate_h3(
         self,
@@ -2070,7 +2061,9 @@ class Table:
             breakdown_metric=breakdown_metric,
             memory_limit=memory_limit,
         )
-        return self._wrap_geographic(result, "geometry" if out_geometry != "none" else None)
+        return self._wrap_geographic(
+            result, BUILT_GEOMETRY_COLUMN if out_geometry != "none" else None
+        )
 
     def aggregate_admin(
         self,
@@ -2127,7 +2120,9 @@ class Table:
             breakdown_metric=breakdown_metric,
             memory_limit=memory_limit,
         )
-        return self._wrap_geographic(result, "geometry" if out_geometry != "none" else None)
+        return self._wrap_geographic(
+            result, BUILT_GEOMETRY_COLUMN if out_geometry != "none" else None
+        )
 
     def overview(
         self,
@@ -2165,8 +2160,8 @@ class Table:
             scheme=scheme,
             memory_limit=memory_limit,
         )
-        has_geometry = "geometry" in result.column_names
-        return self._wrap_geographic(result, "geometry" if has_geometry else None)
+        has_geometry = BUILT_GEOMETRY_COLUMN in result.column_names
+        return self._wrap_geographic(result, BUILT_GEOMETRY_COLUMN if has_geometry else None)
 
     def add_s2(
         self,

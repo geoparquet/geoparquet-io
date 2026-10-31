@@ -34,6 +34,7 @@ from geoparquet_io.core.duckdb_utils import (
     build_kv_metadata_clause,
     describe_query,
     duckdb_type_is_geometry,
+    geom_from_wkb_sql,
     quote_identifier,
     register_arrow,
     sql_literal,
@@ -171,7 +172,7 @@ def _table_query_with_native_geometry(
         ):
             continue
         ident = quote_identifier(name)
-        expr = f"ST_GeomFromWKB({ident})"
+        expr = geom_from_wkb_sql(ident)
         crs = type_crs_for(metadata.get(name)) if name != geometry_column else None
         if is_unknown_type_crs(crs):
             expr = f"ST_SetCRS({expr}, {sql_literal(crs)})"

@@ -45,9 +45,11 @@ from geoparquet_io.core.duckdb_metadata import (
 )
 from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
+    as_wkb_sql,
     describe_query,
     disable_geoparquet_conversion,
     fetch_one,
+    geom_from_wkb_sql,
     is_interrupt,
     quote_identifier,
     sql_path,
@@ -1512,7 +1514,7 @@ def _check_orientation_matches_data(
         raw_url = resolve_file_url(parquet_file, verbose=False)
         read = _geometry_read(con, raw_url, geom_col)
         rows = con.execute(f"""
-            SELECT ST_AsWKB(ST_Force2D(part.geom))
+            SELECT {as_wkb_sql("ST_Force2D(part.geom)")}
             FROM (
                 SELECT {read.expr} AS g
                 FROM read_parquet({sql_path(raw_url)})
@@ -2616,7 +2618,7 @@ def _geojson_of(con, wkb):
     import json
 
     rows = con.execute(
-        "SELECT ST_AsGeoJSON(TRY(ST_GeomFromWKB(w))) FROM (SELECT UNNEST(?::BLOB[]) AS w)",
+        f"SELECT ST_AsGeoJSON(TRY({geom_from_wkb_sql('w')})) FROM (SELECT UNNEST(?::BLOB[]) AS w)",
         [[value for value in wkb.to_pylist() if value is not None]],
     ).fetchall()
     for (text,) in rows:

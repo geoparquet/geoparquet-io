@@ -226,9 +226,9 @@ def test_1075_check_fix_refuses_a_remote_glob_before_checking(remote_parts):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="#1359")
 def test_1359_convert_geojson_writes_an_empty_collection_for_zero_rows(tmp_path):
-    """Expected to fail with ``Binder Error: No function matches ... 'ST_IsValid(BLOB)'``.
+    """Failed with ``Binder Error: No function matches ... 'ST_IsValid(BLOB)'`` (fixed in T3c:
+    ``geojson_stream`` decodes a WKB column through ``geometry_detection.create_geometry_view``).
 
     The file is written the way the issue found it, by DuckDB itself: with no
     geometry observed DuckDB writes no ``geo`` key, so the column scans back as

@@ -36,6 +36,7 @@ from geoparquet_io.core.duckdb_utils import (
     describe_query,
     fetch_one,
     fetch_row,
+    geom_from_wkb_sql,
     get_duckdb_connection,
     is_interrupt,
     load_spatial_extension,
@@ -58,6 +59,7 @@ from geoparquet_io.core.geo_metadata import (
     merged_geometry_stats,
     sanitized_carried_geo_of_file,
 )
+from geoparquet_io.core.geometry_detection import GeometryRead, primary_geometry_column
 from geoparquet_io.core.json_output import dumps_json, to_jsonable
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.metadata_utils import (
@@ -330,36 +332,30 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
     # Detect Parquet native geo type
     parquet_type = "No Parquet geo logical type"
     parquet_geo_info = {}
-    geometry_column = None
 
-    # Find geometry column and parse its logical type
+    # The primary column is the owner's answer (#1367); its logical type, when
+    # it has a native one, is the file's Parquet geo type.
+    geometry_column = primary_geometry_column(parquet_file, geo=geo_meta, con=con)
     for col in schema_info:
-        col_name = col.get("name", "")
-        if col_name in geo_columns:
-            parquet_type = geo_columns[col_name]
-            geometry_column = col_name
-
-            # Parse additional details from logical type
-            logical_type = col.get("logical_type") or ""
-            if logical_type:
-                geom_details = parse_geometry_logical_type(logical_type)
-                if geom_details:
-                    parquet_geo_info["geometry_type"] = geom_details.get("geometry_type")
-                    parquet_geo_info["coordinate_dimension"] = geom_details.get(
-                        "coordinate_dimension"
-                    )
-                    # Resolve CRS reference if needed (e.g., "projjson:key_name")
-                    raw_crs = geom_details.get("crs")
-                    parquet_geo_info["crs"] = resolve_crs_reference(parquet_file, raw_crs)
-                    if geom_details.get("geo_type") == "Geography":
-                        state_edges(parquet_geo_info, logical_type_edges(geom_details))
-            break
+        if col.get("name", "") != geometry_column or geometry_column not in geo_columns:
+            continue
+        parquet_type = geo_columns[geometry_column]
+        logical_type = col.get("logical_type") or ""
+        geom_details = parse_geometry_logical_type(logical_type) if logical_type else None
+        if geom_details:
+            parquet_geo_info["geometry_type"] = geom_details.get("geometry_type")
+            parquet_geo_info["coordinate_dimension"] = geom_details.get("coordinate_dimension")
+            # Resolve CRS reference if needed (e.g., "projjson:key_name")
+            raw_crs = geom_details.get("crs")
+            parquet_geo_info["crs"] = resolve_crs_reference(parquet_file, raw_crs)
+            if geom_details.get("geo_type") == "Geography":
+                state_edges(parquet_geo_info, logical_type_edges(geom_details))
 
     # Extract GeoParquet metadata
     geoparquet_info = {}
     if geo_meta:
         version = declared_geoparquet_version(geo_meta, default=None)
-        primary_column = geo_meta.get("primary_column", "geometry")
+        primary_column = primary_geometry_column(list(geo_meta.get("columns") or {}), geo=geo_meta)
         columns_meta = geo_meta.get("columns", {})
 
         crs = None
@@ -385,12 +381,8 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
         if declares_edges(col_meta):
             state_edges(geoparquet_info, edges_of(col_meta))
 
-        # Use GeoParquet primary_column if we didn't find one from Parquet type
-        if not geometry_column:
-            geometry_column = primary_column
-
-    # Determine the effective primary column
-    primary_column = geometry_column or "geometry"
+    # The effective primary column: the owner's one answer.
+    primary_column = geometry_column
 
     # Determine effective CRS (prefer GeoParquet, fallback to Parquet type)
     # Keep as raw PROJJSON - display functions will handle default formatting
@@ -538,7 +530,7 @@ def wkb_to_wkt_preview(wkb_bytes: bytes, max_length: int = 45) -> str:
             else:
                 # Standard ISO WKB format
                 result = fetch_one(
-                    con.execute("SELECT ST_AsText(ST_GeomFromWKB(?::BLOB))", [wkb_bytes])
+                    con.execute(f"SELECT ST_AsText({geom_from_wkb_sql('?::BLOB')})", [wkb_bytes])
                 )
 
         if result and result[0]:
@@ -715,7 +707,9 @@ def get_preview_data(
         # Native GeoArrow geometry is exposed by DuckDB as a raw STRUCT/LIST, which
         # ST_AsText cannot consume. Select those columns raw and convert them to WKT
         # via geoarrow after the query. Serialized (WKB/GEOMETRY) columns keep ST_AsText.
-        native_geo_columns = {c for c in geo_columns if "STRUCT" in col_types.get(c, "").upper()}
+        native_geo_columns = {
+            c for c in geo_columns if GeometryRead.for_type(c, col_types.get(c)).kind == "geoarrow"
+        }
 
         # Build column list, converting serialized geometry columns to WKT in SQL
         column_expressions = []

@@ -24,6 +24,7 @@ from geoparquet_io.core.crs_utils import (
 )
 from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.duckdb_utils import (
+    as_wkb_sql,
     describe_query,
     get_duckdb_connection,
     load_community_extension,
@@ -34,12 +35,13 @@ from geoparquet_io.core.duckdb_utils import (
     uses_aws_profile,
 )
 from geoparquet_io.core.edges import is_nonplanar, representative_point_sql
-from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError, PartitionError
+from geoparquet_io.core.exceptions import InvalidParameterError, PartitionError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo, sanitized_carried_geo_of_file
 from geoparquet_io.core.geometry_detection import (
-    detect_geometry_column_from_names,
-    find_primary_geometry_column,
+    create_geometry_view,
+    primary_geometry_column,
+    require_geometry_column,
 )
 from geoparquet_io.core.geometry_repair import nonplanar_edges_of_arrow_table
 from geoparquet_io.core.logging_config import (
@@ -57,7 +59,6 @@ from geoparquet_io.core.remote import (
     validate_profile_for_urls,
 )
 from geoparquet_io.core.streaming import (
-    find_geometry_column_from_table,
     is_stdin,
     should_stream_output,
 )
@@ -226,9 +227,9 @@ def add_index_table(spec, table, column_name, resolution, geometry_column=None, 
         resolution = int(resolution)
     validate_index_resolution(spec, resolution, table=True)
     preflight_index(spec, "add")
-    geom_col = geometry_column or find_geometry_column_from_table(table)
-    if geom_col is None:
-        raise GeoParquetError("No geometry column found")
+    geom_col = geometry_column or require_geometry_column(
+        primary_geometry_column(table), "the table"
+    )
     source_crs = crs_string_from_table(table, geom_col)
     validate_index_crs(
         spec, sanitized_carried_geo(table.schema.metadata), geom_col, source_crs, "table"
@@ -240,19 +241,10 @@ def add_index_table(spec, table, column_name, resolution, geometry_column=None, 
         con.execute("SET geometry_always_xy = true;")
         load_index(con, spec)
         registered = register_arrow(con, "__input_table", table)
-        columns_info = describe_query(con, "SELECT * FROM __input_table")
         other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
-        source = "__input_table"
-        if any(c[0] == geom_col and "BLOB" in c[1].upper() for c in columns_info):
-            definitions = other_cols + [
-                f"ST_GeomFromWKB({quote_identifier(geom_col)}) AS {quote_identifier(geom_col)}"
-            ]
-            con.execute(
-                f"CREATE VIEW __input_view AS SELECT {', '.join(definitions)} FROM {source}"
-            )
-            source = "__input_view"
+        source = create_geometry_view(con, "__input_table", geom_col, "__input_view")
         columns = other_cols + [
-            f"ST_AsWKB({quote_identifier(geom_col)}) AS {quote_identifier(geom_col)}",
+            f"{as_wkb_sql(quote_identifier(geom_col))} AS {quote_identifier(geom_col)}",
             f"{index_expression(spec, geom_col, resolution, source_crs, bbox_col, edges)} AS {quote_identifier(column_name)}",
         ]
         result = con.sql(f"SELECT {', '.join(columns)} FROM {source}").arrow().read_all()
@@ -297,7 +289,9 @@ def add_index_column(
     if not spec.multiple_files:
         require_single_file(input_parquet, f"add {spec.name}")
     validate_profile_for_urls(write.profile, input_parquet, output_parquet)
-    geom_col = find_primary_geometry_column(input_parquet, verbose)
+    geom_col = require_geometry_column(
+        primary_geometry_column(input_parquet, verbose=verbose), input_parquet
+    )
     input_path = resolve_file_url(input_parquet, verbose)
     source_crs = source_crs_string(input_parquet, verbose, geom_col)
 
@@ -360,9 +354,15 @@ def add_index_streaming(
         con.execute("SET geometry_always_xy = true;")
         load_index(con, spec, verbose=verbose and not should_stream_output(output_path))
         schema = query_schema(con, f"SELECT * FROM {source}").empty_table()
-        geom_col = detect_geometry_column_from_names(schema.column_names)
-        if geom_col is None:
-            raise GeoParquetError("No geometry column found")
+        # The owner over the source's typed columns and the carried block, as
+        # every streaming caller asks it (#1367).
+        geom_col = require_geometry_column(
+            primary_geometry_column(
+                describe_query(con, f"SELECT * FROM {source}"),
+                geo=sanitized_carried_geo(metadata),
+            ),
+            "the input stream",
+        )
         validate_index_crs(
             spec,
             sanitized_carried_geo(metadata),

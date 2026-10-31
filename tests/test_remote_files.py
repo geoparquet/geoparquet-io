@@ -114,9 +114,9 @@ class TestRemoteFileReading:
 
     def test_geometry_column_https(self):
         """Test finding geometry column from HTTPS URL."""
-        from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+        from geoparquet_io.core.geometry_detection import primary_geometry_column
 
-        geom_col = find_primary_geometry_column(self.HTTPS_URL)
+        geom_col = primary_geometry_column(self.HTTPS_URL)
         assert geom_col == "geometry"
 
     def test_bbox_structure_https(self):

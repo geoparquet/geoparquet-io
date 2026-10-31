@@ -471,9 +471,9 @@ class TestAddBboxStreamingQuoting:
     """geoparquet_io/core/add/bbox.py: _make_add_bbox_query, used by
     _add_bbox_streaming (the `gpio add bbox -` stdin/stdout CLI path).
 
-    _add_bbox_streaming's own geometry-column auto-detection only checks
-    STANDARD_GEOMETRY_NAMES (a separate, pre-existing limitation, out of
-    scope for this fix), so the hostile name is added to that lookup via
+    _add_bbox_streaming's geometry-column auto-detection
+    (geometry_detection.primary_geometry_column over the stream's column names)
+    only knows STANDARD_GEOMETRY_NAMES, so the hostile name is added to that lookup via
     monkeypatch to let the *real* _add_bbox_streaming run end-to-end rather
     than testing the SQL-building helper in isolation.
 
@@ -511,12 +511,13 @@ class TestAddBboxStreamingQuoting:
     def test_add_bbox_streaming_succeeds_with_correct_values(
         self, tmp_path, monkeypatch, column_name, force
     ):
+        from geoparquet_io.core import geometry_detection
         from geoparquet_io.core.add import bbox as bbox_module
 
         monkeypatch.setattr(
-            bbox_module,
+            geometry_detection,
             "STANDARD_GEOMETRY_NAMES",
-            [column_name, *bbox_module.STANDARD_GEOMETRY_NAMES],
+            [column_name, *geometry_detection.STANDARD_GEOMETRY_NAMES],
         )
         input_path = self._fixture(tmp_path, column_name, with_stale_bbox=force)
         output_path = str(tmp_path / "streaming_output.parquet")
@@ -708,11 +709,13 @@ class TestExtractSpatialFilterQuoting:
         )
 
         # Nothing in the file intersects (999 999), so no row may be written.
-        # Quoting turns the payload into a column name that does not exist, so
-        # the run fails cleanly instead of silently returning the whole file.
+        # The payload names a column the file does not have, so the resolver
+        # does not answer with it (#1367): the filter runs on the real
+        # `geometry` column and keeps nothing. Before #1367 the payload was the
+        # answer, and quoting made the run fail cleanly instead.
         leaked = pq.read_table(out).num_rows if out.exists() else 0
         assert leaked == 0, f"spatial filter bypassed: {leaked} non-intersecting rows written"
-        assert result.exit_code != 0
+        assert self.BYPASS_COL not in result.output
 
 
 class TestAddCommandsQuoting:

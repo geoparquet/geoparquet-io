@@ -85,6 +85,7 @@ EXPECTED_COUNTS = {
     "G1.geometry_stats": 0,
     "G1.edges": 0,
     "G1.footer_patch": 0,
+    "G1.geometry_identity": 0,
     "G2.exemptions": 12,
     "G3.pairs": 0,
     "G3.baseline": 0,
@@ -1835,6 +1836,316 @@ def _find_footer_patch(m: _Module) -> Iterator[Hit]:
             yield m.hit(node)
 
 
+#: A name that holds a geometry *column name*: ``geometry_column``, ``geom_col``,
+#: ``geometry_col``... (not ``geometry_name``, an output name, nor ``bucket_point``).
+_GEOM_COLUMN_NAME = re.compile(r"geom\w*col", re.IGNORECASE)
+#: The WKB codec calls ``core/duckdb_utils.py`` spells once (``as_wkb_sql``,
+#: ``geom_from_wkb_sql``) and ``core/geometry_detection.py`` builds reads from.
+_WKB_CODEC_CALL = re.compile(r"(?i)\bST_(?:GeomFrom(?:HEX)?WKB|AsWKB)\s*\(")
+_WKB_CODEC_OWNERS = ("geoparquet_io/core/duckdb_utils.py",)
+
+
+def _is_geometry_literal(node: ast.AST | None) -> bool:
+    return isinstance(node, ast.Constant) and node.value == "geometry"
+
+
+def _names_a_geometry_column(node: ast.AST) -> bool:
+    return isinstance(node, ast.Name) and bool(_GEOM_COLUMN_NAME.search(node.id))
+
+
+def _param_default_literals(node: ast.AST) -> Iterator[ast.AST]:
+    """``def f(geometry_column="geometry")``: the literal as a column default."""
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return
+    args = node.args
+    positional = [*args.posonlyargs, *args.args]
+    pairs = list(
+        zip(positional[len(positional) - len(args.defaults) :], args.defaults, strict=True)
+    )
+    pairs += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults, strict=True) if d]
+    for arg, default in pairs:
+        if _GEOM_COLUMN_NAME.search(arg.arg) and _is_geometry_literal(default):
+            yield default
+
+
+def _own_returns(fn: ast.AST) -> Iterator[ast.Return]:
+    """The ``return`` statements of *fn* itself, not of a def nested in it."""
+    stack = list(ast.iter_child_nodes(fn))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Return):
+            yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            stack.extend(ast.iter_child_nodes(node))
+
+
+def _fallback_returns(node: ast.AST) -> Iterator[ast.AST]:
+    """``return "geometry"`` in a function with another return: a fallback."""
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return
+    returns = list(_own_returns(node))
+    if len(returns) > 1:
+        yield from (r.value for r in returns if _is_geometry_literal(r.value))
+
+
+def _literal_column_default(node: ast.AST) -> ast.AST | None:
+    """The ``"geometry"`` literal *node* uses as a column-name default, if any."""
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        return node.values[-1] if _is_geometry_literal(node.values[-1]) else None
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        if node.func.attr == "get" and len(node.args) >= 2 and _is_geometry_literal(node.args[1]):
+            return node.args[1]
+    if isinstance(node, ast.Assign) and _is_geometry_literal(node.value):
+        if any(_names_a_geometry_column(t) for t in node.targets):
+            return node.value
+    if isinstance(node, ast.AnnAssign) and _is_geometry_literal(node.value):
+        if _names_a_geometry_column(node.target):
+            return node.value
+    if isinstance(node, ast.Compare) and _names_a_geometry_column(node.left):
+        if any(_is_geometry_literal(c) for c in node.comparators):
+            return next(c for c in node.comparators if _is_geometry_literal(c))
+    return None
+
+
+#: Column names some resolver has matched as "the geometry", as spelled (lower
+#: case: ``("Geometry", "Geography")`` is the logical-type family pair, not
+#: names). Two or more of them in one list/tuple/set literal is a second
+#: candidates list; the owner's
+#: is ``geometry_detection.STANDARD_GEOMETRY_NAMES`` (a source's own extras go
+#: through ``primary_geometry_column(extra_names=...)``).
+_GEOMETRY_NAMES = frozenset(
+    {"geometry", "geom", "the_geom", "wkb_geometry", "shape", "geo", "geography"}
+)
+
+
+def _geometry_names_list(node: ast.AST) -> bool:
+    if not isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return False
+    named = {e.value for e in node.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+    return len(named & _GEOMETRY_NAMES) >= 2
+
+
+def _primary_literal(node: ast.AST) -> ast.AST | None:
+    """``primary = "geometry"`` / ``primary_column: str = "geom"``: a primary
+    column decided by a literal rather than by the resolver."""
+    if isinstance(node, ast.Assign):
+        targets, value = node.targets, node.value
+    elif isinstance(node, ast.AnnAssign):
+        targets, value = [node.target], node.value
+    else:
+        return None
+    if not (isinstance(value, ast.Constant) and isinstance(value.value, str) and value.value):
+        return None
+    for target in targets:
+        if isinstance(target, ast.Name) and "primary" in target.id.lower():
+            return value
+    return None
+
+
+def _ifexp_literal(node: ast.AST) -> ast.AST | None:
+    """``"geometry" if x else y`` / ``x if c else "geometry"``: the literal as one
+    branch of a conditional is a column chosen by literal."""
+    # Both branches literals is a word chosen for a message ("geometry" /
+    # "geometries"), not a column.
+    if isinstance(node, ast.IfExp):
+        branches = (node.body, node.orelse)
+        if all(isinstance(b, ast.Constant) for b in branches):
+            return None
+        return next((b for b in branches if _is_geometry_literal(b)), None)
+    return None
+
+
+#: An expression that holds geometry columns (``geo_columns``,
+#: ``detect_geometry_columns(f)``, ``geometry_cols``): its first entry taken as
+#: *the* column is a "first native column" pick.
+_GEOM_COLUMNS_TEXT = re.compile(r"(?i)geo\w*_col")
+
+
+def _first_column_pick(node: ast.AST) -> bool:
+    """``next(iter(geo_columns))`` / ``geo_columns[0]``: the first of a set of
+    geometry columns as the answer, instead of the resolver's rule."""
+    inner = None
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "next":
+        arg = node.args[0] if node.args else None
+        if isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name) and arg.func.id == "iter":
+            inner = arg.args[0] if arg.args else None
+    elif isinstance(node, ast.Subscript):
+        if isinstance(node.slice, ast.Constant) and node.slice.value == 0:
+            inner = node.value
+    return inner is not None and bool(_GEOM_COLUMNS_TEXT.search(ast.unparse(inner)))
+
+
+def _primary_get(node: ast.AST) -> ast.AST | None:
+    """``geometry_column = geo.get("primary_column")``: the block's primary read
+    inline as the column, skipping the resolver's "the schema has it" check."""
+    if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+        return None
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    if not any(_names_a_geometry_column(t) for t in targets):
+        return None
+    for sub in ast.walk(node.value):
+        # ``extract_geo_info(...)``'s ``*_info`` result names the resolver's
+        # answer, not the block's claim.
+        receiver = getattr(sub, "func", None)
+        receiver = getattr(receiver, "value", None)
+        if isinstance(receiver, ast.Name) and receiver.id.endswith("_info"):
+            continue
+        if (
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Attribute)
+            and sub.func.attr == "get"
+            and sub.args
+            and isinstance(sub.args[0], ast.Constant)
+            and sub.args[0].value == "primary_column"
+        ):
+            return sub
+    return None
+
+
+_CASE_FOLDS = frozenset({"lower", "upper", "casefold"})
+_GEO_SUBSTRINGS = frozenset({"geo", "geom", "geometry", "geog", "geography"})
+
+
+def _substring_heuristic(node: ast.AST) -> bool:
+    """``"geo" in name.lower()``: a column taken as geometry because its name
+    contains a fragment (BigQuery's ``building_geom_wkb`` rule)."""
+    if not (isinstance(node, ast.Compare) and len(node.ops) == 1):
+        return False
+    if not isinstance(node.ops[0], ast.In):
+        return False
+    left, right = node.left, node.comparators[0]
+    return (
+        isinstance(left, ast.Constant)
+        and left.value in _GEO_SUBSTRINGS
+        and isinstance(right, ast.Call)
+        and isinstance(right.func, ast.Attribute)
+        and right.func.attr in _CASE_FOLDS
+    )
+
+
+def _literal_column_kwarg(node: ast.AST) -> ast.AST | None:
+    """``f(t, geometry_column="geometry")``: a built column named by a literal
+    rather than ``geometry_detection.BUILT_GEOMETRY_COLUMN``."""
+    if isinstance(node, ast.Call):
+        for kw in node.keywords:
+            if kw.arg and _GEOM_COLUMN_NAME.search(kw.arg) and _is_geometry_literal(kw.value):
+                return kw.value
+    return None
+
+
+def _calls_named(fn: ast.AST, name: str) -> list[ast.Call]:
+    return [
+        c
+        for c in ast.walk(fn)
+        if isinstance(c, ast.Call)
+        and (
+            (isinstance(c.func, ast.Name) and c.func.id == name)
+            or (isinstance(c.func, ast.Attribute) and c.func.attr == name)
+        )
+    ]
+
+
+def _hand_rolled_read(m: _Module, fn: ast.AST) -> Iterator[ast.AST]:
+    """A function that decodes through the primitive (``geom_from_wkb_sql``)
+    after its own type test (``"BLOB" in t``) or into a view it builds: the
+    BLOB-vs-native read the owner's ``resolve_geometry_read`` /
+    ``create_geometry_view`` answer, re-derived."""
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return
+    decodes = _calls_named(fn, "geom_from_wkb_sql")
+    if not decodes:
+        return
+    for node in ast.walk(fn):
+        if (
+            isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Constant)
+            and node.left.value in ("BLOB", "BINARY")
+            and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops)  # codespell:ignore
+        ):
+            yield node
+            return
+    for node in ast.walk(fn):
+        if id(node) in m.docstrings:
+            continue
+        template = _string_template(node)
+        if template is not None and re.search(r"(?i)\bCREATE\b.*\bVIEW\b", template):
+            yield decodes[0]
+            return
+
+
+def _find_geometry_identity(m: _Module) -> Iterator[Hit]:
+    """A literal ``"geometry"`` column-name default outside
+    ``core/geometry_detection.py``, or a WKB codec call (``ST_GeomFromWKB(`` /
+    ``ST_AsWKB(``) built outside it and ``core/duckdb_utils.py``.
+
+    ``geometry_detection.primary_geometry_column`` is the one resolver and it
+    never answers the literal: a schema with no geometry-like column is
+    ``None``, which the caller turns into ``GeometryColumnNotFoundError``.
+    Would have caught the nine resolvers #1367 found, four of which fell back
+    to ``"geometry"`` and so named a column the file did not have (a ``geom``
+    file read as having no CRS, #887 review), and the sort sentinel that
+    treated an explicit ``--geometry-column geometry`` as "detect". The literal
+    shapes: a parameter default named like a column (``geometry_column=``,
+    ``geom_col=``), ``x or "geometry"``, ``.get(k, "geometry")``,
+    ``geom_col = "geometry"``, ``geometry_column == "geometry"`` and a fallback
+    ``return "geometry"`` (one of several returns), a ``primary = "<name>"``
+    literal (``derive_geo_from_file``'s), and a second list of geometry
+    column names (``extract_bigquery``'s, with ``geo``/``geography``).
+    The audit's eight blind spots (#1392 pass 1) are shapes too: the literal
+    as a branch of a conditional (``"geometry" if x else y``), the first of a
+    set of geometry columns taken as the answer (``next(iter(geo_columns))``,
+    ``geo_columns[0]``), the block's primary read inline as the column
+    (``geometry_column = geo.get("primary_column")``), a name-fragment rule
+    (``"geo" in name.lower()``), a built column named by a literal keyword
+    (``geometry_column="geometry"``; ``BUILT_GEOMETRY_COLUMN`` is the name),
+    ``ST_GeomFromHEXWKB(``, and a function that decodes through the
+    primitive ``geom_from_wkb_sql`` after its own ``"BLOB" in t`` test or into
+    a view it builds (``resolve_geometry_read`` / ``create_geometry_view`` are
+    that read and that view).
+
+    ``geometry_detection.resolve_geometry_read`` is the one BLOB-vs-native read
+    expression, and the WKB codec is spelled once in ``duckdb_utils``
+    (``as_wkb_sql`` / ``geom_from_wkb_sql``). What this does *not* make
+    impossible: a decode that tests the type some other way (``"GEOMETRY" ==
+    t``, a type set) before calling the primitive, or one that holds the
+    primitive's result in a variable another function decodes with.
+
+    Not seen (named so a reviewer looks for them): the literal held in a
+    constant first (``DEFAULT = "geometry"; col = x or DEFAULT``), a default
+    assigned to a name that says neither ``geom...col`` nor ``primary``
+    (``col = "geometry"``), a names list of one geometry name or built by
+    concatenation, an output column *named* ``geometry`` by an SQL alias or a
+    subscript assignment, a first-column pick from a container whose name does
+    not say ``geo..._col`` (``next(iter(inferred))``), a substring test without
+    a case fold (``"geo" in name``, indistinguishable from list membership),
+    and a codec call assembled by concatenation (``"ST_As" + "WKB("``).
+    """
+    wkb_owner = _owns(m.path, _WKB_CODEC_OWNERS)
+    for node in ast.walk(m.tree):
+        for literal in (*_param_default_literals(node), *_fallback_returns(node)):
+            yield m.hit(literal)
+        literal = _literal_column_default(node)
+        if literal is not None:
+            yield m.hit(literal)
+        primary = _primary_literal(node)
+        if primary is not None:
+            yield m.hit(primary)
+        if _geometry_names_list(node) or _first_column_pick(node) or _substring_heuristic(node):
+            yield m.hit(node)
+        for shaped in (_ifexp_literal(node), _primary_get(node), _literal_column_kwarg(node)):
+            if shaped is not None:
+                yield m.hit(shaped)
+        if not wkb_owner:
+            yield from (m.hit(n) for n in _hand_rolled_read(m, node))
+        if wkb_owner or id(node) in m.docstrings:
+            continue
+        if isinstance(m.parents.get(id(node)), ast.JoinedStr):
+            continue
+        template = _string_template(node)
+        if template is not None and _WKB_CODEC_CALL.search(template):
+            yield m.hit(node)
+
+
 @dataclass(frozen=True)
 class Arm:
     finder: Callable[..., Iterator[Hit]]
@@ -1879,6 +2190,9 @@ ARMS = {
     "geometry_stats": Arm(_find_geometry_stats, ("geoparquet_io/core/geo_metadata.py",)),
     "edges": Arm(_find_edges, ("geoparquet_io/core/edges.py",)),
     "footer_patch": Arm(_find_footer_patch, ("geoparquet_io/core/parquet_footer.py",)),
+    "geometry_identity": Arm(
+        _find_geometry_identity, ("geoparquet_io/core/geometry_detection.py",)
+    ),
 }
 
 
@@ -2396,6 +2710,7 @@ G1_PLANTS = {
         "import os\n\ndef check(out, force):\n"
         "    if os.path.exists(out) and not force:\n        raise ValueError(out)\n"
     ),
+    "geometry_identity": ('def column(geo):\n    return geo.get("primary_column") or "geometry"\n'),
     "geometry_stats": (
         "def bounds(con, q, g):\n"
         '    return con.execute(f"SELECT MIN(ST_XMin({g})), MAX(ST_XMax({g})) FROM ({q})")\n'
@@ -2448,6 +2763,10 @@ G1_CLEAN = {
     ),
     "overwrite_check": (
         "import os\n\ndef cleanup(tmp):\n    if os.path.exists(tmp):\n        os.remove(tmp)\n"
+    ),
+    "geometry_identity": (
+        "from geoparquet_io.core.geometry_detection import primary_geometry_column\n\n"
+        "def column(path):\n    return primary_geometry_column(path)\n"
     ),
     "geometry_stats": (
         "def bbox_column(g):\n"
@@ -2854,6 +3173,106 @@ def test_g12_geometry_stats_arm_flags_every_shape(shape, tmp_path):
 def test_g12_geometry_stats_arm_passes_its_look_alikes(shape, tmp_path):
     repo = _plant(tmp_path, "geometry_stats", STATS_NEAR_MISSES[shape])
     assert arm_hits(repo, "geometry_stats") == []
+
+
+#: Every shape of a literal ``"geometry"`` column default and of a WKB codec
+#: call the #1367 T3c sweep found, each of which the arm must see...
+GEOMETRY_IDENTITY_SHAPES = {
+    "or-fallback": 'def f(t):\n    return find(t) or "geometry"\n',
+    "get-default": 'def f(geo):\n    return geo.get("primary_column", "geometry")\n',
+    "parameter default": 'def f(t, geometry_column="geometry"):\n    return t\n',
+    "annotated parameter default": 'def f(t, *, geom_col: str = "geometry"):\n    return t\n',
+    "assigned fallback": 'def f(c):\n    if not c:\n        geom_col = "geometry"\n',
+    "sentinel compare": 'def f(geometry_column):\n    return geometry_column == "geometry"\n',
+    "fallback return": (
+        'def f(geo):\n    if geo:\n        return geo["primary_column"]\n    return "geometry"\n'
+    ),
+    "decode in an f-string": 'def f(q):\n    return f"ST_GeomFromWKB({q})"\n',
+    "encode in a plain string": 'Q = "SELECT ST_AsWKB(g) FROM t"\n',
+    "lower-case codec": 'Q = "select st_aswkb (g) from t"\n',
+    "second names list": 'NAMES = ["geometry", "geom", "the_geom", "geo"]\n',
+    "names tuple in a loop": 'def f(cols):\n    for n in ("shape", "geography"):\n        pass\n',
+    "primary literal": 'def f(cols):\n    primary = "geometry"\n    return primary\n',
+    "annotated primary literal": 'def f():\n    primary_column: str = "geom"\n',
+    # The audit's eight blind spots (#1392 pass 1).
+    "conditional literal": 'def f(t, x):\n    return "geometry" if x else t\n',
+    "conditional literal else": 'def f(t, x):\n    return t if x else "geometry"\n',
+    "first native column": "def f(p):\n    return next(iter(detect_geometry_columns(p)))\n",
+    "first of the geo columns": "def f(geo_columns):\n    return geo_columns[0]\n",
+    "BLOB test then the primitive": (
+        'def f(t, q):\n    return geom_from_wkb_sql(q) if "BLOB" in t else q\n'
+    ),
+    "view through the primitive": (
+        "def f(con, c):\n"
+        '    con.execute(f"CREATE VIEW v AS SELECT {geom_from_wkb_sql(c)} AS g FROM t")\n'
+    ),
+    "inline block primary": (
+        'def f(geo, geometry_column=None):\n    geometry_column = geo.get("primary_column")\n'
+    ),
+    "hex WKB codec": 'Q = "SELECT ST_GeomFromHEXWKB(h) FROM t"\n',
+    "substring heuristic": (
+        'def f(fields):\n    return [n for n in fields if "geo" in n.lower()]\n'
+    ),
+    "keyword naming a built column": 'def f(t):\n    return sort(t, geometry_column="geometry")\n',
+}
+#: ...and the output names and prose it must leave alone.
+GEOMETRY_IDENTITY_NEAR_MISSES = {
+    "output column alias": 'Q = "SELECT x AS geometry FROM t"\n',
+    "keyword naming the built constant": (
+        "def f(t):\n    return sort(t, geometry_column=BUILT_GEOMETRY_COLUMN)\n"
+    ),
+    "enum value": 'def f(t, bucket_point: str = "geometry"):\n    return t\n',
+    "output name parameter": 'def f(t, geometry_name="geometry"):\n    return t\n',
+    "rename to the output name": 'def f(names, i):\n    names[i] = "geometry"\n',
+    "single return of a dataset fact": 'def get_geometry_column():\n    return "geometry"\n',
+    "type compare": 'def f(d):\n    return d.get("type") == "geometry"\n',
+    "prose": 'def f():\n    """Calls ST_AsWKB(g) through the owner; falls back to "geometry"."""\n',
+    "codec named without a call": 'MSG = "(the query uses ST_AsWKB for geometry columns)"\n',
+    "one geometry-ish name": 'def f():\n    return load(extensions=["geography"])\n',
+    "type names list": 'TYPES = ["Point", "LineString", "Polygon"]\n',
+    "logical type families": 'def f(t):\n    return t in ("Geometry", "Geography")\n',
+    "list built from the owner's names": 'def f():\n    return ["wkt", *STANDARD_GEOMETRY_NAMES]\n',
+    "primary from the data": "def f(cols):\n    primary = cols[0]\n    primary = None\n",
+    "conditional on other names": 'def f(x):\n    return "geom" if x else "point"\n',
+    "a word for a message": 'def f(n):\n    return "geometry" if n == 1 else "geometries"\n',
+    "the resolver's answer from an info dict": (
+        'def f(geo_info):\n    primary_geom_col = geo_info.get("primary_column")\n'
+    ),
+    "first of anything else": "def f(rows):\n    return next(iter(rows)), rows[0]\n",
+    "BLOB test without the primitive": 'def f(t):\n    return "BLOB" in t\n',
+    "primitive without a type test": "def f(c):\n    return geom_from_wkb_sql(c)\n",
+    "view without the primitive": 'def f(con):\n    con.execute("CREATE VIEW v AS SELECT * FROM t")\n',
+    "block primary into its own name": (
+        'def f(geo):\n    primary = geo.get("primary_column")\n    return primary\n'
+    ),
+    "list membership": 'def f(names):\n    return "geo" in names\n',
+    "substring of a non-geo fragment": 'def f(n):\n    return "bbox" in n.lower()\n',
+}
+
+
+@pytest.mark.parametrize("shape", sorted(GEOMETRY_IDENTITY_SHAPES))
+def test_g12_geometry_identity_arm_flags_every_shape(shape, tmp_path):
+    repo = _plant(tmp_path, "geometry_identity", GEOMETRY_IDENTITY_SHAPES[shape])
+    assert len(arm_hits(repo, "geometry_identity")) == 1, GEOMETRY_IDENTITY_SHAPES[shape]
+
+
+@pytest.mark.parametrize("shape", sorted(GEOMETRY_IDENTITY_NEAR_MISSES))
+def test_g12_geometry_identity_arm_passes_its_look_alikes(shape, tmp_path):
+    repo = _plant(tmp_path, "geometry_identity", GEOMETRY_IDENTITY_NEAR_MISSES[shape])
+    assert arm_hits(repo, "geometry_identity") == []
+
+
+def test_g12_geometry_identity_arm_lets_duckdb_utils_spell_the_codec_only(tmp_path):
+    """``duckdb_utils`` owns the codec spelling, not the column default."""
+    target = tmp_path / "geoparquet_io" / "core" / "duckdb_utils.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        'def as_wkb_sql(e):\n    return f"ST_AsWKB({e})"\n\n'
+        'def col(c):\n    return c or "geometry"\n',
+        encoding="utf-8",
+    )
+    hits = arm_hits(tmp_path, "geometry_identity")
+    assert [h.name for h in hits] == ["col"], hits
 
 
 @pytest.mark.parametrize("arm_name", sorted(ARMS))

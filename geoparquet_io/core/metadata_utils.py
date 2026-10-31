@@ -75,13 +75,9 @@ def has_parquet_geo_row_group_stats(parquet_file: str, geometry_column: str | No
         "sample_bbox": None,
     }
 
-    # Auto-detect geometry column if not specified
-    if not geometry_column:
-        geo_columns = detect_geometry_columns(parquet_file)
-        if geo_columns:
-            geometry_column = next(iter(geo_columns.keys()))
-
-    if not geometry_column:
+    # Native Parquet geo types only: a named column, or any native one. Which
+    # one is not asked here -- the covering below is the primary's (#1171).
+    if not geometry_column and not detect_geometry_columns(parquet_file):
         return result
 
     # The PRIMARY geometry's bbox covering column, or none (#1171).
@@ -371,7 +367,6 @@ def format_parquet_metadata_enhanced(
     parquet_file: str,
     json_output: bool,
     row_groups_limit: int | None = 1,
-    primary_geom_col: str | None = None,
 ) -> None:
     """
     Format and output enhanced Parquet file metadata with geo column highlighting.
@@ -380,7 +375,9 @@ def format_parquet_metadata_enhanced(
         parquet_file: Path to the parquet file
         json_output: Whether to output as JSON
         row_groups_limit: Number of row groups to display (None for all)
-        primary_geom_col: Primary geometry column name (for highlighting)
+
+    Geometry columns are highlighted from their native Parquet geo type
+    (``duckdb_metadata.detect_geometry_columns``).
     """
     from geoparquet_io.core.duckdb_metadata import (
         detect_geometry_columns,
@@ -796,7 +793,6 @@ def format_all_metadata(
         # For JSON, combine all metadata into one object
         # `or None`: an absent block is JSON `null` here, as it always was.
         geo_meta = sanitized_carried_geo_of_file(parquet_file) or None
-        primary_col = geo_meta.get("primary_column") if geo_meta else None
 
         # We need to manually construct the combined JSON output
         # This is a simplified version - in production you'd want to extract the actual data
@@ -808,11 +804,8 @@ def format_all_metadata(
         print(dumps_json(output, indent=2))
     else:
         # Terminal output - show all three sections
-        geo_meta = sanitized_carried_geo_of_file(parquet_file)
-        primary_col = geo_meta.get("primary_column")
-
         # Section 1: Parquet File Metadata
-        format_parquet_metadata_enhanced(parquet_file, False, row_groups_limit, primary_col)
+        format_parquet_metadata_enhanced(parquet_file, False, row_groups_limit)
 
         # Section 2: Parquet Geo Metadata
         format_parquet_geo_metadata(parquet_file, False, row_groups_limit)

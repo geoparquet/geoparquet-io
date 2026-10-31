@@ -43,7 +43,7 @@ from geoparquet_io.core.file_utils import (
     resolve_file_url,
 )
 from geoparquet_io.core.geo_metadata import build_bbox_covering
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import primary_geometry_column, require_geometry_column
 from geoparquet_io.core.logging_config import (
     debug,
     info,
@@ -172,8 +172,8 @@ def add_computed_column(
     # interpolation escapes it through sql_path (#802).
     input_path = resolve_file_url(input_parquet, verbose)
 
-    # Get geometry column (for reference)
-    geom_col = find_primary_geometry_column(input_parquet, verbose)
+    # For the dry-run header only (no SQL here reads it), so None stays None.
+    geom_col = primary_geometry_column(input_parquet, verbose=verbose)
 
     source = from_clause or sql_path(input_path)
 
@@ -305,8 +305,8 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
             f"Please choose a different name.",
         )
 
-    # Get geometry column for SQL expression
-    geom_col = find_primary_geometry_column(parquet_file, verbose)
+    geom_col = primary_geometry_column(parquet_file, verbose=verbose)
+    geom_col = require_geometry_column(geom_col, parquet_file)  # the SQL needs one
 
     if verbose:
         debug(f"Adding bbox column for geometry column: {geom_col}")

@@ -90,7 +90,6 @@ from geoparquet_io.core.file_utils import get_all_parquet_files, is_partition_pa
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     SELF_EVIDENT_BBOX_COLUMN,
-    carried_geometry_column,
     declare_carried_bbox_column,
     gate_illegal_bbox_covering,
     is_geoparquet_1x,
@@ -108,8 +107,10 @@ from geoparquet_io.core.geodesic_bbox import (
     geography_statistics,
 )
 from geoparquet_io.core.geometry_detection import (
+    BUILT_GEOMETRY_COLUMN,
     _detect_geometry_from_query,
     native_geometry_types_from_query,
+    primary_geometry_column,
 )
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -1845,7 +1846,7 @@ def _edges_to_restore(
     return edges_by_col
 
 
-def table_nonplanar_edges(table, geometry_column: str, edges: str | None) -> dict[str, str]:
+def table_nonplanar_edges(table, geometry_column: str | None, edges: str | None) -> dict[str, str]:
     """Map geometry column -> non-planar edges an in-memory table declares.
 
     The one reader of a table's edges (the repair gate's
@@ -1964,7 +1965,7 @@ def write_geoparquet_table(
     row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
 
     if geometry_column is None:
-        geometry_column = carried_geometry_column(geo_meta, table.column_names) or "geometry"
+        geometry_column = primary_geometry_column(table.column_names, geo=geo_meta)
 
     # Check if geometry column exists
     has_geometry = geometry_column in table.column_names
@@ -2143,7 +2144,7 @@ def write_aggregate_table(
     write_geoparquet_table(
         table,
         output_file,
-        geometry_column="geometry",
+        geometry_column=BUILT_GEOMETRY_COLUMN,
         compression=compression,
         compression_level=compression_level,
         geoparquet_version=geoparquet_version,

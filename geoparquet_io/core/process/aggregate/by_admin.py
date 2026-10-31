@@ -14,7 +14,9 @@ from geoparquet_io.core.admin_datasets import (
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet
 from geoparquet_io.core.duckdb_utils import (
+    as_wkb_sql,
     describe_query,
+    geom_from_wkb_sql,
     quote_identifier,
     s3_config_scope,
     validate_where_clause,
@@ -23,7 +25,9 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.edges import PLANAR, representative_point_sql
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import (
+    primary_geometry_column,
+)
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
 from geoparquet_io.core.process.aggregate.common import (
     VALID_OUT_GEOMETRY,
@@ -111,7 +115,7 @@ def _build_joined_sql(
         admin_select_clause=(
             f"{code_ref} AS __admin_code, "
             f"{name_ref} AS __admin_name, "
-            f"ST_AsWKB(b.{quote_identifier(admin_geom_col)}) AS __admin_geom"
+            f"{as_wkb_sql(f'b.{quote_identifier(admin_geom_col)}')} AS __admin_geom"
         ),
         input_geom_col="__cen",
         admin_geom_col=admin_geom_col,
@@ -157,8 +161,8 @@ def _wrap_admin_geometry(agg_sql: str, out_geometry: str) -> str:
 
     geom_wkb = "a.__admin_geom"  # WKB binary stored in __admin_geom
     # The admin polygons are planar, so their centroid is the planar point.
-    point = representative_point_sql(f"ST_GeomFromWKB({geom_wkb})", PLANAR)
-    centroid = f"ST_AsWKB({point})"
+    point = representative_point_sql(geom_from_wkb_sql(geom_wkb), PLANAR)
+    centroid = as_wkb_sql(point)
     if out_geometry == "polygon":
         geom_cols = f"{geom_wkb} AS geometry"
     elif out_geometry == "centroid":
@@ -259,7 +263,9 @@ def aggregate_by_admin(
     admin_bbox_col = admin_dataset.get_bbox_column()
 
     input_url = resolve_file_url(input_parquet, verbose)
-    geom_col = find_primary_geometry_column(input_parquet, verbose) or "geometry"
+    # None when the input has no geometry column: the bbox and point-column
+    # keying modes never read it (bucket_point_expr refuses it in geometry mode).
+    geom_col = primary_geometry_column(input_parquet, verbose=verbose)
 
     # Opened in the dataset's scope, so its public read is not signed with an
     # outer AWS profile and configure_s3's endpoint is not beaten by a secret.

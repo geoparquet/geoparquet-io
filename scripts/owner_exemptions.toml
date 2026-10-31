@@ -519,10 +519,6 @@ option = "--geometry"
 fields = ["type", "is_flag"]
 reason = "permanent: a different concept (include geometry) under the same name; renaming breaks the CLI"
 [[G13.options]]
-option = "--geometry-column"
-fields = ["default"]
-reason = "T3c: sort's 'geometry' default is a copy of the primary-column rule (hilbert_order/str_order auto-detect sentinel); the default becomes None via primary_geometry_column there. Simplify shares column_name_option since T5c"
-[[G13.options]]
 option = "--geoparquet-version"
 fields = ["type"]
 reason = "permanent: check spec validates against spec versions, and 1.1-geoarrow is a write encoding, not a spec version"

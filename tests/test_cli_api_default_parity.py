@@ -245,11 +245,6 @@ def collect_divergences() -> list[tuple[str, str, str, str, str]]:
 # was closed in #762 by giving the API the same `auto=True` the CLI has, not by
 # writing a better excuse.
 
-_GEOMETRY_COLUMN_FROM_TABLE = (
-    "Intentional. The CLI is handed a path and names the conventional column; the API is handed "
-    "a Table that already tracks its own geometry column, so None means 'use that one'. Pinning "
-    "the API to 'geometry' would break every table whose column is named something else."
-)
 _KEEP_TRISTATE = (
     "Intentional. CLI flag False and API None both mean 'follow hive' at runtime; the API spells "
     "it as a tri-state so it can also express an explicit drop, which a bare Click flag cannot."
@@ -329,20 +324,6 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str, str, str], str] = {
         "'<unset>'",
         "False",
     ): _KDTREE_AUTO_SPELLING,
-    (
-        "sort hilbert",
-        "ops.sort_hilbert",
-        "geometry_column",
-        "'geometry'",
-        "'<unset>'",
-    ): _GEOMETRY_COLUMN_FROM_TABLE,
-    (
-        "sort str",
-        "ops.sort_str",
-        "geometry_column",
-        "'geometry'",
-        "'<unset>'",
-    ): _GEOMETRY_COLUMN_FROM_TABLE,
     (
         "partition a5",
         "ops.partition_by_a5",

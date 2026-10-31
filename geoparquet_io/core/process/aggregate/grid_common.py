@@ -25,6 +25,7 @@ from geoparquet_io.core.crs_utils import (
     extract_crs_from_table,
 )
 from geoparquet_io.core.duckdb_utils import (
+    as_wkb_sql,
     describe_query,
     fetch_one,
     get_duckdb_connection,
@@ -38,7 +39,10 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import has_glob_pattern, resolve_file_url
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import (
+    primary_geometry_column,
+    require_geometry_column,
+)
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.index_ops import (
     IndexSpec,
@@ -260,9 +264,7 @@ def _validate_bbox_struct_column(con, relation: str, bbox_column: str) -> None:
         )
     qbox = quote_identifier(bbox_column)
     try:
-        fields = {
-            row[0] for row in con.execute(f"DESCRIBE SELECT {qbox}.* FROM {relation}").fetchall()
-        }
+        fields = {name for name, _ in describe_query(con, f"SELECT {qbox}.* FROM {relation}")}
     except duckdb.Error:  # not a struct -- .* expansion does not bind
         fields = set()
     missing = _BBOX_STRUCT_FIELDS - fields
@@ -292,7 +294,7 @@ def _validate_point_column(con, relation: str, bucket_point: str) -> None:
 def bucket_point_expr(
     con: duckdb.DuckDBPyConnection,
     relation: str,
-    geom_col: str,
+    geom_col: str | None,
     source_crs: dict | str | None,
     bucket_point: str,
     bbox_column: str | None,
@@ -311,8 +313,10 @@ def bucket_point_expr(
     """
     _validate_bucket_point_args(bucket_point, bbox_column)
     if bucket_point == BUCKET_POINT_GEOMETRY:
+        geom_col = require_geometry_column(geom_col, "the input")
         geom_expr = geometry_to_geom_expr(con, relation, geom_col)
         return index_point(geom_expr, source_crs, edges=(edges or {}).get(geom_col)), ()
+    excluded = (geom_col,) if geom_col else ()
     if bucket_point == BUCKET_POINT_BBOX:
         if not bbox_column:
             raise InvalidParameterError(
@@ -321,12 +325,12 @@ def bucket_point_expr(
             )
         _validate_bbox_struct_column(con, relation, bbox_column)
         # The bbox covering column is stored in the file's CRS, same as geometry.
-        return index_point(None, source_crs, bbox_column), (geom_col,)
+        return index_point(None, source_crs, bbox_column), excluded
     # Any other value names an existing (point) geometry column. The point is a
     # no-op for points and keeps non-point columns keyable rather than erroring.
     _validate_point_column(con, relation, bucket_point)
     point_expr = geometry_to_geom_expr(con, relation, bucket_point)
-    return index_point(point_expr, source_crs, edges=(edges or {}).get(bucket_point)), (geom_col,)
+    return index_point(point_expr, source_crs, edges=(edges or {}).get(bucket_point)), excluded
 
 
 def cell_area_expr(scheme: GridScheme, resolution: int, cell_expr: str) -> str | None:
@@ -431,7 +435,7 @@ def source_select_list(
 def read_grid_source_sql(
     con,
     input_url: str,
-    geom_col: str,
+    geom_col: str | None,
     source_crs=None,
     where: str | None = None,
     bucket_point: str = BUCKET_POINT_GEOMETRY,
@@ -607,10 +611,10 @@ def _repaired_poly_wkb() -> str:
     poly = _MAKE_RING_POLYGON.format(r="__fring")
     return (
         "CASE WHEN __bnd IS NULL THEN NULL "
-        "WHEN __ring IS NULL THEN ST_AsWKB(__bnd) "
+        f"WHEN __ring IS NULL THEN {as_wkb_sql('__bnd')} "
         f"WHEN list_max({_RING_LONS.format(r='__fring')}) > 180.0 "
-        f"THEN ST_AsWKB({_CUT_AT_ANTIMERIDIAN.format(g=poly)}) "
-        f"ELSE ST_AsWKB({poly}) END"
+        f"THEN {as_wkb_sql(_CUT_AT_ANTIMERIDIAN.format(g=poly))} "
+        f"ELSE {as_wkb_sql(poly)} END"
     )
 
 
@@ -894,7 +898,9 @@ def aggregate_grid_file(
     )
 
     input_url = resolve_file_url(input_parquet, verbose)
-    geom_col = find_primary_geometry_column(input_parquet, verbose) or "geometry"
+    # None when the input has no geometry column: the bbox and point-column
+    # keying modes never read it (bucket_point_expr refuses it in geometry mode).
+    geom_col = primary_geometry_column(input_parquet, verbose=verbose)
     if bucket_point == BUCKET_POINT_BBOX:
         warn_planar_math_for_file("aggregate", input_parquet, geom_col)
     edges = collect_nonplanar_edges(input_parquet)
@@ -1009,7 +1015,9 @@ def aggregate_grid_table(
         bbox_column = _resolve_bbox_column_for_table(table, bbox_column)
     validate_index_resolution(scheme.spec, resolution)
 
-    geom_col = geometry_column or "geometry"
+    # None when the table has no geometry column: the bbox and point-column
+    # keying modes never read it (bucket_point_expr refuses it in geometry mode).
+    geom_col = geometry_column or primary_geometry_column(table)
     con = open_bounded_connection(load_spatial=True, load_httpfs=False, memory_limit=memory_limit)
     try:
         load_index(con, scheme.spec, feature=f"{scheme.name} aggregation")
@@ -1022,7 +1030,7 @@ def aggregate_grid_table(
         pt_expr, exclude = bucket_point_expr(
             con, "__agg_input", geom_col, source_crs, bucket_point, bbox_column, edges
         )
-        hidden = (geom_col, *exclude, *_RESERVED_INTERNAL)
+        hidden = (*((geom_col,) if geom_col else ()), *exclude, *_RESERVED_INTERNAL)
         input_columns = _relation_columns(con, "__agg_input") - set(hidden)
         select_list = source_select_list(
             con,

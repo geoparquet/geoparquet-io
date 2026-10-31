@@ -10,6 +10,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.constants import DEFAULT_A5_COLUMN_NAME
+from geoparquet_io.core.duckdb_utils import as_wkb_sql
 from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.grid_common import (
     GridScheme,
@@ -34,7 +35,7 @@ A5_SCHEME = GridScheme(
     ),
     latlng_template="a5_cell_to_lonlat({cell})",
     # a5_cell_to_lonlat returns [lon, lat].
-    centroid_wkb_template="ST_AsWKB(ST_Point({ll}[1], {ll}[2]))",
+    centroid_wkb_template=as_wkb_sql("ST_Point({ll}[1], {ll}[2])"),
     # A5 is equal-area by construction: every cell at a resolution covers the
     # same number of square metres, so the denominator of `pct_cell` is one
     # constant and does not need the cell id (#1181).

@@ -280,13 +280,13 @@ class TestPipelineIntegration:
         """Test geometry column detection from Arrow table schema."""
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.streaming import find_geometry_column_from_table
+        from geoparquet_io.core.geometry_detection import primary_geometry_column
 
         # Read test data
         table = pq.read_table(str(PLACES_PARQUET))
 
         # Find geometry column from the table
-        geom_col = find_geometry_column_from_table(table)
+        geom_col = primary_geometry_column(table)
         assert geom_col is not None
 
     def test_no_geometry_column_raises_error(self):
@@ -302,7 +302,9 @@ class TestPipelineIntegration:
 
         # Mock read_arrow_stream at the source module
         with patch("geoparquet_io.core.streaming.read_arrow_stream", return_value=table_no_geom):
-            with pytest.raises(ValueError) as exc_info:
+            from geoparquet_io.core.geometry_detection import GeometryColumnNotFoundError
+
+            with pytest.raises(GeometryColumnNotFoundError) as exc_info:
                 _convert_from_stream()
 
             # Check error message contains helpful information

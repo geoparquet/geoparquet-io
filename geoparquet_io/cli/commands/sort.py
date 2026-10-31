@@ -42,8 +42,8 @@ def sort(ctx):
 @column_name_option(
     "--geometry-column",
     "-g",
-    default="geometry",
-    help="Name of the geometry column (default: geometry)",
+    default=None,
+    help="Name of the geometry column (default: the file's primary geometry column)",
 )
 @bbox_option
 @output_format_options
@@ -112,8 +112,8 @@ def hilbert_order(
 @column_name_option(
     "--geometry-column",
     "-g",
-    default="geometry",
-    help="Name of the geometry column (default: geometry)",
+    default=None,
+    help="Name of the geometry column (default: the file's primary geometry column)",
 )
 @bbox_option
 @output_format_options

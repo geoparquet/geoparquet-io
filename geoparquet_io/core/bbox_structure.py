@@ -511,12 +511,12 @@ def dataset_bounds(parquet_file, geometry_column=None, verbose=False, *, advise=
     """
     from geoparquet_io.core.exceptions import GeometryError
     from geoparquet_io.core.file_utils import resolve_file_url
-    from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+    from geoparquet_io.core.geometry_detection import primary_geometry_column
 
     configure_verbose(verbose)
     resolve_file_url(parquet_file, verbose)  # a missing file is reported as one, first
     if not geometry_column:
-        geometry_column = find_primary_geometry_column(parquet_file, verbose)
+        geometry_column = primary_geometry_column(parquet_file, verbose=verbose)
     bbox_info = check_bbox_structure(parquet_file, verbose)
     bbox_column = bbox_info["bbox_column_name"] if bbox_info["has_bbox_column"] else None
     if bbox_column:

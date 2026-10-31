@@ -20,7 +20,7 @@ from __future__ import annotations
 import gc
 
 from geoparquet_io.core.admin_datasets import resolve_admin_dataset
-from geoparquet_io.core.duckdb_utils import quote_identifier, register_arrow, sql_path
+from geoparquet_io.core.duckdb_utils import as_wkb_sql, quote_identifier, register_arrow, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.memory_limits import open_bounded_connection
@@ -132,8 +132,8 @@ def build_admin_rollup_sql(
         f"ST_Union_Agg({country_geom_expr}) AS __country_geom "
         f"FROM {country_ref} GROUP BY {country_code_col}"
     )
-    polygon = "ST_AsWKB(c.__country_geom)"
-    centroid = "ST_AsWKB(ST_Centroid(c.__country_geom))"
+    polygon = as_wkb_sql("c.__country_geom")
+    centroid = as_wkb_sql("ST_Centroid(c.__country_geom)")
     if info.out_geometry == "polygon":
         geom_cols = f"{polygon} AS geometry"
     elif info.out_geometry == "centroid":

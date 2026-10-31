@@ -15,13 +15,6 @@
       "reviewed_by": "user"
     },
     {
-      "code_file": "geoparquet_io/core/stac.py",
-      "doc_target": "docs/guide/stac.md",
-      "reviewed_at": "2026-04-02T14:58:46.295840+00:00",
-      "code_commit_at_review": "f12d2f8",
-      "reviewed_by": "Claude"
-    },
-    {
       "code_file": "geoparquet_io/cli/main.py",
       "doc_target": "CLAUDE.md#Architecture & Key Files",
       "reviewed_at": "2026-04-02T15:00:50.816535+00:00",
@@ -106,27 +99,6 @@
       "reviewed_by": "Claude"
     },
     {
-      "code_file": "geoparquet_io/cli/commands/sort.py",
-      "doc_target": "geoparquet_io/skills/geoparquet.md#Command Reference",
-      "reviewed_at": "2026-09-11T07:50:22.603962+00:00",
-      "code_commit_at_review": "5ce725e",
-      "reviewed_by": "write-facade PR (generated target, doc-sync reports up to date)"
-    },
-    {
-      "code_file": "geoparquet_io/cli/commands/sort.py",
-      "doc_target": "CLAUDE.md#CLI Command Groups",
-      "reviewed_at": "2026-09-11T07:50:22.694863+00:00",
-      "code_commit_at_review": "5ce725e",
-      "reviewed_by": "write-facade PR (generated target, doc-sync reports up to date)"
-    },
-    {
-      "code_file": "geoparquet_io/cli/commands/sort.py",
-      "doc_target": "docs/contributing.md",
-      "reviewed_at": "2026-09-11T07:50:22.784820+00:00",
-      "code_commit_at_review": "5ce725e",
-      "reviewed_by": "write-facade PR (generated target, doc-sync reports up to date)"
-    },
-    {
       "code_file": "geoparquet_io/cli/commands/check.py",
       "doc_target": "geoparquet_io/skills/geoparquet.md#Command Reference",
       "reviewed_at": "2026-09-13T09:29:38.321455+00:00",
@@ -155,37 +127,9 @@
       "reviewed_by": "Claude"
     },
     {
-      "code_file": "geoparquet_io/api/table.py",
-      "doc_target": "docs/api/python-api.md#Table Class",
-      "reviewed_at": "2026-10-29T23:46:27.839388+00:00",
-      "code_commit_at_review": "f326bfc",
-      "reviewed_by": "claude-code (DuckDB 2.0 call-site migration, no doc-visible change)"
-    },
-    {
       "code_file": "geoparquet_io/core/benchmark.py",
       "doc_target": "docs/cli/benchmark.md",
       "reviewed_at": "2026-10-29T23:46:27.946962+00:00",
-      "code_commit_at_review": "f326bfc",
-      "reviewed_by": "claude-code (DuckDB 2.0 call-site migration, no doc-visible change)"
-    },
-    {
-      "code_file": "geoparquet_io/core/convert.py",
-      "doc_target": "docs/guide/convert.md",
-      "reviewed_at": "2026-10-29T23:46:28.054558+00:00",
-      "code_commit_at_review": "f326bfc",
-      "reviewed_by": "claude-code (DuckDB 2.0 call-site migration, no doc-visible change)"
-    },
-    {
-      "code_file": "geoparquet_io/core/hilbert_order.py",
-      "doc_target": "docs/guide/sort.md",
-      "reviewed_at": "2026-10-29T23:46:28.271021+00:00",
-      "code_commit_at_review": "f326bfc",
-      "reviewed_by": "claude-code (DuckDB 2.0 call-site migration, no doc-visible change)"
-    },
-    {
-      "code_file": "geoparquet_io/core/validate.py",
-      "doc_target": "docs/guide/check.md",
-      "reviewed_at": "2026-10-29T23:46:28.378693+00:00",
       "code_commit_at_review": "f326bfc",
       "reviewed_by": "claude-code (DuckDB 2.0 call-site migration, no doc-visible change)"
     },
@@ -204,11 +148,102 @@
       "reviewed_by": "claude"
     },
     {
+      "code_file": "geoparquet_io/api/table.py",
+      "doc_target": "docs/api/python-api.md#Table Class",
+      "reviewed_at": "2026-10-31T02:25:40.941988+00:00",
+      "code_commit_at_review": "ef48aa5",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/cli/commands/process.py",
+      "doc_target": "docs/contributing.md",
+      "reviewed_at": "2026-10-31T02:25:41.066768+00:00",
+      "code_commit_at_review": "ef48aa5",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/cli/commands/process.py",
+      "doc_target": "geoparquet_io/skills/geoparquet.md#Command Reference",
+      "reviewed_at": "2026-10-31T02:25:41.191776+00:00",
+      "code_commit_at_review": "ef48aa5",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/cli/commands/process.py",
+      "doc_target": "CLAUDE.md#CLI Command Groups",
+      "reviewed_at": "2026-10-31T02:25:41.315516+00:00",
+      "code_commit_at_review": "ef48aa5",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/cli/commands/process.py",
+      "doc_target": "CLAUDE.md#Architecture",
+      "reviewed_at": "2026-10-31T02:25:41.438591+00:00",
+      "code_commit_at_review": "ef48aa5",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/cli/commands/sort.py",
+      "doc_target": "docs/contributing.md",
+      "reviewed_at": "2026-10-31T02:25:41.561420+00:00",
+      "code_commit_at_review": "ef48aa5",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/cli/commands/sort.py",
+      "doc_target": "geoparquet_io/skills/geoparquet.md#Command Reference",
+      "reviewed_at": "2026-10-31T02:25:41.684307+00:00",
+      "code_commit_at_review": "ef48aa5",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/cli/commands/sort.py",
+      "doc_target": "CLAUDE.md#CLI Command Groups",
+      "reviewed_at": "2026-10-31T02:25:41.808386+00:00",
+      "code_commit_at_review": "ef48aa5",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/cli/commands/sort.py",
+      "doc_target": "CLAUDE.md#Architecture",
+      "reviewed_at": "2026-10-31T02:25:41.932062+00:00",
+      "code_commit_at_review": "ef48aa5",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/core/convert.py",
+      "doc_target": "docs/guide/convert.md",
+      "reviewed_at": "2026-10-31T02:25:42.056735+00:00",
+      "code_commit_at_review": "ef48aa5",
+      "reviewed_by": "T3c"
+    },
+    {
       "code_file": "geoparquet_io/core/extract.py",
       "doc_target": "docs/guide/extract.md",
-      "reviewed_at": "2026-10-30T20:57:05.809492+00:00",
-      "code_commit_at_review": "ee876eb",
-      "reviewed_by": "claude"
+      "reviewed_at": "2026-10-31T02:25:42.180259+00:00",
+      "code_commit_at_review": "ef48aa5",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/core/hilbert_order.py",
+      "doc_target": "docs/guide/sort.md",
+      "reviewed_at": "2026-10-31T02:25:42.303902+00:00",
+      "code_commit_at_review": "ef48aa5",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/core/stac.py",
+      "doc_target": "docs/guide/stac.md",
+      "reviewed_at": "2026-10-31T02:25:42.426468+00:00",
+      "code_commit_at_review": "ef48aa5",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/core/validate.py",
+      "doc_target": "docs/guide/check.md",
+      "reviewed_at": "2026-10-31T02:25:42.549102+00:00",
+      "code_commit_at_review": "ef48aa5",
+      "reviewed_by": "T3c"
     }
   ]
 }

@@ -16,6 +16,8 @@ import json
 
 import pyarrow as pa
 
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
+
 
 def finalize_raster_table(
     table: pa.Table,
@@ -35,8 +37,8 @@ def finalize_raster_table(
         geo_column["crs"] = crs
     geo = {
         "version": "1.1.0",
-        "primary_column": "geometry",
-        "columns": {"geometry": geo_column},
+        "primary_column": BUILT_GEOMETRY_COLUMN,
+        "columns": {BUILT_GEOMETRY_COLUMN: geo_column},
     }
     target = pa.schema(
         [pa.field(f.name, f.type, nullable=f.nullable) for f in table.schema],

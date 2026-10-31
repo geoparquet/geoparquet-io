@@ -266,7 +266,7 @@ class TestNotGeoParquet:
             "failure"
         )
 
-        monkeypatch.setattr(structure, "find_primary_geometry_column", lambda *a, **k: None)
+        monkeypatch.setattr(structure, "primary_geometry_column", lambda *a, **k: None)
         assert structure.check_compression(nogeo, return_results=True)["severity"] == "failure"
 
     @pytest.mark.parametrize("subcommand", ["bbox", "compression"])

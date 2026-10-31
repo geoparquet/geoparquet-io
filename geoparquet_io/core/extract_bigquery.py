@@ -20,6 +20,7 @@ from geoparquet_io.core.column_selection import (
     split_column_list,
 )
 from geoparquet_io.core.duckdb_utils import (
+    as_wkb_sql,
     describe_query,
     duckdb_type_is_geometry,
     fetch_one,
@@ -32,6 +33,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.edges import SPHERICAL
 from geoparquet_io.core.exceptions import ValidationError
 from geoparquet_io.core.file_utils import handle_output_overwrite
+from geoparquet_io.core.geometry_detection import GEOGRAPHY_SOURCE_NAMES, primary_geometry_column
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -364,22 +366,11 @@ def _detect_geometry_column(table: pa.Table) -> str | None:
     Returns:
         Name of detected geometry column, or None
     """
-    # Look for known geometry column names (case insensitive)
-    common_names = ["geometry", "geom", "the_geom", "shape", "geo", "geography"]
-    lower_names = {name.lower(): name for name in table.column_names}
-
-    for name in common_names:
-        if name in lower_names:
-            return lower_names[name]
-
-    # Fallback: look for GEOMETRY type columns by checking for binary/blob types
-    # that might contain WKB data
-    for field in table.schema:
-        field_name_lower = field.name.lower()
-        if "geom" in field_name_lower or "geo" in field_name_lower:
-            return field.name
-
-    return None
+    # The one resolver over the table's typed columns: its names, then
+    # BigQuery's own (its geometry type is called GEOGRAPHY, so a column named
+    # for it, or ``geo``, is a candidate), then a GeoArrow-typed column. A name
+    # that merely contains "geo" is not an answer (#1367).
+    return primary_geometry_column(table, extra_names=GEOGRAPHY_SOURCE_NAMES)
 
 
 def extract_bigquery_table(
@@ -741,11 +732,10 @@ def _detect_geometry_column_from_schema(
         # can handle it as VARCHAR with WKT/GeoJSON parsing
         return None
 
-    # Return first native GEOMETRY column found
-    if geometry_cols:
-        return geometry_cols[0]
-
-    return None
+    # The owner over the GEOMETRY-typed columns only (a VARCHAR is never one
+    # here): a standard name among them, else the first.
+    typed = [(c, t) for c, t in schema_rows if duckdb_type_is_geometry(t)]
+    return primary_geometry_column(typed, extra_names=GEOGRAPHY_SOURCE_NAMES)
 
 
 def _schema_column_names(
@@ -843,12 +833,12 @@ def _build_geometry_select_expr(
         SQL expression string for the SELECT clause
     """
     if duckdb_type_is_geometry(column_type):
-        return f"ST_AsWKB({quote_identifier(column_name)}) AS {quote_identifier(column_name)}"
+        return f"{as_wkb_sql(quote_identifier(column_name))} AS {quote_identifier(column_name)}"
     elif geometry_format == "geojson":
-        return f"ST_AsWKB(ST_GeomFromGeoJSON({quote_identifier(column_name)})) AS {quote_identifier(column_name)}"
+        return f"{as_wkb_sql(f'ST_GeomFromGeoJSON({quote_identifier(column_name)})')} AS {quote_identifier(column_name)}"
     else:
         # Default: WKT
-        return f"ST_AsWKB(ST_GeomFromText({quote_identifier(column_name)})) AS {quote_identifier(column_name)}"
+        return f"{as_wkb_sql(f'ST_GeomFromText({quote_identifier(column_name)})')} AS {quote_identifier(column_name)}"
 
 
 def _build_select_with_wkb(

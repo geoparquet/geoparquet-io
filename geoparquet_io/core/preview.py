@@ -168,22 +168,19 @@ def _covering_bbox_column(parquet_file: str, geometry_column: str | None) -> str
     may only be pruned on a covering its own ``geo`` entry declares.
     """
     from geoparquet_io.core.bbox_structure import bbox_covering_column_for, check_bbox_structure
+    from geoparquet_io.core.geometry_detection import primary_geometry_column
 
-    if geometry_column is None or geometry_column == _primary_geometry_column(parquet_file):
+    if geometry_column is not None:
+        try:
+            primary = primary_geometry_column(parquet_file)
+        except Exception:  # noqa: BLE001 - a pruning hint, never the preview's failure
+            primary = None
+    if geometry_column is None or geometry_column == primary:
         return check_bbox_structure(parquet_file).get("bbox_column_name")
 
     from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
     return bbox_covering_column_for(raw_geo_of_file(parquet_file).block, geometry_column)
-
-
-def _primary_geometry_column(parquet_file: str) -> str | None:
-    from geoparquet_io.core.duckdb_metadata import find_primary_geometry_column_duckdb
-
-    try:
-        return find_primary_geometry_column_duckdb(parquet_file)
-    except Exception:
-        return None
 
 
 def _matching_row_groups(

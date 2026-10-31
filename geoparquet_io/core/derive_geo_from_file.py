@@ -36,6 +36,7 @@ from geoparquet_io.core.geo_metadata import (
     row_group_geometry_stats,
     sanitized_carried_geo_of_file,
 )
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns
 
@@ -279,7 +280,8 @@ def derive_v2_geo_metadata(
     the block has to be rebuilt from the file's native geospatial statistics and
     logical types, mirroring the shape DuckDB writes for XY/XYZ data (#589).
     ``primary_column`` names the real geometry column for multi-geometry files;
-    without it the fallback is "geometry", then alphabetical.
+    without it ``geometry_detection.primary_geometry_column`` picks among the
+    native columns (a standard geometry name, then the alphabetically first).
 
     When the file does carry a ``geo`` key, the one thing checked is its
     ``primary_column``. DuckDB's generated block names the FIRST geometry column
@@ -315,13 +317,15 @@ def derive_v2_geo_metadata(
             name: _geo_col_meta_from_stats(pf, i, logical, output_path)
             for i, (name, logical) in geo_cols.items()
         }
+        geo_cols_logical = dict(geo_cols.values())
 
-        if primary_column and primary_column in columns:
-            primary = primary_column
-        elif "geometry" in columns:
-            primary = "geometry"
-        else:
-            primary = sorted(columns)[0]
+        # Every described column is native, so the resolver's last step (the
+        # first native-typed column) always answers; the columns go in sorted so
+        # that step stays the alphabetical tie-break it has always been.
+        primary = primary_geometry_column(
+            [(name, geo_cols_logical[name]) for name in sorted(columns)],
+            geo={"primary_column": primary_column} if primary_column else None,
+        )
         return {"version": "2.0.0", "primary_column": primary, "columns": columns}
     finally:
         # Release the read handle before the caller writes to the file (Windows
