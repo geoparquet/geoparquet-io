@@ -76,7 +76,7 @@ EXPECTED_COUNTS = {
     "G1.retry_status_sets": 2,
     "G1.retry_after": 0,
     "G1.retry_wrappers": 0,
-    "G1.json_dumps": 40,
+    "G1.json_dumps": 35,
     "G1.parquet_metadata": 0,
     "G1.row_group_policy": 2,
     "G1.scheme_test": 0,
@@ -84,13 +84,13 @@ EXPECTED_COUNTS = {
     "G1.output_version": 0,
     "G1.geometry_stats": 0,
     "G1.edges": 0,
-    "G2.exemptions": 19,
-    "G3.pairs": 21,
-    "G3.baseline": 21,
-    "G3.pylint": 48,
-    "G13.options": 13,
-    "G13.bbox_parsers": 3,
-    "G4.whitelist": 180,
+    "G2.exemptions": 12,
+    "G3.pairs": 0,
+    "G3.baseline": 0,
+    "G3.pylint": 24,
+    "G13.options": 12,
+    "G13.bbox_parsers": 0,
+    "G4.whitelist": 177,
     "G4.tests_whitelist": 95,
 }
 
@@ -1667,7 +1667,9 @@ def _logical_type_concat(node: ast.AST) -> bool:
 
 #: Where a planar ``ST_Centroid(`` is a cell key: those sites take the
 #: owner's ``representative_point_sql``, which spells it for planar edges.
+#: ``index_ops.py`` is the IndexSpec driver, where add, sort and partition key.
 _CELL_KEY_DIRS = (
+    "geoparquet_io/core/index_ops.py",
     "geoparquet_io/core/add/",
     "geoparquet_io/core/partition/",
     "geoparquet_io/core/process/aggregate/",
@@ -2217,7 +2219,7 @@ def _measured_counts() -> dict[str, int]:
     counts["G3.baseline"] = len(_g3_baseline())
     counts["G3.pylint"] = sum(e.get("count", 1) for e in data["G3"]["pylint"])
     counts["G13.options"] = len(data["G13"]["options"])
-    counts["G13.bbox_parsers"] = len(data["G13"]["bbox_parsers"])
+    counts["G13.bbox_parsers"] = len(data["G13"].get("bbox_parsers", []))
     counts["G4.whitelist"] = len(_whitelist_entries())
     counts["G4.tests_whitelist"] = len(_whitelist_entries("tests_whitelist"))
     return counts
@@ -3349,6 +3351,15 @@ def test_g12_the_output_version_arm_leaves_non_decisions_alone(tmp_path, source)
     assert arm_hits(_plant(tmp_path, "output_version", source), "output_version") == [], source
 
 
+@pytest.mark.parametrize(
+    "name", ["ensure_h3_column", "_ensure_h3_column", "ensure_index_column", "ensurecell_column"]
+)
+def test_g12_g2_index_column_ensure_has_one_owner(tmp_path, name):
+    repo = _g2_tree(tmp_path, {"index_copy.py": f"def {name}(x):\n    return x\n"})
+    result = _run_owner_defs("--repo", str(repo))
+    assert result.returncode == 1 and name in result.stdout, result.stdout
+
+
 #: Every shape of an ``edges`` decision the G1.edges arm must see.
 EDGES_SHAPES = {
     "literal compare": 'def f(e):\n    return e == "spherical"\n',
@@ -3388,6 +3399,8 @@ CELL_KEY_PLANTS = {
     "geoparquet_io/core/add/some_cells.py": 'def f(g):\n    return f"h3_latlng_to_cell(ST_Y(ST_Centroid({g})), 0, 9)"\n',
     "geoparquet_io/core/partition/some_cells.py": 'SQL = "SELECT ST_Centroid(geometry) FROM t"\n',
     "geoparquet_io/core/process/aggregate/some_cells.py": 'def f(g):\n    return f"ST_Centroid({g})"\n',
+    # The IndexSpec driver, where every add/sort/partition cell key is built.
+    "geoparquet_io/core/index_ops.py": 'def f(g):\n    return f"ST_Y(ST_Centroid({g}))"\n',
 }
 
 

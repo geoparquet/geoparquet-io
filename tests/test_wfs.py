@@ -4489,22 +4489,21 @@ class TestBboxAxisRuleByCrs:
         assert sent[0] <= a0 <= sent[2]
         assert sent[1] <= a1 <= sent[3]
 
-    def test_a_user_bbox_across_the_antimeridian_is_not_tiled(self, caplog):
-        """Fourth review of #1278: treat it like a layer bbox that crosses it."""
-        from geoparquet_io.core.wfs import _get_tiling_bbox
+    def test_a_user_bbox_across_the_antimeridian_is_refused_before_tiling(self):
+        """Fourth review of #1278, now one rule: a WFS BBOX has no wrapped form.
 
-        layer = WFSLayerInfo(
-            typename="t:l",
-            title="",
-            crs_list=[],
-            default_crs=None,
-            bbox=(-180.0, -90.0, 180.0, 90.0),
-            geometry_column="geom",
-            available_formats=[],
-        )
-        with caplog.at_level(logging.WARNING):
-            assert _get_tiling_bbox((170.0, 50.0, -130.0, 72.0), True, layer, "EPSG:4326") is None
-        assert "antimeridian" in caplog.text
+        wfs_to_table refuses it by name (bbox_parse.refuse_wrap) before any
+        request, so the tiler never sees one.
+        """
+        from geoparquet_io.core.bbox_parse import AntimeridianBBoxError
+        from geoparquet_io.core.wfs import wfs_to_table
+
+        with (
+            patch("socket.getaddrinfo", side_effect=AssertionError("no request")) as dns,
+            pytest.raises(AntimeridianBBoxError),
+        ):
+            wfs_to_table("https://gpio.invalid/wfs", "t:l", bbox=(170.0, 50.0, -130.0, 72.0))
+        dns.assert_not_called()
 
 
 # =============================================================================

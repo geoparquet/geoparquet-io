@@ -15,6 +15,7 @@ import duckdb
 import pyarrow as pa
 import pytest
 
+from geoparquet_io.core.bbox_parse import parse_bbox
 from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.extract import (
@@ -27,7 +28,6 @@ from geoparquet_io.core.extract import (
     get_schema_columns,
     is_geographic_crs,
     looks_like_latlong_bbox,
-    parse_bbox,
     parse_geometry_input,
     validate_columns,
     validate_where_clause,
@@ -138,9 +138,9 @@ class TestParseBbox:
         assert "numeric" in str(exc_info.value).lower()
 
     def test_bbox_reversed_x_coordinates(self):
-        """Test bbox with reversed x coordinates (xmax < xmin)."""
+        """Reversed x beyond longitudes (xmax < xmin, not an antimeridian wrap)."""
         with pytest.raises(GeoParquetError) as exc_info:
-            parse_bbox("10,0,5,10")  # xmin=10, xmax=5 is invalid
+            parse_bbox("500000,0,400000,10")
         assert "reversed" in str(exc_info.value).lower()
         assert "xmin" in str(exc_info.value).lower()
 

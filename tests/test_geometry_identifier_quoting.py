@@ -46,6 +46,7 @@ from geoparquet_io.core.duckdb_metadata import (
     get_per_row_group_native_geo_stats,
 )
 from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, quote_identifier
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.stream_io import _wrap_query_with_wkb_conversion
 from tests.conftest import skip_if_geography_unavailable
 
@@ -531,14 +532,8 @@ class TestAddBboxStreamingQuoting:
             output_path=output_path,
             bbox_column_name=self.HOSTILE_BBOX_COL,
             verbose=False,
-            compression="ZSTD",
-            compression_level=None,
-            row_group_size_mb=None,
-            row_group_rows=None,
-            profile=None,
+            write=WriteOptions(compression="ZSTD", geoparquet_version="2.0"),
             force=force,
-            geoparquet_version="2.0",
-            memory_limit=None,
         )
 
         table = pq.read_table(output_path)

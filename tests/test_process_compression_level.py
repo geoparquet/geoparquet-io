@@ -307,9 +307,6 @@ class TestEveryProcessWriterResolves:
     DOWNSTREAM = {
         ("overview/run.py", "_write_overview"),
         ("overview/run.py", "_build_levels"),
-        ("simplify.py", "_footer_kv_via_funnel"),
-        ("simplify.py", "_simplify_file_streaming"),
-        ("simplify.py", "_simplify_then_refresh_metrics"),
     }
 
     def _writers(self):

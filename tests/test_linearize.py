@@ -696,7 +696,13 @@ class TestCliCurveParityWithoutPrescan:
         out.write_bytes(b"stale bytes the user put here")
         result = CliRunner().invoke(
             cli,
-            ["convert", str(self._unscannable_copy(tmp_path)), str(out), "--skip-hilbert"],
+            [
+                "convert",
+                str(self._unscannable_copy(tmp_path)),
+                str(out),
+                "--skip-hilbert",
+                "--overwrite",
+            ],
         )
         assert result.exit_code == 0, result.output
         assert self._area(out) == pytest.approx(math.pi, rel=0.005)
@@ -714,7 +720,14 @@ class TestCliCurveParityWithoutPrescan:
         precious = b"the user's own file"
         out.write_bytes(precious)
         result = CliRunner().invoke(
-            cli, ["convert", str(self._surface_copy(tmp_path)), str(out), "--skip-hilbert"]
+            cli,
+            [
+                "convert",
+                str(self._surface_copy(tmp_path)),
+                str(out),
+                "--skip-hilbert",
+                "--overwrite",
+            ],
         )
         assert result.exit_code != 0
         assert "CONVERT_TO_LINEAR" in result.output
@@ -738,6 +751,7 @@ class TestCliCurveParityWithoutPrescan:
                 str(out),
                 "--skip-hilbert",
                 "--no-linearize-curves",
+                "--overwrite",
             ],
         )
         assert result.exit_code != 0

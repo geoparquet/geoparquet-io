@@ -3,25 +3,3 @@
 # Each pair's reason (the track that removes it, or permanent) is in
 # scripts/owner_exemptions.toml under [[G3.pairs]]. This list only falls: delete a
 # line with the copy (check_duplicates.py --update drops gone pairs). Never add one.
-
-geoparquet_io/cli/commands/partition.py:partition_a5|geoparquet_io/cli/commands/partition.py:partition_h3
-geoparquet_io/cli/commands/partition.py:partition_a5|geoparquet_io/cli/commands/partition.py:partition_s2
-geoparquet_io/cli/commands/partition.py:partition_h3|geoparquet_io/cli/commands/partition.py:partition_s2
-geoparquet_io/core/add/a5.py:_add_a5_streaming.make_query|geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query
-geoparquet_io/core/add/a5.py:_add_a5_streaming.make_query|geoparquet_io/core/add/s2.py:_add_s2_streaming.make_query
-geoparquet_io/core/add/a5.py:_add_a5_streaming|geoparquet_io/core/add/h3.py:_add_h3_streaming
-geoparquet_io/core/add/a5.py:_add_a5_streaming|geoparquet_io/core/add/s2.py:_add_s2_streaming
-geoparquet_io/core/add/a5.py:add_a5_column|geoparquet_io/core/add/h3.py:add_h3_column
-geoparquet_io/core/add/a5.py:add_a5_table|geoparquet_io/core/add/h3.py:add_h3_table
-geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query|geoparquet_io/core/add/s2.py:_add_s2_streaming.make_query
-geoparquet_io/core/add/h3.py:_add_h3_streaming|geoparquet_io/core/add/s2.py:_add_s2_streaming
-geoparquet_io/core/benchmark.py:benchmark_geopandas_fiona|geoparquet_io/core/benchmark.py:benchmark_geopandas_pyogrio
-geoparquet_io/core/partition/auto_resolution.py:_calculate_a5_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_h3_resolution
-geoparquet_io/core/partition/auto_resolution.py:_calculate_a5_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_quadkey_resolution
-geoparquet_io/core/partition/auto_resolution.py:_calculate_h3_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_quadkey_resolution
-geoparquet_io/core/partition/by_a5.py:_ensure_a5_column|geoparquet_io/core/partition/by_h3.py:_ensure_h3_column
-geoparquet_io/core/partition/by_a5.py:_ensure_a5_column|geoparquet_io/core/partition/by_quadkey.py:_ensure_quadkey_column
-geoparquet_io/core/partition/by_a5.py:_ensure_a5_column|geoparquet_io/core/partition/by_s2.py:_ensure_s2_column
-geoparquet_io/core/partition/by_a5.py:partition_by_a5|geoparquet_io/core/partition/by_h3.py:partition_by_h3
-geoparquet_io/core/partition/by_h3.py:_ensure_h3_column|geoparquet_io/core/partition/by_quadkey.py:_ensure_quadkey_column
-geoparquet_io/core/partition/by_h3.py:_ensure_h3_column|geoparquet_io/core/partition/by_s2.py:_ensure_s2_column

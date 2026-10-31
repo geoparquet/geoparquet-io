@@ -389,3 +389,34 @@ class TestBenchmarkSuiteCLI:
 
         # Should complete (may skip some operations)
         assert result.exit_code == 0 or "not yet" in result.output.lower()
+
+
+class TestGeopandasEngines:
+    """One geopandas harness, the engine a parameter (#1367 G3 pair)."""
+
+    def test_each_registry_entry_runs_its_own_engine(self):
+        from geoparquet_io.core.benchmark import BENCHMARK_FUNCTIONS, benchmark_geopandas
+
+        for engine in ("fiona", "pyogrio"):
+            entry = BENCHMARK_FUNCTIONS[f"geopandas_{engine}"]
+            assert entry.func is benchmark_geopandas
+            assert entry.keywords == {"engine": engine}
+
+    def test_pyogrio_converts_the_file(self, tmp_path):
+        pytest.importorskip("pyogrio")
+        from geoparquet_io.core.benchmark import BENCHMARK_FUNCTIONS
+
+        out = tmp_path / "out.parquet"
+        source = Path(__file__).parent / "data" / "buildings_test.geojson"
+        elapsed, peak = BENCHMARK_FUNCTIONS["geopandas_pyogrio"](source, out)
+        assert elapsed >= 0 and peak > 0
+        import pyarrow.parquet as pq
+
+        assert pq.read_metadata(out).num_rows > 0
+
+    def test_an_unknown_engine_is_refused_by_geopandas(self, tmp_path):
+        from geoparquet_io.core.benchmark import benchmark_geopandas
+
+        source = Path(__file__).parent / "data" / "buildings_test.geojson"
+        with pytest.raises(ValueError, match="engine"):
+            benchmark_geopandas(source, tmp_path / "o.parquet", engine="nope")

@@ -33,6 +33,7 @@ from geoparquet_io.core.crs_utils import (
     is_default_crs,
 )
 from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.reproject import (
     _detect_crs_from_table,
     _detect_geometry_column_from_table,
@@ -918,11 +919,8 @@ class TestReprojectBboxPreservation:
             output_path=output_file,
             target_crs="EPSG:3857",
             source_crs=None,
-            compression="ZSTD",
-            compression_level=None,
+            write=WriteOptions(compression="ZSTD"),
             verbose=False,
-            profile=None,
-            geoparquet_version=None,
         )
 
         # Verify bbox column exists in output

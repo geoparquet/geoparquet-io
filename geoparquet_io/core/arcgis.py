@@ -20,6 +20,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_types import _cast_table_to_schema
+from geoparquet_io.core.bbox_parse import parse_bbox, refuse_wrap
 from geoparquet_io.core.column_selection import (
     resolve_columns_against_schema,
     split_column_list,
@@ -1640,6 +1641,10 @@ def arcgis_to_table(
         PyArrow Table with WKB geometry column
     """
     configure_verbose(verbose)
+    # The one bbox verdict (bbox_parse), before any request. An Esri envelope
+    # has no wrapped form, so an antimeridian-crossing bbox is refused by name.
+    if bbox is not None:
+        bbox = refuse_wrap(parse_bbox(bbox), "ArcGIS")
 
     # Resolve and validate the requested output CRS before any network work
     # so a bad value fails fast with a clean error. "native" needs the layer

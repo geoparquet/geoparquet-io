@@ -48,6 +48,7 @@ __all__ = [
 ]
 
 from geoparquet_io.core.arrow_types import _cast_table_to_schema, _compute_unified_schema
+from geoparquet_io.core.bbox_parse import BBox, parse_bbox, refuse_wrap
 from geoparquet_io.core.crs_utils import _projjson_from_authority
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
@@ -1448,7 +1449,7 @@ def _bbox_hint_lines(
 
 def _bbox_extent_lines(crs: str, layer_bbox: tuple[float, float, float, float] | None) -> list[str]:
     """The layer extent from capabilities, in lon/lat and in ``crs``."""
-    if not layer_bbox or layer_bbox[0] > layer_bbox[2]:
+    if not layer_bbox or BBox(*layer_bbox).crosses_antimeridian(geographic=True):
         return []
     line = f"Layer extent is {_format_bbox(layer_bbox)} in lon/lat"
     native = _layer_extent_in_crs(crs, layer_bbox)
@@ -1461,7 +1462,11 @@ def _layer_extent_in_crs(
     crs: str, layer_bbox: tuple[float, float, float, float] | None
 ) -> tuple[float, float, float, float] | None:
     """The lon/lat layer extent reprojected into a projected ``crs``, or None."""
-    if not layer_bbox or layer_bbox[0] > layer_bbox[2] or _is_geographic_crs(crs):
+    if (
+        not layer_bbox
+        or BBox(*layer_bbox).crosses_antimeridian(geographic=True)
+        or _is_geographic_crs(crs)
+    ):
         return None
     clipped = _clip_to_area_of_use_or_none(layer_bbox, crs)
     return _try_lon_lat_bbox_in_crs(clipped, crs) if clipped else None
@@ -3154,21 +3159,19 @@ def _get_tiling_bbox(
     (it is already in the request CRS). Otherwise falls back to the layer's
     advertised WGS84 bbox from capabilities, reprojected into ``crs``, since
     each tile is sent labelled with ``crs``. Returns None if no bbox is
-    available, a bbox crosses the antimeridian (xmin > xmax, which a midpoint
-    split cannot tile), or the layer bbox cannot be reprojected.
+    available, the layer bbox crosses the antimeridian (xmin > xmax, which a
+    midpoint split cannot tile), or the layer bbox cannot be reprojected.
 
     Like every bbox gpio holds, the result is in x,y order (east-first, see
     ``_first_axis_is_north``). ``_build_bbox_param`` swaps it, once, when the
     request goes out.
     """
     if user_bbox and use_server_bbox:
-        if user_bbox[0] > user_bbox[2]:
-            warn("The --bbox crosses the antimeridian (xmin > xmax), so auto-tiling is off.")
-            return None
+        # wfs_to_table has refused a wrapped user bbox already (refuse_wrap).
         return user_bbox
     if not layer_info.bbox:
         return None
-    if layer_info.bbox[0] > layer_info.bbox[2]:
+    if BBox(*layer_info.bbox).crosses_antimeridian(geographic=True):
         warn("The layer bbox crosses the antimeridian, so auto-tiling is off.")
         return None
     if _crs_matches(crs, "EPSG:4326"):
@@ -3319,6 +3322,10 @@ def wfs_to_table(
         PyArrow Table with GeoParquet-compatible geometry
     """
     configure_verbose(verbose)
+    # The one bbox verdict (bbox_parse), before any request. A WFS BBOX has no
+    # wrapped form (and a midpoint split cannot tile one), so it is refused by name.
+    if bbox is not None:
+        bbox = refuse_wrap(parse_bbox(bbox), "WFS")
 
     # Handle auto version negotiation
     if version == "auto":
@@ -3501,7 +3508,7 @@ def wfs_to_table(
         # The bbox is in the requested CRS, but the geometries are in the CRS the
         # server actually returned. When those differ, align the bbox to the
         # geometries' CRS so the filter doesn't drop valid rows (issue #499).
-        filter_bbox = bbox
+        filter_bbox: tuple[float, float, float, float] = bbox
         if server_crs and not _crs_matches(server_crs, crs):
             filter_bbox = _reproject_bbox_for_local_filter(bbox, crs, server_crs)
         filter_sql = _build_local_bbox_filter(filter_bbox, "geometry")
@@ -3772,6 +3779,8 @@ def convert_wfs_layers_to_directory(
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     configure_verbose(verbose)
+    if bbox is not None:
+        bbox = refuse_wrap(parse_bbox(bbox), "WFS")
 
     output_path = Path(output_dir)
 

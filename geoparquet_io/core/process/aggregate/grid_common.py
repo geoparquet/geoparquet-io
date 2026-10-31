@@ -21,16 +21,13 @@ from geoparquet_io.core.arrow_geo_metadata import _detect_bbox_column_from_table
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.crs_utils import (
-    crs_transform_sql_expr,
     extract_crs_from_parquet,
     extract_crs_from_table,
-    is_geographic_crs,
 )
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     fetch_one,
     get_duckdb_connection,
-    load_community_extension,
     quote_identifier,
     register_arrow,
     sql_literal,
@@ -38,12 +35,18 @@ from geoparquet_io.core.duckdb_utils import (
     validate_where_clause,
     where_sql_fragment,
 )
-from geoparquet_io.core.edges import representative_point_sql
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import has_glob_pattern, resolve_file_url
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
+from geoparquet_io.core.index_ops import (
+    IndexSpec,
+    index_point,
+    load_index,
+    validate_index_resolution,
+    validate_partition_arguments,
+)
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success, warn
 from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.process.aggregate.common import (
@@ -92,9 +95,7 @@ class GridScheme:
     """
 
     name: str
-    extension: str
-    min_resolution: int
-    max_resolution: int
+    spec: IndexSpec
     default_column: str
     key_template: str
     boundary_template: str
@@ -288,24 +289,6 @@ def _validate_point_column(con, relation: str, bucket_point: str) -> None:
     )
 
 
-def _bbox_center_lon_sql(qbox: str, source_crs) -> str:
-    """Longitude of the bbox center, wraparound-aware for the antimeridian.
-
-    GeoJSON/GeoParquet coverings encode an antimeridian crossing as
-    ``xmin > xmax`` (Fiji: xmin=179.9, xmax=-179.9); the naive midpoint would
-    land near lon 0. For those rows take the +360-shifted midpoint and wrap
-    values > 180 back into (-180, 180]. Only geographic CRSs get this
-    treatment: in a projected CRS ``xmin > xmax`` cannot encode a dateline
-    crossing, so the plain midpoint is always correct there.
-    """
-    plain = f"({qbox}.xmin + {qbox}.xmax) / 2.0"
-    if not is_geographic_crs(source_crs):
-        return plain
-    shifted = f"(({qbox}.xmin + {qbox}.xmax + 360.0) / 2.0)"
-    wrapped = f"CASE WHEN {shifted} > 180.0 THEN {shifted} - 360.0 ELSE {shifted} END"
-    return f"CASE WHEN {qbox}.xmin > {qbox}.xmax THEN {wrapped} ELSE {plain} END"
-
-
 def bucket_point_expr(
     con: duckdb.DuckDBPyConnection,
     relation: str,
@@ -317,10 +300,10 @@ def bucket_point_expr(
 ) -> tuple[str, tuple[str, ...]]:
     """Build the keying-point expression for a source relation.
 
-    Returns ``(pt_expr, exclude_columns)``. ``pt_expr`` yields a lon/lat POINT
-    (reprojected from a non-CRS84 ``source_crs``, #525). A geometry keys from
-    ``edges.representative_point_sql`` with its column's ``edges`` (the input's
-    non-planar columns), the point the ``add`` cell keys take (#1293). In ``bbox`` and
+    Returns ``(pt_expr, exclude_columns)``. ``pt_expr`` is ``index_ops.index_point``,
+    the lon/lat POINT the ``add`` cell keys take (reprojected from a non-CRS84
+    ``source_crs``, #525): a geometry's representative point for its column's
+    ``edges`` (#1293), or a bbox row's antimeridian-aware midpoint. In ``bbox`` and
     point-column modes the main geometry column is excluded from the passthrough
     SELECT so Parquet projection pushdown never reads its column chunks (#567).
     The bbox/point column is validated against ``relation`` so a typo fails with
@@ -328,10 +311,8 @@ def bucket_point_expr(
     """
     _validate_bucket_point_args(bucket_point, bbox_column)
     if bucket_point == BUCKET_POINT_GEOMETRY:
-        geom_expr = crs_transform_sql_expr(
-            geometry_to_geom_expr(con, relation, geom_col), source_crs
-        )
-        return representative_point_sql(geom_expr, (edges or {}).get(geom_col)), ()
+        geom_expr = geometry_to_geom_expr(con, relation, geom_col)
+        return index_point(geom_expr, source_crs, edges=(edges or {}).get(geom_col)), ()
     if bucket_point == BUCKET_POINT_BBOX:
         if not bbox_column:
             raise InvalidParameterError(
@@ -339,18 +320,13 @@ def bucket_point_expr(
                 "bucket point 'bbox' requires a bbox column name (none given or detected)",
             )
         _validate_bbox_struct_column(con, relation, bbox_column)
-        qbox = quote_identifier(bbox_column)
-        lon = _bbox_center_lon_sql(qbox, source_crs)
-        pt = f"ST_Point({lon}, ({qbox}.ymin + {qbox}.ymax) / 2.0)"
         # The bbox covering column is stored in the file's CRS, same as geometry.
-        return crs_transform_sql_expr(pt, source_crs), (geom_col,)
+        return index_point(None, source_crs, bbox_column), (geom_col,)
     # Any other value names an existing (point) geometry column. The point is a
     # no-op for points and keeps non-point columns keyable rather than erroring.
     _validate_point_column(con, relation, bucket_point)
-    point_expr = crs_transform_sql_expr(
-        geometry_to_geom_expr(con, relation, bucket_point), source_crs
-    )
-    return representative_point_sql(point_expr, (edges or {}).get(bucket_point)), (geom_col,)
+    point_expr = geometry_to_geom_expr(con, relation, bucket_point)
+    return index_point(point_expr, source_crs, edges=(edges or {}).get(bucket_point)), (geom_col,)
 
 
 def cell_area_expr(scheme: GridScheme, resolution: int, cell_expr: str) -> str | None:
@@ -695,16 +671,12 @@ def _resolve_resolution(
     """
     from geoparquet_io.core.partition import auto_resolution as _auto_resolution
 
-    if auto and resolution is not None:
-        raise InvalidParameterError("resolution", "Pass either --resolution or --auto, not both")
-    if not auto and resolution is None:
-        raise InvalidParameterError(
-            "resolution", f"{scheme.name.upper()} aggregation requires --resolution or --auto"
-        )
+    spec = scheme.spec
+    validate_partition_arguments(spec, resolution, auto=auto)
     if auto:
         resolution = _auto_resolution.calculate_auto_resolution(
             input_parquet,
-            scheme.name,
+            spec.name,
             target_rows_per_partition=target_per_cell,
             max_partitions=max_cells,
             verbose=verbose,
@@ -712,12 +684,7 @@ def _resolve_resolution(
         )
         if verbose:
             debug(f"Auto-selected {scheme.name} resolution {resolution}")
-    if not scheme.min_resolution <= resolution <= scheme.max_resolution:
-        raise InvalidParameterError(
-            "resolution",
-            f"{scheme.name.upper()} resolution must be "
-            f"{scheme.min_resolution}-{scheme.max_resolution}, got {resolution}",
-        )
+    validate_index_resolution(scheme.spec, resolution)
     return resolution
 
 
@@ -937,7 +904,7 @@ def aggregate_grid_file(
         load_spatial=True, load_httpfs=True, memory_limit=memory_limit, verbose=verbose
     )
     try:
-        load_community_extension(con, scheme.extension, feature=f"{scheme.name} aggregation")
+        load_index(con, scheme.spec, feature=f"{scheme.name} aggregation")
         con.execute("SET geometry_always_xy = true")
 
         # The columns a user may name in --metric/--breakdown: everything the
@@ -1040,17 +1007,12 @@ def aggregate_grid_table(
     _validate_bucket_point_args(bucket_point, bbox_column)
     if bucket_point == BUCKET_POINT_BBOX:
         bbox_column = _resolve_bbox_column_for_table(table, bbox_column)
-    if not scheme.min_resolution <= resolution <= scheme.max_resolution:
-        raise InvalidParameterError(
-            "resolution",
-            f"{scheme.name.upper()} resolution must be "
-            f"{scheme.min_resolution}-{scheme.max_resolution}, got {resolution}",
-        )
+    validate_index_resolution(scheme.spec, resolution)
 
     geom_col = geometry_column or "geometry"
     con = open_bounded_connection(load_spatial=True, load_httpfs=False, memory_limit=memory_limit)
     try:
-        load_community_extension(con, scheme.extension, feature=f"{scheme.name} aggregation")
+        load_index(con, scheme.spec, feature=f"{scheme.name} aggregation")
         con.execute("SET geometry_always_xy = true")
         if bucket_point == BUCKET_POINT_BBOX:
             warn_planar_math("aggregate", table, geom_col)

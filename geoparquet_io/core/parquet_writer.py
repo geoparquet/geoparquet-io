@@ -62,8 +62,8 @@ from __future__ import annotations
 
 import math
 from collections.abc import Collection, Iterator, Mapping
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast, overload
+from dataclasses import dataclass, fields, replace
+from typing import TYPE_CHECKING, Any, cast, overload
 
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
@@ -391,6 +391,77 @@ def resolve_row_group_rows_for_table(
         return DEFAULT_ROW_GROUP_ROWS
     # resolve answers None only for an MB target, so there is one here.
     return _rows_for_byte_target(table, cast(float, row_group_size_mb), verbose)
+
+
+def regroup(chunks, rows: int):
+    """Yield the stream's rows in groups of exactly ``rows``; the last takes the remainder.
+
+    The one regrouper: every streamed write cuts its row groups here, after a
+    resolver above has decided ``rows``. ``chunks`` are Arrow record batches or
+    tables, and each group comes back as the same kind (``concat_batches`` /
+    ``concat_tables`` of zero-copy slices), so it holds at most ``rows`` rows.
+    A source in small or uneven groups (DuckDB 2.0's ``to_arrow_reader`` only
+    caps a batch at ``n``; a file's own row groups; batches shrunk by a
+    filter) comes out in whole groups.
+    """
+    import pyarrow as pa
+
+    pending: list = []
+    held = 0
+
+    def joined():
+        if isinstance(pending[0], pa.Table):
+            return pa.concat_tables(pending)
+        return pa.concat_batches(pending)
+
+    for chunk in chunks:
+        while chunk.num_rows:
+            take = min(rows - held, chunk.num_rows)
+            pending.append(chunk.slice(0, take))
+            held += take
+            chunk = chunk.slice(take)
+            if held == rows:
+                yield joined()
+                pending, held = [], 0
+    if held:
+        yield joined()
+
+
+def resolve_row_group_rows_for_sample(
+    table,
+    row_group_rows: int | None,
+    row_group_size_mb: float | None,
+    *,
+    final: bool = True,
+    verbose: bool = False,
+) -> int | None:
+    """:func:`resolve_row_group_rows_for_table` on a bounded sample of ``table``.
+
+    For a writer that streams: ``table`` is the leading rows it is about to
+    write, and at most :data:`_MB_ESTIMATE_SAMPLE_ROWS` of them are measured
+    -- the bound :func:`resolve_row_group_rows_for_query` samples a query with
+    -- so no driver picks a sample size of its own. A table within the bound
+    is measured whole, which is exactly what the table funnel measures.
+
+    ``final=False`` says more rows are coming: below the bound the answer is
+    ``None`` (keep buffering) for a byte target, so the sample is the same one
+    whichever batch size the rows arrived in.
+    """
+    resolved = resolve_row_group_rows(row_group_rows, row_group_size_mb)
+    if resolved is not None:
+        return resolved
+    if not final and table.num_rows < _MB_ESTIMATE_SAMPLE_ROWS:
+        return None
+    if table.num_rows > _MB_ESTIMATE_SAMPLE_ROWS:
+        import pyarrow as pa
+        import pyarrow.compute as pc
+
+        # take() copies, so the buffer sizes are the sample's, not the
+        # whole table's buffers a zero-copy slice would still report.
+        table = pc.take(table, pa.array(range(_MB_ESTIMATE_SAMPLE_ROWS)))
+    return resolve_row_group_rows_for_table(
+        table, row_group_rows, row_group_size_mb, verbose=verbose
+    )
 
 
 def resolve_row_group_rows_for_query(
@@ -1136,3 +1207,58 @@ def write_arrow_table(
 
     if verbose:
         success(f"Wrote {table.num_rows:,} rows to {output_path}")
+
+
+# ---------------------------------------------------------------------------
+# The write-options object (#1367, T5c)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WriteOptions:
+    """The write facts a command hands the funnel, as one value.
+
+    Every write path used to forward the same seven keywords from its public
+    entry point through each private driver to ``write_parquet_with_metadata``
+    / ``stream_io.write_output`` / ``stream_io.execute_transform``, and the
+    lists drifted into 18 copies (pylint R0801). A public core entry point keeps
+    its keyword signature (the CLI and the Python API call it) and builds this
+    once with :meth:`pick` from its own parameters; the drivers pass it along,
+    and the funnel call expands it once (:meth:`funnel_kwargs`).
+
+    Each field means what leaving the funnel's keyword out means when unset:
+    ``None`` everywhere, which the facade resolves (codec ZSTD, the default
+    row-group count, the auto output version, gpio's memory default).
+    """
+
+    compression: str | None = None
+    compression_level: int | None = None
+    row_group_size_mb: float | None = None
+    row_group_rows: int | None = None
+    profile: str | None = None
+    geoparquet_version: str | None = None
+    memory_limit: str | None = None
+
+    @classmethod
+    def pick(cls, values: Mapping[str, Any]) -> WriteOptions:
+        """The options named in *values*; other keys are ignored, absent fields stay unset."""
+        return cls(**{f.name: values[f.name] for f in fields(cls) if f.name in values})
+
+    def sets_output_layout(self) -> bool:
+        """Whether any option that decides the written bytes was set.
+
+        Codec, level, row-group size and output version shape the file; the
+        AWS profile and the memory limit do not. A writer that could copy its
+        input verbatim (``add bbox`` over a file that already has the column)
+        may do so only when this is False, since a copy reproduces whatever the
+        input was written with.
+        """
+        return replace(self, profile=None, memory_limit=None) != WriteOptions()
+
+    def funnel_kwargs(self) -> dict[str, Any]:
+        """The keywords every funnel takes, for ``funnel(..., **options.funnel_kwargs())``.
+
+        Every funnel accepts all seven, including the Arrow-table ones, which
+        accept and ignore the fields that do not apply to them.
+        """
+        return {f.name: getattr(self, f.name) for f in fields(self)}

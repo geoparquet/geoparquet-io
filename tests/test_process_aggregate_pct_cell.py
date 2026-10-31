@@ -17,12 +17,15 @@ children's percentages.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import duckdb
 import pyarrow as pa
 import pytest
 
 from geoparquet_io.core.duckdb_utils import fetch_one, load_community_extension
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME
 from geoparquet_io.core.process.aggregate.by_h3 import H3_SCHEME
@@ -151,9 +154,7 @@ def test_the_h3_cell_area_is_measured_per_cell():
 def test_a_scheme_with_no_area_function_has_no_cell_area():
     bare = A5_SCHEME.__class__(
         name="bare",
-        extension="",
-        min_resolution=0,
-        max_resolution=0,
+        spec=replace(get_index_spec("h3"), extension=None, min_resolution=0, max_resolution=0),
         default_column="cell",
         key_template="{pt}",
         boundary_template="{cell}",

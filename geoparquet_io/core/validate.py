@@ -17,6 +17,7 @@ from typing import Any
 from rich.console import Console
 from rich.markup import escape
 
+from geoparquet_io.core.bbox_parse import BBox, within_wrapped_x_sql
 from geoparquet_io.core.check_verdict import validation_verdict
 from geoparquet_io.core.crs_utils import (
     CRS_ABSENT,
@@ -1590,10 +1591,8 @@ def _x_within_sql(geom_expr: str, xmin, xmax) -> str:
     lo, hi = _sql_float(xmin), _sql_float(xmax)
     if xmin <= xmax:
         return f"ST_XMin({geom_expr}) >= {lo} AND ST_XMax({geom_expr}) <= {hi}"
-    return (
-        f"list_bool_and([ST_X(p.geom) <= {hi} OR ST_X(p.geom) >= {lo} "
-        f"FOR p IN ST_Dump(ST_Points({geom_expr}))])"
-    )
+    inside = within_wrapped_x_sql("ST_X(p.geom)", lo, hi)
+    return f"list_bool_and([{inside} FOR p IN ST_Dump(ST_Points({geom_expr}))])"
 
 
 def _build_bbox_query(
@@ -1698,6 +1697,15 @@ def _interpret_bbox_result(result: tuple | None, geom_col: str) -> ValidationChe
     )
 
 
+def _wrap_refusal(crs, subject: str = "this bbox is") -> str:
+    """Why an xmin > xmax extent is not the wrap (BBox.crosses_antimeridian said no)."""
+    if not is_geographic_crs(crs):
+        return (
+            f"applies only to geographic CRS, so {subject} invalid for the declared projected CRS"
+        )
+    return f"applies only to longitudes in [-180, 180], so {subject} invalid"
+
+
 def _check_bbox_contains_data(
     parquet_file: str,
     geom_col: str,
@@ -1734,15 +1742,14 @@ def _check_bbox_contains_data(
             ),
             category="data_validation",
         )
-    wrapped = xy[0] > xy[2]
-    if wrapped and not is_geographic_crs(crs):
+    wrapped = BBox(xy[0], xy[1], xy[2], xy[3]).crosses_antimeridian(is_geographic_crs(crs))
+    if xy[0] > xy[2] and not wrapped:
         return ValidationCheck(
             name=f"bbox_contains_data_{geom_col}",
             status=CheckStatus.FAILED,
             message=(
                 "declared bbox has xmin > xmax; the antimeridian wrap-around reading "
-                "(RFC 7946, 5.2) applies only to geographic CRS, so this bbox is "
-                "invalid for the declared projected CRS"
+                f"(RFC 7946, 5.2) {_wrap_refusal(crs)}"
             ),
             category="data_validation",
         )
@@ -2453,7 +2460,10 @@ def _check_geography_stats_bbox(
             details="; ".join(issues),
             category="parquet_geo_types",
         )
-    wrapped = any(c["xmin"] > c["xmax"] for c in chunks)
+    wrapped = any(
+        BBox(c["xmin"], c["ymin"], c["xmax"], c["ymax"]).crosses_antimeridian(geographic=True)
+        for c in chunks
+    )
     wrap_note = " (xmin > xmax read as the antimeridian wrap, RFC 7946 5.2)" if wrapped else ""
     return ValidationCheck(
         name=name,
@@ -2846,10 +2856,11 @@ def _check_native_geo_statistics(
             )
             # These values may now wrap the antimeridian (#886), and a bare
             # xmin > xmax reads as corrupt metadata; say which it is.
+            wraps = BBox(
+                geo_bbox["xmin"], geo_bbox["ymin"], geo_bbox["xmax"], geo_bbox["ymax"]
+            ).crosses_antimeridian(geographic)
             wrap_note = (
-                " (statistics interpreted as antimeridian-crossing, RFC 7946 5.2)"
-                if geo_bbox["xmin"] > geo_bbox["xmax"]
-                else ""
+                " (statistics interpreted as antimeridian-crossing, RFC 7946 5.2)" if wraps else ""
             )
             return ValidationCheck(
                 name=f"native_geo_stats_{geom_col}",
@@ -3004,9 +3015,19 @@ def _check_native_geo_stats_contains_data(
         ymax = geo_bbox["ymax"]
         # Parquet's geospatial statistics may legally wrap the antimeridian
         # (xmin > xmax), the same reading _check_bbox_contains_data applies --
-        # and, like there, only for a geographic CRS: a projected wrap was
-        # refused per row group above.
-        wrapped = xmin > xmax
+        # and, like there, only for a geographic CRS (a projected wrap was
+        # refused per row group above); BBox.crosses_antimeridian is the rule.
+        wrapped = BBox(xmin, ymin, xmax, ymax).crosses_antimeridian(is_geographic_crs(crs))
+        if xmin > xmax and not wrapped:
+            return ValidationCheck(
+                name=f"native_geo_stats_contains_data_{geom_col}",
+                status=CheckStatus.FAILED,
+                message=(
+                    "geospatial statistics have xmin > xmax; the antimeridian wrap-around "
+                    f"reading (RFC 7946, 5.2) {_wrap_refusal(crs, 'these statistics are')}"
+                ),
+                category="parquet_geo_types",
+            )
 
         limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
 

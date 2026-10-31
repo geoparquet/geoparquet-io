@@ -6,6 +6,7 @@ and reduce code duplication.
 """
 
 import math
+from typing import Any
 
 import click
 from click.core import ParameterSource
@@ -87,8 +88,9 @@ def parse_row_group_options(
     Raises:
         click.UsageError: If both options are provided or if size string is invalid
     """
-    if row_group_size and row_group_size_mb:
-        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
+    refuse_together(
+        ("--row-group-size", row_group_size), ("--row-group-size-mb", row_group_size_mb)
+    )
 
     if not row_group_size_mb:
         return None
@@ -110,6 +112,22 @@ DEFAULT_KDTREE_APPROX = 100000
 # nor ``--auto``, and the floor for a non-positive ``--auto``. Both commands
 # quote it in ``--auto``'s help text, so they import it too.
 DEFAULT_KDTREE_TARGET_ROWS = 120000
+
+
+def refuse_together(first: tuple[str, Any], second: tuple[str, Any], *, end: str = "") -> None:
+    """Refuse two options given together, in the one wording every command uses.
+
+    Each argument is ``(flag, given)``; *given* is read for truth, so a caller
+    states what "given" means for its option (a set flag, a value that is not
+    ``None``, a source that is not ``ParameterSource.DEFAULT``).
+
+    Raises:
+        click.UsageError: ``"<first> and <second> are mutually exclusive<end>"``
+            when both were given.
+    """
+    (first_flag, first_given), (second_flag, second_given) = first, second
+    if first_given and second_given:
+        raise click.UsageError(f"{first_flag} and {second_flag} are mutually exclusive{end}")
 
 
 def resolve_kdtree_options(
@@ -150,8 +168,7 @@ def resolve_kdtree_options(
             ``--approx`` the user supplied, or a ``--partitions`` value that is
             not a power of two of at least 2.
     """
-    if sum([partitions is not None, auto is not None]) > 1:
-        raise click.UsageError("--partitions and --auto are mutually exclusive")
+    refuse_together(("--partitions", partitions is not None), ("--auto", auto is not None))
 
     if partitions is None and auto is None:
         auto = DEFAULT_KDTREE_TARGET_ROWS
@@ -159,8 +176,7 @@ def resolve_kdtree_options(
     if partitions is not None and (partitions < 2 or (partitions & (partitions - 1)) != 0):
         raise click.UsageError(f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}")
 
-    if exact and approx_source is not ParameterSource.DEFAULT:
-        raise click.UsageError("--approx and --exact are mutually exclusive")
+    refuse_together(("--approx", approx_source is not ParameterSource.DEFAULT), ("--exact", exact))
 
     sample_size = None if exact else approx
 
@@ -421,6 +437,30 @@ def overwrite_option(
         return click.option(*decls, is_flag=True, help=help_text)(command)
 
     return add(func) if func is not None else add
+
+
+def limit_option(*, help: str):
+    """``--limit``: the most rows (or features) a command returns, never negative.
+
+    Each extract command words its own help; the type is the one rule, so a
+    negative count is a usage error everywhere instead of reaching SQL as
+    ``LIMIT -1`` (#1367 G13).
+    """
+    return click.option("--limit", type=click.IntRange(0, None), help=help)
+
+
+def timeout_option(*, default: float, help: str, show_default: bool = False):
+    """``--timeout``: per-request seconds for a service extract, any positive number.
+
+    The default is the caller's: each service has its own budget (#1367 G13).
+    """
+    return click.option(
+        "--timeout",
+        type=click.FloatRange(min=0, min_open=True),
+        default=default,
+        show_default=show_default,
+        help=help,
+    )
 
 
 def strict_option(func):
@@ -748,9 +788,7 @@ def partition_options_base(func):
     func = click.option(
         "--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure"
     )(func)
-    func = click.option("--overwrite", is_flag=True, help="Overwrite existing partition files")(
-        func
-    )
+    func = overwrite_option(func, help_text="Overwrite existing partition files")
     func = click.option(
         "--preview",
         is_flag=True,
@@ -1155,24 +1193,11 @@ def handle_directory_sub_partition(
     input_parquet: str,
     partition_type: str,
     min_size: str | None,
-    resolution: int | None = None,
-    level: int | None = None,
-    partition_resolution: int | None = None,
-    use_centroid: bool = False,
-    in_place: bool = False,
-    hive: bool = False,
-    overwrite: bool = False,
-    verbose: bool = False,
-    force: bool = False,
-    skip_analysis: bool = True,
-    compression: str | None = None,
-    compression_level: int | None = None,
-    auto: bool = False,
-    target_rows: int = 100000,
-    max_partitions: int = 10000,
+    *,
     preview: bool = False,
     column_name: str | None = None,
     output_folder: str | None = None,
+    **run,
 ) -> bool:
     """
     Handle directory input with --min-size for partition commands.
@@ -1185,25 +1210,13 @@ def handle_directory_sub_partition(
         input_parquet: Path to input file or directory
         partition_type: Type of partition ("a5", "h3", "s2", "quadkey")
         min_size: Size threshold string (e.g., "100MB") or None
-        resolution: Resolution for A5/H3/quadkey
-        level: Level for S2
-        partition_resolution: Quadkey only -- the --partition-resolution the
-            directories are split on, required alongside --resolution (#854)
-        use_centroid: Quadkey only -- the --use-centroid flag
-        in_place: Delete originals after sub-partition
-        hive: Use Hive-style partitioning
-        overwrite: Overwrite existing output
-        verbose: Print verbose output
-        force: Force operation with warnings
-        skip_analysis: Skip partition analysis
-        compression: Compression codec
-        compression_level: Compression level
-        auto: Auto-calculate resolution
-        target_rows: Target rows per partition (auto mode)
-        max_partitions: Max partitions (auto mode)
         preview: List the files that would be processed and stop
         column_name: Index column name from the command's --<index>-name option
         output_folder: OUTPUT_FOLDER argument, if the user supplied one
+        run: Everything else ``core.sub_partition.sub_partition_directory`` takes
+            (the resolution or level, ``in_place``, ``hive``, ``overwrite``,
+            ``verbose``, ``force``, ``skip_analysis``, ``write``, the auto
+            options), forwarded as given
 
     Returns:
         True if directory was handled, False if it's a file (continue to single-file logic)
@@ -1253,21 +1266,7 @@ def handle_directory_sub_partition(
             directory=input_parquet,
             partition_type=partition_type,
             min_size_bytes=min_size_bytes,
-            resolution=resolution,
-            level=level,
-            partition_resolution=partition_resolution,
-            use_centroid=use_centroid,
-            in_place=in_place,
-            hive=hive,
-            overwrite=overwrite,
-            verbose=verbose,
-            force=force,
-            skip_analysis=skip_analysis,
-            compression=compression,
-            compression_level=compression_level,
-            auto=auto,
-            target_rows=target_rows,
-            max_partitions=max_partitions,
+            **run,
         )
     except ValueError as e:
         raise click_error_for(e) from None

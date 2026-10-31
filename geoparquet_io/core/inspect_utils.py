@@ -16,6 +16,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from geoparquet_io.core.bbox_parse import BBox
 from geoparquet_io.core.crs_utils import (
     CRS_ABSENT,
     _extract_crs_identifier,
@@ -1402,6 +1403,9 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
         "total_size_bytes": total_size_bytes if total_size_bytes > 0 else None,
         "total_size_human": format_size(total_size_bytes) if total_size_bytes > 0 else "N/A",
         "combined_bbox": combined_bbox,
+        # Whether combined_bbox's xmin > xmax may be read as the wrap: every
+        # file declared a geographic CRS (the merge above made the same call).
+        "combined_bbox_geographic": all_geographic,
         "schema_consistent": schema_consistent,
         "compressions": sorted(compressions) if compressions else [],
         "geoparquet_versions": sorted(geoparquet_versions) if geoparquet_versions else [],
@@ -1409,14 +1413,15 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
     }
 
 
-def _combined_bbox_wrap_note(bbox: list) -> str:
+def _combined_bbox_wrap_note(bbox: list, geographic: bool | None = None) -> str:
     """Trailing note for a combined bbox whose X range wraps the antimeridian.
 
     ``extract_partition_summary`` can now emit ``xmin > xmax`` (#886). Printed
     bare, that is indistinguishable from corrupt metadata, so every path that
     shows the numbers to a person says how they are meant to be read.
     """
-    return " (antimeridian-crossing, RFC 7946 5.2)" if bbox[0] > bbox[2] else ""
+    wraps = BBox(*bbox[:4]).crosses_antimeridian(geographic)
+    return " (antimeridian-crossing, RFC 7946 5.2)" if wraps else ""
 
 
 def format_partition_terminal_output(
@@ -1446,10 +1451,11 @@ def format_partition_terminal_output(
     # Combined bbox
     if partition_summary["combined_bbox"]:
         bbox = partition_summary["combined_bbox"]
+        note = _combined_bbox_wrap_note(bbox, partition_summary.get("combined_bbox_geographic"))
         console.print(
             f"Combined bounds: [cyan][{bbox[0]:.6f}, {bbox[1]:.6f}, "
             f"{bbox[2]:.6f}, {bbox[3]:.6f}][/cyan]"
-            f"[dim]{_combined_bbox_wrap_note(bbox)}[/dim]"
+            f"[dim]{note}[/dim]"
         )
 
     console.print()
@@ -1588,9 +1594,10 @@ def format_partition_markdown_output(
 
     if partition_summary["combined_bbox"]:
         bbox = partition_summary["combined_bbox"]
+        note = _combined_bbox_wrap_note(bbox, partition_summary.get("combined_bbox_geographic"))
         lines.append(
             f"- **Combined bounds:** [{bbox[0]:.6f}, {bbox[1]:.6f}, "
-            f"{bbox[2]:.6f}, {bbox[3]:.6f}]{_combined_bbox_wrap_note(bbox)}"
+            f"{bbox[2]:.6f}, {bbox[3]:.6f}]{note}"
         )
 
     lines.append("")

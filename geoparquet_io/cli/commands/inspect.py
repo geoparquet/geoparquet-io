@@ -10,7 +10,12 @@ import os
 import click
 
 from geoparquet_io.cli._shared import _activate_s3, create_default_group, init_group_context
-from geoparquet_io.cli.decorators import GlobAwareCommand, ParquetInputCommand, verbose_option
+from geoparquet_io.cli.decorators import (
+    GlobAwareCommand,
+    ParquetInputCommand,
+    refuse_together,
+    verbose_option,
+)
 from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.inspect import (
     display_metadata,
@@ -27,6 +32,7 @@ from geoparquet_io.core.inspect import (
 from geoparquet_io.core.inspect import (
     inspect_summary as _inspect_summary_core,
 )
+from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.remote import is_remote_url
 
 # InspectDefaultGroup: defaults to 'summary' when no subcommand is provided
@@ -112,8 +118,7 @@ def _validate_parquet_input(file_path: str) -> None:
 
 def _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_files):
     """CLI wrapper for inspect summary - delegates to core function."""
-    if json_output and markdown_output:
-        raise click.UsageError("--json and --markdown are mutually exclusive")
+    refuse_together(("--json", json_output), ("--markdown", markdown_output))
 
     _validate_parquet_input(parquet_file)
 
@@ -137,8 +142,7 @@ def _inspect_preview_impl(
     parquet_file, count, mode, json_output, markdown_output, max_columns=None, no_truncate=False
 ):
     """CLI wrapper for inspect head/tail - delegates to core function."""
-    if json_output and markdown_output:
-        raise click.UsageError("--json and --markdown are mutually exclusive")
+    refuse_together(("--json", json_output), ("--markdown", markdown_output))
     if no_truncate and max_columns is not None:
         click.echo("Note: --no-truncate overrides --max-columns; showing all columns.")
         max_columns = None
@@ -161,8 +165,7 @@ def _inspect_preview_impl(
 
 def _inspect_stats_impl(parquet_file, json_output, markdown_output):
     """CLI wrapper for inspect stats - delegates to core function."""
-    if json_output and markdown_output:
-        raise click.UsageError("--json and --markdown are mutually exclusive")
+    refuse_together(("--json", json_output), ("--markdown", markdown_output))
 
     _validate_parquet_input(parquet_file)
 
@@ -394,7 +397,6 @@ def inspect_layers(ctx, input_file, json_output, verbose):
         gpio inspect layers data.gdb            # List layers in FileGDB
         gpio inspect layers multi.gpkg --json   # JSON output for scripting
     """
-    import json
 
     from geoparquet_io.core.layers import list_layers
 
@@ -410,13 +412,13 @@ def inspect_layers(ctx, input_file, json_output, verbose):
 
     if layers is None:
         if json_output:
-            click.echo(json.dumps({"layers": None, "count": 0}))
+            click.echo(dumps_json({"layers": None, "count": 0}))
         else:
             click.echo("No layers found (single-layer format or file with 0-1 layers)")
         return
 
     if json_output:
-        click.echo(json.dumps({"layers": layers, "count": len(layers)}))
+        click.echo(dumps_json({"layers": layers, "count": len(layers)}))
     else:
         click.echo(f"Found {len(layers)} layers:")
         for layer in layers:

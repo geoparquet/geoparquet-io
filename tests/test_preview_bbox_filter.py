@@ -240,12 +240,13 @@ class TestNativeStats:
 
 class TestBboxValidation:
     def test_wrong_arity_raises(self):
-        with pytest.raises(InvalidParameterError, match="four numbers"):
+        with pytest.raises(InvalidParameterError, match="expected 4 values"):
             preview_bbox_filter(str(PLACES), (0.0, 1.0, 2.0))
 
     def test_inverted_bbox_raises(self):
+        """xmin > xmax is a wrap only for longitudes; beyond them it is swapped."""
         with pytest.raises(InvalidParameterError, match="xmin"):
-            preview_bbox_filter(str(PLACES), (2.0, 0.0, 1.0, 1.0))
+            preview_bbox_filter(str(PLACES), (500000.0, 0.0, 400000.0, 1.0))
 
     def test_nan_bbox_raises_instead_of_matching_everything(self):
         """NaN compares False everywhere, so unrejected it would "match" every group."""

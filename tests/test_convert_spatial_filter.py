@@ -236,7 +236,7 @@ class TestFilterSemantics:
 
     def test_reversed_bbox_is_rejected(self, tmp_path):
         with pytest.raises(InvalidParameterError, match="reversed"):
-            write_geopackage(PLACES, str(tmp_path / "out.gpkg"), bbox="0.5,10.0,-0.5,11.0")
+            write_geopackage(PLACES, str(tmp_path / "out.gpkg"), bbox="500000,10.0,400000,11.0")
 
     def test_non_numeric_bbox_sequence_is_rejected(self, tmp_path):
         with pytest.raises(InvalidParameterError, match="numeric"):

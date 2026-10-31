@@ -33,6 +33,7 @@ from geoparquet_io.core.geometry_detection import (
     find_primary_geometry_column,
 )
 from geoparquet_io.core.logging_config import success
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.stream_io import execute_transform
@@ -102,19 +103,14 @@ def add_geometry_metrics(
     """
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
+    write = WriteOptions.pick(locals())
     if is_streaming and not dry_run:
         _add_metrics_streaming(
             input_parquet,
             output_parquet,
             vecorel,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
-            memory_limit,
+            write,
         )
         return
 
@@ -124,15 +120,9 @@ def add_geometry_metrics(
         vecorel,
         dry_run,
         verbose,
-        compression,
-        compression_level,
-        row_group_size_mb,
-        row_group_rows,
-        profile,
-        geoparquet_version,
+        write,
         overwrite,
         show_sql,
-        memory_limit,
     )
 
 
@@ -141,20 +131,14 @@ def _add_metrics_streaming(
     output_path,
     vecorel,
     verbose,
-    compression,
-    compression_level,
-    row_group_size_mb,
-    row_group_rows,
-    profile,
-    geoparquet_version,
-    memory_limit,
+    write: WriteOptions,
 ) -> None:
     """Handle streaming input/output for geometry metrics."""
 
     if should_stream_output(output_path):
         verbose = False
 
-    def make_query(source: str, con, source_crs: str | None = None) -> str:
+    def make_query(source: str, con, source_crs: str | None, edges, metadata) -> str:
         col_names = query_schema(con, f"SELECT * FROM {source}").names
 
         geom_col = None
@@ -181,14 +165,9 @@ def _add_metrics_streaming(
         output_path,
         make_query,
         verbose=verbose,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
+        input_aware=True,
         extra_kv_metadata=extra_kv,
-        memory_limit=memory_limit,
+        **write.funnel_kwargs(),
     )
 
     if not should_stream_output(output_path):
@@ -201,15 +180,9 @@ def _add_metrics_file_based(
     vecorel,
     dry_run,
     verbose,
-    compression,
-    compression_level,
-    row_group_size_mb,
-    row_group_rows,
-    profile,
-    geoparquet_version,
+    write: WriteOptions,
     overwrite,
     show_sql,
-    memory_limit,
 ) -> None:
     """Handle file-based geometry metrics addition — two passes via add_computed_column."""
     handle_output_overwrite(output_parquet, overwrite, input_parquet)
@@ -246,13 +219,7 @@ def _add_metrics_file_based(
             column_name=AREA_COLUMN,
             sql_expression=area_expr,
             verbose=verbose,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
 
         # Pass 2: add perimeter column to final output
@@ -262,13 +229,7 @@ def _add_metrics_file_based(
             column_name=PERIMETER_COLUMN,
             sql_expression=perimeter_expr,
             verbose=verbose,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
     finally:
         if os.path.exists(temp_file):
@@ -283,13 +244,13 @@ def _add_metrics_file_based(
         from geoparquet_io.core.constants import ensure_vecorel_columns
 
         _add_vecorel_metadata_to_file(
-            output_parquet, verbose, memory_limit, compression, compression_level
+            output_parquet, verbose, write.memory_limit, write.compression, write.compression_level
         )
         ensure_vecorel_columns(
             output_parquet,
             verbose,
-            compression=compression,
-            compression_level=compression_level,
+            compression=write.compression,
+            compression_level=write.compression_level,
         )
 
     success(f"Added {AREA_COLUMN} and {PERIMETER_COLUMN} to: {output_parquet}")

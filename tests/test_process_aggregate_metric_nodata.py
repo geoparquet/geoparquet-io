@@ -4,6 +4,8 @@ Sentinel values (e.g. -999) are mapped to NULL for metric computation only, so
 sum/avg/min/max ignore them while `count` still counts every feature.
 """
 
+from dataclasses import replace
+
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -13,6 +15,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5
 from geoparquet_io.core.process.aggregate.common import (
     build_metric_select,
@@ -28,9 +31,7 @@ from geoparquet_io.core.process.aggregate.grid_common import GridScheme, build_g
 # key_template ignores the geometry and keys every row to the resolution value.
 _DUMMY_SCHEME = GridScheme(
     name="dummy",
-    extension="none",
-    min_resolution=0,
-    max_resolution=10,
+    spec=replace(get_index_spec("h3"), extension=None, min_resolution=0, max_resolution=10),
     default_column="cell",
     key_template="{res}",
     boundary_template="ST_MakeEnvelope(0.0, 0.0, 1.0, 1.0)",

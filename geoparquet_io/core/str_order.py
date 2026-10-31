@@ -42,6 +42,7 @@ from geoparquet_io.core.hilbert_order import (
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success, warn
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
+    WriteOptions,
     resolve_row_group_rows,
 )
 from geoparquet_io.core.partition.reader import require_single_file
@@ -288,6 +289,7 @@ def str_order(
             "Set --row-group-size to choose the strip count yourself."
         )
 
+    write = WriteOptions.pick(locals())
     if is_stdin(input_parquet) or should_stream_output(output_parquet):
         if add_bbox_flag:
             # Same pre-existing gap as `sort hilbert`: the streaming path has no
@@ -299,13 +301,7 @@ def str_order(
             geometry_column,
             tile_size,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
-            memory_limit,
+            write,
         )
         return
 
@@ -316,14 +312,8 @@ def str_order(
         tile_size,
         add_bbox_flag,
         verbose,
-        compression,
-        compression_level,
-        row_group_size_mb,
-        row_group_rows,
-        profile,
-        geoparquet_version,
+        write,
         overwrite,
-        memory_limit,
     )
 
 
@@ -333,13 +323,7 @@ def _str_order_streaming(
     geometry_column: str,
     tile_size: int,
     verbose: bool,
-    compression: str | None,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
-    memory_limit: str | None,
+    write: WriteOptions,
 ) -> None:
     if should_stream_output(output_path):
         verbose = False
@@ -382,14 +366,8 @@ def _str_order_streaming(
             output_path,
             original_metadata=metadata,
             geometry_column=geom_col,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
         if not should_stream_output(output_path):
             if reordered:
@@ -406,21 +384,15 @@ def _str_order_file_based(
     tile_size: int,
     add_bbox_flag: bool,
     verbose: bool,
-    compression: str | None,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
+    write: WriteOptions,
     overwrite: bool,
-    memory_limit: str | None,
 ) -> None:
     handle_output_overwrite(output_parquet, overwrite, input_parquet)
     require_single_file(input_parquet, "sort str")
     working_parquet, temp_file_created, temp_file = _prepare_working_file(
         input_parquet, add_bbox_flag, verbose
     )
-    validate_profile_for_urls(profile, input_parquet, output_parquet)
+    validate_profile_for_urls(write.profile, input_parquet, output_parquet)
     show_remote_read_message(working_parquet, verbose)
 
     source = sql_path(resolve_file_url(working_parquet, verbose))
@@ -450,15 +422,9 @@ def _str_order_file_based(
             query,
             output_parquet,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
             input_file=input_parquet,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
         if add_bbox_flag and temp_file_created:
             success("Output includes bbox column and metadata for optimal performance")

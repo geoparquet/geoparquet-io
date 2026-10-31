@@ -14,6 +14,7 @@ falls inside it.
 """
 
 import json
+from dataclasses import replace
 
 import duckdb
 import pyarrow.parquet as pq
@@ -21,6 +22,7 @@ import pytest
 
 from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME, aggregate_by_a5
 from geoparquet_io.core.process.aggregate.by_h3 import H3_SCHEME, aggregate_by_h3
 from geoparquet_io.core.process.aggregate.common import geometry_to_geom_expr
@@ -136,9 +138,7 @@ def _ring_case_scheme():
     )
     return GridScheme(
         name="ringcase",
-        extension="",
-        min_resolution=0,
-        max_resolution=0,
+        spec=replace(get_index_spec("h3"), extension=None, min_resolution=0, max_resolution=0),
         default_column="cell",
         key_template="{pt}",
         boundary_template=f"ST_GeomFromText(CASE {{cell}} {cases} END)",

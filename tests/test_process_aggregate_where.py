@@ -4,6 +4,8 @@ The clause must apply to the source scan feeding keying, metrics, breakdowns,
 and --auto resolution sizing, mirroring `gpio extract --where` semantics.
 """
 
+from dataclasses import replace
+
 import duckdb
 import pyarrow.parquet as pq
 import pytest
@@ -12,6 +14,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import ValidationError
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3
 
@@ -241,19 +244,22 @@ def test_auto_empty_filter_result_names_the_filter(tmp_path):
 
 
 def test_probe_distinct_cell_counts_respects_where(tmp_path):
-    from geoparquet_io.core.add.quadkey import register_quadkey_udf
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-    from geoparquet_io.core.partition.auto_resolution import _probe_distinct_cell_counts
+    from geoparquet_io.core.index_ops import get_index_spec, index_point, load_index
+    from geoparquet_io.core.partition.auto_resolution import (
+        _probe_distinct_cell_counts,
+    )
 
     src = tmp_path / "f.parquet"
     # Two far-apart points -> 2 distinct quadkeys; filter selects one.
     _write_points_geoparquet(src, [(10.0, 50.0, "wheat", 4.0), (-120.0, 40.0, "corn", 1.0)])
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        register_quadkey_udf(con)
-        counts_all = _probe_distinct_cell_counts(con, str(src), "quadkey", "geometry", "", [5])
+        load_index(con, get_index_spec("quadkey"))
+        point = index_point("geometry")
+        counts_all = _probe_distinct_cell_counts(con, str(src), "quadkey", point, "", [5])
         counts_filtered = _probe_distinct_cell_counts(
-            con, str(src), "quadkey", "geometry", "", [5], where="crop = 'wheat'"
+            con, str(src), "quadkey", point, "", [5], where="crop = 'wheat'"
         )
         assert counts_all == [2]
         assert counts_filtered == [1]
@@ -268,9 +274,11 @@ def test_probe_filters_beneath_the_sample(tmp_path):
     ``USING SAMPLE``, so a selective filter left only a fraction of the sample
     and --auto over-resolved (#612).
     """
-    from geoparquet_io.core.add.quadkey import register_quadkey_udf
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-    from geoparquet_io.core.partition.auto_resolution import _probe_distinct_cell_counts
+    from geoparquet_io.core.index_ops import get_index_spec, index_point, load_index
+    from geoparquet_io.core.partition.auto_resolution import (
+        _probe_distinct_cell_counts,
+    )
 
     src = tmp_path / "f.parquet"
     # 100 wheat rows at 100 distinct locations + 900 corn rows stacked on one spot.
@@ -280,12 +288,12 @@ def test_probe_filters_beneath_the_sample(tmp_path):
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        register_quadkey_udf(con)
+        load_index(con, get_index_spec("quadkey"))
         counts = _probe_distinct_cell_counts(
             con,
             str(src),
             "quadkey",
-            "geometry",
+            index_point("geometry"),
             " USING SAMPLE 200 ROWS",
             [8],
             where="crop = 'wheat'",
@@ -374,9 +382,7 @@ def test_grid_aggregation_output_has_no_hive_partition_column(tmp_path):
     # A scheme keyed by plain SQL so the test needs no community extension.
     scheme = GridScheme(
         name="test",
-        extension="",
-        min_resolution=0,
-        max_resolution=10,
+        spec=replace(get_index_spec("h3"), extension=None, min_resolution=0, max_resolution=10),
         default_column="test_cell",
         key_template="CAST(floor(ST_X({pt}) * {res}) AS VARCHAR)",
         boundary_template="ST_MakeEnvelope(0.0, 0.0, 1.0, 1.0)",

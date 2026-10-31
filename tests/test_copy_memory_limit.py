@@ -36,6 +36,7 @@ from geoparquet_io.core.duckdb_utils import (
     restore_duckdb_settings,
     sql_path,
 )
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.sizing import displayed_size_max, parse_size_string
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
@@ -697,7 +698,7 @@ class TestDirectCopyRegressions:
             str(tmp_path / "out"),
             column_name="cat",
             skip_analysis=True,
-            memory_limit="700MB",
+            write=WriteOptions(memory_limit="700MB"),
         )
 
         assert seen, "the no-geometry write ran outside scoped_write_memory_limit"

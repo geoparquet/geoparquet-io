@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -53,7 +53,7 @@ from geoparquet_io.core.geo_metadata import (
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, info, success, warn
-from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+from geoparquet_io.core.parquet_writer import WriteOptions, resolve_output_geoparquet_version
 from geoparquet_io.core.remote import (
     needs_httpfs,
     remote_write_context,
@@ -488,16 +488,10 @@ def reproject_impl(
     target_crs: str = "EPSG:4326",
     source_crs: str | None = None,
     overwrite: bool = False,
-    compression: str | None = None,
-    compression_level: int | None = None,
     verbose: bool = False,
-    profile: str | None = None,
-    geoparquet_version: str | None = None,
     on_progress: Callable[[str], None] | None = None,
-    row_group_size_mb: int | None = None,
-    row_group_rows: int | None = None,
-    memory_limit: str | None = None,
     assume_crs84: bool = False,
+    write: WriteOptions | None = None,
 ) -> ReprojectResult:
     """
     Reproject a GeoParquet file to a different CRS using DuckDB.
@@ -510,15 +504,10 @@ def reproject_impl(
         assume_crs84: Treat an unknown/null input CRS as OGC:CRS84 (rewrites the
             metadata so DuckDB can read the file; no coordinate change).
         overwrite: If True and output_parquet is None, overwrite input file
-        compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
-        compression_level: Compression level (varies by format)
         verbose: Whether to print verbose output
-        profile: AWS profile name for S3 operations
-        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         on_progress: Optional callback for progress messages
-        row_group_size_mb: Row group size in MB (mutually exclusive with row_group_rows)
-        row_group_rows: Row group size in number of rows (mutually exclusive with row_group_size_mb)
-        memory_limit: DuckDB memory limit for write operations (e.g., "2GB")
+        write: The write options (codec, level, row groups, profile, version,
+            memory limit); ``None`` takes every default
 
     Returns:
         ReprojectResult with information about the operation
@@ -535,8 +524,9 @@ def reproject_impl(
         elif verbose:
             info(msg)
 
+    write = write or WriteOptions()
     # Validate profile usage
-    validate_profile_for_urls(profile, input_parquet, output_parquet)
+    validate_profile_for_urls(write.profile, input_parquet, output_parquet)
 
     # Resolve an unknown CRS before DuckDB reads the file: raise a friendly
     # error without --src-crs or --assume-crs84, or sanitize to a temp copy with
@@ -650,8 +640,10 @@ def reproject_impl(
         log(f"Output: {out_path}")
 
         # Validate compression settings
-        codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
-        compression, compression_level = codec.name, codec.level
+        codec = resolve_codec(
+            write.compression, write.compression_level, context="write", verbose=verbose
+        )
+        write = replace(write, compression=codec.name, compression_level=codec.level)
 
         # Get target CRS as PROJJSON for metadata
         target_crs_projjson = parse_crs_string_to_projjson(target_crs, con)
@@ -681,15 +673,9 @@ def reproject_impl(
                     query,
                     str(tmp_path),
                     original_metadata=original_metadata,
-                    compression=compression,
-                    compression_level=compression_level,
-                    row_group_size_mb=row_group_size_mb,
-                    row_group_rows=row_group_rows,
                     verbose=verbose,
-                    profile=profile,
-                    geoparquet_version=geoparquet_version,
                     input_crs=target_crs_projjson,
-                    memory_limit=memory_limit,
+                    **write.funnel_kwargs(),
                     input_file=read_source,
                     invalidate_derived_stats=True,
                     invalidate_derived_stats_columns={geom_col},
@@ -712,15 +698,9 @@ def reproject_impl(
                     query,
                     actual_output,
                     original_metadata=original_metadata,
-                    compression=compression,
-                    compression_level=compression_level,
-                    row_group_size_mb=row_group_size_mb,
-                    row_group_rows=row_group_rows,
                     verbose=verbose,
-                    profile=profile,
-                    geoparquet_version=geoparquet_version,
                     input_crs=target_crs_projjson,
-                    memory_limit=memory_limit,
+                    **write.funnel_kwargs(),
                     input_file=read_source,
                     invalidate_derived_stats=True,
                     invalidate_derived_stats_columns={geom_col},
@@ -731,7 +711,7 @@ def reproject_impl(
                     upload_if_remote(
                         actual_output,
                         str(out_path),
-                        profile=profile,
+                        profile=write.profile,
                         is_directory=False,
                         verbose=verbose,
                     )
@@ -761,11 +741,8 @@ def _reproject_streaming(
     output_path: str | None,
     target_crs: str,
     source_crs: str | None,
-    compression: str,
-    compression_level: int | None,
     verbose: bool,
-    profile: str | None,
-    geoparquet_version: str | None,
+    write: WriteOptions,
     assume_crs84: bool = False,
 ) -> None:
     """Handle streaming input/output for reproject."""
@@ -868,8 +845,11 @@ def _reproject_streaming(
 
             # Auto version mode: same contract as the file-based path (todo 040).
             # The stream funnel only sees the metadata, so the file is asked here.
-            geoparquet_version = resolve_output_geoparquet_version(
-                geoparquet_version, input_file=working_file, original_metadata=metadata
+            write = replace(
+                write,
+                geoparquet_version=resolve_output_geoparquet_version(
+                    write.geoparquet_version, input_file=working_file, original_metadata=metadata
+                ),
             )
 
             # Update metadata with target CRS
@@ -889,11 +869,8 @@ def _reproject_streaming(
                 query,
                 output_path,
                 original_metadata=metadata,
-                compression=compression,
-                compression_level=compression_level,
                 verbose=verbose,
-                profile=profile,
-                geoparquet_version=geoparquet_version,
+                **write.funnel_kwargs(),
             )
 
             if not should_stream_output(output_path):
@@ -959,17 +936,15 @@ def reproject(
     # Check for streaming mode
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
+    write = WriteOptions.pick(locals())
     if is_streaming:
         _reproject_streaming(
             input_parquet,
             output_parquet,
             target_crs,
             source_crs,
-            compression,
-            compression_level,
             verbose,
-            profile,
-            geoparquet_version,
+            write,
             assume_crs84=assume_crs84,
         )
         return None
@@ -981,14 +956,8 @@ def reproject(
         target_crs,
         source_crs,
         overwrite,
-        compression,
-        compression_level,
         verbose,
-        profile,
-        geoparquet_version,
         on_progress,
-        row_group_size_mb,
-        row_group_rows,
-        memory_limit,
         assume_crs84=assume_crs84,
+        write=write,
     )

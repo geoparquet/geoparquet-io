@@ -201,7 +201,7 @@ returns no rows, and while it is open `con.sql()`, `con.register()`,
 way until drained, and a connection used from several threads needs a
 `con.cursor()` per thread. `to_arrow_reader(batch_size=n)` caps batches at `n`
 but does not merge smaller ones, so a writer that turns batches into row groups
-re-chunks them first (`_rebatch` in `write_strategies/arrow_streaming.py`).
+re-chunks them first (`regroup` in `core/parquet_writer.py`).
 
 Additional patterns (not yet enforced):
 - `ST_Transform(..., always_xy := true)` → `SET geometry_always_xy = true` at session level

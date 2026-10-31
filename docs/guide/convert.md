@@ -42,6 +42,12 @@ The `convert` command transforms between GeoParquet and other vector formats wit
     one line naming both numbers before the footer does
     ([#986](https://github.com/geoparquet/geoparquet-io/issues/986)).
 
+    An output that already exists is refused unless you pass `--overwrite`,
+    as every other gpio command does (`gpio convert` used to replace it
+    silently). The old file is kept until the new one is written, so a
+    conversion that fails leaves it in place. `.write()` in Python takes
+    `overwrite=True` for the same thing.
+
 === "Python"
 
     <!-- doctest: needs-ogr, setup="ogr2ogr -f 'ESRI Shapefile' input.shp places.geojson" -->
@@ -915,10 +921,10 @@ writes it as 2.0. A `geo` block that declares a version still wins over both.
     gpio convert input_v2.parquet output.parquet
 
     # Auto mode: reproject preserves the input version too
-    gpio convert reproject input_v2.parquet output.parquet --dst-crs EPSG:3857
+    gpio convert reproject input_v2.parquet output_3857.parquet --dst-crs EPSG:3857
 
     # Explicit version always wins
-    gpio convert input_v2.parquet output.parquet --geoparquet-version 1.1
+    gpio convert input_v2.parquet output_v1_1.parquet --geoparquet-version 1.1
     ```
 
 === "Python"
@@ -1051,7 +1057,7 @@ Skips Hilbert ordering for faster processing on large files.
 ### Custom Compression Settings
 
 ```bash
-gpio convert roads.geojson roads.parquet \
+gpio convert roads.geojson roads_zstd22.parquet \
   --compression ZSTD \
   --compression-level 22 \
   --verbose

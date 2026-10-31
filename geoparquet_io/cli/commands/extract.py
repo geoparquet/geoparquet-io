@@ -22,6 +22,7 @@ from geoparquet_io.cli.decorators import (
     compression_options,
     dry_run_option,
     geoparquet_version_option,
+    limit_option,
     output_format_options,
     overwrite_option,
     parse_row_group_options,
@@ -29,10 +30,10 @@ from geoparquet_io.cli.decorators import (
     repair_geometry_option,
     row_group_options,
     show_sql_option,
+    timeout_option,
     verbose_option,
     write_strategy_option,
 )
-from geoparquet_io.cli.exception_handler import error_text
 from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT
 from geoparquet_io.core.edges import PLANAR, SPHERICAL
 from geoparquet_io.core.extract import extract as extract_impl
@@ -99,11 +100,7 @@ def extract(ctx):
     help="DuckDB WHERE clause for filtering rows. Column names with special "
     'characters need double quotes in SQL (e.g., "crop:name"). Shell escaping varies.',
 )
-@click.option(
-    "--limit",
-    type=int,
-    help="Maximum number of rows to extract.",
-)
+@limit_option(help="Maximum number of rows to extract.")
 @click.option(
     "--skip-count",
     is_flag=True,
@@ -298,11 +295,7 @@ def extract_geoparquet(
     "--exclude-cols",
     help="Comma-separated columns to exclude (applied after download)",
 )
-@click.option(
-    "--limit",
-    type=int,
-    help="Maximum number of features to extract",
-)
+@limit_option(help="Maximum number of features to extract")
 @click.option(
     "--output-crs",
     help="Output CRS such as EPSG:25830, or 'native' for the layer's "
@@ -338,9 +331,7 @@ def extract_geoparquet(
     default=None,
     help="Features per request. Default: server's maxRecordCount. A page the server refuses (a generic JSON error 500, an HTML error page or a persistent HTTP 500/502/504) is retried at the same offset with a smaller size, which then sticks. Start smaller for layers with complex geometries.",
 )
-@click.option(
-    "--timeout",
-    type=click.FloatRange(min=0, min_open=True),
+@timeout_option(
     default=DEFAULT_TIMEOUT,
     show_default=True,
     help="Per-request HTTP timeout in seconds. Increase for layers with very large or complex geometries that the server is slow to serialize.",
@@ -454,19 +445,6 @@ def extract_arcgis(
     # Validate mutual exclusivity of row group options and get MB value
     row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
-    # Parse bbox string if provided
-    bbox_tuple = None
-    if bbox:
-        try:
-            parts = [float(x.strip()) for x in bbox.split(",")]
-            if len(parts) != 4:
-                raise ValueError("bbox must have exactly 4 values")
-            bbox_tuple = tuple(parts)
-        except ValueError as e:
-            raise click.BadParameter(
-                f"Invalid bbox format: {error_text(e)}. Use xmin,ymin,xmax,ymax"
-            ) from e
-
     with _activate_s3(ctx, aws_profile=aws_profile):
         convert_arcgis_to_geoparquet(
             service_url=service_url,
@@ -477,7 +455,7 @@ def extract_arcgis(
             password=password,
             portal_url=portal_url,
             where=where,
-            bbox=bbox_tuple,
+            bbox=bbox or None,
             include_cols=include_cols,
             exclude_cols=exclude_cols,
             limit=limit,
@@ -634,11 +612,7 @@ def _reject_query_shaping_with_sql(ctx: click.Context, sql: str | None) -> None:
     help="Row count threshold for auto bbox mode. Tables with more rows use "
     "server-side filtering. Must be non-negative. Default: 500000",
 )
-@click.option(
-    "--limit",
-    type=click.IntRange(0, None),
-    help="Maximum number of rows to extract. Must be non-negative.",
-)
+@limit_option(help="Maximum number of rows to extract. Must be non-negative.")
 @click.option(
     "--geography-column",
     help="Column containing geometry data. Auto-detected for native GEOGRAPHY columns. "
@@ -895,11 +869,7 @@ def _deprecated_version_callback(ctx, param, value):
     help="Bbox filter mode: 'auto' (default) chooses based on server capabilities, "
     "'server' forces server-side filtering, 'local' forces client-side filtering",
 )
-@click.option(
-    "--limit",
-    type=click.IntRange(0, None),
-    help="Maximum number of features to extract. Must be non-negative.",
-)
+@limit_option(help="Maximum number of features to extract. Must be non-negative.")
 @click.option(
     "--output-crs",
     help="Request specific CRS from server (e.g., EPSG:4326, urn:ogc:def:crs:EPSG::4326)",
@@ -1097,20 +1067,6 @@ def extract_wfs_cmd(
     # Parse row group options
     row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
-    # Parse bbox if provided
-    bbox_tuple = None
-    if bbox:
-        try:
-            parts = [float(x.strip()) for x in bbox.split(",")]
-            if len(parts) != 4:
-                raise ValueError("Expected 4 values")
-            bbox_tuple = tuple(parts)
-        except ValueError as e:
-            raise click.ClickException(
-                f"Invalid bbox format: {bbox}\n"
-                "Expected: xmin,ymin,xmax,ymax (e.g., -122.5,37.5,-122.0,38.0)"
-            ) from e
-
     if is_multi_layer:
         # Multi-layer parallel extraction
         convert_wfs_layers_to_directory(
@@ -1121,7 +1077,7 @@ def extract_wfs_cmd(
             max_workers=workers,
             page_size=page_size,
             version=wfs_version,
-            bbox=bbox_tuple,
+            bbox=bbox or None,
             bbox_mode=bbox_mode,
             output_crs=output_crs,
             limit=limit,
@@ -1147,7 +1103,7 @@ def extract_wfs_cmd(
             typename=typenames[0],
             output_file=output_file,
             version=wfs_version,
-            bbox=bbox_tuple,
+            bbox=bbox or None,
             bbox_mode=bbox_mode,
             output_crs=output_crs,
             limit=limit,
@@ -1182,11 +1138,7 @@ def extract_wfs_cmd(
     "--bbox",
     help="Bounding box filter: xmin,ymin,xmax,ymax in WGS84",
 )
-@click.option(
-    "--limit",
-    type=click.IntRange(0, None),
-    help="Maximum number of rows to extract",
-)
+@limit_option(help="Maximum number of rows to extract")
 @column_list_option(
     "--include-cols",
     help="Comma-separated columns to include (default: all)",
@@ -1195,9 +1147,7 @@ def extract_wfs_cmd(
     "--exclude-cols",
     help="Comma-separated columns to exclude",
 )
-@click.option(
-    "--timeout",
-    type=click.IntRange(1, 3600),
+@timeout_option(
     default=CARTO_REQUEST_TIMEOUT,
     help=f"Request timeout in seconds (default: {CARTO_REQUEST_TIMEOUT})",
 )
@@ -1308,27 +1258,13 @@ def extract_carto_cmd(
     # Parse row group options
     row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
-    # Parse bbox if provided
-    bbox_tuple = None
-    if bbox:
-        try:
-            parts = [float(x.strip()) for x in bbox.split(",")]
-            if len(parts) != 4:
-                raise ValueError("Expected 4 values")
-            bbox_tuple = tuple(parts)
-        except ValueError as e:
-            raise click.ClickException(
-                f"Invalid bbox format: {bbox}\n"
-                "Expected: xmin,ymin,xmax,ymax (e.g., -75.2,39.9,-75.1,40.0)"
-            ) from e
-
     with _activate_s3(ctx, aws_profile=aws_profile):
         convert_carto_to_geoparquet(
             url=url,
             table_name=table_name,
             output_file=output_file,
             where=where,
-            bbox=bbox_tuple,
+            bbox=bbox or None,
             limit=limit,
             include_cols=include_cols,
             exclude_cols=exclude_cols,

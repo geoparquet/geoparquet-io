@@ -67,6 +67,7 @@ GUARDED_OPTIONS = {
     ("sort", "quadkey"): "--quadkey-name",
     ("sort", "hilbert"): "--geometry-column",
     ("sort", "str"): "--geometry-column",
+    ("process", "simplify"): "--geometry-column",
 }
 
 # Options the sweep matches but that deliberately carry no Click-layer guard.
@@ -112,11 +113,7 @@ REVIEWED_UNGUARDED = {
 # same fact from the shared-option side: these differ from the guarded spelling
 # of the same flag. When the track adds column_name_option(), the pending test
 # below fails: move the option to GUARDED_OPTIONS and drop its G13 entry.
-PENDING_GUARD = {
-    # T5c: the sort commands' --geometry-column uses column_name_option();
-    # simplify declares its own without the callback or the "geometry" default.
-    ("process", "simplify"): ["--geometry-column"],
-}
+PENDING_GUARD: dict[tuple[str, ...], list[str]] = {}
 
 
 def _positional_args(path: tuple[str, ...], tmp_path) -> list[str]:

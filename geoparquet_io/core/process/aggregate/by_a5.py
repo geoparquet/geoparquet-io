@@ -10,19 +10,20 @@ import pyarrow as pa
 
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.constants import DEFAULT_A5_COLUMN_NAME
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.grid_common import (
     GridScheme,
     aggregate_grid_file,
     aggregate_grid_table,
 )
 
+SPEC = get_index_spec("a5")
+
 A5_SCHEME = GridScheme(
-    name="a5",
-    extension="a5",
-    min_resolution=0,
-    max_resolution=30,
-    default_column=DEFAULT_A5_COLUMN_NAME,
-    key_template="a5_lonlat_to_cell(ST_X({pt}), ST_Y({pt}), {res})",
+    name=SPEC.name,
+    spec=SPEC,
+    default_column=SPEC.column_name,
+    key_template=SPEC.expression("ST_X({pt})", "ST_Y({pt})", "{res}"),
     # a5_cell_to_boundary returns an open DOUBLE[2][] ring that stays contiguous
     # but lets longitudes run outside [-180, 180] (267.0 is a real value), so the
     # shared builder still has to bring the polygon back into range.

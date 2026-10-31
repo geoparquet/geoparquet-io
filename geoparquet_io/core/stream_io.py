@@ -47,6 +47,7 @@ from geoparquet_io.core.geo_metadata import (
 )
 from geoparquet_io.core.geometry_detection import native_geometry_types_from_query
 from geoparquet_io.core.logging_config import progress, warn
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.streaming import (
     apply_geoarrow_extension_type,
@@ -510,40 +511,24 @@ def _detect_transform_source_crs(
     return source_crs_string(input_path)
 
 
-def _query_fn_params(transform_query_fn) -> list[str]:
-    """The query builder's parameter names (empty when they cannot be read)."""
-    import inspect
+def _build_transform_query(
+    transform_query_fn, source, con, input_path, metadata, is_stream, *, input_aware=False
+):
+    """Call the query builder under one of its two contracts.
 
-    try:
-        return list(inspect.signature(transform_query_fn).parameters)
-    except (TypeError, ValueError):
-        return []
-
-
-def _wants_source_crs(transform_query_fn) -> bool:
-    """True when the query builder takes a third ``source_crs`` parameter.
-
-    Keeps the ``(source, con)`` contract for existing callers (sort, bbox, ...)
-    while letting CRS-aware builders opt in.
+    ``(source, con)`` for a builder that needs only the source (sort, ...).
+    With ``input_aware`` the one input-aware contract,
+    ``(source, con, source_crs, edges, metadata)``: the input's CRS as an
+    ``ST_Transform`` source (``None`` for lon/lat or CRS-less input), its
+    ``{column: edges}`` (:func:`input_nonplanar_edges`, so a cell key on stdin
+    keys the way the file path does, #1293) and its schema metadata. The CRS is
+    resolved only for an input-aware builder, since an unresolvable one raises.
     """
-    return len(_query_fn_params(transform_query_fn)) >= 3
-
-
-def _build_transform_query(transform_query_fn, source, con, input_path, metadata, is_stream):
-    """Call the query builder, resolving the input CRS only when it takes one.
-
-    A builder with a fourth parameter also gets the input's non-planar edges
-    (``declared_nonplanar_edges``: the file, or a stream's own block), so a cell
-    key on stdin keys the way the file path does (#1293).
-    """
-    if not _wants_source_crs(transform_query_fn):
+    if not input_aware:
         return transform_query_fn(source, con)
     source_crs = _detect_transform_source_crs(input_path, metadata, is_stream)
-    if len(_query_fn_params(transform_query_fn)) < 4:
-        return transform_query_fn(source, con, source_crs)
-    return transform_query_fn(
-        source, con, source_crs, input_nonplanar_edges(input_path, metadata, is_stream)
-    )
+    edges = input_nonplanar_edges(input_path, metadata, is_stream)
+    return transform_query_fn(source, con, source_crs, edges, metadata)
 
 
 def input_nonplanar_edges(input_path: str, metadata: dict | None, is_stream: bool) -> dict:
@@ -552,8 +537,9 @@ def input_nonplanar_edges(input_path: str, metadata: dict | None, is_stream: boo
     The one place a streamed cell-key builder learns its edges (#1293): the
     file when there is one, otherwise the stream's own block
     (``write_funnels.declared_nonplanar_edges``). ``_build_transform_query``
-    hands it to a four-parameter builder (h3, s2, a5); ``add quadkey``, which
-    opens its own input, asks it directly.
+    hands it to every input-aware builder as its ``edges`` argument
+    (``index_ops.add_index_streaming``, the one driver for h3, s2, a5 and
+    quadkey, is the one that keys from it).
     """
     return declared_nonplanar_edges(None if is_stream else input_path, metadata)
 
@@ -573,6 +559,7 @@ def execute_transform(
     geoparquet_version: str | None = None,
     extra_kv_metadata: dict[str, str] | None = None,
     memory_limit: str | None = None,
+    input_aware: bool = False,
 ) -> pa.Table | None:
     """
     Execute a transformation with unified streaming/file I/O.
@@ -583,7 +570,9 @@ def execute_transform(
     Args:
         input_path: Input path (file or "-" for stdin)
         output_path: Output path (file, "-" for stdout, or None for auto-detect)
-        transform_query_fn: Callable(source_ref, con) -> SQL query string
+        transform_query_fn: Callable(source_ref, con) -> SQL query string, or
+            with ``input_aware`` Callable(source_ref, con, source_crs, edges,
+            metadata) (see ``_build_transform_query``)
         verbose: Whether to print verbose output
         dry_run: If True, print query without executing
         compression: Compression for file output
@@ -595,6 +584,8 @@ def execute_transform(
         geoparquet_version: GeoParquet version to write
         memory_limit: DuckDB memory limit for file writes (e.g., '2GB', '512MB');
             ignored for stream output
+        input_aware: Call ``transform_query_fn`` with the input's CRS, edges
+            and metadata as well
 
     Returns:
         Table if streaming output, None if file output or dry_run
@@ -610,6 +601,7 @@ def execute_transform(
     if should_stream_output(output_path):
         verbose = False
 
+    write = WriteOptions.pick(locals())
     with open_input(
         input_path, verbose=verbose, stream_output=should_stream_output(output_path)
     ) as (source, metadata, is_stream, con):
@@ -617,7 +609,13 @@ def execute_transform(
         # non-CRS84 input (e.g. lon/lat grid keying, #525). Streamed input is an
         # Arrow IPC stream, so its CRS comes from the schema metadata, not a file.
         query = _build_transform_query(
-            transform_query_fn, source, con, input_path, metadata, is_stream
+            transform_query_fn,
+            source,
+            con,
+            input_path,
+            metadata,
+            is_stream,
+            input_aware=input_aware,
         )
 
         if dry_run:
@@ -631,14 +629,8 @@ def execute_transform(
             query,
             output_path,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
             custom_metadata=custom_metadata,
-            geoparquet_version=geoparquet_version,
             extra_kv_metadata=extra_kv_metadata,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )

@@ -4,44 +4,81 @@ from __future__ import annotations
 
 import pyarrow as pa
 
-from geoparquet_io.core.common import add_computed_column
 from geoparquet_io.core.constants import DEFAULT_A5_COLUMN_NAME
-from geoparquet_io.core.crs_utils import (
-    crs_string_from_table,
-    source_crs_string,
-    transform_geom_sql,
+from geoparquet_io.core.index_ops import IndexSpec, add_index_column, add_index_table
+from geoparquet_io.core.parquet_writer import WriteOptions
+
+
+def _get_resolution_size(resolution):
+    """Get approximate cell size for a given A5 resolution."""
+    sizes = {
+        0: "42.5M km²",
+        1: "10.6M km²",
+        2: "2.7M km²",
+        3: "666K km²",
+        4: "167K km²",
+        5: "41.7K km²",
+        6: "10.4K km²",
+        7: "2,600 km²",
+        8: "650 km²",
+        9: "163 km²",
+        10: "40.7 km²",
+        11: "10.2 km²",
+        12: "2.5 km²",
+        13: "630 m²",
+        14: "158 m²",
+        15: "39.4 m²",
+        16: "9.9 m²",
+        17: "2.5 m²",
+        18: "616 mm²",
+        19: "154 mm²",
+        20: "38.5 mm²",
+        21: "9.6 mm²",
+        22: "2.4 mm²",
+        23: "0.6 mm²",
+        24: "0.15 mm²",
+        25: "38 μm²",
+        26: "9.5 μm²",
+        27: "2.4 μm²",
+        28: "0.6 μm²",
+        29: "0.15 μm²",
+        30: "37 nm²",
+    }
+    return sizes.get(resolution, f"resolution {resolution}")
+
+
+def _cell_expression(lon, lat, resolution):
+    return f"""a5_lonlat_to_cell(
+        {lon},
+        {lat},
+        {resolution}
+    )"""
+
+
+SPEC = IndexSpec(
+    "a5",
+    DEFAULT_A5_COLUMN_NAME,
+    0,
+    30,
+    _cell_expression,
+    6,
+    4,
+    "a5",
+    _get_resolution_size,
+    resolution_function="a5_get_resolution",
+    parent_template="a5_cell_to_parent({cell}, {level})",
+    longitude_first=True,
+    default_resolution=15,
+    label="A5",
+    cell_integer=True,
+    column_option="--a5-name",
 )
-from geoparquet_io.core.duckdb_utils import (
-    describe_query,
-    get_duckdb_connection,
-    load_community_extension,
-    query_schema,
-    quote_identifier,
-    register_arrow,
-)
-from geoparquet_io.core.edges import representative_point_sql
-from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.file_utils import handle_output_overwrite
-from geoparquet_io.core.geometry_detection import (
-    STANDARD_GEOMETRY_NAMES,
-    find_primary_geometry_column,
-)
-from geoparquet_io.core.geometry_repair import nonplanar_edges_of_arrow_table
-from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
-from geoparquet_io.core.partition.reader import require_single_file
-from geoparquet_io.core.stream_io import execute_transform
-from geoparquet_io.core.streaming import (
-    find_geometry_column_from_table,
-    is_stdin,
-    should_stream_output,
-)
-from geoparquet_io.core.write_funnels import collect_nonplanar_edges
 
 
 def add_a5_table(
     table: pa.Table,
     a5_column_name: str = DEFAULT_A5_COLUMN_NAME,
-    resolution: int = 15,
+    resolution: int = SPEC.default_resolution,
     geometry_column: str | None = None,
 ) -> pa.Table:
     """
@@ -58,119 +95,14 @@ def add_a5_table(
     Returns:
         New table with A5 column added
     """
-    # Find geometry column
-    geom_col = geometry_column or find_geometry_column_from_table(table)
-    if not geom_col:
-        geom_col = "geometry"
-
-    # Validate resolution
-    if not 0 <= resolution <= 30:
-        raise ValueError(f"A5 resolution must be between 0 and 30, got {resolution}")
-
-    # A5 keying expects lon/lat degrees; reproject non-CRS84 input first (#525).
-    source_crs = crs_string_from_table(table, geom_col)
-
-    # Register table and execute query
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-    try:
-        # Ensure ST_Transform (CRS-aware keying) emits lon/lat order.
-        con.execute("SET geometry_always_xy = true;")
-
-        # Load A5 extension
-        load_community_extension(con, "a5")
-
-        # Keyed from a point on the sphere when the edges are not planar (#1293).
-        edges = nonplanar_edges_of_arrow_table(table, geom_col)
-        registered = register_arrow(con, "__input_table", table)
-
-        # Check if geometry column is BLOB (needs conversion)
-        columns_info = describe_query(con, "SELECT * FROM __input_table")
-        geom_is_blob = any(col[0] == geom_col and "BLOB" in col[1].upper() for col in columns_info)
-
-        if geom_is_blob and geom_col in table.column_names:
-            # Create view with geometry conversion
-            # Quote all column names for safety with special characters
-            other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
-            col_defs = other_cols + [
-                f"ST_GeomFromWKB({quote_identifier(geom_col)}) AS {quote_identifier(geom_col)}"
-            ]
-            view_query = (
-                f"CREATE VIEW __input_view AS SELECT {', '.join(col_defs)} FROM __input_table"
-            )
-            con.execute(view_query)
-            source_ref = "__input_view"
-        else:
-            source_ref = "__input_table"
-
-        # Build A5 column query (reproject to lon/lat when source is non-CRS84)
-        geom_ref = transform_geom_sql(quote_identifier(geom_col), source_crs)
-        point = representative_point_sql(geom_ref, edges)
-        a5_expr = f"""a5_lonlat_to_cell(
-            ST_X({point}),
-            ST_Y({point}),
-            {resolution}
-        )"""
-
-        # Get non-geometry columns
-        other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
-        select_cols = ", ".join(other_cols) if other_cols else ""
-
-        # Build SELECT with geometry converted back to WKB
-        if select_cols:
-            query = f"""
-                SELECT {select_cols},
-                       ST_AsWKB({quote_identifier(geom_col)}) AS {quote_identifier(geom_col)},
-                       {a5_expr} AS {quote_identifier(a5_column_name)}
-                FROM {source_ref}
-            """
-        else:
-            query = f"""
-                SELECT ST_AsWKB({quote_identifier(geom_col)}) AS {quote_identifier(geom_col)},
-                       {a5_expr} AS {quote_identifier(a5_column_name)}
-                FROM {source_ref}
-            """
-        result = con.sql(query).arrow().read_all()
-
-        # Preserve metadata
-        if table.schema.metadata:
-            result = result.replace_schema_metadata(table.schema.metadata)
-
-        result = registered.restore_edges(result)
-        return result
-    finally:
-        con.close()
-
-
-def _make_add_a5_query(
-    source: str,
-    geometry_column: str,
-    a5_column_name: str,
-    resolution: int,
-    source_crs: str | None = None,
-    edges: dict[str, str] | None = None,
-) -> str:
-    """Build query to add A5 column to a source.
-
-    ``source_crs`` reprojects a non-CRS84 input to lon/lat before centroid keying
-    (#525); ``None`` (CRS84 / CRS-less) leaves the geometry untouched. ``edges``
-    maps the input's non-planar columns to their edges: those key from a point
-    on the sphere (#1293).
-    """
-    geom_ref = transform_geom_sql(quote_identifier(geometry_column), source_crs)
-    point = representative_point_sql(geom_ref, (edges or {}).get(geometry_column))
-    a5_expr = f"""a5_lonlat_to_cell(
-        ST_X({point}),
-        ST_Y({point}),
-        {resolution}
-    )"""
-    return f"SELECT *, {a5_expr} AS {quote_identifier(a5_column_name)} FROM {source}"
+    return add_index_table(SPEC, table, a5_column_name, resolution, geometry_column)
 
 
 def add_a5_column(
     input_parquet: str,
     output_parquet: str | None = None,
     a5_column_name: str = DEFAULT_A5_COLUMN_NAME,
-    a5_resolution: int = 15,
+    a5_resolution: int = SPEC.default_resolution,
     dry_run: bool = False,
     verbose: bool = False,
     compression: str | None = None,
@@ -211,192 +143,15 @@ def add_a5_column(
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         memory_limit: DuckDB memory limit for the write (e.g., '2GB', '512MB')
     """
-    # Configure logging verbosity
-    configure_verbose(verbose)
-
-    # Validate resolution
-    if not 0 <= a5_resolution <= 30:
-        raise InvalidParameterError("resolution", f"must be between 0 and 30, got {a5_resolution}")
-
-    # Check for streaming mode (stdin input or stdout output)
-    is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
-
-    if is_streaming and not dry_run:
-        _add_a5_streaming(
-            input_parquet,
-            output_parquet,
-            a5_column_name,
-            a5_resolution,
-            verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
-            memory_limit=memory_limit,
-        )
-        return
-
-    # File-based mode
-    # Check if output file exists and handle overwrite (fixes issue #278)
-    handle_output_overwrite(output_parquet, overwrite, input_parquet)
-
-    # Check for partition input (not supported)
-    require_single_file(input_parquet, "add a5")
-
-    # Get geometry column for the SQL expression
-    geom_col = find_primary_geometry_column(input_parquet, verbose)
-
-    # A5 keying expects lon/lat degrees; reproject non-CRS84 input first (#525).
-    geom_ref = transform_geom_sql(
-        quote_identifier(geom_col), source_crs_string(input_parquet, verbose, geom_col)
+    write = WriteOptions.pick(locals())
+    return add_index_column(
+        SPEC,
+        input_parquet,
+        output_parquet,
+        a5_column_name,
+        a5_resolution,
+        dry_run,
+        verbose,
+        write,
+        overwrite,
     )
-
-    # Define the A5 SQL expression, keyed from a point on the sphere when the
-    # edges are not planar (#1293).
-    point = representative_point_sql(geom_ref, collect_nonplanar_edges(input_parquet).get(geom_col))
-    sql_expression = f"""a5_lonlat_to_cell(
-        ST_X({point}),
-        ST_Y({point}),
-        {a5_resolution}
-    )"""
-
-    # Prepare A5 metadata for GeoParquet spec
-    a5_metadata = {"covering": {"a5": {"column": a5_column_name, "resolution": a5_resolution}}}
-
-    if not dry_run:
-        progress(f"Adding A5 column '{a5_column_name}' (resolution {a5_resolution})...")
-
-    # Use the generic helper
-    add_computed_column(
-        input_parquet=input_parquet,
-        output_parquet=output_parquet,
-        column_name=a5_column_name,
-        sql_expression=sql_expression,
-        extensions=["a5"],  # Load A5 extension from DuckDB community
-        dry_run=dry_run,
-        verbose=verbose,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        dry_run_description=f"A5 cell ID at resolution {a5_resolution} (~{_get_resolution_size(a5_resolution)})",
-        custom_metadata=a5_metadata,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
-        memory_limit=memory_limit,
-    )
-
-    if not dry_run:
-        success(
-            f"Successfully added A5 column '{a5_column_name}' "
-            f"(resolution {a5_resolution}) to: {output_parquet}"
-        )
-
-
-def _add_a5_streaming(
-    input_path: str,
-    output_path: str | None,
-    a5_column_name: str,
-    resolution: int,
-    verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
-    memory_limit: str | None,
-) -> None:
-    """Handle streaming input/output for add_a5."""
-    # Suppress verbose when streaming to stdout
-    if should_stream_output(output_path):
-        verbose = False
-
-    def make_query(
-        source: str, con, source_crs: str | None = None, edges: dict | None = None
-    ) -> str:
-        """Build the add A5 query for streaming source.
-
-        ``source_crs`` is the streamed input's CRS (from its Arrow geo metadata),
-        used to reproject non-CRS84 input to lon/lat before keying (#525);
-        ``edges`` the input's non-planar edges, file or stream (#1293).
-        """
-        # Load A5 extension
-        load_community_extension(con, "a5")
-
-        # Get column names from query result
-        col_names = query_schema(con, f"SELECT * FROM {source}").names
-
-        # Find geometry column from common names
-        geom_col = None
-        for name in STANDARD_GEOMETRY_NAMES:
-            if name in col_names:
-                geom_col = name
-                break
-        if not geom_col:
-            geom_col = "geometry"
-
-        if verbose:
-            debug(f"Using geometry column: {geom_col}")
-
-        return _make_add_a5_query(source, geom_col, a5_column_name, resolution, source_crs, edges)
-
-    execute_transform(
-        input_path,
-        output_path,
-        make_query,
-        verbose=verbose,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
-        memory_limit=memory_limit,
-    )
-
-    if not should_stream_output(output_path):
-        success(
-            f"Successfully added A5 column '{a5_column_name}' "
-            f"(resolution {resolution}) to: {output_path}"
-        )
-
-
-def _get_resolution_size(resolution):
-    """Get approximate cell size for a given A5 resolution."""
-    sizes = {
-        0: "42.5M km²",
-        1: "10.6M km²",
-        2: "2.7M km²",
-        3: "666K km²",
-        4: "167K km²",
-        5: "41.7K km²",
-        6: "10.4K km²",
-        7: "2,600 km²",
-        8: "650 km²",
-        9: "163 km²",
-        10: "40.7 km²",
-        11: "10.2 km²",
-        12: "2.5 km²",
-        13: "630 m²",
-        14: "158 m²",
-        15: "39.4 m²",
-        16: "9.9 m²",
-        17: "2.5 m²",
-        18: "616 mm²",
-        19: "154 mm²",
-        20: "38.5 mm²",
-        21: "9.6 mm²",
-        22: "2.4 mm²",
-        23: "0.6 mm²",
-        24: "0.15 mm²",
-        25: "38 μm²",
-        26: "9.5 μm²",
-        27: "2.4 μm²",
-        28: "0.6 μm²",
-        29: "0.15 μm²",
-        30: "37 nm²",
-    }
-    return sizes.get(resolution, f"resolution {resolution}")

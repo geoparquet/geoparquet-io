@@ -5,6 +5,7 @@ from __future__ import annotations
 from geoparquet_io.core.duckdb_metadata import get_column_names, get_schema_info
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.common import (
     partition_by_column,
     preview_partition,
@@ -86,7 +87,7 @@ def partition_by_string(
         filename_prefix: Optional prefix for partition filenames
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write
-        compression: Compression codec (default: ZSTD)
+        compression: Compression codec (default: the compression owner's)
         compression_level: Compression level (default: 15)
         row_group_size_mb: Row group size in MB (mutually exclusive with row_group_rows)
         row_group_rows: Row group size in number of rows (mutually exclusive with row_group_size_mb)
@@ -103,6 +104,7 @@ def partition_by_string(
         temp_file_path = read_stdin_to_temp_file(verbose)
         input_parquet = temp_file_path
 
+    write = WriteOptions.pick(locals())
     try:
         # Validate column exists
         if verbose:
@@ -169,13 +171,7 @@ def partition_by_string(
             force=force,
             skip_analysis=skip_analysis,
             filename_prefix=filename_prefix,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            memory_limit=memory_limit,
+            write=write,
         )
 
         success(f"Successfully created {num_partitions} partition file(s)")

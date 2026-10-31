@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pystac.validation
 
+from geoparquet_io.core.bbox_parse import BBox
 from geoparquet_io.core.check_verdict import Verdict
 from geoparquet_io.core.logging_config import debug, error, progress, success, warn
 from geoparquet_io.core.remote import is_remote_url
@@ -140,7 +141,10 @@ def _validate_geometry_bbox(stac_dict: dict, results: dict) -> None:
 
     if len(bbox) == 4:
         xmin, ymin, xmax, ymax = bbox
-        if xmin > xmax or ymin > ymax:
+        # A STAC bbox is WGS84; xmin > xmax is valid when it is the
+        # antimeridian wrap (RFC 7946 5.2), the one rule in bbox_parse.
+        wraps = BBox(xmin, ymin, xmax, ymax).crosses_antimeridian(geographic=True)
+        if (xmin > xmax and not wraps) or ymin > ymax:
             results["errors"].append(f"Invalid bbox ordering: [{xmin}, {ymin}, {xmax}, {ymax}]")
             results["valid"] = False
 

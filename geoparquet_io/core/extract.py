@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pyarrow as pa
 
+from geoparquet_io.core import bbox_parse
 from geoparquet_io.core.bbox_structure import check_bbox_structure, dataset_bounds
 from geoparquet_io.core.column_selection import (
     reject_blank_column_entries,
@@ -73,6 +74,7 @@ from geoparquet_io.core.geometry_repair import (
 )
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
 from geoparquet_io.core.parquet_writer import (
+    WriteOptions,
     resolve_output_geoparquet_version,
     resolve_row_group_rows_for_query,
 )
@@ -224,43 +226,6 @@ def _warn_if_crs_mismatch(
         msg += "\nIf you get 0 results, try using coordinates in the data's CRS."
 
         warn(msg)
-
-
-def parse_bbox(bbox_str: str) -> tuple[float, float, float, float]:
-    """
-    Parse bounding box string into tuple of floats.
-
-    Args:
-        bbox_str: Comma-separated string "xmin,ymin,xmax,ymax"
-
-    Returns:
-        tuple: (xmin, ymin, xmax, ymax)
-
-    Raises:
-        InvalidParameterError: If format is invalid or coordinates are reversed
-    """
-    try:
-        parts = [float(x.strip()) for x in bbox_str.split(",")]
-        if len(parts) != 4:
-            raise InvalidParameterError(
-                "bbox", f"expected 4 values (xmin,ymin,xmax,ymax), got {len(parts)}"
-            )
-        xmin, ymin, xmax, ymax = parts
-
-        # Validate coordinate ordering
-        if xmin > xmax or ymin > ymax:
-            raise InvalidParameterError(
-                "bbox",
-                f"coordinates appear to be reversed. "
-                f"xmin ({xmin}) must be <= xmax ({xmax}), and ymin ({ymin}) must be <= ymax ({ymax}). "
-                "Expected order: xmin,ymin,xmax,ymax.",
-            )
-
-        return (xmin, ymin, xmax, ymax)
-    except ValueError as e:
-        raise InvalidParameterError(
-            "bbox", f"expected numeric values: xmin,ymin,xmax,ymax. Error: {e}"
-        ) from e
 
 
 def convert_geojson_to_wkt(geojson: dict) -> str:
@@ -575,16 +540,28 @@ def build_spatial_filter(
     conditions = []
 
     if bbox:
-        xmin, ymin, xmax, ymax = bbox
+        # A wrapped bbox (xmin > xmax) is its two lobes, ORed (bbox_parse.any_piece).
         if bbox_info.get("has_bbox_column"):
-            bbox_col = bbox_info["bbox_column_name"]
+            col = quote_identifier(bbox_info["bbox_column_name"])
             conditions.append(
-                f"({quote_identifier(bbox_col)}.xmax >= {xmin} AND {quote_identifier(bbox_col)}.xmin <= {xmax} "
-                f"AND {quote_identifier(bbox_col)}.ymax >= {ymin} AND {quote_identifier(bbox_col)}.ymin <= {ymax})"
+                bbox_parse.any_piece(
+                    bbox_parse.BBox(*bbox),
+                    lambda b: (
+                        f"({col}.xmax >= {b.xmin} AND {col}.xmin <= {b.xmax} "
+                        f"AND {col}.ymax >= {b.ymin} AND {col}.ymin <= {b.ymax})"
+                    ),
+                )
             )
         else:
+            geom = quote_identifier(geometry_col)
             conditions.append(
-                f"ST_Intersects({quote_identifier(geometry_col)}, ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))"
+                bbox_parse.any_piece(
+                    bbox_parse.BBox(*bbox),
+                    lambda b: (
+                        f"ST_Intersects({geom}, "
+                        f"ST_MakeEnvelope({b.xmin}, {b.ymin}, {b.xmax}, {b.ymax}))"
+                    ),
+                )
             )
 
     if geometry_wkt:
@@ -953,12 +930,7 @@ def _extract_streaming(
     where: str | None,
     limit: int | None,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
+    write: WriteOptions,
     repair_geometry: bool = True,
 ) -> None:
     """Handle extraction with streaming input/output."""
@@ -1046,13 +1018,8 @@ def _extract_streaming(
             output_path,
             original_metadata=metadata,
             geometry_column=geom_col,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
+            **write.funnel_kwargs(),
         )
 
         if not should_stream_output(output_path):
@@ -1181,14 +1148,8 @@ def _execute_extraction(
     selected_columns: list[str],
     verbose: bool,
     show_sql: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None = None,
+    write: WriteOptions,
     write_strategy: str = "duckdb-kv",
-    memory_limit: str | None = None,
     geometry_col: str | None = None,
     repair_geometry: bool = True,
 ) -> None:
@@ -1257,19 +1218,13 @@ def _execute_extraction(
             query,
             output_parquet,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
             show_sql=show_sql,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
             write_strategy=write_strategy,
-            memory_limit=memory_limit,
             input_file=input_parquet,
             invalidate_derived_stats=stale_columns is None or bool(stale_columns),
             invalidate_derived_stats_columns=stale_columns,
+            **write.funnel_kwargs(),
         )
 
         # Get extracted row count from output file metadata (fast - reads footer only)
@@ -1417,8 +1372,9 @@ def _extract_impl(
     if output_parquet and not is_streaming and not dry_run:
         handle_output_overwrite(output_parquet, overwrite, input_parquet)
 
+    write = WriteOptions.pick(locals())
     if is_streaming and not dry_run:
-        bbox_tuple = parse_bbox(bbox) if bbox else None
+        bbox_tuple = bbox_parse.parse_bbox(bbox) if bbox else None
         geometry_wkt = parse_geometry_input(geometry, use_first_geometry) if geometry else None
         if where:
             validate_where_clause(where)
@@ -1432,12 +1388,7 @@ def _extract_impl(
             where,
             limit,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
+            write,
             repair_geometry=repair_geometry,
         )
 
@@ -1460,7 +1411,7 @@ def _extract_impl(
     selected_columns = build_column_selection(
         all_columns, include_list, exclude_list, geometry_col, bbox_col
     )
-    bbox_tuple = parse_bbox(bbox) if bbox else None
+    bbox_tuple = bbox_parse.parse_bbox(bbox) if bbox else None
     if bbox_tuple and not dry_run:
         _warn_if_crs_mismatch(bbox_tuple, input_parquet, geometry_col)
 
@@ -1508,14 +1459,8 @@ def _extract_impl(
             selected_columns,
             verbose,
             show_sql,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
+            write,
             write_strategy,
-            memory_limit,
             geometry_col=geometry_col,
             repair_geometry=repair_geometry,
         )

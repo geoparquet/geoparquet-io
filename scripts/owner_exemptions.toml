@@ -110,27 +110,6 @@ reason = "permanent: ArcGIS JSON error-body code 500 marks page pressure (halve 
 # PROJJSON, GeoJSON data), not a report; a new report in one of them is not
 # caught, which is the price of not listing 60 serializer lines one by one.
 [[G1.json_dumps]]
-path = "geoparquet_io/cli/commands/benchmark.py"
-name = "benchmark_report"
-reason = "benchmark report JSON; dumps_json (T5c)"
-[[G1.json_dumps]]
-path = "geoparquet_io/cli/commands/inspect.py"
-name = "inspect_layers"
-count = 2
-reason = "inspect layers --json; dumps_json (T5c)"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/benchmark.py"
-name = "format_json_output"
-reason = "benchmark --json report; dumps_json (T5c)"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/benchmark.py"
-name = "format_explain_output"
-reason = "benchmark explain --json report; dumps_json (T5c)"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/benchmark_suite.py"
-name = "SuiteResult.to_json"
-reason = "benchmark suite report; dumps_json (T5c)"
-[[G1.json_dumps]]
 path = "geoparquet_io/core/add/bbox.py"
 count = "*"
 reason = "metadata serialization, not a report: geo block"
@@ -325,7 +304,7 @@ reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 "_get_query_columns" = ["geoparquet_io/core/duckdb_utils.py"]
 "*unique_name*" = ["geoparquet_io/core/column_selection.py"]
 "*_with_retry" = ["geoparquet_io/core/http_retry.py"]
-"_ensure_*_column" = ["geoparquet_io/core/index_ops.py"]
+"*ensure*_column" = ["geoparquet_io/core/index_ops.py"]
 "build_spatial_join*" = ["geoparquet_io/core/duckdb_utils.py"]
 "_align*schema" = ["geoparquet_io/core/arrow_types.py"]
 "_unify*schema" = ["geoparquet_io/core/arrow_types.py"]
@@ -387,11 +366,8 @@ reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 "*unique_name*" = ["free_column_name", "_suffixed_to_unique"]
 "parse_bbox" = ["_normalize_bbox", "_validated_bbox"]
 
-# Owners named above that do not exist yet. bbox_parse.py is a placeholder
-# (T5c decides parse_bbox's home); index_ops.py arrives with T5b.
+# Owners named above that do not exist yet (none today).
 [G2.pending_owners]
-"geoparquet_io/core/bbox_parse.py" = "placeholder home for parse_bbox; T5c decides"
-"geoparquet_io/core/index_ops.py" = "created by T5b for the _ensure_*_column family"
 
 # The definitions outside their owner today, each with the track that deletes
 # it. count = how many defs of that name the file holds (default 1); the check
@@ -425,37 +401,9 @@ path = "geoparquet_io/core/extract.py"
 name = "is_geographic_crs"
 reason = "is-geographic copy (approved change 8); T4c"
 [[G2.exemptions]]
-path = "geoparquet_io/core/extract.py"
-name = "parse_bbox"
-reason = "parse_bbox copy; T5c"
-[[G2.exemptions]]
-path = "geoparquet_io/core/format_writers.py"
-name = "_normalize_bbox"
-reason = "parse_bbox copy; T5c"
-[[G2.exemptions]]
 path = "geoparquet_io/core/inspect_utils.py"
 name = "_crs_are_equivalent"
 reason = "CRS equality copy (approved change 9); T4c"
-[[G2.exemptions]]
-path = "geoparquet_io/core/partition/by_a5.py"
-name = "_ensure_a5_column"
-reason = "_ensure_*_column family; moves to index_ops (T5b)"
-[[G2.exemptions]]
-path = "geoparquet_io/core/partition/by_h3.py"
-name = "_ensure_h3_column"
-reason = "_ensure_*_column family; moves to index_ops (T5b)"
-[[G2.exemptions]]
-path = "geoparquet_io/core/partition/by_quadkey.py"
-name = "_ensure_quadkey_column"
-reason = "_ensure_*_column family; moves to index_ops (T5b)"
-[[G2.exemptions]]
-path = "geoparquet_io/core/partition/by_s2.py"
-name = "_ensure_s2_column"
-reason = "_ensure_*_column family; moves to index_ops (T5b)"
-[[G2.exemptions]]
-path = "geoparquet_io/core/preview.py"
-name = "_validated_bbox"
-reason = "parse_bbox copy; T5c"
 [[G2.exemptions]]
 path = "geoparquet_io/core/process/aggregate/common.py"
 name = "_unique_name"
@@ -480,70 +428,8 @@ reason = "CRS equality copy (approved change 9); T4c"
 # tests/test_owner_guards.py fails when the two lists differ.
 [G3]
 baseline = "scripts/duplicate_pairs_baseline.txt"
-
-[[G3.pairs]]
-pair = "geoparquet_io/cli/commands/partition.py:partition_a5|geoparquet_io/cli/commands/partition.py:partition_h3"
-reason = "partition h3/s2/a5 CLI commands, one per index; T5b shares one implementation"
-[[G3.pairs]]
-pair = "geoparquet_io/cli/commands/partition.py:partition_a5|geoparquet_io/cli/commands/partition.py:partition_s2"
-reason = "partition h3/s2/a5 CLI commands, one per index; T5b shares one implementation"
-[[G3.pairs]]
-pair = "geoparquet_io/cli/commands/partition.py:partition_h3|geoparquet_io/cli/commands/partition.py:partition_s2"
-reason = "partition h3/s2/a5 CLI commands, one per index; T5b shares one implementation"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/a5.py:_add_a5_streaming.make_query|geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query"
-reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/a5.py:_add_a5_streaming.make_query|geoparquet_io/core/add/s2.py:_add_s2_streaming.make_query"
-reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/a5.py:_add_a5_streaming|geoparquet_io/core/add/h3.py:_add_h3_streaming"
-reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/a5.py:_add_a5_streaming|geoparquet_io/core/add/s2.py:_add_s2_streaming"
-reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/a5.py:add_a5_column|geoparquet_io/core/add/h3.py:add_h3_column"
-reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/a5.py:add_a5_table|geoparquet_io/core/add/h3.py:add_h3_table"
-reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query|geoparquet_io/core/add/s2.py:_add_s2_streaming.make_query"
-reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/add/h3.py:_add_h3_streaming|geoparquet_io/core/add/s2.py:_add_s2_streaming"
-reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/benchmark.py:benchmark_geopandas_fiona|geoparquet_io/core/benchmark.py:benchmark_geopandas_pyogrio"
-reason = "geopandas benchmark harness differing only in the engine= literal; T5c (one function, engine parameter, two registry entries)"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/auto_resolution.py:_calculate_a5_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_h3_resolution"
-reason = "auto-resolution per index; T5b's one resolution calculator"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/auto_resolution.py:_calculate_a5_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_quadkey_resolution"
-reason = "auto-resolution per index; T5b's one resolution calculator"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/auto_resolution.py:_calculate_h3_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_quadkey_resolution"
-reason = "auto-resolution per index; T5b's one resolution calculator"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/by_a5.py:_ensure_a5_column|geoparquet_io/core/partition/by_h3.py:_ensure_h3_column"
-reason = "_ensure_*_column, one copy per index; T5b's ensure_index_column"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/by_a5.py:_ensure_a5_column|geoparquet_io/core/partition/by_quadkey.py:_ensure_quadkey_column"
-reason = "_ensure_*_column, one copy per index; T5b's ensure_index_column"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/by_a5.py:_ensure_a5_column|geoparquet_io/core/partition/by_s2.py:_ensure_s2_column"
-reason = "_ensure_*_column, one copy per index; T5b's ensure_index_column"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/by_a5.py:partition_by_a5|geoparquet_io/core/partition/by_h3.py:partition_by_h3"
-reason = "partition workflow, one copy per index; T5b's index_ops driver"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/by_h3.py:_ensure_h3_column|geoparquet_io/core/partition/by_quadkey.py:_ensure_quadkey_column"
-reason = "_ensure_*_column, one copy per index; T5b's ensure_index_column"
-[[G3.pairs]]
-pair = "geoparquet_io/core/partition/by_h3.py:_ensure_h3_column|geoparquet_io/core/partition/by_s2.py:_ensure_s2_column"
-reason = "_ensure_*_column, one copy per index; T5b's ensure_index_column"
+# Every near-duplicate pair is gone; the list stays, empty, so a new one has nowhere to hide.
+pairs = []
 
 # pylint R0801 (scripts/check_pylint_duplicates.py, the pylint-duplicates hook).
 # One entry per reported block, keyed by the module and the function (or class,
@@ -551,9 +437,6 @@ reason = "_ensure_*_column, one copy per index; T5b's ensure_index_column"
 # the wrapper fails when the tree differs, so swapping one copy for another
 # between the same two modules fails too. Most are keyword-argument lists forwarded to one callee:
 # R0801 counts lines, not logic, so those are permanent.
-[[G3.pylint]]
-block = "api.ops:_sub_partition|cli.decorators:handle_directory_sub_partition"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
 block = "api.ops:aggregate_admin|api.table:Table.aggregate_admin"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
@@ -596,47 +479,11 @@ reason = "permanent: the same keyword-argument list forwarded to one callee (API
 [[G3.pylint]]
 block = "cli.commands.process:process_aggregate_a5|core.process.aggregate.by_h3:aggregate_by_h3"
 count = 2
-reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
+reason = "aggregation options (metric, breakdown, bucket-point, ...) forwarded to the grid driver; T5a: one aggregate-options object"
 [[G3.pylint]]
 block = "cli.commands.process:process_aggregate_h3|core.process.aggregate.by_a5:aggregate_by_a5"
 count = 2
-reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
-[[G3.pylint]]
-block = "api.ops:_sub_partition|cli.commands.partition:partition_h3"
-reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
-[[G3.pylint]]
-block = "cli.commands.partition:partition_s2|cli.decorators:handle_directory_sub_partition"
-reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
-[[G3.pylint]]
-block = "core.add.a5:_add_a5_streaming.make_query|core.add.h3:_add_h3_streaming.make_query"
-reason = "index add workflow per index; T5b's index_ops driver"
-[[G3.pylint]]
-block = "core.add.a5:_add_a5_streaming|core.add.h3:_add_h3_streaming"
-reason = "index add workflow per index; T5b's index_ops driver"
-[[G3.pylint]]
-block = "core.add.a5:add_a5_column|core.sort_by_column:sort_by_column"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.add.a5:add_a5_table|core.add.h3:add_h3_table"
-reason = "index add workflow per index; T5b's index_ops driver"
-[[G3.pylint]]
-block = "core.add.bbox:_add_bbox_streaming|core.stream_io:execute_transform"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.add.geometry_metrics:_add_metrics_streaming|core.sort_by_column:_sort_by_column_streaming"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.add.h3:_add_h3_streaming|core.sort_by_column:_sort_by_column_streaming"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.add.h3:add_h3_column|core.sort_quadkey:sort_by_quadkey"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.add.h3:add_h3_table|core.add.quadkey:add_quadkey_table"
-reason = "index add workflow per index; T5b's index_ops driver"
-[[G3.pylint]]
-block = "core.add.kdtree:_add_kdtree_streaming|core.str_order:_str_order_streaming"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+reason = "aggregation options (metric, breakdown, bucket-point, ...) forwarded to the grid driver; T5a: one aggregate-options object"
 [[G3.pylint]]
 block = "core.add.quadkey:_is_geographic_crs|core.extract:is_geographic_crs"
 reason = "is-geographic CRS copy (approved change 8); T4c"
@@ -644,45 +491,14 @@ reason = "is-geographic CRS copy (approved change 8); T4c"
 block = "core.crs_utils:<module>|core.duckdb_metadata:_get_pyarrow_logical_type"
 reason = "GeoArrow extension-name list copied; T3a's decoder owner"
 [[G3.pylint]]
-block = "core.extract:_execute_extraction|core.str_order:_str_order_file_based"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
 block = "core.extract:_extract_streaming|core.str_order:_str_order_streaming"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.hilbert_order:hilbert_order|core.str_order:str_order"
-count = 2
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.partition.admin_hierarchical:_create_all_partitions|core.partition.common:partition_by_column"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.partition.by_a5:_run_preview|core.partition.by_h3:_run_preview"
-reason = "partition workflow per index; T5b's index_ops driver"
-[[G3.pylint]]
-block = "core.partition.by_a5:partition_by_a5|core.partition.by_h3:partition_by_h3"
-reason = "partition workflow per index; T5b's index_ops driver"
-[[G3.pylint]]
-block = "core.partition.by_h3:_run_preview|core.partition.by_s2:_run_preview"
-reason = "partition workflow per index; T5b's index_ops driver"
-[[G3.pylint]]
-block = "core.partition.by_h3:partition_by_h3|core.partition.by_kdtree:partition_by_kdtree"
-reason = "partition analysis and write options per index; T5b's index_ops driver"
-[[G3.pylint]]
-block = "core.partition.by_quadkey:_ensure_quadkey_column|core.sort_quadkey:sort_by_quadkey"
-reason = "ensure-quadkey-via-temp-file workflow with the codec policy re-derived as literals; T5b's ensure_index_column"
-[[G3.pylint]]
-block = "core.partition.by_s2:_partition_with_temp_file|core.partition.by_string:partition_by_string"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
 block = "core.process.aggregate.by_a5:aggregate_by_a5|core.process.aggregate.by_h3:aggregate_by_h3"
 count = 2
-reason = "permanent: aggregate-by-a5/h3 public entry points forward the same parameters to one grid driver (grid_common)"
+reason = "aggregation options (metric, breakdown, bucket-point, ...) forwarded to the grid driver; T5a: one aggregate-options object"
 [[G3.pylint]]
 block = "core.process.raster.contour:contour_file|core.process.raster.polygonize:polygonize_file"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.sort_by_column:sort_by_column|core.sort_quadkey:sort_by_quadkey"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
 block = "core.sort_quadkey:sort_by_quadkey_table|core.str_order:str_order_table"
@@ -694,8 +510,10 @@ reason = "sort result read back with the input's schema metadata carried verbati
 # Option names declared on more than one command whose type, default, callback,
 # multiple or is_flag differ, with the fields that differ. The set is exact: a
 # new difference fails, and a unified option must leave the list.
-# Not here: --bbox (its parsing differs in the command bodies, not in the Click
-# declaration: pinned below as [[G13.bbox_parsers]]) and --json/--markdown
+# Not here: --bbox (every declaration is the same str; the parse layer has its
+# own arm, tests/test_cli_shared_options.py's inline_bbox_parsers, which finds
+# none since T5c routed them to core/bbox_parse.parse_bbox: add a
+# [[G13.bbox_parsers]] entry only if one must stay) and --json/--markdown
 # (declared repeatedly but identically).
 [[G13.options]]
 option = "--auto"
@@ -712,11 +530,11 @@ reason = "permanent: convert geoparquet auto-detects (None); shapefile DBF text 
 [[G13.options]]
 option = "--geometry"
 fields = ["type", "is_flag"]
-reason = "T5c: extract carto's --geometry is a bool flag where every other command takes a column name"
+reason = "permanent: a different concept (include geometry) under the same name; renaming breaks the CLI"
 [[G13.options]]
 option = "--geometry-column"
-fields = ["default", "callback"]
-reason = "T5c: process simplify declares its own --geometry-column without the 'geometry' default or the _validate_column_name callback the sort commands share"
+fields = ["default"]
+reason = "T3c: sort's 'geometry' default is a copy of the primary-column rule (hilbert_order/str_order auto-detect sentinel); the default becomes None via primary_geometry_column there. Simplify shares column_name_option since T5c"
 [[G13.options]]
 option = "--geoparquet-version"
 fields = ["type"]
@@ -726,13 +544,9 @@ option = "--level"
 fields = ["type", "default"]
 reason = "permanent: S2 level (add 13; partition None = auto-resolve) vs aggregate admin's country/region level"
 [[G13.options]]
-option = "--limit"
-fields = ["type"]
-reason = "T5c: extract geoparquet/arcgis take a plain int where bigquery/wfs/carto reject negatives (IntRange min=0)"
-[[G13.options]]
 option = "--precision"
 fields = ["default"]
-reason = "T5c: pmtiles create forwards --precision to the GeoJSON writer (core/pmtiles.py) with its own default 6 against the writer's 7"
+reason = "permanent: PMTiles tile precision 6 and GeoJSON writer precision 7 are deliberate per-format defaults; one default changes tile bytes (not approved)"
 [[G13.options]]
 option = "--profile"
 fields = ["type", "is_flag"]
@@ -743,28 +557,13 @@ fields = ["type", "default"]
 reason = "permanent: per-index bounds and defaults (H3 0-15, A5 0-30, quadkey 0-23; partition/aggregate None = auto); T5b's index specs carry them"
 [[G13.options]]
 option = "--timeout"
-fields = ["type", "default"]
-reason = "T5c: one --timeout type (arcgis FloatRange, carto IntRange); the 60 s and 120 s defaults are per-service budgets the T4a audit accepted"
+fields = ["default"]
+reason = "permanent: one type since T5c (cli.decorators.timeout_option); the 60 s (arcgis) and 120 s (carto) defaults are per-service budgets the T4a audit accepted"
 [[G13.options]]
 option = "--where"
 fields = ["default"]
 reason = "permanent: ArcGIS REST requires a where clause, so extract arcgis defaults to its select-all '1=1'"
 
-# Inline --bbox parsers in cli/ (tests/test_cli_shared_options.py's parse arm):
-# each splits on "," and casts floats itself instead of calling
-# core/extract.parse_bbox, and NaN handling differs (#1367's G13 evidence).
-[[G13.bbox_parsers]]
-path = "geoparquet_io/cli/commands/extract.py"
-name = "extract_arcgis"
-reason = "inline --bbox parser beside core/extract.parse_bbox; T5c"
-[[G13.bbox_parsers]]
-path = "geoparquet_io/cli/commands/extract.py"
-name = "extract_wfs_cmd"
-reason = "inline --bbox parser beside core/extract.parse_bbox; T5c"
-[[G13.bbox_parsers]]
-path = "geoparquet_io/cli/commands/extract.py"
-name = "extract_carto_cmd"
-reason = "inline --bbox parser beside core/extract.parse_bbox; T5c"
 
 # ---------------------------------------------------------------------------
 # G4: dead code (vulture at min_confidence = 60)

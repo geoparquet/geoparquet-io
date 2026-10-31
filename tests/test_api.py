@@ -1104,8 +1104,7 @@ class TestFrontDoorDelegation:
 
 #: The front doors and every owner module of the #1367 concept table. A change
 #: to any of their public names is a diff to tests/data/snapshots/public_api.json,
-#: so nothing moves silently. Not yet created, and taken in when it exists:
-#: geoparquet_io.core.index_ops (T5b).
+#: so nothing moves silently.
 PUBLIC_API_MODULES = (
     "geoparquet_io.api",
     "geoparquet_io.api.ops",
@@ -1130,8 +1129,9 @@ PUBLIC_API_MODULES = (
     "geoparquet_io.core.format_writers",
     "geoparquet_io.cli.decorators",
     "geoparquet_io.cli.exception_handler",
-    # Concept 15 (shared CLI behaviour): today's owners of the check runner and
-    # of parse_bbox, until T5c settles their homes.
+    # Concept 15 (shared CLI behaviour): the owner of parse_bbox / BBox, and
+    # the check runner's module.
+    "geoparquet_io.core.bbox_parse",
     "geoparquet_io.cli.commands.check",
     "geoparquet_io.core.extract",
     "geoparquet_io.core.edges",

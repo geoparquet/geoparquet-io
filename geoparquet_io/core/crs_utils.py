@@ -11,6 +11,7 @@ import re
 from functools import lru_cache
 from typing import Any
 
+from geoparquet_io.core.bbox_parse import BBox
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     fetch_one,
@@ -1472,12 +1473,13 @@ def merge_longitude_ranges(ranges: list[tuple[float, float]]) -> tuple[float, fl
     """
     if not ranges:
         raise ValueError("merge_longitude_ranges() needs at least one range")
-    if all(xmin <= xmax for xmin, xmax in ranges):
+    boxes = [BBox(xmin, 0.0, xmax, 0.0) for xmin, xmax in ranges]
+    if not any(box.crosses_antimeridian(geographic=True) for box in boxes):
         return min(r[0] for r in ranges), max(r[1] for r in ranges)
 
     arcs: list[list[float]] = []
-    for xmin, xmax in ranges:
-        arcs.extend([[xmin, xmax]] if xmin <= xmax else [[xmin, 180.0], [-180.0, xmax]])
+    for box in boxes:
+        arcs.extend([piece.xmin, piece.xmax] for piece in box.pieces(geographic=True))
     arcs.sort()
 
     merged = [arcs[0]]

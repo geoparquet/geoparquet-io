@@ -59,7 +59,7 @@ from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_
 from geoparquet_io.core.geo_metadata import is_levelled_overview, sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, success, warn
-from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+from geoparquet_io.core.parquet_writer import WriteOptions, resolve_output_geoparquet_version
 from geoparquet_io.core.partition.staging import (
     PartitionWriteOptions,
     finalize_partition_file,
@@ -269,7 +269,7 @@ def _split_input(
                 None, input_file=input_path, verbose=verbose
             ),
             input_file=input_path,
-            compression_level=3,  # read once by tippecanoe; not worth level 15
+            write=WriteOptions(compression_level=3),  # read once by tippecanoe; not worth 15
         )
         for values, partition_dir in iter_staging_partitions(staging):
             chunk_file = os.path.join(parts_dir, f"{values[0]}.parquet")

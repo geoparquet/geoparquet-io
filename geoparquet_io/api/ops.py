@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 import pyarrow as pa
 
+from geoparquet_io.core import index_ops
 from geoparquet_io.core.add.a5 import add_a5_table
 from geoparquet_io.core.add.bbox import add_bbox_table
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata_table
@@ -186,7 +187,7 @@ def add_stac_metadata_table(
 def add_quadkey(
     table: pa.Table,
     column_name: str = "quadkey",
-    resolution: int = 13,
+    resolution: int = index_ops.get_index_spec("quadkey").default_resolution,
     use_centroid: bool = False,
     geometry_column: str | None = None,
 ) -> pa.Table:
@@ -390,7 +391,7 @@ def extract(
 def add_h3(
     table: pa.Table,
     column_name: str = "h3_cell",
-    resolution: int = 9,
+    resolution: int = index_ops.get_index_spec("h3").default_resolution,
     geometry_column: str | None = None,
 ) -> pa.Table:
     """
@@ -416,7 +417,7 @@ def add_h3(
 def add_a5(
     table: pa.Table,
     column_name: str = "a5_cell",
-    resolution: int = 15,
+    resolution: int = index_ops.get_index_spec("a5").default_resolution,
     geometry_column: str | None = None,
 ) -> pa.Table:
     """
@@ -854,7 +855,7 @@ def add_kdtree(
 def add_s2(
     table: pa.Table,
     column_name: str = "s2_cell",
-    level: int = 13,
+    level: int = index_ops.get_index_spec("s2").default_resolution,
     geometry_column: str | None = None,
 ) -> pa.Table:
     """
@@ -912,7 +913,7 @@ def sort_column(
 def sort_quadkey(
     table: pa.Table,
     column_name: str = "quadkey",
-    resolution: int = 13,
+    resolution: int = index_ops.get_index_spec("quadkey").default_resolution,
     use_centroid: bool = False,
     remove_column: bool = False,
 ) -> pa.Table:
@@ -1452,8 +1453,6 @@ def partition_by_admin(
 # the CLI command each mirrors.
 # --------------------------------------------------------------------------
 
-_SUB_PARTITION_RESOLUTION_ARG = {"s2": "level"}
-
 
 def _parse_min_size(min_size: str | int) -> int:
     """Bytes from either the CLI's '100MB' spelling or a plain byte count."""
@@ -1510,6 +1509,7 @@ def _sub_partition(
 
     from geoparquet_io.core import sub_partition as core_sub_partition
     from geoparquet_io.core.exceptions import InvalidParameterError, PartitionError
+    from geoparquet_io.core.parquet_writer import WriteOptions
 
     if not _Path(directory).is_dir():
         raise InvalidParameterError(
@@ -1547,25 +1547,20 @@ def _sub_partition(
             "errors": [],
         }
 
-    argument = _SUB_PARTITION_RESOLUTION_ARG.get(partition_type, "resolution")
-    if partition_type == "quadkey":
-        # Quadkey takes two resolutions; refuse once here rather than per file
-        # (#854), spelled as keyword arguments rather than CLI flags.
-        missing = core_sub_partition.quadkey_resolution_error(
-            resolution,
-            partition_resolution,
-            auto=auto,
-            labels=("resolution=<int>", "partition_resolution=<int>"),
-            auto_label="auto=True",
+    from geoparquet_io.core.index_ops import get_index_spec, validate_partition_arguments
+
+    spec = get_index_spec(partition_type)
+    try:
+        validate_partition_arguments(
+            spec, resolution if resolution is not None else level, partition_resolution, auto
         )
-        if missing:
-            raise InvalidParameterError(argument, missing)
-    elif not auto and (resolution if resolution is not None else level) is None:
-        raise InvalidParameterError(
-            argument,
-            f"pass {argument}=<int> or auto=True -- gpio does not guess a "
-            f"{partition_type} {argument}",
+    except InvalidParameterError as exc:
+        message = (
+            exc.reason.replace("--partition-resolution", "partition_resolution=<int>")
+            .replace(f"--{spec.unit}", f"{spec.unit}=<int>")
+            .replace("--auto", "auto=True")
         )
+        raise InvalidParameterError(exc.param_name, message) from exc
 
     candidates = core_sub_partition.plan_sub_partition(
         str(directory), partition_type, min_size_bytes
@@ -1585,8 +1580,7 @@ def _sub_partition(
         verbose=verbose,
         force=force,
         skip_analysis=skip_analysis,
-        compression=compression,
-        compression_level=compression_level,
+        write=WriteOptions(compression=compression, compression_level=compression_level),
         auto=auto,
         target_rows=target_rows,
         max_partitions=max_partitions,
@@ -3047,6 +3041,7 @@ def create_pmtiles_pyramid(
     force: bool = False,
     verbose: bool = False,
     temporary_directory: str | None = None,
+    memory_limit: str | None = None,
 ) -> None:
     """
     Create a banded multi-level PMTiles pyramid from an aggregate file.
@@ -3083,6 +3078,8 @@ def create_pmtiles_pyramid(
         verbose: Enable verbose output
         temporary_directory: Existing directory for this run's scratch and
             the intermediate band archives; defaults to the OS temp directory
+        memory_limit: DuckDB memory limit for band planning and the overview
+            rollups (e.g. "2GB"); default: half the memory ceiling (#1191)
 
     Raises:
         TippecanoeNotFoundError: If tippecanoe is not in PATH
@@ -3123,6 +3120,7 @@ def create_pmtiles_pyramid(
         force=force,
         verbose=verbose,
         temporary_directory=temporary_directory,
+        memory_limit=memory_limit,
     )
 
 

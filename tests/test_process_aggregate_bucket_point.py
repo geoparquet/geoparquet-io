@@ -5,6 +5,8 @@ column) instead of the full geometry, so the (usually huge) geometry column is
 never scanned for the common cell-polygon output.
 """
 
+from dataclasses import replace
+
 import duckdb
 import pyarrow.parquet as pq
 import pytest
@@ -13,6 +15,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.duckdb_utils import fetch_one, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3
 
@@ -941,9 +944,7 @@ def test_build_grid_query_with_metric_and_breakdown(tmp_path):
 
     scheme = GridScheme(
         name="dummy",
-        extension="",
-        min_resolution=0,
-        max_resolution=5,
+        spec=replace(get_index_spec("h3"), extension=None, min_resolution=0, max_resolution=5),
         default_column="cell",
         key_template="CAST(floor(ST_X({pt})) AS INTEGER)",
         boundary_template="ST_MakeEnvelope(CAST({cell} AS DOUBLE), 0.0, CAST({cell} AS DOUBLE) + 1.0, 1.0)",

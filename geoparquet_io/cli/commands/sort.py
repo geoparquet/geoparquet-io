@@ -23,6 +23,7 @@ from geoparquet_io.cli.decorators import (
 )
 from geoparquet_io.core.file_utils import validate_parquet_extension
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.sort_by_column import sort_by_column as sort_by_column_impl
 from geoparquet_io.core.sort_quadkey import sort_by_quadkey as sort_by_quadkey_impl
 from geoparquet_io.core.str_order import str_order as str_impl
@@ -256,9 +257,11 @@ def sort_column(
 )
 @click.option(
     "--resolution",
-    default=13,
-    type=click.IntRange(0, 23),
-    help="Resolution when auto-adding quadkey column (0-23). Default: 13",
+    default=get_index_spec("quadkey").default_resolution,
+    type=click.IntRange(
+        get_index_spec("quadkey").min_resolution, get_index_spec("quadkey").max_resolution
+    ),
+    help=f"Resolution when auto-adding quadkey column ({get_index_spec('quadkey').bounds_text}). Default: {get_index_spec('quadkey').default_resolution}",
 )
 @click.option(
     "--use-centroid",

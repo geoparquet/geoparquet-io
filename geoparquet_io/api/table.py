@@ -22,7 +22,7 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.add.kdtree import (
     DEFAULT_KDTREE_TARGET_ROWS,
     ITERATIONS_CONFLICT,
-    ITERATIONS_MISSING,
+    require_iterations_or_auto,
 )
 from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
@@ -31,6 +31,7 @@ from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.edges import edges_of, state_edges
 from geoparquet_io.core.file_utils import unlink_released_file
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
+from geoparquet_io.core.index_ops import get_index_spec, validate_partition_arguments
 from geoparquet_io.core.logging_config import warn
 from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE
 from geoparquet_io.core.wfs import DEFAULT_WFS_PAGE_SIZE
@@ -40,47 +41,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from geoparquet_io.api.check import CheckResult
-
-
-def _require_auto_or_resolution(
-    auto: bool,
-    values: dict[str, int | None],
-    *,
-    conflict: str,
-    missing: str,
-) -> None:
-    """
-    Mirror the core partition gate before any I/O is spent on the call.
-
-    The auto-capable partition methods hand an in-memory table to core through a
-    temporary parquet file. Core raises for a call that names neither a
-    resolution nor ``auto`` -- but only after the whole table has been
-    serialized. Checking here makes an invalid call cost nothing; core keeps its
-    own gate as the backstop for every other caller.
-
-    Args:
-        auto: Whether the caller asked for auto-sizing
-        values: The resolution-ish parameters by their public name, in the order
-            core reports them
-        conflict: Reason for the error when ``auto`` is combined with an
-            explicit value (worded as core words it)
-        missing: Reason for the error when neither was given
-
-    Raises:
-        InvalidParameterError: If ``auto`` conflicts with an explicit value, or
-            neither was given
-    """
-    from geoparquet_io.core.exceptions import InvalidParameterError
-
-    given = [name for name, value in values.items() if value is not None]
-
-    if auto:
-        if given:
-            raise InvalidParameterError("auto", conflict)
-        return
-
-    if len(given) != len(values):
-        raise InvalidParameterError(next(iter(values)), missing)
 
 
 def _run_partition_with_temp_file(
@@ -1335,17 +1295,11 @@ class Table:
         """Detect output format from file extension."""
         from pathlib import Path as PathLib
 
-        ext = PathLib(path).suffix.lower()
-        EXTENSION_MAP = {
-            ".parquet": "parquet",
-            ".gpkg": "geopackage",
-            ".fgb": "flatgeobuf",
-            ".csv": "csv",
-            ".shp": "shapefile",
-            ".geojson": "geojson",
-            ".json": "geojson",
-        }
-        return EXTENSION_MAP.get(ext, "parquet")  # Default to parquet
+        from geoparquet_io.core.format_writers import EXTENSION_TO_FORMAT
+
+        detected = EXTENSION_TO_FORMAT.get(PathLib(path).suffix.lower(), "geoparquet")
+        # write() spells GeoParquet "parquet"; an unknown suffix defaults to it.
+        return "parquet" if detected == "geoparquet" else detected
 
     def _require_geometry_column_present(self) -> None:
         """Refuse a write whose named geometry column is not in the table (#1176).
@@ -1838,7 +1792,7 @@ class Table:
     def add_quadkey(
         self,
         column_name: str = "quadkey",
-        resolution: int = 13,
+        resolution: int = get_index_spec("quadkey").default_resolution,
         use_centroid: bool = False,
     ) -> Table:
         """
@@ -1957,7 +1911,7 @@ class Table:
     def add_h3(
         self,
         column_name: str = "h3_cell",
-        resolution: int = 9,
+        resolution: int = get_index_spec("h3").default_resolution,
     ) -> Table:
         """
         Add an H3 cell column based on geometry location.
@@ -1981,7 +1935,7 @@ class Table:
     def add_a5(
         self,
         column_name: str = "a5_cell",
-        resolution: int = 15,
+        resolution: int = get_index_spec("a5").default_resolution,
     ) -> Table:
         """
         Add an A5 cell column based on geometry location.
@@ -2217,7 +2171,7 @@ class Table:
     def add_s2(
         self,
         column_name: str = "s2_cell",
-        level: int = 13,
+        level: int = get_index_spec("s2").default_resolution,
     ) -> Table:
         """
         Add an S2 cell column based on geometry location.
@@ -2349,7 +2303,7 @@ class Table:
     def sort_quadkey(
         self,
         column_name: str = "quadkey",
-        resolution: int = 13,
+        resolution: int = get_index_spec("quadkey").default_resolution,
         use_centroid: bool = False,
         remove_column: bool = False,
     ) -> Table:
@@ -2465,11 +2419,8 @@ class Table:
         """
         from geoparquet_io.core.partition.by_quadkey import partition_by_quadkey
 
-        _require_auto_or_resolution(
-            auto,
-            {"resolution": resolution, "partition_resolution": partition_resolution},
-            conflict="cannot specify --resolution or --partition-resolution with --auto",
-            missing="must specify either --auto or both --resolution and --partition-resolution",
+        validate_partition_arguments(
+            get_index_spec("quadkey"), resolution, partition_resolution, auto=auto
         )
 
         return _run_partition_with_temp_file(
@@ -2541,12 +2492,7 @@ class Table:
         """
         from geoparquet_io.core.partition.by_h3 import partition_by_h3
 
-        _require_auto_or_resolution(
-            auto,
-            {"resolution": resolution},
-            conflict="cannot specify both --auto and --resolution",
-            missing="must specify either --resolution or --auto",
-        )
+        validate_partition_arguments(get_index_spec("h3"), resolution, auto=auto)
 
         return _run_partition_with_temp_file(
             self._table,
@@ -2619,12 +2565,7 @@ class Table:
         """
         from geoparquet_io.core.partition.by_s2 import partition_by_s2
 
-        _require_auto_or_resolution(
-            auto,
-            {"level": level},
-            conflict="cannot specify both --auto and --level",
-            missing="must specify either --level or --auto",
-        )
+        validate_partition_arguments(get_index_spec("s2"), level, auto=auto)
 
         return _run_partition_with_temp_file(
             self._table,
@@ -2697,12 +2638,7 @@ class Table:
         """
         from geoparquet_io.core.partition.by_a5 import partition_by_a5
 
-        _require_auto_or_resolution(
-            auto,
-            {"resolution": resolution},
-            conflict="cannot specify both --auto and --resolution",
-            missing="must specify either --resolution or --auto",
-        )
+        validate_partition_arguments(get_index_spec("a5"), resolution, auto=auto)
 
         return _run_partition_with_temp_file(
             self._table,
@@ -3744,12 +3680,7 @@ class Table:
 
                 raise InvalidParameterError("auto", ITERATIONS_CONFLICT)
         else:
-            _require_auto_or_resolution(
-                auto,
-                {"iterations": iterations},
-                conflict=ITERATIONS_CONFLICT,
-                missing=ITERATIONS_MISSING,
-            )
+            require_iterations_or_auto(iterations, ("rows", target_rows) if auto else None)
 
         return _run_partition_with_temp_file(
             self._table,

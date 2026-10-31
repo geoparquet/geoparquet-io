@@ -33,6 +33,7 @@ from geoparquet_io.core.geometry_detection import (
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, progress, success, warn
 from geoparquet_io.core.parquet_writer import (
+    WriteOptions,
     declared_geoparquet_version,
     resolve_output_geoparquet_version,
 )
@@ -265,35 +266,6 @@ def _bbox_covering_metadata(bbox_column_name: str) -> dict:
     }
 
 
-def _write_options_requested(
-    compression: str | None,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    geoparquet_version: str | None,
-) -> bool:
-    """Whether the caller explicitly asked for write settings the input may not have.
-
-    A verbatim copy of the input cannot honour ``--geoparquet-version``,
-    ``--compression``, ``--compression-level`` or ``--row-group-size``: it
-    reproduces whatever the input was written with. So when one of those is
-    explicitly requested, the copy shortcut is not an acceptable answer and the
-    column is recomputed instead. Every one of these arrives as ``None`` unless
-    the caller set it (the CLI passes ``compression=None`` when ``--compression``
-    was left at its default).
-    """
-    return any(
-        option is not None
-        for option in (
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            geoparquet_version,
-        )
-    )
-
-
 def _version_a_copy_would_miss(input_parquet: str) -> str | None:
     """The facade's version for this input, when a verbatim copy would declare another.
 
@@ -394,11 +366,10 @@ def add_bbox_column(
         except for GeoParquet 1.0 output: 'covering' was introduced in 1.1, so a
         1.0 file gets the bbox column without the covering key.
     """
-    # Whether a copy of the input could satisfy this call at all, decided before
-    # 'compression' is defaulted -- None here means "the caller did not ask".
-    write_options_requested = _write_options_requested(
-        compression, compression_level, row_group_size_mb, row_group_rows, geoparquet_version
-    )
+    # Built before anything is defaulted: None means "the caller did not ask",
+    # which is what decides whether a copy of the input could satisfy the call.
+    write = WriteOptions.pick(locals())
+    write_options_requested = write.sets_output_layout()
 
     warn_planar_math_for_file("add_bbox", input_parquet)
 
@@ -411,14 +382,8 @@ def add_bbox_column(
             output_parquet,
             bbox_column_name,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
+            write,
             force,
-            geoparquet_version,
-            memory_limit=memory_limit,
         )
         return
 
@@ -429,15 +394,9 @@ def add_bbox_column(
         bbox_column_name,
         dry_run,
         verbose,
-        compression,
-        compression_level,
-        row_group_size_mb,
-        row_group_rows,
-        profile,
+        write,
         force,
-        geoparquet_version,
         overwrite,
-        memory_limit=memory_limit,
         write_options_requested=write_options_requested,
     )
 
@@ -447,14 +406,8 @@ def _add_bbox_streaming(
     output_path: str | None,
     bbox_column_name: str,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
+    write: WriteOptions,
     force: bool,
-    geoparquet_version: str | None,
-    memory_limit: str | None,
 ) -> None:
     """Handle streaming input/output for add_bbox."""
     # Suppress verbose when streaming to stdout
@@ -467,7 +420,7 @@ def _add_bbox_streaming(
     # built. (add_bbox's query builder takes no source CRS, so nothing is lost.)
     with open_input(input_path, verbose=verbose) as (source, metadata, _is_stream, con):
         query, passed_through, bbox_column_name = _make_streaming_bbox_query(
-            source, con, bbox_column_name, force=force, geoparquet_version=geoparquet_version
+            source, con, bbox_column_name, force=force, geoparquet_version=write.geoparquet_version
         )
 
         write_output(
@@ -475,18 +428,12 @@ def _add_bbox_streaming(
             query,
             output_path,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
             # A covering gpio did not compute must not be declared. The version
             # is the facade's, pass-through or not: a 1.0 stream writes 1.1 like
             # every other command (approved change 7).
             custom_metadata=None if passed_through else _bbox_covering_metadata(bbox_column_name),
-            geoparquet_version=geoparquet_version,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
 
     if should_stream_output(output_path):
@@ -556,15 +503,9 @@ def _add_bbox_file_based(
     bbox_column_name: str,
     dry_run: bool,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
+    write: WriteOptions,
     force: bool,
-    geoparquet_version: str | None,
     overwrite: bool,
-    memory_limit: str | None,
     write_options_requested: bool = False,
 ) -> None:
     """Handle file-based add_bbox operation."""
@@ -616,7 +557,7 @@ def _add_bbox_file_based(
     # same file wrote `bbox_1` (#1176).
     if replace_column is None:
         bbox_column_name = resolve_bbox_name(
-            get_column_names(input_parquet), geoparquet_version, requested=bbox_column_name
+            get_column_names(input_parquet), write.geoparquet_version, requested=bbox_column_name
         )
 
     # A column is being computed. Say which bbox-shaped structs it will sit
@@ -647,16 +588,10 @@ def _add_bbox_file_based(
         extensions=None,
         dry_run=dry_run,
         verbose=verbose,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
         dry_run_description="Bounding box struct (xmin, ymin, xmax, ymax)",
-        profile=profile,
         replace_column=replace_column,
-        geoparquet_version=geoparquet_version,
         custom_metadata=covering_metadata,
-        memory_limit=memory_limit,
+        **write.funnel_kwargs(),
     )
 
     if not dry_run:

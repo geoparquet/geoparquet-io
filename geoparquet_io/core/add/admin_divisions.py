@@ -38,7 +38,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
-from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_query
+from geoparquet_io.core.parquet_writer import WriteOptions, resolve_row_group_rows_for_query
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import display_path
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
@@ -233,7 +233,9 @@ class _AdminAddRun:
     admin_bbox_col: str | None
     has_native_geometry: bool
     input_rewritten: bool
-    write_kwargs: dict = field(default_factory=dict)
+    options: WriteOptions = field(default_factory=WriteOptions)
+    #: The funnel keywords that are not write options (metadata, witness, kv).
+    funnel_extras: dict = field(default_factory=dict)
     con: duckdb.DuckDBPyConnection | None = None
 
     def select_for(self, levels, columns):
@@ -284,19 +286,25 @@ class _AdminAddRun:
             strategy,
             step.query,
             self.output_parquet,
-            self.write_kwargs["compression"],
-            self.write_kwargs["compression_level"],
+            self.options.compression,
+            self.options.compression_level,
             resolve_row_group_rows_for_query(
                 self.con,
                 step.query,
-                self.write_kwargs["row_group_rows"],
-                self.write_kwargs["row_group_size_mb"],
+                self.options.row_group_rows,
+                self.options.row_group_size_mb,
             ),
         )
 
     def write(self, step: AdminJoinStep) -> None:
         """The last step: the join, written through the funnel."""
-        write_parquet_with_metadata(self.con, step.query, self.output_parquet, **self.write_kwargs)
+        write_parquet_with_metadata(
+            self.con,
+            step.query,
+            self.output_parquet,
+            **self.funnel_extras,
+            **self.options.funnel_kwargs(),
+        )
 
 
 def add_admin_divisions_multi(
@@ -403,21 +411,15 @@ def add_admin_divisions_multi(
         admin_bbox_col=admin_bbox_col,
         has_native_geometry=has_native_geometry,
         input_rewritten=admin_input_reprojected(source_crs, admin_bbox_col),
-        write_kwargs={
+        options=WriteOptions.pick(locals()),
+        funnel_extras={
             "original_metadata": metadata,
-            "compression": compression,
-            "compression_level": compression_level,
-            "row_group_size_mb": row_group_size_mb,
-            "row_group_rows": row_group_rows,
             "verbose": verbose,
-            "profile": profile,
-            "geoparquet_version": geoparquet_version,
             # The join is `SELECT a.*` plus admin columns at every level, so
             # the geometry reaching the output is the input's own -- the
             # witness auto mode needs to keep a native-geo-only input native
             # rather than rewriting it as 1.1 WKB (#993).
             "input_file": input_path,
-            "memory_limit": memory_limit,
         },
     )
 
@@ -440,7 +442,7 @@ def add_admin_divisions_multi(
                     build_collection_metadata,
                 )
 
-                run.write_kwargs["extra_kv_metadata"] = build_collection_metadata(
+                run.funnel_extras["extra_kv_metadata"] = build_collection_metadata(
                     [VECOREL_ADMIN_SCHEMA], metadata
                 )
 

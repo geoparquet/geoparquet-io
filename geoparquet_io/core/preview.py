@@ -21,12 +21,11 @@ duckdb into the process.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.bbox_parse import BBox, parse_bbox
 
 #: The one reason a preview carries no estimate.
 NO_STATS_REASON = (
@@ -98,7 +97,7 @@ def preview_bbox_filter(
             ``xmin <= xmax`` and ``ymin <= ymax``, or if ``geometry_column``
             names a column the file does not have.
     """
-    query_bbox = _validated_bbox(bbox)
+    query_bbox = parse_bbox(bbox)
 
     from geoparquet_io.core.duckdb_metadata import get_row_group_sizes
 
@@ -131,25 +130,6 @@ def preview_bbox_filter(
         est_bytes=sum(group.compressed_bytes for group in matched),
         **totals,
     )
-
-
-def _validated_bbox(bbox: Sequence[float]) -> tuple[float, float, float, float]:
-    """``bbox`` as four floats, or the InvalidParameterError saying what it must be."""
-    try:
-        xmin, ymin, xmax, ymax = (float(value) for value in bbox)
-    except (TypeError, ValueError) as exc:
-        raise InvalidParameterError(
-            "bbox", "must be four numbers: (xmin, ymin, xmax, ymax)"
-        ) from exc
-    if not all(math.isfinite(value) for value in (xmin, ymin, xmax, ymax)):
-        # NaN compares False against everything, so letting it through would
-        # silently "match" every row group instead of estimating anything.
-        raise InvalidParameterError("bbox", f"must be finite numbers: {bbox!r}")
-    if xmin > xmax or ymin > ymax:
-        raise InvalidParameterError(
-            "bbox", f"xmin > xmax or ymin > ymax: ({xmin}, {ymin}, {xmax}, {ymax})"
-        )
-    return (xmin, ymin, xmax, ymax)
 
 
 def _row_group_spatial_stats(
@@ -230,14 +210,18 @@ def _matching_row_groups(
 
 
 def _intersects(stat: dict, bbox: tuple[float, float, float, float]) -> bool:
-    """Whether a row group's bbox statistics intersect the query bbox (edges count)."""
-    xmin, ymin, xmax, ymax = bbox
-    if stat["ymax"] < ymin or stat["ymin"] > ymax:
-        return False
-    if stat["xmin"] > stat["xmax"]:
-        # The Parquet geospatial statistics permit xmin > xmax for a group
-        # wrapping the antimeridian (see aggregate_native_geo_stats): the X
-        # range is the two lobes [xmin, 180] and [-180, xmax], not an empty
-        # interval. Pruning it as empty would drop rows the real read returns.
-        return bool(stat["xmin"] <= xmax or stat["xmax"] >= xmin)
-    return not (stat["xmax"] < xmin or stat["xmin"] > xmax)
+    """Whether a row group's bbox statistics intersect the query bbox (edges count).
+
+    Either box may wrap the antimeridian: the query bbox, and a group's
+    statistics, which Parquet permits to have xmin > xmax (see
+    aggregate_native_geo_stats). Each is split into its lobes by the owner
+    (``BBox.pieces``) and they intersect when any two lobes do; pruning a
+    wrapped group as an empty interval would drop rows the real read returns.
+    """
+    group = BBox(stat["xmin"], stat["ymin"], stat["xmax"], stat["ymax"])
+    return any(_boxes_meet(g, q) for g in group.pieces() for q in BBox(*bbox).pieces())
+
+
+def _boxes_meet(a: BBox, b: BBox) -> bool:
+    """Whether two non-wrapping boxes intersect (edges count)."""
+    return not (a.xmax < b.xmin or a.xmin > b.xmax or a.ymax < b.ymin or a.ymin > b.ymax)

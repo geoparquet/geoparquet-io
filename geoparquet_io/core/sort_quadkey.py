@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import os
-import tempfile
-import uuid
 
 import duckdb
 import pyarrow as pa
 
-from geoparquet_io.core.add.quadkey import add_quadkey_column, add_quadkey_table
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.constants import DEFAULT_QUADKEY_COLUMN_NAME, DEFAULT_QUADKEY_RESOLUTION
-from geoparquet_io.core.duckdb_metadata import get_column_names, get_usable_columns
+from geoparquet_io.core.constants import DEFAULT_QUADKEY_COLUMN_NAME
+from geoparquet_io.core.duckdb_metadata import get_usable_columns
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
@@ -20,14 +17,15 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
     uses_aws_profile,
 )
-from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
+from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import (
     handle_output_overwrite,
     is_partition_path,
     resolve_file_url,
 )
+from geoparquet_io.core.index_ops import ensure_index_column, get_index_spec
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
-from geoparquet_io.core.parquet_writer import resolve_row_group_rows
+from geoparquet_io.core.parquet_writer import WriteOptions, resolve_row_group_rows
 from geoparquet_io.core.partition.reader import (
     build_read_parquet_expr,
     raise_for_schema_mismatch,
@@ -46,7 +44,7 @@ from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 def sort_by_quadkey_table(
     table: pa.Table,
     quadkey_column_name: str = DEFAULT_QUADKEY_COLUMN_NAME,
-    resolution: int = DEFAULT_QUADKEY_RESOLUTION,
+    resolution: int = get_index_spec("quadkey").default_resolution,
     use_centroid: bool = False,
     remove_quadkey_column: bool = False,
 ) -> pa.Table:
@@ -65,15 +63,13 @@ def sort_by_quadkey_table(
     Returns:
         New table sorted by quadkey
     """
-    # Check if quadkey column exists, add if needed
-    working_table = table
-    if quadkey_column_name not in table.column_names:
-        working_table = add_quadkey_table(
-            table,
-            quadkey_column_name=quadkey_column_name,
-            resolution=resolution,
-            use_centroid=use_centroid,
-        )
+    working_table, quadkey_column_name, _ = ensure_index_column(
+        get_index_spec("quadkey"),
+        table,
+        quadkey_column_name,
+        resolution,
+        use_centroid=use_centroid,
+    )
 
     # Sort by quadkey
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
@@ -106,7 +102,7 @@ def sort_by_quadkey(
     input_parquet: str,
     output_parquet: str | None = None,
     quadkey_column_name: str = DEFAULT_QUADKEY_COLUMN_NAME,
-    resolution: int = DEFAULT_QUADKEY_RESOLUTION,
+    resolution: int = get_index_spec("quadkey").default_resolution,
     use_centroid: bool = False,
     remove_quadkey_column: bool = False,
     verbose: bool = False,
@@ -158,6 +154,7 @@ def sort_by_quadkey(
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
+    write = WriteOptions.pick(locals())
     if is_streaming:
         _sort_by_quadkey_streaming(
             input_parquet,
@@ -167,13 +164,7 @@ def sort_by_quadkey(
             use_centroid,
             remove_quadkey_column,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
-            memory_limit=memory_limit,
+            write,
         )
         return
 
@@ -194,72 +185,31 @@ def sort_by_quadkey(
     actual_input, read_options = resolve_read_path(input_parquet, verbose=verbose)
     hive_input: bool | None = True if read_options.get("hive_partitioning") else None
 
-    # Check if quadkey column exists
-    column_names = get_column_names(input_parquet)
-    column_exists = quadkey_column_name in column_names
-    using_default_name = quadkey_column_name == DEFAULT_QUADKEY_COLUMN_NAME
-
-    # Track if we created a temporary file with quadkey
-    temp_file = None
-
-    if not column_exists:
-        if not using_default_name:
-            # Custom name specified but column doesn't exist - error
-            raise InvalidParameterError(
-                "quadkey_column_name",
-                f"column '{quadkey_column_name}' not found in input file. "
-                f"Run 'gpio add quadkey --quadkey-name {quadkey_column_name}' to add it first.",
-            )
-
-        # Auto-add quadkey column using default name
-        if verbose:
-            debug(
-                f"Quadkey column '{quadkey_column_name}' not found. "
-                f"Auto-adding at resolution {resolution}..."
-            )
-
-        # Create temporary file for quadkey-enriched data. The input's basename
-        # is deliberately not part of the name: a directory input has none (or
-        # a trailing separator), and a glob's `*` is not a legal filename
-        # character on Windows.
-        temp_dir = tempfile.gettempdir()
-        temp_file = os.path.join(temp_dir, f"quadkey_enriched_{uuid.uuid4().hex}.parquet")
-
-        try:
-            add_quadkey_column(
-                input_parquet=actual_input,
-                output_parquet=temp_file,
-                quadkey_column_name=quadkey_column_name,
-                resolution=resolution,
-                use_centroid=use_centroid,
-                dry_run=False,
-                verbose=verbose,
-                compression=None,
-                compression_level=None,
-                row_group_size_mb=None,
-                row_group_rows=None,
-                profile=profile,
-                allow_schema_diff=allow_schema_diff,
-                hive_input=hive_input,
-            )
-            # The scratch file already holds the union (and the materialised
-            # hive keys), so the sort below reads it as the plain single file
-            # it is.
-            actual_input = temp_file
-            hive_input = None
-            if verbose:
-                debug(f"Quadkey column added successfully at resolution {resolution}")
-        except Exception as e:
-            if temp_file and os.path.exists(temp_file):
-                os.remove(temp_file)
-            # A multi-file input whose files disagree on their columns dies
-            # here, in the first read over the glob. Report the mismatch,
-            # not a failed quadkey add (#817's new surface).
-            raise_for_schema_mismatch(e, input_parquet)
-            raise GeoParquetError(f"Failed to add quadkey column: {str(e)}") from e
-
-    elif verbose:
-        debug(f"Using existing quadkey column '{quadkey_column_name}'")
+    missing_error = None
+    if quadkey_column_name != DEFAULT_QUADKEY_COLUMN_NAME:
+        missing_error = InvalidParameterError(
+            "quadkey_column_name",
+            f"column '{quadkey_column_name}' not found in input file. "
+            f"Run 'gpio add quadkey --quadkey-name {quadkey_column_name}' to add it first.",
+        )
+    try:
+        actual_input, quadkey_column_name, temp_file = ensure_index_column(
+            get_index_spec("quadkey"),
+            actual_input,
+            quadkey_column_name,
+            resolution,
+            verbose,
+            use_centroid,
+            profile,
+            missing_error=missing_error,
+            allow_schema_diff=allow_schema_diff,
+            hive_input=hive_input,
+        )
+    except Exception as exc:
+        raise_for_schema_mismatch(exc, input_parquet)
+        raise
+    if temp_file:
+        hive_input = None
 
     # Get metadata from input file (use actual_input in case we added quadkey)
     read_expr = build_read_parquet_expr(
@@ -310,20 +260,14 @@ def sort_by_quadkey(
             query,
             output_parquet,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
             input_file=input_parquet,
-            memory_limit=memory_limit,
             # `metadata` describes only the first file of a multi-file input
             # (and the auto-add step carried that footer forward), so its
             # bbox/geometry_types under-cover the merged output. Recompute
             # rather than carry (#793).
             invalidate_derived_stats=is_partition_path(input_parquet),
+            **write.funnel_kwargs(),
         )
 
         if remove_quadkey_column:
@@ -354,13 +298,7 @@ def _sort_by_quadkey_streaming(
     use_centroid: bool,
     remove_quadkey_column: bool,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
-    memory_limit: str | None,
+    write: WriteOptions,
 ) -> None:
     """Handle streaming input/output for sort_by_quadkey."""
     # Suppress verbose when streaming to stdout
@@ -379,41 +317,23 @@ def _sort_by_quadkey_streaming(
         else:
             working_file = input_path
 
-        # Check if quadkey column exists
-        column_names = get_column_names(working_file)
-        column_exists = quadkey_column_name in column_names
-        using_default_name = quadkey_column_name == DEFAULT_QUADKEY_COLUMN_NAME
-
-        actual_input = working_file
-
-        if not column_exists:
-            if not using_default_name:
-                raise InvalidParameterError(
-                    "quadkey_column_name",
-                    f"column '{quadkey_column_name}' not found in input. "
-                    f"Use default name 'quadkey' for auto-addition.",
-                )
-
-            if verbose:
-                debug(f"Auto-adding quadkey column at resolution {resolution}...")
-
-            temp_fd, temp_quadkey_file = tempfile.mkstemp(suffix=".parquet")
-            os.close(temp_fd)
-
-            add_quadkey_column(
-                input_parquet=working_file,
-                output_parquet=temp_quadkey_file,
-                quadkey_column_name=quadkey_column_name,
-                resolution=resolution,
-                use_centroid=use_centroid,
-                dry_run=False,
-                verbose=verbose,
-                compression=None,
-                compression_level=None,
-                profile=profile,
-                overwrite=True,  # Temp file created by mkstemp
+        missing_error = None
+        if quadkey_column_name != DEFAULT_QUADKEY_COLUMN_NAME:
+            missing_error = InvalidParameterError(
+                "quadkey_column_name",
+                f"column '{quadkey_column_name}' not found in input. "
+                f"Use default name 'quadkey' for auto-addition.",
             )
-            actual_input = temp_quadkey_file
+        actual_input, quadkey_column_name, temp_quadkey_file = ensure_index_column(
+            get_index_spec("quadkey"),
+            working_file,
+            quadkey_column_name,
+            resolution,
+            verbose,
+            use_centroid,
+            write.profile,
+            missing_error=missing_error,
+        )
 
         # Build and execute sort query
         actual_url = resolve_file_url(actual_input, verbose=False)
@@ -447,14 +367,8 @@ def _sort_by_quadkey_streaming(
             query,
             output_path,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
 
         con.close()

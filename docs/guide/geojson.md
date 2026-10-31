@@ -350,6 +350,30 @@ Levels come from [`gpio process overview`](process-overview.md) — existing `_r
     )
     ```
 
+### Memory
+
+Band planning (the worst-tile probe) and any overview level built on the fly run
+in DuckDB under gpio's usual memory bound: half the memory ceiling (physical RAM,
+or the container or Slurm job cap when lower). `--write-memory` (`memory_limit=`
+in Python) sets that limit explicitly; the tippecanoe and tile-join runs are
+separate processes and are not bounded by it.
+
+=== "CLI"
+
+    <!-- doctest: needs-tippecanoe, setup="gpio process aggregate h3 input.parquet cells.parquet --resolution 5" -->
+    ```bash
+    gpio pmtiles pyramid cells.parquet cells.pmtiles --write-memory 8GB
+    ```
+
+=== "Python"
+
+    <!-- doctest: needs-tippecanoe, setup="gpio process aggregate h3 input.parquet cells.parquet --resolution 5" -->
+    ```python
+    from geoparquet_io.api import ops
+
+    ops.create_pmtiles_pyramid('cells.parquet', 'cells.pmtiles', memory_limit='8GB')
+    ```
+
 ### Layer Modes
 
 `--layer-mode` controls how bands map to vector tile layers, which drives how you style them in MapLibre:

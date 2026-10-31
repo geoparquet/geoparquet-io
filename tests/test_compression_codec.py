@@ -806,7 +806,7 @@ JUSTIFIED_CALL_SITES = {
         "partition staging file: SNAPPY, read once and deleted",
     ),
     ("geoparquet_io/core/benchmark.py", "codec-literal-arg"): (
-        3,
+        2,
         "benchmark baselines: DuckDB's ZSTD 3 and the geopandas writers' own"
         " compression='zstd', fixed so runs compare across versions and tools",
     ),

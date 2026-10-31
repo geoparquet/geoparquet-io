@@ -13,11 +13,13 @@ from geoparquet_io.cli.decorators import (
     aggregate_memory_option,
     breakdown_metric_option,
     bucket_point_options,
+    column_name_option,
     geoparquet_version_option,
     grid_aggregate_options,
     metric_nodata_option,
     overwrite_option,
     process_compression_options,
+    refuse_together,
     repair_geometry_option,
     row_group_options,
     show_sql_option,
@@ -25,12 +27,14 @@ from geoparquet_io.cli.decorators import (
     where_option,
 )
 from geoparquet_io.cli.exception_handler import click_error_for
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5 as aggregate_by_a5_impl
 from geoparquet_io.core.process.aggregate.by_admin import (
     aggregate_by_admin as aggregate_by_admin_impl,
 )
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3 as aggregate_by_h3_impl
 from geoparquet_io.core.process.overview import create_overviews as create_overviews_impl
+from geoparquet_io.core.process.overview.detect import VALID_SCHEMES
 from geoparquet_io.core.process.overview.run import create_overview_file
 from geoparquet_io.core.process.simplify import simplify_file as simplify_file_impl
 
@@ -85,7 +89,7 @@ def process(ctx):
 )
 @click.option(
     "--scheme",
-    type=click.Choice(["a5", "h3", "admin"]),
+    type=click.Choice(list(VALID_SCHEMES)),
     default=None,
     help=(
         "Bucketing scheme of the cell column when inference is ambiguous "
@@ -224,9 +228,9 @@ def process_aggregate(ctx):
 @click.argument("output_parquet")
 @click.option(
     "--resolution",
-    type=click.IntRange(0, 30),
+    type=click.IntRange(get_index_spec("a5").min_resolution, get_index_spec("a5").max_resolution),
     default=None,
-    help="A5 resolution (0-30). Required unless --auto.",
+    help=f"A5 resolution ({get_index_spec('a5').bounds_text}). Required unless --auto.",
 )
 @grid_aggregate_options
 @process_compression_options
@@ -308,9 +312,9 @@ def process_aggregate_a5(
 @click.argument("output_parquet")
 @click.option(
     "--resolution",
-    type=click.IntRange(0, 15),
+    type=click.IntRange(get_index_spec("h3").min_resolution, get_index_spec("h3").max_resolution),
     default=None,
-    help="H3 resolution (0-15). Required unless --auto.",
+    help=f"H3 resolution ({get_index_spec('h3').bounds_text}). Required unless --auto.",
 )
 @grid_aggregate_options
 @process_compression_options
@@ -524,7 +528,7 @@ def process_aggregate_admin(
     default=None,
     help="Worker threads for coarsen (default: let the library decide).",
 )
-@click.option(
+@column_name_option(
     "--geometry-column",
     default=None,
     help="Geometry column to simplify (default: the file's primary geometry column).",
@@ -585,12 +589,11 @@ def process_simplify(
         gpio process simplify admin.parquet simplified.parquet \\
             --tolerance 0.001 --coverage
     """
-    if coverage and preserve_topology is not None:
-        raise click.UsageError(
-            "--preserve-topology/--no-preserve-topology applies to plain mode "
-            "and cannot be combined with --coverage (coverage simplification "
-            "always preserves the coverage's topology)."
-        )
+    refuse_together(
+        ("--coverage", coverage),
+        ("--preserve-topology/--no-preserve-topology", preserve_topology is not None),
+        end=": coverage simplification always preserves the coverage's topology.",
+    )
     if not coverage and simplify_boundary is not None:
         raise click.UsageError(
             "--simplify-boundary/--no-simplify-boundary only applies with --coverage."
@@ -799,10 +802,6 @@ def process_contour(
     """
     from geoparquet_io.core.process.raster.contour import contour_file
 
-    if levels is not None and interval is not None:
-        raise click.UsageError("--levels and --interval are mutually exclusive.")
-    if levels is None and interval is None:
-        raise click.UsageError("one of --levels or --interval is required.")
     level_list = _parse_float_csv(levels, "--levels")
     with _activate_s3(ctx):
         try:

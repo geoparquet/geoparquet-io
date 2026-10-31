@@ -225,22 +225,59 @@ def test_convert_reproject_src_crs_works_around_an_unresolvable_crs(tmp_path):
 
 
 def test_stream_transform_reads_the_stream_crs(fixtures):
-    """A streamed input's CRS reaches a CRS-aware query builder through the resolver."""
+    """A streamed input's CRS reaches an input-aware query builder through the resolver."""
+    from geoparquet_io.core.stream_io import _build_transform_query
+
+    metadata = pq.read_schema(str(fixtures["geo-block"])).metadata
+    seen = []
+
+    def builder(source, con, crs, edges, metadata):
+        seen.append(crs)
+        return "SELECT 1"
+
+    query = _build_transform_query(builder, "src", None, "-", metadata, True, input_aware=True)
+    assert query == "SELECT 1"
+    assert seen[0].startswith("{")
+
+
+def test_an_input_aware_builder_gets_the_edges_and_the_metadata(tmp_path):
+    """The one contract: ``(source, con, source_crs, edges, metadata)``, the edges
+    read from the input file (#1293)."""
+    from geoparquet_io.core.stream_io import execute_transform
+
+    src = tmp_path / "spherical.parquet"
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "geometry_types": [], "edges": "spherical"}},
+    }
+    table = pa.table({"geometry": pa.array([shapely.to_wkb(shapely.Point(1, 2))], pa.binary())})
+    pq.write_table(table.replace_schema_metadata({b"geo": json.dumps(geo).encode()}), src)
+    seen = {}
+
+    def builder(source, con, source_crs, edges, metadata):
+        seen.update(crs=source_crs, edges=edges, geo=json.loads(metadata[b"geo"]))
+        return f"SELECT * FROM {source}"
+
+    execute_transform(
+        str(src), str(tmp_path / "out.parquet"), builder, dry_run=True, input_aware=True
+    )
+    assert seen["edges"] == {"geometry": "spherical"}
+    assert seen["crs"] is None
+    assert seen["geo"]["columns"]["geometry"]["edges"] == "spherical"
+
+
+def test_a_plain_builder_gets_the_source_and_connection_only(fixtures):
+    """No arity inspection: a builder that did not ask for the input gets none of it."""
     from geoparquet_io.core.stream_io import _build_transform_query
 
     metadata = pq.read_schema(str(fixtures["geo-block"])).metadata
     seen = []
     query = _build_transform_query(
-        lambda source, con, crs: seen.append(crs) or "SELECT 1", "src", None, "-", metadata, True
+        lambda source, con, *rest: seen.append(rest) or "SELECT 1", "src", None, "-", metadata, True
     )
     assert query == "SELECT 1"
-    assert seen[0].startswith("{")
-
-
-def test_a_builder_without_a_signature_gets_no_crs():
-    from geoparquet_io.core.stream_io import _wants_source_crs
-
-    assert _wants_source_crs(max) is False
+    assert seen == [()]
 
 
 def test_table_explicit_null_crs_is_not_read_from_the_field():

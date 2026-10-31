@@ -14,6 +14,7 @@ import re
 import duckdb
 import pyarrow as pa
 
+from geoparquet_io.core.bbox_parse import any_piece, parse_bbox
 from geoparquet_io.core.column_selection import (
     resolve_columns_against_schema,
     split_column_list,
@@ -30,7 +31,6 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.edges import SPHERICAL
 from geoparquet_io.core.exceptions import ValidationError
-from geoparquet_io.core.extract import parse_bbox
 from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.logging_config import (
@@ -41,6 +41,7 @@ from geoparquet_io.core.logging_config import (
     warn,
 )
 from geoparquet_io.core.memory_limits import bound_open_connection
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.write_funnels import write_geoparquet_table, write_plain_parquet_table
 
 # Regex patterns for GCP resource validation
@@ -958,16 +959,21 @@ def _build_dry_run_query(
     else:
         progress(f"Bbox mode: {bbox_mode}")
 
-    xmin, ymin, xmax, ymax = parse_bbox(bbox)
-    wkt = f"POLYGON(({xmin} {ymin}, {xmax} {ymin}, {xmax} {ymax}, {xmin} {ymax}, {xmin} {ymin}))"
+    parsed = parse_bbox(bbox)
 
     if bbox_mode == "local":
         query = f"SELECT {select_cols} FROM bigquery_scan({sql_literal(table_id)})"
-        query += f" WHERE ST_Intersects(<geometry_column>, ST_GeomFromText('{wkt}'))"
+        query += " WHERE " + any_piece(
+            parsed,
+            lambda b: f"ST_Intersects(<geometry_column>, ST_GeomFromText('{b.polygon_wkt()}'))",
+        )
     else:
         # Server or auto mode - show server-side as example. Escaped once here,
         # mirroring the real path in _build_bigquery_query.
-        bq_filter = f"ST_INTERSECTS(<geometry_column>, ST_GEOGFROMTEXT('{wkt}'))"
+        bq_filter = any_piece(
+            parsed,
+            lambda b: f"ST_INTERSECTS(<geometry_column>, ST_GEOGFROMTEXT('{b.polygon_wkt()}'))",
+        )
         query = (
             f"SELECT {select_cols} FROM bigquery_scan("
             f"{sql_literal(table_id)}, filter={sql_literal(bq_filter)})"
@@ -1078,9 +1084,7 @@ def _build_bbox_filters(
         are returned as plain GoogleSQL -- the caller escapes them once when
         embedding them in the ``filter='...'`` DuckDB string literal.
     """
-    xmin, ymin, xmax, ymax = parse_bbox(bbox)
-    wkt = f"POLYGON(({xmin} {ymin}, {xmax} {ymin}, {xmax} {ymax}, {xmin} {ymax}, {xmin} {ymin}))"
-
+    parsed = parse_bbox(bbox)
     bq_filters = []
     local_conditions = []
 
@@ -1089,30 +1093,28 @@ def _build_bbox_filters(
         # backtick-quoted, because "..." is a STRING literal here.
         bq_col = _quote_bigquery_identifier(geom_col)
         if is_native_geometry:
-            # Native GEOGRAPHY column - use directly
-            bbox_filter = f"ST_INTERSECTS({bq_col}, ST_GEOGFROMTEXT('{wkt}'))"
+            subject = bq_col  # Native GEOGRAPHY column - use directly
         elif geometry_format == "geojson":
-            # VARCHAR with GeoJSON - parse first
-            bbox_filter = f"ST_INTERSECTS(ST_GEOGFROMGEOJSON({bq_col}), ST_GEOGFROMTEXT('{wkt}'))"
+            subject = f"ST_GEOGFROMGEOJSON({bq_col})"
         else:
-            # VARCHAR with WKT - parse first
-            bbox_filter = f"ST_INTERSECTS(ST_GEOGFROMTEXT({bq_col}), ST_GEOGFROMTEXT('{wkt}'))"
+            subject = f"ST_GEOGFROMTEXT({bq_col})"
+        bbox_filter = any_piece(
+            parsed, lambda b: f"ST_INTERSECTS({subject}, ST_GEOGFROMTEXT('{b.polygon_wkt()}'))"
+        )
         bq_filters.append(bbox_filter)
         debug(f"BigQuery filter: {bbox_filter}")
     else:
         # DuckDB local filter - DuckDB dialect, so quote_identifier applies.
         local_col = quote_identifier(geom_col)
         if is_native_geometry:
-            # Native GEOMETRY column - use directly
-            bbox_filter = f"ST_Intersects({local_col}, ST_GeomFromText('{wkt}'))"
+            subject = local_col
         elif geometry_format == "geojson":
-            # VARCHAR with GeoJSON - parse first
-            bbox_filter = (
-                f"ST_Intersects(ST_GeomFromGeoJSON({local_col}), ST_GeomFromText('{wkt}'))"
-            )
+            subject = f"ST_GeomFromGeoJSON({local_col})"
         else:
-            # VARCHAR with WKT - parse first
-            bbox_filter = f"ST_Intersects(ST_GeomFromText({local_col}), ST_GeomFromText('{wkt}'))"
+            subject = f"ST_GeomFromText({local_col})"
+        bbox_filter = any_piece(
+            parsed, lambda b: f"ST_Intersects({subject}, ST_GeomFromText('{b.polygon_wkt()}'))"
+        )
         local_conditions.append(bbox_filter)
         debug(f"DuckDB filter: {bbox_filter}")
 
@@ -1356,14 +1358,9 @@ def extract_bigquery(
         limit=limit,
         show_sql=show_sql,
         output_parquet=output_parquet,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        geoparquet_version=geoparquet_version,
+        write=WriteOptions.pick(locals()),
         verbose=verbose,
         repair_geometry=repair_geometry,
-        memory_limit=memory_limit,
     )
 
 
@@ -1435,14 +1432,9 @@ def _execute_bigquery_extraction(
     limit: int | None,
     show_sql: bool,
     output_parquet: str | None,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    geoparquet_version: str | None,
+    write: WriteOptions,
     verbose: bool,
     repair_geometry: bool = True,
-    memory_limit: str | None = None,
 ) -> pa.Table | None:
     """Execute the BigQuery extraction with the given parameters."""
     debug("Connecting to BigQuery...")
@@ -1453,8 +1445,8 @@ def _execute_bigquery_extraction(
         # The BigQuery scan is what actually consumes memory here (the result is
         # materialised as an Arrow table before the PyArrow write), so the
         # user's limit -- and the thread cap it affords -- bound this connection.
-        if memory_limit is not None:
-            bound_open_connection(con, memory_limit, verbose=True)
+        if write.memory_limit is not None:
+            bound_open_connection(con, write.memory_limit, verbose=True)
 
         # --sql is its own relation. Building it once here means every step
         # below -- the DESCRIBE, the geometry detection, the read -- is
@@ -1575,13 +1567,9 @@ def _execute_bigquery_extraction(
                     result,
                     output_parquet,
                     geometry_column=final_geom_col,
-                    compression=compression,
-                    compression_level=compression_level,
-                    row_group_size_mb=row_group_size_mb,
-                    row_group_rows=row_group_rows,
-                    geoparquet_version=geoparquet_version,
                     verbose=verbose,
                     edges=final_edges,
+                    **write.funnel_kwargs(),
                 )
             else:
                 # No geometry: plain Parquet through the geometry-free funnel,
@@ -1594,11 +1582,8 @@ def _execute_bigquery_extraction(
                 write_plain_parquet_table(
                     result,
                     output_parquet,
-                    compression=compression,
-                    compression_level=compression_level,
-                    row_group_size_mb=row_group_size_mb,
-                    row_group_rows=row_group_rows,
                     verbose=verbose,
+                    **write.funnel_kwargs(),
                 )
 
             success(f"Extracted {row_count:,} rows to {output_parquet}")
