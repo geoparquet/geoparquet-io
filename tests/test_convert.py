@@ -35,7 +35,6 @@ from geoparquet_io.core.convert import (
     _detect_spatial_geometry,
     _spatial_source_aliases,
     _st_read_layer_meta,
-    _suffixed_to_unique,
     convert_to_geoparquet,
 )
 from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
@@ -1731,18 +1730,3 @@ class TestCollisionRescueGivesUp:
                 _detect_spatial_geometry(con, colliding_geojson_path, False, None, None)
         finally:
             con.close()
-
-
-class TestSuffixedToUnique:
-    """The naming rule on its own, without the cost of a conversion."""
-
-    def test_first_spelling_wins_and_later_ones_are_suffixed(self):
-        assert _suffixed_to_unique(["id", "Id", "ID"]) == ["id", "Id_1", "ID_2"]
-
-    def test_untouched_when_nothing_collides(self):
-        names = ["OGC_FID", "Id", "name", "geom"]
-        assert _suffixed_to_unique(names) == names
-
-    def test_suffix_that_would_itself_collide_is_skipped(self):
-        """``Id_1`` already taken means the rename has to keep counting."""
-        assert _suffixed_to_unique(["id", "Id_1", "Id"]) == ["id", "Id_1", "Id_2"]

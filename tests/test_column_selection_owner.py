@@ -9,7 +9,10 @@ bytes). The #1109 tests drive the real CLI.
 
 from __future__ import annotations
 
+import json
+
 import duckdb
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
@@ -103,6 +106,22 @@ UNIQUE_CASES = [
 @pytest.mark.parametrize(("base", "taken", "start", "expected"), UNIQUE_CASES)
 def test_unique_name_table(base, taken, start, expected):
     assert cs.unique_name(base, taken, start=start) == expected
+
+
+SEQUENCE_CASES = [
+    # Suffixing a list in turn, each result added to what is taken (convert's rule).
+    (["id", "Id", "ID"], ["id", "Id_1", "ID_2"]),
+    (["OGC_FID", "Id", "name", "geom"], ["OGC_FID", "Id", "name", "geom"]),
+    (["id", "Id_1", "Id"], ["id", "Id_1", "Id_2"]),  # a suffix that collides is skipped
+]
+
+
+@pytest.mark.parametrize(("names", "expected"), SEQUENCE_CASES)
+def test_unique_name_suffixes_a_sequence_in_turn(names, expected):
+    unique: list[str] = []
+    for name in names:
+        unique.append(cs.unique_name(name, unique))
+    assert unique == expected
 
 
 def test_unique_name_does_not_change_taken():
@@ -222,16 +241,30 @@ def test_aggregate_breakdown_numbers_colliding_values_from_two(collision_file, t
 
 @pytest.fixture
 def case_variant_file(tmp_path):
-    raw = tmp_path / "variants.parquet"
+    """GeoParquet whose columns ``height`` and ``HEIGHT`` differ only in case (Parquet allows it)."""
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial")
-    con.execute(
-        f"""COPY (SELECT i AS height, (i * 10)::DOUBLE AS "HEIGHT", ST_Point(i, i) AS "PT",
-            ST_Point(i, i) AS geometry FROM range(5) t(i)) TO '{raw}'"""
-    )
+    wkb = [
+        bytes(row[0])
+        for row in con.execute(
+            "SELECT ST_AsWKB(ST_Point(i, i)) FROM range(5) t(i) ORDER BY i"
+        ).fetchall()
+    ]
+    geo = {
+        "version": "1.0.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+    }
+    table = pa.table(
+        {
+            "height": pa.array(range(5), pa.int64()),
+            "HEIGHT": pa.array([i * 10.0 for i in range(5)]),
+            "PT": pa.array(wkb, pa.binary()),
+            "geometry": pa.array(wkb, pa.binary()),
+        }
+    ).replace_schema_metadata({b"geo": json.dumps(geo).encode()})
     out = tmp_path / "variants_geo.parquet"
-    result = CliRunner().invoke(cli, ["convert", "geoparquet", str(raw), str(out)])
-    assert result.exit_code == 0, result.output
+    pq.write_table(table, out)
     return out
 
 
@@ -242,7 +275,6 @@ def _aggregate(source, out, *extra):
     )
 
 
-@pytest.mark.xfail(strict=True, reason="#1109")
 def test_1109_metric_that_two_columns_fold_to_is_refused_not_bound_silently(
     case_variant_file, tmp_path
 ):
@@ -251,14 +283,12 @@ def test_1109_metric_that_two_columns_fold_to_is_refused_not_bound_silently(
     assert "HEIGHT matches HEIGHT, height" in result.output
 
 
-@pytest.mark.xfail(strict=True, reason="#1109")
 def test_1109_bucket_point_is_matched_like_a_metric(case_variant_file, tmp_path):
     # `--bucket-point pt` against a `PT` column: DuckDB binds it, so gpio accepts it.
     result = _aggregate(case_variant_file, tmp_path / "o.parquet", "--bucket-point", "pt")
     assert result.exit_code == 0, result.output
 
 
-@pytest.mark.xfail(strict=True, reason="#1109")
 def test_1109_reserved_internal_names_are_reserved_in_any_case(tmp_path):
     from geoparquet_io.core.process.aggregate.grid_common import build_exclude_clause
 

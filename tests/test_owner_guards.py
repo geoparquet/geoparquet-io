@@ -84,9 +84,10 @@ EXPECTED_COUNTS = {
     "G1.output_version": 0,
     "G1.geometry_stats": 0,
     "G1.edges": 0,
+    "G1.column_fold": 0,
     "G1.footer_patch": 0,
     "G1.geometry_identity": 9,
-    "G2.exemptions": 12,
+    "G2.exemptions": 9,
     "G3.pairs": 0,
     "G3.baseline": 0,
     "G3.pylint": 24,
@@ -2246,6 +2247,143 @@ def _geometry_identity_nodes(m: _Module) -> Iterator[ast.AST]:
             yield node
 
 
+_FOLD_METHODS = frozenset({"lower", "upper", "casefold"})
+#: An identifier that says it holds a column name; a type, a colour or a collection
+#: is not one.
+_COLUMNISH = re.compile(r"(col|field)", re.IGNORECASE)
+_NOT_COLUMNISH = re.compile(r"(type|colo|collect|collis|colon|encod)", re.IGNORECASE)
+#: A loop over these hands its target a column name.
+_COLUMN_SOURCE = re.compile(r"(col|field|schema)", re.IGNORECASE)
+
+
+def _ident(node: ast.AST) -> str:
+    """The last identifier of ``x``, ``a.x`` or ``a[i]`` (``a``): '' for anything else."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Subscript):
+        return _ident(node.value)
+    return ""
+
+
+def _says_column(name: str) -> bool:
+    return bool(_COLUMNISH.search(name)) and not _NOT_COLUMNISH.search(name)
+
+
+def _column_targets(m: _Module) -> set[tuple[int, str]]:
+    """``(loop id, target)`` for each ``for``/comprehension target that iterates columns."""
+    found: set[tuple[int, str]] = set()
+    for node in ast.walk(m.tree):
+        if isinstance(node, (ast.For, ast.comprehension)):
+            source = ast.unparse(node.iter)
+            if _COLUMN_SOURCE.search(source) and not _NOT_COLUMNISH.search(source):
+                for name in ast.walk(node.target):
+                    if isinstance(name, ast.Name):
+                        found.add((id(node), name.id))
+    return found
+
+
+def _enclosing_loops(m: _Module, node: ast.AST) -> Iterator[ast.AST]:
+    """The ``for`` statements and comprehension clauses *node* sits inside."""
+    up = m.parents.get(id(node))
+    while up is not None:
+        if isinstance(up, ast.For):
+            yield up
+        yield from getattr(up, "generators", [])
+        up = m.parents.get(id(up))
+
+
+def _is_suffix_fstring(node: ast.AST) -> bool:
+    """``f"{base}_{n}"``: two names around a literal underscore."""
+    if not isinstance(node, ast.JoinedStr) or len(node.values) != 3:
+        return False
+    first, mid, last = node.values
+    return (
+        isinstance(first, ast.FormattedValue)
+        and isinstance(mid, ast.Constant)
+        and mid.value == "_"
+        and isinstance(last, ast.FormattedValue)
+    )
+
+
+def _suffix_loop(m: _Module, node: ast.AST) -> bool:
+    """A loop that re-suffixes a name until a test says it is free: a ``while``
+    whose condition mentions the rebuilt name, or a ``for`` that returns or
+    breaks on ``name not in taken``."""
+    if not isinstance(node, (ast.While, ast.For)):
+        return False
+    inner = list(ast.walk(node))
+    suffixed = {
+        t.id
+        for a in inner
+        if isinstance(a, ast.Assign) and _is_suffix_fstring(a.value)
+        for t in a.targets
+        if isinstance(t, ast.Name)
+    }
+    if not suffixed:
+        return False
+    if isinstance(node, ast.While):
+        return _mentions(node.test, suffixed)
+    return any(
+        isinstance(i, ast.If)
+        and isinstance(i.test, ast.Compare)
+        and any(isinstance(op, ast.NotIn) for op in i.test.ops)  # codespell:ignore
+        and _mentions(i.test.left, suffixed)
+        and any(isinstance(b, (ast.Return, ast.Break)) for b in i.body)
+        for i in inner
+    )
+
+
+def _mentions(node: ast.AST, names: set[str]) -> bool:
+    return any(isinstance(n, ast.Name) and n.id in names for n in ast.walk(node))
+
+
+def _find_column_fold(m: _Module) -> Iterator[Hit]:
+    """A case fold applied to a column name, or a hand-written name suffixer,
+    outside ``core/column_selection.py`` (#1367 concept 12): ``col.lower()`` /
+    ``.upper()`` / ``.casefold()`` on a name that says it is a column (or a
+    field), or on the target of a loop over columns, names or a schema; and a
+    ``while``/``for`` that rebuilds ``f"{base}_{n}"`` until a membership test
+    says the name is free.
+
+    ``column_selection.fold`` is the one rule (DuckDB's: ASCII only, exact
+    spelling first), ``matching_columns`` / ``find_column`` / ``bound_column``
+    / ``has_column`` / ``same_column`` its lookups and ``unique_name`` the one
+    suffixer. Would have caught the eleven folding sites (some ``.lower()``,
+    some ASCII, one exact-only) that disagreed about whether ``--bucket-point
+    PT`` meant ``pt`` (#1109), and the three suffixers that started at ``_1``,
+    ``_2`` and ``_1`` with three notions of "taken". The geometry column's own
+    name folds in ``geometry_detection`` (the second owner).
+
+    Not seen (named so a reviewer looks for them): a fold of a name held in a
+    variable that does not say column (``n = names[0]; n.lower()``), a
+    ``translate`` table, and a suffix built by ``%`` or ``.format``.
+    """
+    targets = _column_targets(m)
+    for node in ast.walk(m.tree):
+        if _suffix_loop(m, node):
+            yield m.hit(node)
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _FOLD_METHODS
+        ):
+            continue
+        receiver = node.func.value
+        if isinstance(receiver, ast.Call) and _ident(receiver.func) == "str" and receiver.args:
+            receiver = receiver.args[0]
+        name = _ident(receiver)
+        if _says_column(name):
+            yield m.hit(node)
+        elif (
+            isinstance(receiver, ast.Name)
+            and not _NOT_COLUMNISH.search(receiver.id)
+            and any((id(loop), receiver.id) in targets for loop in _enclosing_loops(m, node))
+        ):
+            yield m.hit(node)
+
+
 @dataclass(frozen=True)
 class Arm:
     finder: Callable[..., Iterator[Hit]]
@@ -2290,6 +2428,10 @@ ARMS = {
     "geometry_stats": Arm(_find_geometry_stats, ("geoparquet_io/core/geo_metadata.py",)),
     "edges": Arm(_find_edges, ("geoparquet_io/core/edges.py",)),
     "footer_patch": Arm(_find_footer_patch, ("geoparquet_io/core/parquet_footer.py",)),
+    "column_fold": Arm(
+        _find_column_fold,
+        ("geoparquet_io/core/column_selection.py", "geoparquet_io/core/geometry_detection.py"),
+    ),
     "geometry_identity": Arm(
         _find_geometry_identity, ("geoparquet_io/core/geometry_detection.py",)
     ),
@@ -2801,6 +2943,7 @@ G1_PLANTS = {
     "scheme_test": 'def remote(p):\n    return p.startswith("s3://")\n',
     "output_version": ('def version(md):\n    return sanitized_carried_geo(md).get("version")\n'),
     "edges": 'def spherical(col):\n    return col.get("edges") is not None\n',
+    "column_fold": "def same(col, other):\n    return col.lower() == other.lower()\n",
     "footer_patch": (
         "from geoparquet_io.core import parquet_footer\n\n"
         "def add(path, rewrite):\n    try:\n        rewrite(path)\n"
@@ -2851,6 +2994,13 @@ G1_CLEAN = {
         '    return f"s3://{bucket}/{rest}"\n'
     ),
     "output_version": ('def version(path):\n    return read_raw_geo(path).value.get("version")\n'),
+    "column_fold": (
+        "from geoparquet_io.core.column_selection import same_column\n\n"
+        "def same(col, other):\n    return same_column(col, other)\n"
+        "def kind(col_type):\n    return col_type.upper()\n"
+        "def ext(path):\n    return path.suffix.lower()\n"
+        "def label(name):\n    return name.lower()  # not said to be a column\n"
+    ),
     "edges": (
         "from geoparquet_io.core.edges import is_nonplanar, edges_of\n\n"
         'def spherical(col):\n    return is_nonplanar(edges_of(col))  # not "spherical"\n'
@@ -3581,7 +3731,7 @@ def test_g12_g2_a_leading_underscore_does_not_leave_the_family(tmp_path):
 
 @pytest.mark.parametrize(
     "name",
-    ["_detect_version_from_table", "_crs_matches", "free_column_name", "_validated_bbox"],
+    ["_detect_version_from_table", "_crs_matches", "_validated_bbox"],
 )
 def test_g12_g2_flags_a_known_renamed_copy(tmp_path, name):
     repo = _g2_tree(tmp_path, {"m.py": f"def {name}(x):\n    return x\n"})
@@ -4203,3 +4353,61 @@ def test_g12_edges_arm_leaves_a_centroid_elsewhere_alone(tmp_path):
 def test_g12_edges_arm_flags_every_shape(shape, tmp_path):
     repo = _plant(tmp_path, "edges", EDGES_SHAPES[shape])
     assert arm_hits(repo, "edges"), shape
+
+
+#: Every shape of a column-name fold or hand-written suffixer the G1.column_fold
+#: arm must see (the base's eleven folding sites and three suffixers), and the
+#: look-alikes it must not.
+COLUMN_FOLD_SHAPES = {
+    "lower of a column": "def f(col, x):\n    return col.lower() == x\n",
+    "upper of a field": "def f(field_name):\n    return field_name.upper()\n",
+    "casefold of a column": "def f(column):\n    return column.casefold()\n",
+    "attribute": "def f(spec):\n    return spec.column.lower()\n",
+    "subscript": "def f(columns):\n    return columns[0].lower()\n",
+    "str() wrapped": "def f(col):\n    return str(col).lower()\n",
+    "comprehension target": (
+        "def f(schema_rows, want):\n    return [n for n, _ in schema_rows if n.lower() == want]\n"
+    ),
+    "for target": (
+        "def f(columns, want):\n    for c in columns:\n        if c.lower() == want:\n"
+        "            return c\n"
+    ),
+    "set of folded": "def f(cols):\n    return {c.lower() for c in cols}\n",
+    "while suffixer": (
+        "def f(base, taken):\n    name = base\n    n = 0\n    while name in taken:\n"
+        '        n += 1\n        name = f"{base}_{n}"\n    return name\n'
+    ),
+    "while on a fold": (
+        "def f(base, taken):\n    name = base\n    n = 0\n    while name.lower() in taken:\n"
+        '        n += 1\n        name = f"{base}_{n}"\n    return name\n'
+    ),
+    "for suffixer": (
+        "def f(base, taken):\n    for i in range(1, 100):\n"
+        '        cand = f"{base}_{i}"\n        if cand not in taken:\n            return cand\n'
+    ),
+}
+
+COLUMN_FOLD_NEAR_MISSES = {
+    "a type": "def f(col_type):\n    return col_type.upper()\n",
+    "a path suffix": "def f(path):\n    return path.suffix.lower()\n",
+    "a codec": "def f(codec):\n    return codec.lower()\n",
+    "a name that says nothing": "def f(name):\n    return name.lower()\n",
+    "a one-shot suffix": 'def f(prefix, v):\n    base = f"{prefix}_{v}"\n    return base in {"a"}\n',
+    "a loop over plain names": "def f(items):\n    return [i.lower() for i in items]\n",
+    "the owner's lookups": (
+        "from geoparquet_io.core.column_selection import matching_columns, unique_name\n\n"
+        "def f(c, cols, taken):\n    return matching_columns(c, cols), unique_name(c, taken)\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(COLUMN_FOLD_SHAPES))
+def test_g12_column_fold_arm_flags_every_shape(shape, tmp_path):
+    repo = _plant(tmp_path, "column_fold", COLUMN_FOLD_SHAPES[shape])
+    assert arm_hits(repo, "column_fold"), shape
+
+
+@pytest.mark.parametrize("shape", sorted(COLUMN_FOLD_NEAR_MISSES))
+def test_g12_column_fold_arm_passes_its_look_alikes(shape, tmp_path):
+    repo = _plant(tmp_path, "column_fold", COLUMN_FOLD_NEAR_MISSES[shape])
+    assert arm_hits(repo, "column_fold") == [], shape

@@ -16,7 +16,11 @@ import pyarrow as pa
 
 from geoparquet_io.core.bbox_parse import any_piece, parse_bbox
 from geoparquet_io.core.column_selection import (
+    find_column,
+    has_column,
+    matching_columns,
     resolve_columns_against_schema,
+    same_column,
     split_column_list,
 )
 from geoparquet_io.core.duckdb_utils import (
@@ -718,12 +722,11 @@ def _detect_geometry_column_from_schema(
 
     # If explicit column provided and it's a native GEOMETRY column, use it
     if geography_column:
-        lower_map = {c.lower(): c for c in geometry_cols}
-        if geography_column.lower() in lower_map:
-            return lower_map[geography_column.lower()]
+        found = find_column(geography_column, geometry_cols)
+        if found is not None:
+            return found
         # Check column exists (for better error messages later)
-        all_lower = {c.lower() for c in all_cols}
-        if geography_column.lower() not in all_lower:
+        if not has_column(all_cols, geography_column):
             raise ValueError(
                 f"Column '{geography_column}' not found in table '{table_id}'. "
                 f"Available columns: {all_cols}."
@@ -779,10 +782,10 @@ def _get_column_type(
     """
     if schema_rows is None:
         schema_rows = _schema_rows(con, table_id)
-    for name, col_type in schema_rows:
-        if name.lower() == column_name.lower():
-            return col_type.upper()
-    return "VARCHAR"
+    found = matching_columns(column_name, [name for name, _ in schema_rows])
+    if not found:
+        return "VARCHAR"
+    return next(col_type for name, col_type in schema_rows if name == found[0]).upper()
 
 
 def _resolve_column_name(
@@ -805,10 +808,8 @@ def _resolve_column_name(
     Returns:
         The actual column name from the schema, or the input if not found
     """
-    for name in _schema_column_names(con, table_id, table_source, schema_rows):
-        if name.lower() == column_name.lower():
-            return name
-    return column_name
+    names = _schema_column_names(con, table_id, table_source, schema_rows)
+    return next(iter(matching_columns(column_name, names)), column_name)
 
 
 def _build_geometry_select_expr(
@@ -881,7 +882,7 @@ def _build_select_with_wkb(
     # Build SELECT with appropriate geometry conversion
     select_parts = []
     for col in columns:
-        if geometry_column and col.lower() == geometry_column.lower():
+        if geometry_column and same_column(col, geometry_column):
             select_parts.append(_build_geometry_select_expr(col, geom_col_type, geometry_format))
         else:
             select_parts.append(quote_identifier(col))

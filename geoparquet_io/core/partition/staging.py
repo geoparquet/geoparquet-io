@@ -23,6 +23,7 @@ import tempfile
 from dataclasses import dataclass, field
 from urllib.parse import unquote
 
+from geoparquet_io.core.column_selection import unique_name
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import sql_path
 from geoparquet_io.core.exceptions import PartitionError
@@ -122,12 +123,8 @@ def make_partition_aliases(count: int, existing_columns) -> list[str]:
     existing = set(existing_columns)
     aliases: list[str] = []
     for i in range(count):
-        candidate = PARTITION_ALIAS if count == 1 else f"{PARTITION_ALIAS}{i}"
-        suffix = 0
-        while candidate in existing or candidate in aliases:
-            suffix += 1
-            candidate = f"{PARTITION_ALIAS}_{suffix}_{i}"
-        aliases.append(candidate)
+        base = PARTITION_ALIAS if count == 1 else f"{PARTITION_ALIAS}{i}"
+        aliases.append(unique_name(base, [*existing, *aliases]))
     return aliases
 
 

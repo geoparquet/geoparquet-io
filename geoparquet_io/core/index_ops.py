@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from geoparquet_io.core.bbox_parse import crosses_antimeridian_sql
 from geoparquet_io.core.bbox_structure import get_bbox_advice
+from geoparquet_io.core.column_selection import matching_columns
 from geoparquet_io.core.crs_utils import (
     crs_string_from_table,
     is_geographic_crs,
@@ -431,7 +432,7 @@ def ensure_index_column(
     """Return (working path, resolved column, temporary path), reusing existing cells."""
     is_table = hasattr(input_parquet, "column_names")
     columns = input_parquet.column_names if is_table else get_column_names(input_parquet)
-    resolved = next((c for c in columns if c.lower() == column_name.lower()), None)
+    resolved = next(iter(matching_columns(column_name, columns)), None)
     if reject_existing:
         if resolved:
             raise InvalidParameterError(

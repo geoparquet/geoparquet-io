@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import math
 import re
-import string
 from dataclasses import dataclass
 
+from geoparquet_io.core.column_selection import bound_column, fold, unique_name
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     duckdb_type_is_numeric,
@@ -157,9 +157,9 @@ def expand_pct_cell_metrics(metrics: list[MetricSpec]) -> list[MetricSpec]:
     column so the two are one read rather than two.
     """
     out: list[MetricSpec] = []
-    have = {(_fold(m.column), m.func) for m in metrics}
+    have = {(fold(m.column), m.func) for m in metrics}
     for spec in metrics:
-        if spec.func == PCT_CELL_FUNC and (_fold(spec.column), "sum") not in have:
+        if spec.func == PCT_CELL_FUNC and (fold(spec.column), "sum") not in have:
             out.append(
                 MetricSpec(
                     func="sum",
@@ -167,7 +167,7 @@ def expand_pct_cell_metrics(metrics: list[MetricSpec]) -> list[MetricSpec]:
                     output_name=metric_output_name("sum", spec.column),
                 )
             )
-            have.add((_fold(spec.column), "sum"))
+            have.add((fold(spec.column), "sum"))
         out.append(spec)
     return out
 
@@ -468,22 +468,6 @@ def build_metric_select(
     return ", ".join(parts)
 
 
-# DuckDB folds identifiers case-insensitively, but only over ASCII: "HEIGHT"
-# binds to a `Height` column while "STRASSE" does not bind to `straße`. Column
-# lookups here follow the same rule so validation accepts exactly what the
-# generated SQL would bind -- no more, no less.
-_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
-
-
-def _fold(name: str) -> str:
-    return name.translate(_ASCII_LOWER)
-
-
-def _has_column(available: set[str], name: str) -> bool:
-    """Whether ``name`` resolves to a column of the input, as DuckDB would resolve it."""
-    return name in available or any(_fold(c) == _fold(name) for c in available)
-
-
 def _format_available(available: set[str]) -> str:
     """Render the column list for an error message.
 
@@ -513,9 +497,9 @@ def validate_agg_columns(
     request against a ``Height`` column.
     """
     for m in metrics:
-        if _has_column(available, m.column):
+        if bound_column(m.column, available, option_name="metric") is not None:
             continue
-        if _fold(m.column) == "count":
+        if fold(m.column) == "count":
             raise InvalidParameterError(
                 "metric",
                 "'count' does not need to be requested: every output row "
@@ -528,13 +512,16 @@ def validate_agg_columns(
             f"Metric column '{m.column}' not found in input. "
             f"Available columns: {_format_available(available)}",
         )
-    if breakdown and not _has_column(available, breakdown):
+    if breakdown and bound_column(breakdown, available, option_name="breakdown") is None:
         raise InvalidParameterError(
             "breakdown",
             f"Breakdown column '{breakdown}' not found in input. "
             f"Available columns: {_format_available(available)}",
         )
-    if breakdown_metric is not None and not _has_column(available, breakdown_metric.column):
+    if (
+        breakdown_metric is not None
+        and bound_column(breakdown_metric.column, available, option_name="breakdown-metric") is None
+    ):
         raise InvalidParameterError(
             "breakdown-metric",
             f"Breakdown metric column '{breakdown_metric.column}' not found in input. "
@@ -558,15 +545,6 @@ def sanitize_value_for_column(value: object) -> str:
 _MAX_VALUE_FRAGMENT = 64
 
 
-def _unique_name(base: str, used: set[str]) -> str:
-    name, suffix = base, 2
-    while name in used:
-        name = f"{base}_{suffix}"
-        suffix += 1
-    used.add(name)
-    return name
-
-
 def build_breakdown_column_names(
     values: list, reserved: set[str] | None = None, prefix: str = "count"
 ) -> list[tuple[object, str]]:
@@ -583,7 +561,8 @@ def build_breakdown_column_names(
     mapping: list[tuple[object, str]] = []
     for value in values:
         base = f"{prefix}_{sanitize_value_for_column(value)}"
-        name = _unique_name(base, used)
+        name = unique_name(base, used, start=2)
+        used.add(name)
         if name != base and base in (reserved or set()):
             warn(
                 f"Breakdown column {base!r} for value {value!r} is written as {name!r}: "
@@ -595,7 +574,7 @@ def build_breakdown_column_names(
 
 def breakdown_other_name(colmap: list[tuple[object, str]], reserved: set[str], prefix: str) -> str:
     """The remainder bucket's column name, clear of the pivots and the metric names."""
-    return _unique_name(f"{prefix}_other", set(reserved) | {name for _, name in colmap})
+    return unique_name(f"{prefix}_other", set(reserved) | {name for _, name in colmap}, start=2)
 
 
 def resolve_breakdown_values(con, source_sql: str, column: str, limit: int) -> tuple[list, bool]:

@@ -392,7 +392,6 @@ reason = "the GeoJSON properties column's type (unnest a STRUCT), not a geometry
 [G2.known_copies]
 "resolve_*version*" = ["_detect_version_from_table", "extract_version_from_metadata", "detect_version_for_output"]
 "*crs_equal*" = ["_crs_are_equivalent", "_crs_matches"]
-"*unique_name*" = ["free_column_name", "_suffixed_to_unique"]
 "parse_bbox" = ["_normalize_bbox", "_validated_bbox"]
 
 # Owners named above that do not exist yet (none today).
@@ -418,14 +417,6 @@ path = "geoparquet_io/core/carto.py"
 name = "_fetch_with_retry"
 reason = "permanent: caller-specific classify wrapper over run_with_retry, accepted by the T4a audit"
 [[G2.exemptions]]
-path = "geoparquet_io/core/convert.py"
-name = "_suffixed_to_unique"
-reason = "column-name suffixer copy; T5a"
-[[G2.exemptions]]
-path = "geoparquet_io/core/duckdb_utils.py"
-name = "free_column_name"
-reason = "column-name suffixer copy; T5a"
-[[G2.exemptions]]
 path = "geoparquet_io/core/extract.py"
 name = "is_geographic_crs"
 reason = "is-geographic copy (approved change 8); T4c"
@@ -433,10 +424,6 @@ reason = "is-geographic copy (approved change 8); T4c"
 path = "geoparquet_io/core/inspect_utils.py"
 name = "_crs_are_equivalent"
 reason = "CRS equality copy (approved change 9); T4c"
-[[G2.exemptions]]
-path = "geoparquet_io/core/process/aggregate/common.py"
-name = "_unique_name"
-reason = "copy of column_selection's; T5a"
 [[G2.exemptions]]
 path = "geoparquet_io/core/validate.py"
 name = "_crs_equals"

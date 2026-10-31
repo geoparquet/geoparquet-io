@@ -248,7 +248,13 @@ def aggregate_by_admin(
     if bucket_point == "bbox":
         bbox_column = _resolve_bbox_column_for_file(input_parquet, bbox_column, verbose)
     # Fail on a bad keying column before the (possibly network-bound) dataset setup.
-    _validate_keying_columns_for_file(input_parquet, bucket_point, bbox_column, verbose)
+    _validate_keying_columns_for_file(
+        input_parquet,
+        bucket_point,
+        bbox_column,
+        verbose,
+        needed_source_columns(metrics, breakdown, bd_metric),
+    )
 
     admin_dataset, _boundary_columns, _ = resolve_admin_dataset(
         dataset, [level], cache=False, verbose=verbose

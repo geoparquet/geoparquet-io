@@ -174,6 +174,7 @@ def exclude_columns(
     *,
     protect: str | None = None,
     option_name: str = "--exclude-cols",
+    strict: bool = True,
 ) -> list[str]:
     """The columns of ``schema_cols`` left after dropping ``requested``, in schema order.
 
@@ -187,11 +188,18 @@ def exclude_columns(
     ``protect`` names a column the output requires (the geometry, on a path that
     writes GeoParquet): asking to drop it warns once and keeps it.
 
+    ``strict=False`` is for a caller that resolved ``requested`` against a wider
+    schema than the one in hand (ArcGIS checks its layer's fields against a
+    narrower ``outFields`` selection): a name this schema lacks is then skipped
+    instead of an error.
+
     Raises:
         InvalidParameterError: a name is blank, absent or ambiguous, or the
             exclusion would leave no column at all -- a request that is a typo,
             which used to write a 0-column file without a word (#1176)
     """
+    if requested and not strict:
+        requested = [col for col in requested if has_column(schema_cols, col)]
     drop = resolve_columns_against_schema(requested, schema_cols, option_name)
     if drop and protect is not None and protect in drop:
         drop = [col for col in drop if col != protect]

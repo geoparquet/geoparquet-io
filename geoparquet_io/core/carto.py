@@ -18,6 +18,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.bbox_parse import BBox, any_piece, parse_optional_bbox
 from geoparquet_io.core.column_selection import (
+    exclude_columns,
     resolve_columns_against_schema,
     split_column_list,
 )
@@ -562,29 +563,12 @@ def _apply_column_exclusions(
             the exclusion would leave no columns at all -- the tabular path used
             to write a 0-column file silently (#1176).
     """
-    exclude_list = resolve_columns_against_schema(
-        exclude_list, table.column_names, "--exclude-cols"
-    )
-    if exclude_list and protect_geometry and BUILT_GEOMETRY_COLUMN in exclude_list:
-        exclude_list = [col for col in exclude_list if col != BUILT_GEOMETRY_COLUMN]
-        warn("Cannot exclude 'geometry' column - it is required for GeoParquet output")
-    if not exclude_list:
+    protect = BUILT_GEOMETRY_COLUMN if protect_geometry else None
+    keep = exclude_columns(table.column_names, exclude_list, protect=protect)
+    if len(keep) == len(table.column_names):
         return table
-
-    exclude_set = set(exclude_list)
-    keep = [col for col in table.column_names if col not in exclude_set]
-    if not keep:
-        # A 0-column file was written without a word (#1176). The request is a
-        # typo, and the only useful answer is to name it -- the same refusal
-        # `extract arcgis` and `build_column_selection` make.
-        raise InvalidParameterError(
-            "--exclude-cols",
-            f"excluding {', '.join(sorted(exclude_set))} would leave no columns at all "
-            f"(the fetched table has: {', '.join(table.column_names)})",
-        )
-    table = table.select(keep)
-    debug(f"Excluded columns: {exclude_set}")
-    return table
+    debug(f"Excluded columns: {set(table.column_names) - set(keep)}")
+    return table.select(keep)
 
 
 # The geometry column Carto's GeoJSON format serializes, and the one

@@ -147,10 +147,18 @@
     "within_wrapped_x_sql"
   ],
   "geoparquet_io.core.column_selection": [
+    "bound_column",
+    "exclude_columns",
+    "find_column",
+    "fold",
+    "has_column",
     "join_column_list",
+    "matching_columns",
     "reject_blank_column_entries",
     "resolve_columns_against_schema",
-    "split_column_list"
+    "same_column",
+    "split_column_list",
+    "unique_name"
   ],
   "geoparquet_io.core.compression": [
     "ACCEPTED_CODEC_NAMES",
@@ -284,7 +292,6 @@
     "fetch_one",
     "fetch_row",
     "fetch_rows",
-    "free_column_name",
     "geoarrow_extension",
     "geom_from_wkb_sql",
     "get_active_s3_config",

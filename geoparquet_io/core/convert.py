@@ -11,6 +11,7 @@ import duckdb
 
 from geoparquet_io.core.arrow_geo_metadata import describe_wkb_geometry
 from geoparquet_io.core.bbox_structure import check_bbox_structure, resolve_bbox_name
+from geoparquet_io.core.column_selection import fold, matching_columns, same_column, unique_name
 from geoparquet_io.core.common import should_skip_bbox
 from geoparquet_io.core.crs_utils import (
     _format_crs_display,
@@ -31,7 +32,6 @@ from geoparquet_io.core.duckdb_utils import (
     describe_query,
     duckdb_type_is_numeric,
     fetch_one,
-    free_column_name,
     geom_from_wkb_sql,
     get_duckdb_connection,
     quote_identifier,
@@ -406,31 +406,6 @@ def _st_read_column_count(
     return len(describe_query(con, f"SELECT * FROM {expr}"))
 
 
-def _suffixed_to_unique(names: list[str]) -> list[str]:
-    """Keep the first spelling of each name; suffix every later case-collision.
-
-    ``['id', 'Id', 'ID']`` becomes ``['id', 'Id_1', 'ID_2']``. Parquet field
-    names are case-sensitive, so none of these columns has to be dropped --
-    they only have to stop colliding under DuckDB's case-insensitive binder.
-    """
-    seen: dict[str, int] = {}
-    unique = []
-    for name in names:
-        key = name.lower()
-        if key not in seen:
-            seen[key] = 0
-            unique.append(name)
-            continue
-        seen[key] += 1
-        candidate = f"{name}_{seen[key]}"
-        while candidate.lower() in seen:
-            seen[key] += 1
-            candidate = f"{name}_{seen[key]}"
-        seen[candidate.lower()] = 0
-        unique.append(candidate)
-    return unique
-
-
 def _case_collision_aliases(
     con, input_path: str, layer: str | None, open_options: list[str] | None = None
 ) -> list[str] | None:
@@ -461,7 +436,13 @@ def _case_collision_aliases(
     if prefix:
         names = [_DRIVER_FID_COLUMNS.get(driver, _DEFAULT_FID_COLUMN)] + names
 
-    unique = _suffixed_to_unique(names)
+    # Keep the first spelling of each name and suffix every later case-collision
+    # (['id', 'Id', 'ID'] -> ['id', 'Id_1', 'ID_2']): Parquet field names are
+    # case-sensitive, so no column has to go, only stop colliding under DuckDB's
+    # case-insensitive binder.
+    unique: list[str] = []
+    for name in names:
+        unique.append(unique_name(name, unique))
     if unique == names:
         return None
     for before, after in zip(names, unique, strict=True):
@@ -862,7 +843,7 @@ def _column_suggestions(name, actual_cols):
     close = difflib.get_close_matches(name, actual_cols, n=3, cutoff=0.7)
     # difflib compares case-sensitively, so a pure case slip scores 0 and has
     # to be looked for separately -- it is the likeliest intent of all.
-    exact_fold = [c for c in actual_cols if c.lower() == name.lower()]
+    exact_fold = [c for c in actual_cols if same_column(c, name)]
     return exact_fold + [c for c in close if c not in exact_fold]
 
 
@@ -927,7 +908,7 @@ _LON_TOKENS = ("lon", "lng", "long", "longitude")
 def _name_tokens(name):
     """Lower-cased words of a column name: ``decimalLatitude`` -> decimal, latitude."""
     spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name)
-    return [token for token in re.split(r"[^0-9a-z]+", spaced.lower()) if token]
+    return [token for token in re.split(r"[^0-9a-z]+", fold(spaced)) if token]
 
 
 def _axis_affix(name, axis_tokens):
@@ -970,7 +951,7 @@ def _exact_latlon_pair(columns, allow_xy=True):
     """
     by_lower = {}
     for col in columns:
-        by_lower.setdefault(col[0].lower(), col)
+        by_lower.setdefault(fold(col[0]), col)
     candidates = [(_LAT_TOKENS, _LON_TOKENS)]
     if allow_xy:
         candidates.append((("y",), ("x",)))
@@ -1098,7 +1079,7 @@ def _handle_explicit_columns(wkt_column, lat_column, lon_column, columns, csv_re
 
 def _auto_detect_geometry(con, csv_read, columns, verbose, allow_xy=True):
     """Auto-detect geometry columns. Returns geom_info dict or None."""
-    col_names_lower = {col[0].lower(): col[0] for col in columns}
+    col_names_lower = {fold(col[0]): col[0] for col in columns}
     # Try WKT first
     wkt_col = _try_detect_wkt_column(con, csv_read, col_names_lower)
     if wkt_col:
@@ -1413,8 +1394,12 @@ def _csv_carried_columns(geom_info):
     are not among them and cannot collide with a name gpio computes.
     """
     source = [geom_info.get(key) for key in ("wkt_column", "lat_column", "lon_column")]
-    excluded = {str(name).lower() for name in source if name}
-    return [name for name in geom_info["source_columns"] if str(name).lower() not in excluded]
+    consumed = [str(name) for name in source if name]
+    return [
+        name
+        for name in geom_info["source_columns"]
+        if not any(same_column(str(name), used) for used in consumed)
+    ]
 
 
 def _resolve_tabular_geometry_name(carried_columns, base=BUILT_GEOMETRY_COLUMN):
@@ -1433,9 +1418,9 @@ def _resolve_tabular_geometry_name(carried_columns, base=BUILT_GEOMETRY_COLUMN):
     ("ST_IsEmpty(VARCHAR)", #1176). The computed column moves aside instead, as
     the computed bbox does (#1079).
     """
-    geometry_name = free_column_name(base, carried_columns)
+    geometry_name = unique_name(base, carried_columns)
     if geometry_name != base:
-        taken = next(str(name) for name in carried_columns if str(name).lower() == base.lower())
+        taken = matching_columns(base, carried_columns)[0]
         warn(
             f"Input already has a column named '{taken}' that is not geometry; "
             f"writing the geometry built from the source columns as '{geometry_name}'"

@@ -42,6 +42,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
+from geoparquet_io.core.column_selection import matching_columns
 from geoparquet_io.core.compression import resolve_codec, resolve_process_compression_level
 from geoparquet_io.core.geo_metadata import (
     OVERVIEW_LEVEL_COLUMN,
@@ -152,7 +153,7 @@ def _check_level_schemas(files: list[pq.ParquetFile], levels: list[LevelInput]) 
                 f"{lv.path} has no rows; an overview file must not carry an empty level "
                 "(OVERVIEWS_SPEC 7.3)"
             )
-        collisions = [n for n in pf.schema_arrow.names if n.lower() == OVERVIEW_LEVEL_COLUMN]
+        collisions = matching_columns(OVERVIEW_LEVEL_COLUMN, pf.schema_arrow.names)
         if collisions:
             raise ValueError(
                 f"{lv.path} already has a column named {collisions[0]!r}; an overview file's "

@@ -22,7 +22,9 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.arrow_types import _cast_table_to_schema
 from geoparquet_io.core.bbox_parse import parse_bbox, refuse_wrap
 from geoparquet_io.core.column_selection import (
+    exclude_columns,
     resolve_columns_against_schema,
+    same_column,
     split_column_list,
 )
 from geoparquet_io.core.crs_utils import (
@@ -1244,34 +1246,14 @@ def _target_schema(layer_info: ArcGISLayerInfo, out_fields: str) -> pa.Schema:
     schema = _build_schema_from_layer_info(layer_info)
     if out_fields == "*":
         return schema
-    requested = {f.strip().lower() for f in out_fields.split(",")}
+    requested = [f.strip() for f in out_fields.split(",")]
     return pa.schema(
         [
             field
             for field in schema
-            if field.name == BUILT_GEOMETRY_COLUMN or field.name.lower() in requested
+            if field.name == BUILT_GEOMETRY_COLUMN
+            or any(same_column(field.name, name) for name in requested)
         ]
-    )
-
-
-def _require_columns_remain(column_names, exclude_list: list[str] | None) -> None:
-    """Refuse an ``--exclude-cols`` that would leave the table with no columns.
-
-    The guard used to be ``if cols_to_keep:``, which silently ignored the whole
-    option -- so ``--exclude-cols geometry`` on a geometry-only layer wrote full
-    GeoParquet including the column the user asked to drop (#1176). An empty
-    table is not what was asked for either; the request is a typo and the only
-    useful answer is to name it.
-    """
-    if not exclude_list:
-        return
-    excluded = set(exclude_list)
-    if any(name not in excluded for name in column_names):
-        return
-    raise InvalidParameterError(
-        "--exclude-cols",
-        f"excluding {', '.join(sorted(excluded))} would leave the output with no "
-        f"columns at all (the layer has: {', '.join(column_names)})",
     )
 
 
@@ -1279,11 +1261,9 @@ def _exclude_columns(table: pa.Table, exclude_list: list[str] | None) -> pa.Tabl
     """Drop the ``--exclude-cols`` names from a fetched table (client-side)."""
     if not exclude_list:
         return table
-    _require_columns_remain(table.column_names, exclude_list)
-    cols_to_exclude = set(exclude_list)
-    cols_to_keep = [name for name in table.column_names if name not in cols_to_exclude]
-    debug(f"Excluded columns: {cols_to_exclude}")
-    return table.select(cols_to_keep)
+    keep = exclude_columns(table.column_names, exclude_list, strict=False)
+    debug(f"Excluded columns: {exclude_list}")
+    return table.select(keep)
 
 
 def _json_doc_to_table(doc: dict, exclude: str, suffix: str, con=None) -> pa.Table:
@@ -1727,7 +1707,7 @@ def arcgis_to_table(
 
     # The layer's advertised fields are enough to see an --exclude-cols that
     # would leave nothing, so say so before a single feature is downloaded.
-    _require_columns_remain(_target_schema(layer_info, out_fields).names, exclude_list)
+    exclude_columns(_target_schema(layer_info, out_fields).names, exclude_list, strict=False)
 
     if layer_info.total_count == 0:
         filters_applied = where != "1=1" or bbox is not None

@@ -19,6 +19,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.arrow_geo_metadata import _detect_bbox_column_from_table
 from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.column_selection import bound_column, fold, same_column
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.crs_utils import (
     extract_crs_from_parquet,
@@ -59,7 +60,6 @@ from geoparquet_io.core.process.aggregate.common import (
     PCT_CELL_FUNC,
     VALID_OUT_GEOMETRY,
     MetricSpec,
-    _fold,
     aggregate_source_relation,
     build_breakdown_pivot,
     build_metric_select,
@@ -227,6 +227,11 @@ def _relation_columns(con, relation: str) -> set[str]:
     return {name for name, _ in describe_query(con, f"SELECT * FROM {relation}")}
 
 
+def _without(columns: set[str], hidden) -> set[str]:
+    """``columns`` less every spelling of the ``hidden`` names (an input ``__PT`` is ``__pt``)."""
+    return {c for c in columns if not any(same_column(c, h) for h in hidden)}
+
+
 def build_exclude_clause(
     con: duckdb.DuckDBPyConnection, relation: str, columns: tuple[str, ...]
 ) -> str:
@@ -239,8 +244,11 @@ def build_exclude_clause(
     cols = _relation_columns(con, relation)
     drop: list[str] = []
     for name in columns:
-        if name in cols and name not in drop:
-            drop.append(name)
+        # Every spelling that folds to the name: a reserved ``__pt`` is not
+        # shadowable by an input column ``__PT`` (#1109).
+        for col in sorted(c for c in cols if same_column(c, name)):
+            if col not in drop:
+                drop.append(col)
     return f" EXCLUDE ({', '.join(quote_identifier(c) for c in drop)})" if drop else ""
 
 
@@ -260,7 +268,10 @@ def _validate_bucket_point_args(bucket_point: str, bbox_column: str | None) -> N
 
 def _validate_bbox_struct_column(con, relation: str, bbox_column: str) -> None:
     """Ensure ``bbox_column`` exists in ``relation`` and is a bbox covering struct."""
-    if bbox_column not in _relation_columns(con, relation):
+    if (
+        bound_column(bbox_column, _relation_columns(con, relation), option_name="bbox-column")
+        is None
+    ):
         raise InvalidParameterError(
             "bbox-column", f"bbox column '{bbox_column}' not found in the input"
         )
@@ -280,15 +291,21 @@ def _validate_bbox_struct_column(con, relation: str, bbox_column: str) -> None:
 
 def _validate_point_column(con, relation: str, bucket_point: str) -> None:
     """Ensure a point-column ``bucket_point`` names an existing column."""
-    if bucket_point in _relation_columns(con, relation):
-        return
-    hint = ""
-    lowered = bucket_point.lower()
+    lowered = fold(bucket_point)
     if lowered in (BUCKET_POINT_BBOX, BUCKET_POINT_GEOMETRY):
-        hint = f" (mode keywords are lowercase — did you mean '{lowered}'?)"
+        # Only a keyword spelled exactly gets here as a mode; any other
+        # spelling would silently bind to a column of that name (a `bbox`).
+        raise InvalidParameterError(
+            "bucket-point",
+            f"point column '{bucket_point}' not found in the input (mode keywords are "
+            f"lowercase — did you mean '{lowered}'?); the bucket point must be "
+            "'geometry', 'bbox', or the name of an existing point column",
+        )
+    if bound_column(bucket_point, _relation_columns(con, relation), option_name="bucket-point"):
+        return
     raise InvalidParameterError(
         "bucket-point",
-        f"point column '{bucket_point}' not found in the input{hint}; the bucket "
+        f"point column '{bucket_point}' not found in the input; the bucket "
         "point must be 'geometry', 'bbox', or the name of an existing point column",
     )
 
@@ -383,8 +400,8 @@ def needed_source_columns(
     seen: set[str] = set()
     kept: list[str] = []
     for name in wanted:
-        folded = _fold(name)
-        if folded in seen or name in _RESERVED_INTERNAL:
+        folded = fold(name)
+        if folded in seen or any(same_column(name, r) for r in _RESERVED_INTERNAL):
             continue
         seen.add(folded)
         kept.append(name)
@@ -402,10 +419,7 @@ def _resolve_column_names(available: set[str], wanted: tuple[str, ...]) -> list[
     """
     resolved: list[str] = []
     for name in wanted:
-        if name in available:
-            resolved.append(name)
-            continue
-        match = next((c for c in sorted(available) if _fold(c) == _fold(name)), None)
+        match = bound_column(name, sorted(available), option_name="column")
         if match is not None:
             resolved.append(match)
     return resolved
@@ -428,7 +442,7 @@ def source_select_list(
     """
     if keep_columns is None:
         return f"*{build_exclude_clause(con, relation, exclude)}, "
-    available = _relation_columns(con, relation) - set(exclude)
+    available = _without(_relation_columns(con, relation), exclude)
     return "".join(
         f"{quote_identifier(c)}, " for c in _resolve_column_names(available, keep_columns)
     )
@@ -787,22 +801,58 @@ def _warn_files_missing_column(con, input_path: str, column: str) -> None:
         )
 
 
+def _reject_folded_duplicates(con, input_parquet: str, requested: tuple[str, ...]) -> None:
+    """Refuse a requested column that two physical columns of one file fold to.
+
+    DuckDB renames the second of ``height``/``HEIGHT`` to ``HEIGHT_1`` on read
+    and then binds *both* spellings to the first, so ``--metric sum:HEIGHT``
+    summed ``height`` with no warning and no later check could see why: the
+    relation no longer shows the clash. The file's own schema still does (#1109).
+    """
+    wanted = sorted({fold(name) for name in requested})
+    if not wanted:
+        return
+    names = ", ".join(sql_literal(name) for name in wanted)
+    try:
+        rows = con.execute(
+            f"SELECT file_name, name FROM parquet_schema({sql_path(input_parquet)}) "
+            f"WHERE lower(name) IN ({names})"
+        ).fetchall()
+    except duckdb.Error:  # pragma: no cover - best-effort diagnostics only
+        return
+    by_file: dict[str, list[str]] = {}
+    for file_name, name in rows:
+        by_file.setdefault(file_name, []).append(name)
+    for name in requested:
+        for physical in by_file.values():
+            bound_column(name, physical, option_name="column")
+
+
 def _validate_keying_columns_for_file(
-    input_parquet: str, bucket_point: str, bbox_column: str | None, verbose: bool
+    input_parquet: str,
+    bucket_point: str,
+    bbox_column: str | None,
+    verbose: bool,
+    requested: tuple[str, ...] = (),
 ) -> None:
     """Validate the bbox/point keying column against the file schema up front.
 
     Runs before any expensive work (the --auto probe, grid extension install,
     admin dataset setup) so a typo'd or wrongly-shaped column fails immediately
     with a clear error rather than a late binder error. Also warns when a glob
-    input is heterogeneous (some files lack the keying column).
+    input is heterogeneous (some files lack the keying column). ``requested`` is
+    every metric/breakdown column the run reads, checked for a case-clash in the
+    file's own schema (:func:`_reject_folded_duplicates`).
     """
-    if bucket_point == BUCKET_POINT_GEOMETRY:
+    if bucket_point == BUCKET_POINT_GEOMETRY and not requested:
         return
     input_url = resolve_file_url(input_parquet, verbose=False)
     relation = f"read_parquet({sql_path(input_url)}, hive_partitioning=false, union_by_name=true)"
     con = get_duckdb_connection(load_spatial=False, load_httpfs=needs_httpfs(input_parquet))
     try:
+        _reject_folded_duplicates(con, input_url, requested)
+        if bucket_point == BUCKET_POINT_GEOMETRY:
+            return
         if bucket_point == BUCKET_POINT_BBOX and bbox_column:
             _validate_bbox_struct_column(con, relation, bbox_column)
             _warn_files_missing_column(con, input_parquet, bbox_column)
@@ -895,7 +945,13 @@ def aggregate_grid_file(
     _validate_bucket_point_args(bucket_point, bbox_column)
     if bucket_point == BUCKET_POINT_BBOX:
         bbox_column = _resolve_bbox_column_for_file(input_parquet, bbox_column, verbose)
-    _validate_keying_columns_for_file(input_parquet, bucket_point, bbox_column, verbose)
+    _validate_keying_columns_for_file(
+        input_parquet,
+        bucket_point,
+        bbox_column,
+        verbose,
+        needed_source_columns(metrics, breakdown, breakdown_spec),
+    )
     resolution = _resolve_resolution(
         scheme, input_parquet, resolution, auto, target_per_cell, max_cells, verbose, where=where
     )
@@ -925,7 +981,7 @@ def aggregate_grid_file(
         _, hidden = bucket_point_expr(
             con, read_rel, geom_col, source_crs, bucket_point, bbox_column
         )
-        input_columns = _relation_columns(con, read_rel) - {*hidden, *_RESERVED_INTERNAL}
+        input_columns = _without(_relation_columns(con, read_rel), (*hidden, *_RESERVED_INTERNAL))
         source_sql = read_grid_source_sql(
             con,
             input_url,
@@ -1034,7 +1090,7 @@ def aggregate_grid_table(
             con, "__agg_input", geom_col, source_crs, bucket_point, bbox_column, edges
         )
         hidden = (*((geom_col,) if geom_col else ()), *exclude, *_RESERVED_INTERNAL)
-        input_columns = _relation_columns(con, "__agg_input") - set(hidden)
+        input_columns = _without(_relation_columns(con, "__agg_input"), hidden)
         select_list = source_select_list(
             con,
             "__agg_input",

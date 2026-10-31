@@ -20,6 +20,7 @@ import pyarrow as pa
 from geoparquet_io.core import bbox_parse
 from geoparquet_io.core.bbox_structure import check_bbox_structure, dataset_bounds
 from geoparquet_io.core.column_selection import (
+    exclude_columns,
     reject_blank_column_entries,
     split_column_list,
 )
@@ -476,7 +477,7 @@ def build_column_selection(
         if bbox_col and bbox_col not in exclude_set:
             selected.add(bbox_col)
     elif exclude_cols:
-        selected = set(all_columns) - exclude_set
+        return exclude_columns(all_columns, exclude_cols, option_name="exclude_cols")
     else:
         selected = set(all_columns)
 
@@ -484,7 +485,7 @@ def build_column_selection(
     result = [c for c in all_columns if c in selected]
     if all_columns and not result:
         raise InvalidParameterError(
-            "exclude_cols" if exclude_cols else "columns",
+            "columns",
             f"this selection leaves no columns to extract (available: {', '.join(all_columns)})",
         )
     return result

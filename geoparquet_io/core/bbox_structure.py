@@ -20,8 +20,8 @@ again.
 import json
 from typing import Literal, TypedDict, cast
 
+from geoparquet_io.core.column_selection import matching_columns, unique_name
 from geoparquet_io.core.duckdb_metadata import get_schema_info
-from geoparquet_io.core.duckdb_utils import free_column_name
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.geo_metadata import (
     SELF_EVIDENT_BBOX_COLUMN,
@@ -379,10 +379,10 @@ def resolve_bbox_name(column_names, geoparquet_version, requested="bbox", announ
         The free name, which the caller must use for both the SQL alias and the
         covering it declares
     """
-    bbox_name = free_column_name(requested, column_names)
+    bbox_name = unique_name(requested, column_names)
     if bbox_name == requested or not announce:
         return bbox_name
-    taken = next(str(name) for name in column_names if str(name).lower() == requested.lower())
+    taken = matching_columns(requested, column_names)[0]
     if covering_supported(geoparquet_version):
         outcome = "and declaring the covering over it"
     else:

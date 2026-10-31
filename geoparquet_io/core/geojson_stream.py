@@ -27,6 +27,7 @@ import io
 import sys
 from typing import TYPE_CHECKING
 
+from geoparquet_io.core.column_selection import same_column
 from geoparquet_io.core.geometry_detection import (
     create_geometry_view,
     primary_geometry_column,
@@ -231,6 +232,11 @@ def _needs_reprojection(source_crs: str | None) -> bool:
     return crs_upper not in wgs84_variants
 
 
+def _is_geometry_or_bbox(column: str, geometry_column: str) -> bool:
+    """Whether ``column`` is the geometry or the bbox, which are not GeoJSON properties."""
+    return same_column(column, geometry_column) or same_column(column, "bbox")
+
+
 def _get_property_columns(
     con: duckdb.DuckDBPyConnection,
     source_ref: str,
@@ -250,8 +256,7 @@ def _get_property_columns(
     columns = [name for name, _ in describe_query(con, f"SELECT * FROM {source_ref}")]
 
     # Exclude geometry column and bbox
-    excluded = {geometry_column.lower(), "bbox"}
-    return [col for col in columns if col.lower() not in excluded]
+    return [col for col in columns if not _is_geometry_or_bbox(col, geometry_column)]
 
 
 def _reprojected_source_ref(source_ref: str, quoted_geom: str, source_crs: str) -> str:
@@ -904,8 +909,9 @@ def _convert_from_stream(
         info(f"Reprojecting from {transform_source_label(source_crs)} to WGS84 (RFC 7946)")
 
     # Get property columns
-    excluded = {geometry_column.lower(), "bbox"}
-    property_columns = [col for col in table.column_names if col.lower() not in excluded]
+    property_columns = [
+        col for col in table.column_names if not _is_geometry_or_bbox(col, geometry_column)
+    ]
 
     debug(f"Property columns: {', '.join(property_columns)}")
 
