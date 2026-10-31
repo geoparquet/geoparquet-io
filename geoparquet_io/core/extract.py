@@ -76,6 +76,7 @@ from geoparquet_io.core.geometry_repair import (
     repair_query_geometry,
 )
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
+from geoparquet_io.core.parquet_schema import root_schema_index
 from geoparquet_io.core.parquet_writer import (
     WriteOptions,
     resolve_output_geoparquet_version,
@@ -148,6 +149,21 @@ def is_geographic_crs(crs_info: dict | str | None) -> bool | None:
     return None
 
 
+def _native_crs_from_schema(schema_info: list, geometry_col: str) -> dict | str | None:
+    """CRS in the ROOT column's Parquet geo logical type, else ``None``.
+
+    A struct child called like the column, listed first, must not supply it.
+    """
+    index = root_schema_index(schema_info, geometry_col)
+    if index is None:
+        return None
+    logical_type = schema_info[index].get("logical_type") or ""
+    if native_geo_type(logical_type) is None:
+        return None
+    parsed = parse_geometry_logical_type(logical_type)
+    return parsed["crs"] if parsed and "crs" in parsed else None
+
+
 def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | None:
     """
     Get CRS info from GeoParquet metadata or Parquet geo logical type.
@@ -170,16 +186,9 @@ def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | No
 
     # Fall back to Parquet geo logical type (for GeoParquet 2.0 / parquet-geo)
     try:
-        schema_info = get_schema_info(input_parquet)
-        for col in schema_info:
-            name = col.get("name", "")
-            if name != geometry_col:
-                continue
-            logical_type = col.get("logical_type") or ""
-            if native_geo_type(logical_type) is not None:
-                parsed = parse_geometry_logical_type(logical_type)
-                if parsed and "crs" in parsed:
-                    return parsed["crs"]
+        crs = _native_crs_from_schema(get_schema_info(input_parquet), geometry_col)
+        if crs is not None:
+            return crs
     except Exception:
         # CRS extraction is optional
         pass

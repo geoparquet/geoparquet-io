@@ -1005,12 +1005,9 @@ def detect_geometry_columns(parquet_file: str, con=None) -> dict[str, str]:
     schema = get_schema_info(parquet_file, con)
     geo_columns = {}
 
-    for col in schema:
+    for col in root_schema_columns(schema):
         logical_type = col.get("logical_type") or ""
         name = col.get("name", "")
-
-        if not name:
-            continue
 
         kind = native_geo_type(logical_type)
         if kind is not None:

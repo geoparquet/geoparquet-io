@@ -97,6 +97,7 @@ from geoparquet_io.core.optional_deps import load_module
 from geoparquet_io.core.parquet_footer import read_footer_kv
 from geoparquet_io.core.parquet_schema import (
     nested_schema_index,
+    root_schema_columns,
     root_schema_index,
     schema_direct_children,
     schema_entry_is_group,
@@ -3172,7 +3173,7 @@ def _check_native_columns_in_metadata(schema_info: list, columns: dict) -> Valid
 
     missing = [
         col["name"]
-        for col in schema_info
+        for col in root_schema_columns(schema_info)
         if is_geometry_column(col.get("logical_type") or "") and col["name"] not in columns
     ]
     if missing:

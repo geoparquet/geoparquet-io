@@ -116,3 +116,70 @@ def test_geo_columns_info_is_the_root_columns(decoy_file):
     reordered = [root, *listing[:-1]]  # the root column first, the decoy after it
     info = _build_geo_columns_info(reordered, {"geometry": "Geometry"})
     assert info["geometry"]["crs"] is not None
+
+
+# ---------------------------------------------------------------------------
+# The set/dict-form walks over the whole listing (audit pass 5): a nested
+# field is no column, whatever its logical type.
+# ---------------------------------------------------------------------------
+
+#: meta (struct) holding a GEOMETRY child "inner", then the root geometry column.
+NESTED_GEOMETRY = [
+    {"name": "meta", "type": None, "num_children": 1, "repetition_type": "OPTIONAL"},
+    {
+        "name": "inner",
+        "type": "BYTE_ARRAY",
+        "num_children": 0,
+        "repetition_type": "OPTIONAL",
+        "logical_type": "GeometryType(crs=null)",
+    },
+    {
+        "name": "geometry",
+        "type": "BYTE_ARRAY",
+        "num_children": 0,
+        "repetition_type": "OPTIONAL",
+        "logical_type": "GeometryType(crs=null)",
+    },
+]
+
+
+def test_native_columns_in_metadata_ignores_a_nested_geometry_child():
+    from geoparquet_io.core.validate import _check_native_columns_in_metadata
+
+    check = _check_native_columns_in_metadata(NESTED_GEOMETRY, {"geometry": {}})
+    assert check.status == CheckStatus.PASSED, check.message
+
+
+def test_native_columns_in_metadata_still_names_a_missing_root_column():
+    from geoparquet_io.core.validate import _check_native_columns_in_metadata
+
+    check = _check_native_columns_in_metadata(NESTED_GEOMETRY, {})
+    assert check.status == CheckStatus.FAILED and "['geometry']" in check.message
+
+
+def test_native_geography_edges_are_keyed_by_root_columns_only():
+    from geoparquet_io.core.write_funnels import _native_geography_edges
+
+    geography = 'GeographyType(crs=null, algorithm="spherical")'
+    listing = [
+        {"name": "meta", "type": None, "num_children": 1, "repetition_type": "OPTIONAL"},
+        {"name": "inner", "type": "BYTE_ARRAY", "num_children": 0, "logical_type": geography},
+        {"name": "geog", "type": "BYTE_ARRAY", "num_children": 0, "logical_type": geography},
+    ]
+    assert [name for name, _ in _native_geography_edges(listing)] == ["geog"]
+
+
+def test_native_crs_of_a_file_is_the_root_columns_not_a_nested_childs():
+    from geoparquet_io.core.extract import _native_crs_from_schema
+
+    decoy = 'GeometryType(crs={"id": {"authority": "EPSG", "code": 3857}})'
+    root = 'GeometryType(crs={"id": {"authority": "EPSG", "code": 4326}})'
+    listing = [
+        {"name": "meta", "type": None, "num_children": 1, "repetition_type": "OPTIONAL"},
+        {"name": "geometry", "type": "BYTE_ARRAY", "num_children": 0, "logical_type": decoy},
+        {"name": "geometry", "type": "BYTE_ARRAY", "num_children": 0, "logical_type": root},
+    ]
+    assert _native_crs_from_schema(listing, "geometry") == {
+        "id": {"authority": "EPSG", "code": 4326}
+    }
+    assert _native_crs_from_schema(listing[:2], "geometry") is None

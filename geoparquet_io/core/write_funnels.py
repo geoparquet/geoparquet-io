@@ -179,15 +179,23 @@ def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
     return agree_across_files({path: _file_nonplanar_edges(path) for path in files})
 
 
+def _native_geography_edges(schema_info: list) -> Iterator[tuple[str, str]]:
+    """``(root column, edges)`` of each native GEOGRAPHY type (a nested field is no column).
+
+    Lazy, so a malformed type partway down keeps the declarations read before it.
+    """
+    for col in root_schema_columns(schema_info):
+        logical = col.get("logical_type") or ""
+        if native_geo_type(logical) == "GEOGRAPHY":
+            yield col["name"], logical_type_edges(parse_geometry_logical_type(logical))
+
+
 def _file_nonplanar_edges(input_file: str) -> dict[str, str]:
     """:func:`collect_nonplanar_edges` of one file (or the first of a partition)."""
     native: dict[str, str] = {}
     declared: dict[str, object] = {}
     try:
-        for col in get_schema_info(input_file):
-            logical = col.get("logical_type") or ""
-            if native_geo_type(logical) == "GEOGRAPHY":
-                native[col["name"]] = logical_type_edges(parse_geometry_logical_type(logical))
+        native.update(_native_geography_edges(get_schema_info(input_file)))
         declared = block_edges(sanitized_carried_geo_of_file(input_file))
     except Exception as e:
         # A broken optional geo block must not erase native declarations already

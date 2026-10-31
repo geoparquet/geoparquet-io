@@ -2487,21 +2487,79 @@ def _is_column_collection(node: ast.AST) -> bool:
     )
 
 
-def _reads_a_name(node: ast.AST) -> bool:
-    """``col.get("name")`` / ``col["name"]``: the name a schema entry carries."""
+def _name_read_receiver(node: ast.AST) -> ast.Name | None:
+    """``col`` of ``col.get("name")`` / ``col["name"]``: whose name is read."""
     if isinstance(node, ast.Subscript):
-        return (
-            isinstance(node.slice, ast.Constant)
-            and node.slice.value == "name"
-            and bool(re.search(r"col|field", _ident(node.value), re.IGNORECASE))
-        )
-    return (
+        key, receiver = node.slice, node.value
+    elif (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "get"
-        and bool(node.args)
-        and isinstance(node.args[0], ast.Constant)
-        and node.args[0].value == "name"
+        and node.args
+    ):
+        key, receiver = node.args[0], node.func.value
+    else:
+        return None
+    named = isinstance(key, ast.Constant) and key.value == "name"
+    return receiver if named and isinstance(receiver, ast.Name) else None
+
+
+#: A loop source that is a schema listing (``get_schema_info`` rows), the concept
+#: ``parquet_schema`` owns; ``usable_columns`` and the like are resolved names.
+_SCHEMA_LISTING = re.compile(r"schema", re.IGNORECASE)
+
+
+def _walks_schema_listing(m: _Module, receiver: ast.Name) -> bool:
+    """Whether *receiver* is the target of a loop over a raw schema listing (a loop
+    over ``root_schema_columns(...)`` is the owner's root-only walk)."""
+    for loop in _enclosing_loops(m, receiver):
+        target = loop.target
+        if isinstance(target, ast.Name) and target.id == receiver.id:
+            source = ast.unparse(loop.iter)
+            return bool(_SCHEMA_LISTING.search(source)) and not source.startswith("root_schema_")
+    return False
+
+
+def _schema_name_read(m: _Module, node: ast.AST) -> bool:
+    """A name read off a row of a schema listing: ``col.get("name")`` where ``col``
+    walks ``schema_info``, or a local that was assigned one."""
+    receiver = _name_read_receiver(node)
+    if receiver is not None:
+        return _walks_schema_listing(m, receiver)
+    if not isinstance(node, ast.Name):
+        return False
+    func = _enclosing_function(m, node)
+    return func is not None and any(
+        isinstance(a, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == node.id for t in a.targets)
+        and _name_read_receiver(a.value) is not None
+        and _walks_schema_listing(m, _name_read_receiver(a.value))
+        for a in ast.walk(func)
+    )
+
+
+def _schema_listing_walk(m: _Module, node: ast.AST) -> bool:
+    """A walk of the full depth-first schema listing that tests or keys a column
+    by name, which a nested field of that name shadows: ``col.get("name") != g``,
+    ``col["name"] not in columns``, ``{col["name"]: ... for col in schema_info}``,
+    ``native[col["name"]] = ...`` -- also through ``name = col.get("name")``.
+    ``parquet_schema.root_schema_index`` / ``root_schema_columns`` own the walk;
+    a name compared that was not read off a schema listing is a resolved name."""
+    if isinstance(node, ast.DictComp):
+        return _schema_name_read(m, node.key)
+    if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
+        return _schema_name_read(m, node.slice)
+    if not isinstance(node, ast.Compare):
+        return False
+    operands = [node.left, *node.comparators]
+    walked = (ast.Eq, ast.NotEq, ast.In, ast.NotIn)  # codespell:ignore
+    return any(
+        isinstance(op, walked)
+        and (
+            (_schema_name_read(m, left) and isinstance(right, (ast.Name, ast.Attribute)))
+            or (_schema_name_read(m, right) and isinstance(left, (ast.Name, ast.Attribute)))
+        )
+        for op, left, right in zip(node.ops, operands[:-1], operands[1:], strict=True)
     )
 
 
@@ -2521,7 +2579,7 @@ def _is_set_of_user_columns(node: ast.AST) -> bool:
 def _exact_column_compare(m: _Module, node: ast.AST, targets) -> bool:
     """A case-sensitive test of a name a user typed against a schema or a column
     list: ``col not in table.column_names``, ``c not in exclude_list``,
-    ``col.get("name") == column_name``, ``set(requested) - set(all_columns)``.
+    ``set(requested) - set(all_columns)``.
     A literal on the left is the code's own name, not the user's."""
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Sub):
         return (
@@ -2538,13 +2596,6 @@ def _exact_column_compare(m: _Module, node: ast.AST, targets) -> bool:
                 return True
             # ``[c for c in schema_cols if c not in exclude_list]``: the user's list
             if _is_user_list(right) and _iterates_column_source(m, left):
-                return True
-        elif isinstance(op, (ast.Eq, ast.NotEq)):
-            # ``col.get("name") == x`` / ``!= x``: a flat walk of the schema listing
-            # by name, which a nested field of that name shadows (``root_schema_index``)
-            if (_reads_a_name(left) and isinstance(right, (ast.Name, ast.Attribute))) or (
-                _reads_a_name(right) and isinstance(left, (ast.Name, ast.Attribute))
-            ):
                 return True
     return False
 
@@ -2614,6 +2665,10 @@ def _fold_method_on_column(m: _Module, node: ast.AST, targets) -> bool:
     return root.id in _BARE_NAMES and _function_deals_in_columns(m, node)
 
 
+#: Owns the shape of the schema walk only; a fold or a suffix loop there is flagged.
+_SCHEMA_WALK_OWNER = ("geoparquet_io/core/parquet_schema.py",)
+
+
 def _find_column_fold(m: _Module) -> Iterator[Hit]:
     """A case fold applied to a column name, or a hand-written name suffixer or
     lookup map, outside ``core/column_selection.py`` (#1367 concept 12).
@@ -2636,7 +2691,15 @@ def _find_column_fold(m: _Module) -> Iterator[Hit]:
     ``f"{base}{n}"``, ``base + "_" + str(n)`` or ``name += "_"`` until a
     membership test says the name is free; a lookup map keyed by ``fold(...)``
     (``{fold(c): c}``, ``d[fold(c)] = c``, ``d.setdefault(fold(c), c)``); and a
-    case-sensitive ``column in schema.names`` / ``table.column_names``.
+    case-sensitive ``column in schema.names`` / ``table.column_names``; and a
+    walk of a schema listing (``get_schema_info`` rows) that tests or keys a
+    column by name -- ``col.get("name") != x``, ``col["name"] not in columns``,
+    ``{col["name"]: ... for col in schema_info}``, ``d[col["name"]] = ...``, also
+    through a local holding the name -- which a nested field of that name
+    shadows (``parquet_schema.root_schema_index`` / ``root_schema_columns``;
+    ``parquet_schema`` owns only this walk, not a fold or a suffix there).
+    A name compared that did not come off a schema listing is a resolved name
+    and is left to ``==``.
 
     Not seen (named so a reviewer looks for them): a fold of a name held in a
     variable that says nothing and is not a loop target, a suffix built with
@@ -2651,6 +2714,7 @@ def _find_column_fold(m: _Module) -> Iterator[Hit]:
             or _ascii_fold_table(node)
             or _fold_keyed(node)
             or _exact_column_compare(m, node, targets)
+            or (not _owns(m.path, _SCHEMA_WALK_OWNER) and _schema_listing_walk(m, node))
         ):
             yield m.hit(node)
         elif (
@@ -3061,10 +3125,7 @@ ARMS = {
     "geometry_stats": Arm(_find_geometry_stats, ("geoparquet_io/core/geo_metadata.py",)),
     "edges": Arm(_find_edges, ("geoparquet_io/core/edges.py",)),
     "footer_patch": Arm(_find_footer_patch, ("geoparquet_io/core/parquet_footer.py",)),
-    "column_fold": Arm(
-        _find_column_fold,
-        ("geoparquet_io/core/column_selection.py", "geoparquet_io/core/parquet_schema.py"),
-    ),
+    "column_fold": Arm(_find_column_fold, ("geoparquet_io/core/column_selection.py",)),
     "geometry_identity": Arm(
         _find_geometry_identity, ("geoparquet_io/core/geometry_detection.py",)
     ),
@@ -5305,6 +5366,23 @@ COLUMN_FOLD_SHAPES = {
         "def f(schema_info, geom_col):\n    for col in schema_info:\n"
         '        if col.get("name") == geom_col:\n            return col\n'
     ),
+    "name-read in a local, then compared": (
+        "def f(schema_info, geometry_col):\n    for col in schema_info:\n"
+        '        name = col.get("name", "")\n        if name != geometry_col:\n'
+        "            continue\n        return col\n"
+    ),
+    "name-read set form": (
+        "def f(schema_info, columns):\n"
+        '    return [col["name"] for col in schema_info if col["name"] not in columns]\n'
+    ),
+    "name-read dict form": (
+        "def f(schema_info):\n"
+        '    return {col["name"]: col.get("logical_type") for col in schema_info}\n'
+    ),
+    "name-read dict store": (
+        "def f(schema_info):\n    out = {}\n    for col in schema_info:\n"
+        '        out[col["name"]] = col\n    return out\n'
+    ),
     "type-named loop target": (
         "def f(columns):\n    for col_type in columns:\n        yield col_type.lower()\n"
     ),
@@ -5325,6 +5403,18 @@ COLUMN_FOLD_NEAR_MISSES = {
         "def f(schema_rows):\n    return [(n, col_type.upper()) for n, col_type in schema_rows]\n"
     ),
     "an exact membership on a literal": ("def f(schema):\n    return 'id' in schema.names\n"),
+    "a resolved name compared to a described one": (
+        "def f(usable_columns, primary_geom_col):\n"
+        '    return [col["name"] == primary_geom_col for col in usable_columns]\n'
+    ),
+    "a walk over the owner's root columns": (
+        "from geoparquet_io.core.parquet_schema import root_schema_columns\n\n"
+        "def f(schema_info, columns):\n"
+        '    return [c for c in root_schema_columns(schema_info) if c["name"] not in columns]\n'
+    ),
+    "a schema name read that is only listed": (
+        'def f(schema_info):\n    return [col["name"] for col in schema_info]\n'
+    ),
     "a table's own name": "def f(table):\n    return table.name.lower()\n",
     "sql lower of a path": 'Q = "SELECT lower(path) FROM t"\n',
     "a fold of a constant": "from m import fold\n\nKNOWN = {fold('A'): 1}\n",
@@ -5339,6 +5429,39 @@ COLUMN_FOLD_NEAR_MISSES = {
 def test_g12_column_fold_arm_flags_every_shape(shape, tmp_path):
     repo = _plant(tmp_path, "column_fold", COLUMN_FOLD_SHAPES[shape])
     assert arm_hits(repo, "column_fold"), shape
+
+
+def _plant_in(tmp_path: Path, relative: str, source: str) -> Path:
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text(source, encoding="utf-8")
+    return tmp_path
+
+
+def test_g12_column_fold_owner_of_the_schema_walk_may_walk(tmp_path):
+    walk = (
+        "def f(schema_info, name):\n    for col in schema_info:\n"
+        '        if col.get("name") == name:\n            return col\n'
+    )
+    repo = _plant_in(tmp_path, "geoparquet_io/core/parquet_schema.py", walk)
+    assert arm_hits(repo, "column_fold") == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def f(col, x):\n    return col.lower() == x\n",
+        (
+            "def f(base, taken):\n    n = 0\n    name = base\n    while name in taken:\n"
+            '        n += 1\n        name = f"{base}_{n}"\n    return name\n'
+        ),
+        "def f(table, column):\n    return column in table.column_names\n",
+    ],
+    ids=["fold", "suffix loop", "exact membership"],
+)
+def test_g12_column_fold_owner_of_the_schema_walk_does_not_own_folds(source, tmp_path):
+    repo = _plant_in(tmp_path, "geoparquet_io/core/parquet_schema.py", source)
+    assert arm_hits(repo, "column_fold"), source
 
 
 @pytest.mark.parametrize("shape", sorted(COLUMN_FOLD_NEAR_MISSES))
