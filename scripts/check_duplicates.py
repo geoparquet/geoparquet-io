@@ -9,8 +9,11 @@ functions that differ only in their identifiers read the same. The signature
 the body and do not shift the numbering: a copy with an annotation or an extra
 leading parameter still reads the same. Attributes and constants are kept. The
 bodies are compared as token sequences with ``difflib.SequenceMatcher``
-(``autojunk=False``; ``real_quick_ratio`` and ``quick_ratio`` prefilter), and a
-pair at or above 0.90 is a near-duplicate.
+(``autojunk=False``), and a pair at or above 0.90 is a near-duplicate. Two
+upper bounds of the ratio prune first, so most pairs never reach the matcher:
+the body lengths (``real_quick_ratio``: only bodies within a length window of
+each other are paired at all) and token counts per class (a coarse
+``quick_ratio``); a pair either bound puts below the floor cannot reach it.
 
 The pairs that exist today are listed in ``scripts/duplicate_pairs_baseline.txt``
 as ``fileA:qualnameA|fileB:qualnameB`` (``#`` starts a comment). A pair that is
@@ -26,11 +29,12 @@ from __future__ import annotations
 
 import argparse
 import ast
-import copy
+import bisect
 import difflib
 import json
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,39 +57,50 @@ def _without_docstring(body: list[ast.stmt]) -> list[ast.stmt]:
     return body
 
 
-class _Rename(ast.NodeTransformer):
-    """Rename identifiers by first occurrence in the body, in AST field order."""
-
-    def __init__(self) -> None:
-        self.names: dict[str, str] = {}
-
-    def identifier(self, name: str) -> str:
-        return self.names.setdefault(name, f"v{len(self.names)}")
-
-    def visit_Name(self, node: ast.Name) -> ast.AST:
-        node.id = self.identifier(node.id)
-        return self.generic_visit(node)
-
-    def visit_arg(self, node: ast.arg) -> ast.AST:
-        node.arg = self.identifier(node.arg)
-        return self.generic_visit(node)
+def _rename(body: list[ast.stmt]) -> list[tuple[ast.AST, str, str]]:
+    """Rename every ``Name`` and ``arg`` in *body* in place, ``v0``, ``v1``, ...
+    by first occurrence in AST field order (a pre-order walk, as
+    ``ast.NodeVisitor`` would visit them). Returns what to put back."""
+    names: dict[str, str] = {}
+    renamed: list[tuple[ast.AST, str, str]] = []
+    stack: list[ast.AST] = list(reversed(body))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Name):
+            renamed.append((node, "id", node.id))
+            node.id = names.setdefault(node.id, f"v{len(names)}")
+        elif isinstance(node, ast.arg):
+            renamed.append((node, "arg", node.arg))
+            node.arg = names.setdefault(node.arg, f"v{len(names)}")
+        stack.extend(reversed(list(ast.iter_child_nodes(node))))
+    return renamed
 
 
 def normalized_tokens(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
     """The body's tokens with identifiers renamed by first occurrence in the
     body. Nothing from the signature seeds the numbering: numbering parameter
     annotations and defaults first let one annotation shift every later name
-    and hid byte-identical twins (T0c audit)."""
-    func = copy.deepcopy(func)
+    and hid byte-identical twins (T0c audit). The names are renamed in place
+    and put back (a deep copy of every function cost more than the scan)."""
     body = _without_docstring(func.body)
-    rename = _Rename()
-    for statement in body:
-        rename.visit(statement)
-    return _TOKEN.findall(ast.unparse(ast.Module(body=body, type_ignores=[])))
+    renamed = _rename(body)
+    try:
+        return _TOKEN.findall(ast.unparse(ast.Module(body=body, type_ignores=[])))
+    finally:
+        for node, field, name in reversed(renamed):
+            setattr(node, field, name)
 
 
 def statement_count(func: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
-    return sum(isinstance(n, ast.stmt) for s in _without_docstring(func.body) for n in ast.walk(s))
+    """Statements in the body, nested ones included. An expression never holds
+    a statement, so the count does not descend into one."""
+    count = 0
+    stack: list[ast.AST] = list(_without_docstring(func.body))
+    while stack:
+        node = stack.pop()
+        count += isinstance(node, ast.stmt)
+        stack.extend(c for c in ast.iter_child_nodes(node) if not isinstance(c, ast.expr))
+    return count
 
 
 @dataclass(frozen=True)
@@ -143,27 +158,88 @@ def collect(repo: Path, minimum: int = MIN_STATEMENTS) -> list[Function]:
                     walk(child, qualified)
                 elif isinstance(child, ast.ClassDef):
                     walk(child, [*scope, child.name])
-                else:
+                elif not isinstance(child, ast.expr):  # no def is ever inside an expression
                     walk(child, scope)
 
         walk(tree, [])
     return found
 
 
+#: How many of the most frequent tokens get a class of their own in each count
+#: profile (the rest share one): a coarse one that is cheap to compare, then a
+#: fine one for the pairs the coarse one lets through.
+_COARSE_CLASSES = 7
+_FINE_CLASSES = 63
+
+
+def _profiles(token_lists: list[list[str]], classes: int) -> list[tuple[int, ...]]:
+    """Each body's token counts per class: the most frequent tokens one class
+    each, every other token one more. Matching tokens share a class, so the sum
+    of per-class minimums of two bodies bounds the multiset intersection
+    ``quick_ratio`` counts."""
+    totals = Counter(t for tokens in token_lists for t in tokens)
+    ranked = sorted(totals, key=lambda t: (-totals[t], t))[:classes]
+    index = {t: i for i, t in enumerate(ranked)}
+    other = len(ranked)
+    profiles = []
+    for tokens in token_lists:
+        counts = [0] * (other + 1)
+        for t in tokens:
+            counts[index.get(t, other)] += 1
+        profiles.append(tuple(counts))
+    return profiles
+
+
+def _length_window(length: int, floor: float) -> tuple[float, float]:
+    """The other body's lengths whose ``real_quick_ratio`` can reach *floor*
+    (``2 * min / (a + b) >= floor``), widened a little; the exact test follows."""
+    if floor <= 0:
+        return float("-inf"), float("inf")
+    if floor >= 2:
+        return float("inf"), float("-inf")
+    return length * floor / (2 - floor) - 1, length * (2 - floor) / floor + 1
+
+
 def scan(functions: list[Function], floor: float = FLOOR) -> list[Pair]:
-    """Every pair at or above *floor*, highest ratio first."""
+    """Every pair at or above *floor*, highest ratio first.
+
+    Same pairs and ratios as comparing every pair with ``SequenceMatcher``
+    (earlier function as the first sequence); a pair is skipped only when an
+    upper bound of its ratio is below *floor*.
+    """
+    tokens = [list(f.tokens) for f in functions]
+    lengths = [len(t) for t in tokens]
+    coarse = _profiles(tokens, _COARSE_CLASSES)
+    fine = _profiles(tokens, _FINE_CLASSES)
+    by_length = sorted(range(len(functions)), key=lengths.__getitem__)
+    sorted_lengths = [lengths[i] for i in by_length]
     pairs = []
     for j, right in enumerate(functions):
-        # autojunk=False: the default junks tokens frequent in a long body and
-        # lowered real pairs below the floor (T0c audit).
-        matcher = difflib.SequenceMatcher(None, [], list(right.tokens), autojunk=False)
-        for left in functions[:j]:
-            matcher.set_seq1(list(left.tokens))
-            if matcher.real_quick_ratio() < floor or matcher.quick_ratio() < floor:
+        lb = lengths[j]
+        low, high = _length_window(lb, floor)
+        window = by_length[
+            bisect.bisect_left(sorted_lengths, low) : bisect.bisect_right(sorted_lengths, high)
+        ]
+        matcher = None
+        for i in sorted(i for i in window if i < j):
+            total = lengths[i] + lb
+            if (2.0 * min(lengths[i], lb) / total if total else 1.0) < floor:
+                continue  # real_quick_ratio
+            if total and (
+                2.0 * sum(map(min, coarse[i], coarse[j])) / total < floor
+                or 2.0 * sum(map(min, fine[i], fine[j])) / total < floor
+            ):
+                continue  # each at or above quick_ratio
+            if matcher is None:
+                # autojunk=False: the default junks tokens frequent in a long body and
+                # lowered real pairs below the floor (T0c audit).
+                matcher = difflib.SequenceMatcher(None, [], tokens[j], autojunk=False)
+            matcher.set_seq1(tokens[i])
+            if matcher.quick_ratio() < floor:
                 continue
             ratio = matcher.ratio()
             if ratio >= floor:
-                pairs.append(Pair(left, right, ratio))
+                pairs.append(Pair(functions[i], right, ratio))
     return sorted(pairs, key=lambda p: (-p.ratio, p.key))
 
 
