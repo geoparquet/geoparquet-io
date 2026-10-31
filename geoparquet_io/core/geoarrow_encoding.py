@@ -169,20 +169,22 @@ def _resolve_dimension(dimensions: set[int] | None):
     return gat.Dimensions(code), True
 
 
+#: The spec's dimension suffix -> the geoarrow Dimensions code (XY=1 ... XYZM=4).
+_SUFFIX_TO_GEOARROW_DIM = {"": 1, " Z": 2, " M": 3, " ZM": 4}
+
+
 def determine_geoarrow_target_type(
     geometry_types: list[str],
     input_crs: dict | None = None,
-    dimensions: set[int] | None = None,
 ):
     """Determine the single GeoArrow target type for a dataset.
 
     Args:
-        geometry_types: GeoParquet geometry_types strings, e.g. ["Polygon", "MultiPolygon"].
+        geometry_types: GeoParquet geometry_types strings, e.g. ["Polygon", "MultiPolygon Z"],
+            as the stats owner measures them. Their dimension suffixes select a
+            Z/M-aware native type so 3D/measured coordinates are not dropped; when
+            they mix dimensions, the result falls back to WKB.
         input_crs: PROJJSON dict to attach to the type (skipped when default CRS).
-        dimensions: geoarrow dimension codes (Dimensions.value) present in the data.
-            Used to select a Z/M-aware native type so 3D/measured coordinates are not
-            dropped. When the data mixes dimensions (or has none representable as a
-            single native type), the result falls back to WKB.
 
     Returns:
         (geoarrow_type, encoding_name). geoarrow_type is None and encoding_name
@@ -190,9 +192,12 @@ def determine_geoarrow_target_type(
     """
     import geoarrow.pyarrow as ga
 
+    from geoparquet_io.core.geo_metadata import split_zm_suffix
+
     base_names = {_normalize_base_name(g) for g in geometry_types if g}
     if not base_names or not base_names.issubset(_BASE_NAME_TO_FACTORY):
         return None, "WKB"
+    dimensions = {_SUFFIX_TO_GEOARROW_DIM[split_zm_suffix(g)[1]] for g in geometry_types if g}
 
     dimension_enum, dimension_ok = _resolve_dimension(dimensions)
     if not dimension_ok:
@@ -221,28 +226,6 @@ def determine_geoarrow_target_type(
 
     encoding = common.extension_name.replace("geoarrow.", "")
     return common, encoding
-
-
-def detect_wkb_dimensions(arr) -> set[int]:
-    """Detect the geoarrow dimension codes present in a WKB/binary/geoarrow array.
-
-    Returns a set of ``geoarrow.types.Dimensions`` values (1=XY, 2=XYZ, 3=XYM,
-    4=XYZM). Returns an empty set for empty/all-null input or on any detection
-    failure, in which case the caller treats the data as plain 2D.
-    """
-    import geoarrow.pyarrow as ga
-
-    try:
-        if len(arr) == 0:
-            return set()
-        arr = arr.drop_null()  # geoarrow errors on null geometries
-        if len(arr) == 0:
-            return set()
-        types_struct = ga.unique_geometry_types(ga.as_wkb(arr))
-        return {d for d in types_struct.field("dimensions").to_pylist() if d is not None}
-    except Exception as exc:  # geoarrow C++ errors, invalid WKB, etc.
-        debug(f"Could not detect WKB dimensions; assuming 2D: {exc}")
-        return set()
 
 
 def wkb_array_to_geoarrow(arr, target_type):

@@ -13,9 +13,9 @@ may import it back -- and ``tests/test_common_split_guards.py`` refuses a new
 re-export shim.
 
 What remains is the stage-C residue, each block with a home already named in
-#1010's plan: ``compute_geometry_dimensions_via_sql``, ``get_parquet_metadata``,
-``add_computed_column``/``add_bbox`` and ``should_skip_bbox``. The geometry-type
-and bounds helpers went to their owner, ``geo_metadata`` (#1367 concept 5).
+#1010's plan: ``get_parquet_metadata``, ``add_computed_column``/``add_bbox`` and
+``should_skip_bbox``. The geometry-type, dimension and bounds helpers went to
+their owner, ``geo_metadata`` (#1367 concept 5).
 Nothing new belongs here.
 """
 
@@ -26,9 +26,6 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.duckdb_utils import (
     _DuckDBSchemaWrapper,
-    _get_query_column_type,
-    _get_query_columns,
-    _strip_trailing_order_by,
     fetch_one,
     get_duckdb_connection,
     load_community_extension,
@@ -125,68 +122,6 @@ def get_parquet_metadata(parquet_file, verbose=False):
             debug(f"{key_str}: {value}")
 
     return kv_metadata, schema
-
-
-# DuckDB ST_ZMFlag codes -> geoarrow.types.Dimensions values.
-# DuckDB: 0=XY, 1=XYM, 2=XYZ, 3=XYZM. geoarrow: 1=XY, 2=XYZ, 3=XYM, 4=XYZM.
-_DUCKDB_ZMFLAG_TO_GEOARROW_DIM = {0: 1, 1: 3, 2: 2, 3: 4}
-
-
-def compute_geometry_dimensions_via_sql(
-    con,
-    query: str,
-    geometry_column: str,
-) -> set[int]:
-    """Compute the distinct coordinate dimensions of a geometry column via DuckDB.
-
-    Used by the 1.1-geoarrow native path to pick a Z/M-aware GeoArrow type rather
-    than silently coercing 3D/measured coordinates down to 2D.
-
-    Returns:
-        Set of geoarrow dimension codes (1=XY, 2=XYZ, 3=XYM, 4=XYZM). Empty set when
-        the column is absent, native nested (STRUCT), or the dimension is undetectable.
-    """
-    # Same DISTINCT shape, same reason as the type scan above: the set of
-    # dimensions present cannot change with the order the rows arrive in, and
-    # `arrow-streaming` calls this itself -- its bbox and types go through
-    # `geo_metadata.geometry_stats_of`, which strips, so this was the last sorted
-    # extra scan on the 1.1-geoarrow path (#1177).
-    query = _strip_trailing_order_by(query)
-
-    import duckdb
-
-    try:
-        columns = _get_query_columns(con, query)
-        if geometry_column not in columns:
-            return set()
-    except (duckdb.Error, RuntimeError, ValueError, AttributeError):
-        return set()
-
-    # Native nested GeoArrow (STRUCT) cannot use ST_ZMFlag; leave dimension unknown.
-    col_type = _get_query_column_type(con, query, geometry_column) or ""
-    if "STRUCT" in col_type:
-        return set()
-
-    quoted_col = quote_identifier(geometry_column)
-    geom_expr = quoted_col
-    if "BLOB" in col_type or "BINARY" in col_type:
-        geom_expr = f"ST_GeomFromWKB({geom_expr})"
-
-    dims_query = f"""
-        SELECT DISTINCT ST_ZMFlag({geom_expr}) AS zm
-        FROM ({query})
-        WHERE {quoted_col} IS NOT NULL
-    """
-    try:
-        results = con.execute(dims_query).fetchall()
-    except (duckdb.Error, RuntimeError, ValueError):
-        return set()
-
-    dims: set[int] = set()
-    for (zm,) in results:
-        if zm is not None and zm in _DUCKDB_ZMFLAG_TO_GEOARROW_DIM:
-            dims.add(_DUCKDB_ZMFLAG_TO_GEOARROW_DIM[zm])
-    return dims
 
 
 def add_computed_column(

@@ -636,8 +636,6 @@ layers = [
 # below then fails the build until its line here is deleted too -- the ignore
 # list is meant to shrink to nothing, never to grow.
 ignore_imports = [
-    # geometry_type_sql: compute_geometry_dimensions_via_sql
-    "geoparquet_io.core.write_strategies.arrow_streaming -> geoparquet_io.core.common",
     # add/computed_column: add_computed_column
     "geoparquet_io.core.constants -> geoparquet_io.core.common",
 ]
