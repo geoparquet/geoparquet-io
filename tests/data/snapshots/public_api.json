@@ -514,6 +514,7 @@
     "primary_geometry_column",
     "register_geometry_column",
     "require_geometry_column",
+    "resolve_geometry_column",
     "resolve_geometry_read"
   ],
   "geoparquet_io.core.http_retry": [

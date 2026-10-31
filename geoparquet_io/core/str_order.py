@@ -11,6 +11,7 @@ import duckdb
 import pyarrow as pa
 
 from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.duckdb_utils import (
     as_wkb_sql,
     describe_query,
@@ -28,6 +29,7 @@ from geoparquet_io.core.geometry_detection import (
     create_geometry_view,
     primary_geometry_column,
     require_geometry_column,
+    resolve_geometry_column,
 )
 
 # These three helpers are private to hilbert_order.py but are shared by convention
@@ -307,17 +309,14 @@ def _str_order_streaming(
 
     with open_input(input_path, verbose=verbose) as (source, metadata, _is_stream, con):
         described = describe_query(con, f"SELECT * FROM {source}")
-        column_names = [name for name, _ in described]
-        geom_col = geometry_column
-        if geom_col is None or geom_col not in column_names:
-            # The stream carries its own `geo` metadata, so prefer the file's
-            # declared primary column over the conventional-name guess. Without
-            # this a file whose primary column is e.g. `footprint` binder-errors
-            # in stream mode while working in file mode.
-            geom_col = require_geometry_column(
-                primary_geometry_column(described, geo=sanitized_carried_geo(metadata)),
-                input_path,
-            )
+        # The stream carries its own `geo` metadata, so prefer the file's
+        # declared primary column over the conventional-name guess. Without
+        # this a file whose primary column is e.g. `footprint` binder-errors
+        # in stream mode while working in file mode. A named column is the
+        # answer or an error (#1367).
+        geom_col = resolve_geometry_column(
+            described, geometry_column, geo=sanitized_carried_geo(metadata), source=input_path
+        )
 
         source = create_geometry_view(con, source, geom_col)
         row_count = _count_spatial_rows(con, source, geom_col)
@@ -374,6 +373,10 @@ def _str_order_file_based(
     if geometry_column is None:
         geometry_column = require_geometry_column(
             primary_geometry_column(working_parquet, verbose=verbose), working_parquet
+        )
+    else:
+        resolve_geometry_column(
+            get_column_names(working_parquet), geometry_column, source=working_parquet
         )
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working_parquet))

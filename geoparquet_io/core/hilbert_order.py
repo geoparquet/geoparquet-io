@@ -10,6 +10,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.bbox_structure import dataset_bounds, get_bbox_advice
 from geoparquet_io.core.common import add_bbox, get_parquet_metadata
+from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     fetch_one,
@@ -25,6 +26,7 @@ from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
     register_geometry_column,
     require_geometry_column,
+    resolve_geometry_column,
 )
 from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.optional_deps import load_module
@@ -424,15 +426,12 @@ def _hilbert_order_streaming(
     with open_input(input_path, verbose=verbose) as (source, metadata, is_stream, con):
         # Get column names from query result (works with both table names and read_parquet)
         described = describe_query(con, f"SELECT * FROM {source}")
-        col_names = [name for name, _ in described]
 
         # Find geometry column: the owner over the typed columns and the
         # stream's own `geo` block, as the file path asks it.
-        geom_col = geometry_column
-        if geom_col is None or geom_col not in col_names:
-            geom_col = require_geometry_column(
-                primary_geometry_column(described, geo=sanitized_carried_geo(metadata)), input_path
-            )
+        geom_col = resolve_geometry_column(
+            described, geometry_column, geo=sanitized_carried_geo(metadata), source=input_path
+        )
         quoted_geom = quote_identifier(geom_col)
 
         if verbose:
@@ -551,6 +550,10 @@ def _hilbert_order_file_based(
     if geometry_column is None:
         geometry_column = require_geometry_column(
             primary_geometry_column(working_parquet, verbose=verbose), working_parquet
+        )
+    else:
+        resolve_geometry_column(
+            get_column_names(working_parquet), geometry_column, source=working_parquet
         )
     if verbose:
         debug(f"Using geometry column: {geometry_column}")

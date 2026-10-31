@@ -24,7 +24,7 @@ from geoparquet_io.core.duckdb_utils import (
     register_arrow,
     sql_path,
 )
-from geoparquet_io.core.exceptions import GeometryError
+from geoparquet_io.core.exceptions import GeometryError, InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import carried_column_name
 from geoparquet_io.core.logging_config import debug
@@ -320,6 +320,32 @@ def require_geometry_column(column: str | None, source=None) -> str:
     if column is None:
         raise GeometryColumnNotFoundError(source)
     return column
+
+
+def resolve_geometry_column(columns, named: str | None = None, *, geo=None, source=None) -> str:
+    """The geometry column a command runs on: ``named`` when the caller named
+    one, else :func:`primary_geometry_column` of ``columns`` (and ``geo``).
+
+    Only the *block's* primary falls through to the schema. A column the user
+    named is the answer or an :class:`InvalidParameterError` -- never silently
+    swapped for another (#1367 audit). ``columns`` is any non-file source
+    :func:`primary_geometry_column` takes (names, ``(name, type)`` pairs, an
+    Arrow table or schema).
+    """
+    import pyarrow as pa
+
+    if named is None:
+        return require_geometry_column(primary_geometry_column(columns, geo=geo), source)
+    if isinstance(columns, (pa.Table, pa.Schema)):
+        names = list(columns.schema.names if isinstance(columns, pa.Table) else columns.names)
+    else:
+        names = [c[0] if isinstance(c, (tuple, list)) else c for c in columns]
+    if named not in names:
+        where = f" in {source}" if source is not None else ""
+        raise InvalidParameterError(
+            "geometry_column", f"geometry column '{named}' not found{where}"
+        )
+    return named
 
 
 def native_geometry_types_from_query(con, query: str, verbose: bool = False) -> dict[str, str]:

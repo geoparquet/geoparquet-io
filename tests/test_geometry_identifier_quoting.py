@@ -716,6 +716,11 @@ class TestExtractSpatialFilterQuoting:
         leaked = pq.read_table(out).num_rows if out.exists() else 0
         assert leaked == 0, f"spatial filter bypassed: {leaked} non-intersecting rows written"
         assert self.BYPASS_COL not in result.output
+        # The payload never reaches SQL: the resolver does not answer a name
+        # the schema lacks, and every name it does answer is quoted.
+        from geoparquet_io.core.geometry_detection import primary_geometry_column
+
+        assert primary_geometry_column(path) == "geometry"
 
 
 class TestAddCommandsQuoting:

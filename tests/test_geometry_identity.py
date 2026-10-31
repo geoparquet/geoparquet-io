@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import struct
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -397,3 +398,20 @@ def test_derive_v2_geo_metadata_picks_its_primary_through_the_resolver(
     assert b"geo" not in (pq.ParquetFile(str(path)).metadata.metadata or {})
     block = derive_v2_geo_metadata(str(path), primary_column=requested)
     assert block["primary_column"] == expected
+
+
+@pytest.mark.parametrize("sort", ["hilbert", "str"])
+@pytest.mark.parametrize("output", ["-", "out.parquet"])
+def test_an_explicit_missing_geometry_column_errors_on_every_sort_path(sort, output, tmp_path):
+    """Only a *block* primary falls through to the schema (#1367 audit); a
+    column the user named is the answer or an error, file and stream alike."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    src = str(Path(__file__).parent / "data" / "places_test.parquet")
+    out = output if output == "-" else str(tmp_path / output)
+    result = CliRunner().invoke(cli, ["sort", sort, src, out, "--geometry-column", "nope"])
+    assert result.exit_code != 0, result.output
+    assert "nope" in result.output
+    assert "Traceback" not in result.output

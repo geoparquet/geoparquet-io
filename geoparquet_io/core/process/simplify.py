@@ -36,7 +36,9 @@ from geoparquet_io.core.geo_metadata import (
     sanitized_carried_geo,
 )
 from geoparquet_io.core.geoarrow_encoding import is_wkb_extension_field
-from geoparquet_io.core.geometry_detection import primary_geometry_column, require_geometry_column
+from geoparquet_io.core.geometry_detection import (
+    resolve_geometry_column,
+)
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, info, warn
 from geoparquet_io.core.optional_deps import load_module, require_coarsen
@@ -161,14 +163,7 @@ def _first_wkb_of(column) -> bytes | None:
 
 def _geometry_column_of(table: pa.Table, override: str | None) -> str:
     """Resolve the geometry column: the override, else the table's primary."""
-    if override is not None:
-        name = override
-    else:
-        name = require_geometry_column(primary_geometry_column(table), "the table")
-    if name not in table.column_names:
-        raise InvalidParameterError(
-            "geometry_column", f"geometry column '{name}' not found in table"
-        )
+    name = resolve_geometry_column(table, override, source="the table")
     field = table.schema.field(name)
     if field.type not in (pa.binary(), pa.large_binary()) and not is_wkb_extension_field(field):
         raise InvalidParameterError(
