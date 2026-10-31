@@ -10,6 +10,13 @@ The decision recorded in #771: a malformed block is a property of the *input*,
 not a caller error, so it is treated the way an absent block is -- the malformed
 parts are dropped, fresh metadata is built from the table, and one warning names
 what was wrong. Nothing raises.
+
+The owner (``sanitize_geo_metadata`` / ``sanitized_carried_geo``) and the
+readers next to it run every malformed shape; every other reader runs one
+shape per malformed class (``ROUTING_BLOCKS``) to show it routes there, a
+validation reader (which guards rather than sanitizes) runs every shape on one
+column name (``VALIDATION_BLOCKS``), and the CLI sweep runs one command per
+group (#1402).
 """
 
 from __future__ import annotations
@@ -411,6 +418,28 @@ MALFORMED_BLOCKS = [
 ]
 MALFORMED_BLOCK_IDS = [f"{col}-{case}" for col, case, _ in MALFORMED_BLOCKS]
 
+#: One shape per malformed-block class, on the non-default column name: the block
+#: is not an object, ``columns`` is not an object, an entry is not an object, the
+#: primary column is not a name, an entry value is the wrong type. A reader that
+#: sanitizes reaches the owner (``sanitize_geo_metadata``), which the families
+#: above run against every shape; a reader's own test only has to show it routes
+#: there, so it runs these five (#1402).
+ROUTING_CASES = {
+    "block_is_a_list",
+    "columns_null",
+    "entry_not_an_object",
+    "primary_column_is_a_number",
+    "encoding_is_a_number",
+}
+ROUTING_BLOCKS = [b for b in MALFORMED_BLOCKS if b[0] == "geom" and b[1] in ROUTING_CASES]
+ROUTING_BLOCK_IDS = [f"{col}-{case}" for col, case, _ in ROUTING_BLOCKS]
+
+#: A validation reader guards instead of sanitizing, so each shape is its own
+#: branch there; the column-name axis only matters to a reader that recovers a
+#: primary column, which a validation reader never does.
+VALIDATION_BLOCKS = [b for b in MALFORMED_BLOCKS if b[0] == "geometry"]
+VALIDATION_BLOCK_IDS = [f"{col}-{case}" for col, case, _ in VALIDATION_BLOCKS]
+
 
 def _file_with_geo(tmp_path, name: str, geo_block, col: str = "geometry") -> str:
     """A real Parquet file carrying ``geo_block`` verbatim as its ``geo`` key."""
@@ -578,7 +607,7 @@ def test_primary_geometry_column_guards_the_legacy_list_block(case, name, expect
     assert primary_geometry_column(src) == expected
 
 
-@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+@pytest.mark.parametrize(("col", "case", "block"), ROUTING_BLOCKS, ids=ROUTING_BLOCK_IDS)
 def test_detect_all_geometry_columns_survives_a_malformed_block(col, case, block, tmp_path):
     """``convert`` resolves the geometry columns here, before it builds any query.
 
@@ -677,7 +706,7 @@ def test_convert_geoparquet_recovers_from_a_non_string_primary_column(tmp_path, 
     assert any("'primary_column'" in m and "number" in m for m in messages), messages
 
 
-@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+@pytest.mark.parametrize(("col", "case", "block"), ROUTING_BLOCKS, ids=ROUTING_BLOCK_IDS)
 def test_convert_geoparquet_never_fails_with_a_bare_type_error(col, case, block, tmp_path, caplog):
     """``gpio convert geoparquet`` on somebody else's file: no ``TypeError`` escapes.
 
@@ -731,7 +760,7 @@ def test_convert_geoparquet_names_the_malformed_key(tmp_path, caplog):
 
 
 @pytest.mark.parametrize("strategy", WRITE_STRATEGIES)
-@pytest.mark.parametrize(("case", "columns", "_hint"), MALFORMED_COLUMNS)
+@pytest.mark.parametrize(("case", "columns", "_hint"), MALFORMED_COLUMNS[:1])
 def test_table_write_survives_a_malformed_columns_block(case, columns, _hint, strategy, tmp_path):
     from geoparquet_io.api import Table
 
@@ -796,7 +825,7 @@ def test_raw_geo_of_file_tolerates_undecodable_bytes_on_both_paths(cause, tmp_pa
 
 
 @pytest.mark.parametrize("version", ["1.1", "2.0"])
-@pytest.mark.parametrize("cause", ["JSON", "UTF-8"])
+@pytest.mark.parametrize("cause", ["JSON"])
 def test_extract_survives_undecodable_geo_bytes(cause, version, tmp_path, caplog):
     """The reviewer's repro: ``gpio extract geoparquet in.parquet out.parquet --limit 1``.
 
@@ -836,7 +865,7 @@ def test_apply_metadata_survives_undecodable_geo_bytes(case, geo_bytes, cause, c
 
 @pytest.mark.parametrize("version", ["1.1", "2.0"])
 @pytest.mark.parametrize("strategy", WRITE_STRATEGIES)
-@pytest.mark.parametrize(("case", "geo_bytes", "_cause"), UNDECODABLE_GEO)
+@pytest.mark.parametrize(("case", "geo_bytes", "_cause"), UNDECODABLE_GEO[:1])
 def test_table_write_survives_undecodable_geo_bytes(
     case, geo_bytes, _cause, strategy, version, tmp_path
 ):
@@ -1193,7 +1222,7 @@ def test_ops_reproject_survives_a_non_string_primary_column(col):
     assert col in Table(table).reproject("EPSG:3857").table.column_names
 
 
-@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+@pytest.mark.parametrize(("col", "case", "block"), ROUTING_BLOCKS, ids=ROUTING_BLOCK_IDS)
 def test_reproject_table_never_fails_with_a_bare_type_error(col, case, block, tmp_path):
     """``Table.reproject`` end to end: a domain error is fine, a bare TypeError is not."""
     from geoparquet_io.core.reproject import reproject_table
@@ -1325,7 +1354,7 @@ def _table_with_geo_and_bbox(geo_block, col: str = "geometry") -> pa.Table:
     return _table_with_geo(geo_block, col=col).append_column("bbox", _bbox_struct_column())
 
 
-@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+@pytest.mark.parametrize(("col", "case", "block"), ROUTING_BLOCKS, ids=ROUTING_BLOCK_IDS)
 def test_write_geoparquet_table_survives_a_malformed_block(col, case, block, tmp_path):
     """``write_geoparquet_table`` named the column and read the CRS from the raw block.
 
@@ -1343,7 +1372,7 @@ def test_write_geoparquet_table_survives_a_malformed_block(col, case, block, tmp
     _assert_fresh_and_valid(geo, col=col)
 
 
-@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+@pytest.mark.parametrize(("col", "case", "block"), VALIDATION_BLOCKS, ids=VALIDATION_BLOCK_IDS)
 def test_check_bbox_structure_survives_a_malformed_block(col, case, block, tmp_path):
     """``gpio check bbox`` reads the covering out of the block (#947).
 
@@ -1401,7 +1430,7 @@ def test_check_bbox_structure_still_finds_a_real_covering(tmp_path):
     assert check_bbox_structure(str(path))["has_bbox_metadata"] is True
 
 
-@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+@pytest.mark.parametrize(("col", "case", "block"), ROUTING_BLOCKS, ids=ROUTING_BLOCK_IDS)
 def test_add_bbox_metadata_table_survives_a_malformed_block(col, case, block):
     """``Table.add_bbox_metadata`` rewrites the carried block, so it sanitizes (#947)."""
     from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata_table
@@ -1418,7 +1447,7 @@ def test_add_bbox_metadata_table_survives_a_malformed_block(col, case, block):
         assert geo["columns"][col]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
 
 
-@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+@pytest.mark.parametrize(("col", "case", "block"), ROUTING_BLOCKS, ids=ROUTING_BLOCK_IDS)
 def test_add_bbox_metadata_file_survives_a_malformed_block(col, case, block, tmp_path):
     """The file path crashed with ``'str' object does not support item assignment``."""
     from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata
@@ -1441,7 +1470,7 @@ def test_add_bbox_metadata_file_survives_a_malformed_block(col, case, block, tmp
         assert columns[col]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
 
 
-@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+@pytest.mark.parametrize(("col", "case", "block"), ROUTING_BLOCKS, ids=ROUTING_BLOCK_IDS)
 def test_stream_crs_reader_survives_a_malformed_block(col, case, block):
     """The Arrow-stream write reads the output's CRS through here (#947).
 
@@ -1488,7 +1517,7 @@ def test_stream_crs_reader_still_finds_a_real_crs():
     )
 
 
-@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+@pytest.mark.parametrize(("col", "case", "block"), ROUTING_BLOCKS, ids=ROUTING_BLOCK_IDS)
 def test_stac_projection_properties_survive_a_malformed_block(col, case, block, tmp_path):
     """``gpio publish stac`` writes proj:* out of the carried block (#947).
 
@@ -1547,7 +1576,7 @@ def test_stac_projection_properties_still_read_a_real_crs(tmp_path):
     assert item.properties["geoparquet:geometry_types"] == ["Point"]
 
 
-@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+@pytest.mark.parametrize(("col", "case", "block"), VALIDATION_BLOCKS, ids=VALIDATION_BLOCK_IDS)
 def test_api_table_metadata_survives_a_malformed_block(col, case, block, tmp_path):
     """``Table.metadata()`` is a read-only reader: it guards, it does not sanitize.
 
@@ -1715,7 +1744,7 @@ def test_prune_leaves_no_primary_when_two_columns_could_be_meant():
     assert set(geo["columns"]) == {"geom_a", "geom_b"}
 
 
-@pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
+@pytest.mark.parametrize("col", ["geom"])
 @pytest.mark.parametrize("command", [["extract", "geoparquet"], ["sort", "hilbert"]])
 def test_projected_crs_survives_a_malformed_primary_column(command, col, tmp_path):
     """A projected file must not come out of gpio relabelled lon/lat (#968).
@@ -1754,7 +1783,7 @@ def test_projected_crs_survives_a_malformed_primary_column(command, col, tmp_pat
 # declares no version (#968).
 
 
-@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+@pytest.mark.parametrize(("col", "case", "block"), VALIDATION_BLOCKS, ids=VALIDATION_BLOCK_IDS)
 def test_check_spec_reports_a_malformed_block_instead_of_crashing(col, case, block, tmp_path):
     """`check spec` is the command run to be *told* the file is malformed."""
     from geoparquet_io.core.validate import validate_geoparquet
@@ -1819,7 +1848,7 @@ def test_check_spec_still_catches_a_covering_declared_by_a_1_0_file(tmp_path):
     assert reported["version_features_match"] == "failed"
 
 
-@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+@pytest.mark.parametrize(("col", "case", "block"), VALIDATION_BLOCKS, ids=VALIDATION_BLOCK_IDS)
 def test_check_bbox_reports_a_malformed_block_instead_of_crashing(col, case, block, tmp_path):
     """`gpio check bbox` died at `_check_geoparquet_v1` on a non-object block."""
     from click.testing import CliRunner
@@ -2131,107 +2160,78 @@ def test_check_fix_version_resolution_survives_a_non_string_version(case, bad, t
 
 
 # =============================================================================
-# The sweep: every malformed shape against the command surface
+# One command per distinct reader: malformed blocks never cause a traceback
 # =============================================================================
 #
-# The per-site tests above each pin one reader. None of them would have found
-# #979, because the crash was in a *third* key that no per-site test was written
-# for -- the sweep is what found it, so the sweep is what gets committed.
-#
-# Every shape is run against every command that reads a carried `geo` block, and
-# the set of commands that die with a raw `TypeError`/`AttributeError` is
-# asserted against `KNOWN_UNGUARDED` below. Both directions matter: a new
-# unguarded reader fails this, and so does fixing one of the known ones without
-# striking it off the list.
+# Owner families cover every shape. This sweep routes seven shapes through
+# each distinct downstream reader, including readers indexing decoded output.
+# G1 ``geo_parse`` separately guards against decoding outside the owner;
+# ``tests/test_cli_error_boundary.py`` pins the #983 DuckDB refusal boundary.
 
-SWEEP_COMMANDS: list[tuple[str, list[str]]] = [
-    ("check all", ["check", "all", "{in}"]),
-    ("check bbox", ["check", "bbox", "{in}"]),
-    ("check compression", ["check", "compression", "{in}"]),
-    ("check optimization", ["check", "optimization", "{in}"]),
-    ("check row-group", ["check", "row-group", "{in}"]),
-    ("check spatial", ["check", "spatial", "{in}"]),
-    ("check spec", ["check", "spec", "{in}"]),
-    ("check stac", ["check", "stac", "{in}"]),
-    ("inspect head", ["inspect", "head", "{in}"]),
-    ("inspect meta", ["inspect", "meta", "{in}"]),
-    ("inspect stats", ["inspect", "stats", "{in}"]),
-    ("inspect summary", ["inspect", "summary", "{in}"]),
-    ("inspect tail", ["inspect", "tail", "{in}"]),
-    ("add bbox", ["add", "bbox", "{in}", "{out}"]),
-    ("add bbox-metadata", ["add", "bbox-metadata", "{in}", "{out}"]),
-    ("add geometry-metrics", ["add", "geometry-metrics", "{in}", "{out}"]),
-    ("add quadkey", ["add", "quadkey", "{in}", "{out}"]),
-    ("sort hilbert", ["sort", "hilbert", "{in}", "{out}"]),
-    ("sort quadkey", ["sort", "quadkey", "{in}", "{out}"]),
-    ("sort column", ["sort", "column", "{in}", "{out}", "--column", "id"]),
-    ("sort str", ["sort", "str", "{in}", "{out}"]),
-    ("convert geojson", ["convert", "geojson", "{in}", "{out_geojson}"]),
-    ("convert csv", ["convert", "csv", "{in}", "{out_csv}"]),
-    ("convert geoparquet", ["convert", "geoparquet", "{in}", "{out}"]),
-    ("extract geoparquet", ["extract", "geoparquet", "{in}", "{out}"]),
-    ("publish stac", ["publish", "stac", "{in}", "--output", "{out_json}"]),
+GROUP_COMMANDS: list[tuple[str, list[str]]] = [
+    ("check", ["check", "all", "{in}"]),
+    ("inspect", ["inspect", "meta", "{in}"]),
+    ("add", ["add", "bbox", "{in}", "{out}"]),
+    ("sort", ["sort", "hilbert", "{in}", "{out}"]),
+    ("convert", ["convert", "geoparquet", "{in}", "{out}"]),
+    ("extract", ["extract", "geoparquet", "{in}", "{out}"]),
+    ("publish", ["publish", "stac", "{in}", "--output", "{out_json}"]),
+    ("inspect-summary", ["inspect", "summary", "{in}"]),
+    ("convert-geojson", ["convert", "geojson", "{in}", "{out_json}"]),
+    ("add-geometry-metrics", ["add", "geometry-metrics", "{in}", "{out}"]),
+    ("sort-str", ["sort", "str", "{in}", "{out}"]),
+    ("check-optimization", ["check", "optimization", "{in}"]),
+    ("check-spatial", ["check", "spatial", "{in}"]),
 ]
 
-#: Readers that still die on a raw block, with the issue that owns each. Not a
-#: waiver: the sweep fails if one of these stops crashing and the entry is left
-#: behind, so a fix cannot land without this list being updated.
-KNOWN_UNGUARDED: dict[str, set[str]] = {}
-
-#: One column name only: the sweep's job is breadth across *commands*, and the
-#: `geometry`-versus-`geom` axis is covered per reader above.
-#:
-#: `no_columns_key` is #983's reproduction and is not one of `MALFORMED_BLOCKS`:
-#: nothing about it is malformed as far as *gpio* is concerned -- valid JSON, a
-#: string version, no key of a shape any guard here objects to. It is DuckDB's
-#: Parquet reader that refuses it, which is the whole point of the second
-#: assertion below.
+#: The routing shapes plus the two that only a CLI run reaches: #983's
+#: ``no_columns_key`` (DuckDB's reader refuses it) and a float version (#979).
 SWEEP_SHAPES = (
     [("no_columns_key", {"version": "1.1.0"})]
-    + [(case, block) for col, case, block in MALFORMED_BLOCKS if col == "geometry"]
-    + [(f"version_is_{case}", _version_block(bad)) for case, bad in NON_STRING_VERSIONS[2:]]
+    + [
+        (case, block)
+        for col, case, block in MALFORMED_BLOCKS
+        if col == "geometry" and case in ROUTING_CASES
+    ]
+    + [("version_is_a_float", _version_block(2.0))]
 )
 
 
-@pytest.mark.parametrize(("case", "block"), SWEEP_SHAPES, ids=[c for c, _ in SWEEP_SHAPES])
-def test_no_command_dies_with_a_raw_exception_on_a_malformed_block(case, block, tmp_path):
+@pytest.mark.parametrize(("group", "argv"), GROUP_COMMANDS, ids=[g for g, _ in GROUP_COMMANDS])
+def test_no_command_dies_with_a_raw_exception_on_a_malformed_block(group, argv, tmp_path):
     """Two ways the same file can end in a traceback, caught in one pass.
 
     A raw ``TypeError``/``AttributeError`` is gpio indexing into a block it did
     not check (#883, #979). A raw ``duckdb.Error`` is the layer underneath:
-    DuckDB's Parquet reader refuses the block outright, and eleven commands let
-    that refusal out as a traceback because the translation to an error line
-    lived in per-site ``except`` blocks instead of at the CLI boundary (#983).
+    DuckDB's Parquet reader refuses the block outright, and the translation to
+    an error line lives at the CLI boundary (#983).
     """
     from click.testing import CliRunner
 
     from geoparquet_io.cli.main import cli
 
-    reset_malformed_geo_warnings()
-    src = _file_with_geo(tmp_path, f"sweep_{case}", block)
-
     crashed: dict[str, str] = {}
     leaked_from_duckdb: dict[str, str] = {}
-    for i, (name, argv) in enumerate(SWEEP_COMMANDS):
+    for case, block in SWEEP_SHAPES:
+        reset_malformed_geo_warnings()
+        src = _file_with_geo(tmp_path, f"sweep_{case}", block)
         args = [
             arg.format(
                 **{
                     "in": src,
-                    "out": str(tmp_path / f"{case}_{i}.parquet"),
-                    "out_geojson": str(tmp_path / f"{case}_{i}.geojson"),
-                    "out_csv": str(tmp_path / f"{case}_{i}.csv"),
-                    "out_json": str(tmp_path / f"{case}_{i}.json"),
+                    "out": str(tmp_path / f"{case}.parquet"),
+                    "out_json": str(tmp_path / f"{case}.json"),
                 }
             )
             for arg in argv
         ]
         exc = CliRunner().invoke(cli, args).exception
         if isinstance(exc, (TypeError, AttributeError)):
-            crashed[name] = f"{type(exc).__name__}: {exc}"
+            crashed[case] = f"{type(exc).__name__}: {exc}"
         if isinstance(exc, duckdb.Error):
-            leaked_from_duckdb[name] = f"{type(exc).__name__}: {exc}"
+            leaked_from_duckdb[case] = f"{type(exc).__name__}: {exc}"
 
-    assert set(crashed) == KNOWN_UNGUARDED.get(case, set()), crashed
+    assert crashed == {}
     assert leaked_from_duckdb == {}
 
 

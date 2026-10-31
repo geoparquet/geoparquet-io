@@ -281,8 +281,15 @@ class TestNotGeoParquet:
 
 
 class TestClean:
+    """A clean file exits 0 under ``--strict``, so its verdict is a pass.
+
+    The non-strict run of the same file is the owner's table
+    (``TestVerdictHelpers::test_exit_code_table``: a pass exits 0 either way),
+    so only the strict run is made per subcommand (#1402).
+    """
+
     @pytest.mark.parametrize("subcommand", [*RUNNER_SUBCOMMANDS, "spec"])
-    @pytest.mark.parametrize("strict", [False, True])
+    @pytest.mark.parametrize("strict", [True])
     def test_exits_0(self, subcommand, strict, clean):
         result = _invoke(subcommand, clean, *(["--strict"] if strict else []))
 

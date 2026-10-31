@@ -607,25 +607,27 @@ def test_1098_check_spatial_fix_keeps_the_input_row_group_count(tmp_path):
 
     ``fix_spatial_ordering`` wrote ``DEFAULT_ROW_GROUP_ROWS`` whatever the input
     had, so a file the spatial check could judge (12 groups) left ``--fix`` with
-    two, below the eight it needs to judge at all.
+    two, below the eight it needs to judge at all. The pin runs 12 groups of
+    2,048 (the writer's vector size, the smallest group it keeps): the defect
+    writes them back as one 24,576-row group (#1402).
     """
     import random
 
     from tests._defrag_fixtures import grid_points_table
 
-    table = grid_points_table(60_000, with_bbox=False)
+    table = grid_points_table(24_576, with_bbox=False)
     order = list(range(table.num_rows))
     random.Random(1098).shuffle(order)
     src = tmp_path / "unsorted.parquet"
     pq.write_table(
         table.take(order).replace_schema_metadata({b"geo": json.dumps(geo_block()).encode()}),
         str(src),
-        row_group_size=5_000,
+        row_group_size=2_048,
     )
     out = tmp_path / "fixed.parquet"
     result = _run("check", "spatial", src, "--fix", "--fix-output", out)
     assert result.exit_code == 0, _explain(result)
-    assert pq.read_table(str(out)).num_rows == 60_000
+    assert pq.read_table(str(out)).num_rows == 24_576
     assert len(_row_group_sizes(out)) >= 12, _row_group_sizes(out)
 
 
@@ -635,11 +637,17 @@ def test_1098_check_spatial_fix_keeps_the_input_row_group_count(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+#: Rows in the MB fixture: about 4 MB at ~350 bytes a row, so a 1 MB target is
+#: several groups, and well under both defaults the defect wrote (DuckDB's
+#: 122,880 rows, the streaming strategy's 100,000), which then come out as one.
+MB_ROWS = 12_000
+
+
 def _mb_fixture(tmp_path) -> Path:
-    """60,000 rows of about 350 bytes each in one row group, as GeoParquet 2.0."""
+    """``MB_ROWS`` rows of about 350 bytes each in one row group, as GeoParquet 2.0."""
     from tests._defrag_fixtures import grid_points_table
 
-    table = grid_points_table(60_000, with_bbox=False)
+    table = grid_points_table(MB_ROWS, with_bbox=False)
     table = table.append_column(
         "pad", pa.array([f"{i:08d}" * 40 for i in range(table.num_rows)])
     ).replace_schema_metadata({b"geo": json.dumps(geo_block()).encode()})
@@ -658,29 +666,32 @@ def _mb_expected_groups(path, mb: float) -> int:
     return -(-table.num_rows // resolve_row_group_rows_for_table(table, None, mb))
 
 
-@pytest.mark.parametrize("path", ["convert", "sort_hilbert", "extract", "table_write_streaming"])
+@pytest.mark.parametrize("path", ["convert", "table_write_streaming"])
 def test_1215_row_group_size_mb_is_applied_on_every_path(tmp_path, path):
     """Base: a 2.0 input's plain COPY wrote ``[60000]``, ``streaming`` ``[49152, 10848]``.
 
     ``resolve_row_group_rows`` answers ``None`` for an MB target (a byte target
     needs data to measure), and only the strategies measured it: the plain-COPY
     fast path a 2.0 input takes wrote DuckDB's own 122,880-row default, and the
-    streaming strategy its own 100,000.
+    streaming strategy its own 100,000. The pin runs the two paths the issue
+    found (``convert`` is the plain-COPY fast path); ``sort hilbert`` and
+    ``extract`` take the row-group answer from the same facade, which the G7
+    ``row_groups`` invariant and the G1 ``row_group_policy`` arm hold (#1402).
     """
     import geoparquet_io as gpio
 
     src = _mb_fixture(tmp_path)
     out = tmp_path / "out.parquet"
     if path == "table_write_streaming":
-        gpio.read(str(src)).write(str(out), write_strategy="streaming", row_group_size_mb=4)
+        gpio.read(str(src)).write(str(out), write_strategy="streaming", row_group_size_mb=1)
     else:
         command = {"convert": ("convert", "geoparquet"), "sort_hilbert": ("sort", "hilbert")}
         args = command.get(path, (path,))
-        result = _run(*args, src, out, "--row-group-size-mb", "4")
+        result = _run(*args, src, out, "--row-group-size-mb", "1")
         assert result.exit_code == 0, _explain(result)
     sizes = _row_group_sizes(out)
-    assert sum(sizes) == 60_000
-    assert len(sizes) == _mb_expected_groups(src, 4) > 1, sizes
+    assert sum(sizes) == MB_ROWS
+    assert len(sizes) == _mb_expected_groups(src, 1) > 1, sizes
 
 
 # ---------------------------------------------------------------------------

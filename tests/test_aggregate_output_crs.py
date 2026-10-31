@@ -34,9 +34,23 @@ def _assert_geographic_output(result, path, version="1.1"):
         assert "crs" not in geo["columns"]["geometry"]
 
 
-@pytest.mark.parametrize(("scheme", "resolution"), [("h3", 7), ("a5", 10)])
-@pytest.mark.parametrize("out_geometry", ["polygon", "centroid", "both", "none"])
-@pytest.mark.parametrize("version", ["1.0", "1.1", "2.0", "parquet-geo-only"])
+#: Every scheme x every ``out_geometry`` on 1.1, where the replacement is
+#: decided; each other output version once, on h3 polygons. Which version a
+#: written CRS lands in is the write facade's question (G7), not aggregate's.
+GRID_CASES = [
+    *(
+        ("1.1", out_geometry, scheme, resolution)
+        for out_geometry in ["polygon", "centroid", "both", "none"]
+        for scheme, resolution in [("h3", 7), ("a5", 10)]
+    ),
+    *((v, "polygon", "h3", 7) for v in ["1.0", "2.0", "parquet-geo-only"]),
+]
+
+
+@pytest.mark.parametrize(
+    ("version", "out_geometry", "scheme", "resolution"),
+    [pytest.param(*case, id="-".join(map(str, case))) for case in GRID_CASES],
+)
 def test_grid_aggregate_replaces_the_source_crs(
     projected_pair, tmp_path, scheme, resolution, out_geometry, version
 ):

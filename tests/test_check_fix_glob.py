@@ -109,9 +109,16 @@ def failing_on(fix_function: str, name: str, error: BaseException):
 
 
 class TestGlobFixesEveryMatch:
-    """The bug itself: N matched, N fixed."""
+    """The bug itself: N matched, N fixed.
 
-    @pytest.mark.parametrize("case", FIX_CASES, ids=CASE_IDS)
+    One command stands for the four that share ``runner.fix_file``; each of
+    those four is also driven over a glob by
+    ``TestOneFailureAmongMany::test_a_file_that_cannot_be_checked_is_reported_and_the_run_continues``,
+    which asserts the other matches are fixed, and ``check all``'s own loop is
+    ``TestFilesThatNeedNothing::test_a_multi_file_run_prints_one_line_per_file_not_a_banner``.
+    """
+
+    @pytest.mark.parametrize("case", [COMPRESSION], ids=["compression"])
     def test_every_matched_file_is_rewritten_and_sound(
         self, case, austria_bbox_covering_file, tmp_path
     ):
@@ -183,7 +190,7 @@ class TestFixOutputMustHoldOneOutputPerInput:
         assert not shared.exists()
         self._assert_refused(result, files, before)
 
-    @pytest.mark.parametrize("case", [COMPRESSION, ALL], ids=["compression", "all"])
+    @pytest.mark.parametrize("case", [ALL], ids=["all"])
     def test_a_directory_receives_one_output_per_input(
         self, case, austria_bbox_covering_file, tmp_path
     ):
@@ -304,6 +311,7 @@ class TestNoBackupOverAGlob:
     def test_writing_elsewhere_is_never_confirmed(self, austria_bbox_covering_file, tmp_path):
         """``--no-backup`` with ``--fix-output`` has nothing to overwrite, so it asks nothing."""
         files = broken_files(COMPRESSION, austria_bbox_covering_file, tmp_path / "data")
+        before = {path: digest(path) for path in files}
         out_dir = tmp_path / "out"
         out_dir.mkdir()
 
@@ -319,7 +327,11 @@ class TestNoBackupOverAGlob:
 
         assert result.exit_code == 0, result.output
         assert "without backup. Continue?" not in result.output, result.output
+        # One output per input in the directory; the inputs untouched, no .bak.
+        assert sorted(p.name for p in out_dir.iterdir()) == sorted(p.name for p in files)
         for path in files:
+            assert digest(path) == before[path], f"{path.name} was rewritten in place"
+            assert not Path(f"{path}.bak").exists()
             assert_austria_output_is_sound(out_dir / path.name)
 
     def test_declining_the_confirmation_rewrites_nothing(
@@ -406,6 +418,7 @@ class TestOneFailureAmongMany:
         assert "Fixed 2 files:" in result.output
         assert digest(files[1]) == before[files[1]]
         for path in (files[0], files[2]):
+            assert digest(path) != before[path], f"{path.name} was not rewritten"
             assert_austria_output_is_sound(path)
 
     def test_an_interrupt_stops_the_run_and_still_lists_what_was_rewritten(
@@ -491,6 +504,7 @@ class TestFilesThatNeedNothing:
     ):
         """Twenty files is twenty lines, not twenty "Re-validating after fixes" blocks."""
         files = broken_files(ALL, austria_bbox_covering_file, tmp_path / "data")
+        before = {path: digest(path) for path in files}
 
         result = invoke("check", "all", tmp_path / "data" / "*.parquet", "--fix", *ALL.extra)
 
@@ -499,5 +513,9 @@ class TestFilesThatNeedNothing:
         assert "Applying fixes..." not in result.output
         assert result.output.count("Created backup") == 0
         assert "Fixed 3 files:" in result.output
+        # ``check all``'s own glob loop: every match rewritten, backed up, named.
         for path in files:
+            assert digest(path) != before[path], f"{path.name} was not rewritten"
+            assert Path(f"{path}.bak").exists(), f"{path.name} got no backup"
+            assert path.name in result.output, f"{path.name} is not named in the report"
             assert_austria_output_is_sound(path)

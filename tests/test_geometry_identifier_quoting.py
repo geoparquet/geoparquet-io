@@ -21,9 +21,11 @@ Two different escapes are involved, and mixing them up is the recurring bug:
   callers wrap the query in a broad ``except Exception`` and return
   ``None``/``{}``/``[]`` instead of raising.
 
-Every adversarial-name test in this file runs against the same three names
-(:data:`ADVERSARIAL_COLUMNS`) so no site is accidentally covered only by the
-one flavour of hostility it happens to tolerate.
+The owner is run against each of the three names
+(:data:`ADVERSARIAL_COLUMNS`); every call site runs against one name that
+carries all three flavours at once (:data:`HOSTILE_COL`), so no site is
+accidentally covered only by the one flavour of hostility it happens to
+tolerate.
 """
 
 from __future__ import annotations
@@ -73,7 +75,15 @@ ADVERSARIAL_COLUMNS = [SPACED_COL, DQUOTE_COL, SQUOTE_COL]
 #: proves the injection was neutralised, not merely that nothing crashed.
 INJECTION_COL = 'g") AS x, (SELECT 1) AS pwned --'
 
-adversarial_column = pytest.mark.parametrize("column_name", ADVERSARIAL_COLUMNS)
+#: All three hostilities in one name: a space (breaks an unquoted identifier),
+#: a ``"`` (breaks hand-rolled ``f'"{col}"'``) and a ``'`` (breaks an unescaped
+#: string literal). The owner, ``quote_identifier``, is run against each name
+#: on its own (:class:`TestQuoteIdentifierContract`); a call site only has to
+#: show it routes through the owner, which one name carrying every flavour does
+#: in one run instead of three (#1402).
+HOSTILE_COL = "ge\"o m'x"
+
+site_column = pytest.mark.parametrize("column_name", [HOSTILE_COL], ids=["hostile"])
 
 POLYGON_WKTS = [
     "POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))",
@@ -145,12 +155,13 @@ class TestQuoteIdentifierContract:
             ("Geometry", '"Geometry"'),
             ("a\nb", '"a\nb"'),
             (INJECTION_COL, '"g"") AS x, (SELECT 1) AS pwned --"'),
+            (HOSTILE_COL, '"ge""o m\'x"'),
         ],
     )
     def test_quotes_hostile_names(self, raw, expected):
         assert quote_identifier(raw) == expected
 
-    @adversarial_column
+    @pytest.mark.parametrize("column_name", [*ADVERSARIAL_COLUMNS, HOSTILE_COL])
     def test_result_round_trips_through_duckdb(self, column_name):
         con = duckdb.connect()
         try:
@@ -183,7 +194,7 @@ class TestQuoteIdentifierContract:
 class TestStreamIoWkbConversionQuoting:
     """geoparquet_io/core/stream_io.py: _wrap_query_with_wkb_conversion."""
 
-    @adversarial_column
+    @site_column
     def test_wraps_and_converts_correctly(self, column_name):
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
@@ -229,7 +240,7 @@ class TestStreamIoWkbConversionQuoting:
 class TestCommonAddBboxQuoting:
     """geoparquet_io/core/common.py: add_bbox."""
 
-    @adversarial_column
+    @site_column
     def test_add_bbox_succeeds_with_correct_values(self, tmp_path, column_name):
         path = _wkb_fixture(tmp_path, column_name, "add_bbox_fixture.parquet", POLYGON_WKTS)
 
@@ -245,7 +256,7 @@ class TestCliAddBboxOnHostileColumn:
     """End-to-end `gpio add bbox`: core/add/bbox.py's _add_bbox_file_based ->
     common.py's add_computed_column -> the duckdb-kv write strategy."""
 
-    @adversarial_column
+    @site_column
     def test_cli_add_bbox_succeeds(self, tmp_path, column_name):
         input_path = _wkb_fixture(tmp_path, column_name, "cli_add_bbox_input.parquet", POLYGON_WKTS)
         output_path = str(tmp_path / "cli_add_bbox_output.parquet")
@@ -281,7 +292,7 @@ class TestAddComputedColumnQuotesUserSuppliedName:
     `add h3`, `add s2`, `add a5`, `add quadkey` and `add geometry-metrics`.
     """
 
-    @adversarial_column
+    @site_column
     def test_cli_bbox_name_is_quoted(self, tmp_path, column_name):
         input_path = _points_fixture(tmp_path, "geometry", "bbox_name_input.parquet")
         output_path = str(tmp_path / "bbox_name_output.parquet")
@@ -310,7 +321,7 @@ class TestAddComputedColumnQuotesUserSuppliedName:
 class TestCheckSpatialOrderSamplingQuoting:
     """geoparquet_io/core/check_spatial_order.py: the sampling-method queries."""
 
-    @adversarial_column
+    @site_column
     def test_sampling_method_succeeds(self, tmp_path, column_name):
         path = _points_fixture(tmp_path, column_name, "spatial_order_fixture.parquet")
 
@@ -325,7 +336,7 @@ class TestCheckSpatialOrderSamplingQuoting:
         # always closer than a random pair -> the ratio is safely under 1.
         assert result["ratio"] < 1.0
 
-    @adversarial_column
+    @site_column
     def test_cli_check_spatial_succeeds(self, tmp_path, column_name):
         path = _points_fixture(tmp_path, column_name, "spatial_order_cli_fixture.parquet")
 
@@ -400,7 +411,7 @@ class TestDuckdbMetadataSiblingLiteralEscaping:
 class TestApiTableAddBboxQuoting:
     """geoparquet_io/core/add/bbox.py: add_bbox_table -- backs Table.add_bbox()."""
 
-    @adversarial_column
+    @site_column
     def test_table_add_bbox_succeeds_with_correct_values(self, column_name):
         from geoparquet_io.api.table import Table
 
@@ -469,7 +480,7 @@ class TestAddBboxStreamingQuoting:
         )
 
     @pytest.mark.parametrize("force", [False, True])
-    @adversarial_column
+    @site_column
     def test_add_bbox_streaming_succeeds_with_correct_values(
         self, tmp_path, monkeypatch, column_name, force
     ):
@@ -514,7 +525,7 @@ class TestAddBboxStreamingQuoting:
 class TestInspectStatsQuoting:
     """geoparquet_io/core/inspect_utils.py: the per-column stats queries."""
 
-    @adversarial_column
+    @site_column
     def test_inspect_stats_succeeds(self, tmp_path, column_name):
         path = _points_fixture(tmp_path, column_name, "inspect_stats.parquet")
 
@@ -533,7 +544,7 @@ class TestCheckSpecQuoting:
     verdict about a perfectly valid file.
     """
 
-    @adversarial_column
+    @site_column
     def test_check_spec_reports_no_false_failures(self, tmp_path, column_name):
         path = _points_fixture(tmp_path, column_name, "check_spec.parquet")
 
@@ -549,7 +560,7 @@ class TestSortHilbertQuoting:
     """geoparquet_io/core/hilbert_order.py: the empty-geometry count and the
     ORDER BY ST_Hilbert query."""
 
-    @adversarial_column
+    @site_column
     def test_sort_hilbert_succeeds(self, tmp_path, column_name):
         path = _points_fixture(tmp_path, column_name, "hilbert_input.parquet")
         out = str(tmp_path / "hilbert_output.parquet")
@@ -564,7 +575,7 @@ class TestSortHilbertQuoting:
 class TestExtractGeoparquetQuoting:
     """geoparquet_io/core/extract.py: the column-projection builders."""
 
-    @adversarial_column
+    @site_column
     def test_extract_geoparquet_succeeds(self, tmp_path, column_name):
         path = _points_fixture(tmp_path, column_name, "extract_input.parquet")
         out = str(tmp_path / "extract_output.parquet")
@@ -612,7 +623,7 @@ class TestExtractSpatialFilterQuoting:
 
         assert sql == f"ST_Intersects({quote_identifier(column_name)}, ST_GeomFromText('{wkt}'))"
 
-    @adversarial_column
+    @site_column
     def test_cli_geometry_filter_returns_the_right_rows(self, tmp_path, column_name):
         """A hostile-but-honest column name must still filter correctly."""
         path = _points_fixture(tmp_path, column_name, "geom_filter_input.parquet")
@@ -692,7 +703,7 @@ class TestAddCommandsQuoting:
         "subcommand",
         ["h3", "s2", "a5", "quadkey", "geometry-metrics", "kdtree"],
     )
-    @adversarial_column
+    @site_column
     def test_add_subcommand_succeeds(self, tmp_path, subcommand, column_name):
         if subcommand == "s2":
             skip_if_geography_unavailable()
@@ -710,7 +721,7 @@ class TestConvertQuoting:
     """geoparquet_io/core/convert.py + format_writers.py."""
 
     @pytest.mark.parametrize("fmt", ["geojson", "csv"])
-    @adversarial_column
+    @site_column
     def test_convert_succeeds(self, tmp_path, fmt, column_name):
         path = _points_fixture(tmp_path, column_name, "convert_input.parquet")
         out = str(tmp_path / f"convert_output.{fmt}")
@@ -727,7 +738,7 @@ class TestSortColumnQuoting:
     """geoparquet_io/core/sort_by_column.py: the ORDER BY clause takes the
     column name straight from the CLI."""
 
-    @adversarial_column
+    @site_column
     def test_sort_column_succeeds(self, tmp_path, column_name):
         base = _points_fixture(tmp_path, "geometry", "sort_col_input.parquet")
         table = pq.read_table(base)

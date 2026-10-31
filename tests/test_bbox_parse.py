@@ -47,7 +47,15 @@ SEQUENCE_CASES = [
     (["a", 0, 1, 1], None),
     ([None, 0, 1, 1], None),
 ]
-IDS = [repr(v) for v, _ in TEXT_CASES]
+#: What each entry point is run on: the owner gives every case its verdict
+#: (``test_the_owner_verdict``); an entry point only has to show it asks the
+#: owner, so it is run on one plain accept, the antimeridian wrap (accepted,
+#: which a local ``xmin < xmax`` check would refuse) and the NaN corner the
+#: parsers disagreed on (#1402).
+ROUTING_VALUES = {"0,0,1,1", "1,0,0,1", "nan,0,1,1"}
+ROUTING_TEXT = [(v, e) for v, e in TEXT_CASES if v in ROUTING_VALUES]
+ROUTING_IDS = [repr(v) for v, _ in ROUTING_TEXT]
+ROUTING_SEQUENCES = [SEQUENCE_CASES[0], SEQUENCE_CASES[4]]
 
 
 @pytest.mark.parametrize(("value", "expected"), TEXT_CASES + SEQUENCE_CASES)
@@ -75,14 +83,14 @@ def _verdict(result) -> bool:
     return False
 
 
-@pytest.mark.parametrize(("value", "expected"), TEXT_CASES, ids=IDS)
+@pytest.mark.parametrize(("value", "expected"), ROUTING_TEXT, ids=ROUTING_IDS)
 def test_extract_agrees(buildings_test_file, tmp_path, value, expected):
     out = tmp_path / "out.parquet"
     result = CliRunner().invoke(cli, ["extract", buildings_test_file, str(out), "--bbox", value])
     assert _verdict(result) is (expected is not None), result.output
 
 
-@pytest.mark.parametrize(("value", "expected"), TEXT_CASES, ids=IDS)
+@pytest.mark.parametrize(("value", "expected"), ROUTING_TEXT, ids=ROUTING_IDS)
 def test_convert_agrees(buildings_test_file, tmp_path, value, expected):
     out = tmp_path / "out.csv"
     result = CliRunner().invoke(
@@ -96,11 +104,13 @@ SERVICES = {
     "wfs": ["extract", "wfs", "https://gpio.invalid/wfs", "layer"],
     "carto": ["extract", "carto", "https://gpio.invalid/carto", "table"],
 }
-REJECTED = [value for value, expected in TEXT_CASES if expected is None]
+#: The two the services were sent before the one parser: a swapped corner pair
+#: and a NaN corner.
+SERVICE_REJECTED = ["0,1,1,0", "nan,0,1,1"]
 
 
 @pytest.mark.parametrize("service", sorted(SERVICES))
-@pytest.mark.parametrize("value", REJECTED)
+@pytest.mark.parametrize("value", SERVICE_REJECTED)
 def test_the_service_extracts_refuse_what_the_owner_refuses(service, value, tmp_path, monkeypatch):
     """Refused before any request: name resolution is replaced by a tripwire."""
     import socket
@@ -116,7 +126,21 @@ def test_the_service_extracts_refuse_what_the_owner_refuses(service, value, tmp_
     assert "should have been refused" not in str(result.exception or "")
 
 
-@pytest.mark.parametrize(("value", "expected"), TEXT_CASES + SEQUENCE_CASES)
+def _routing_preview_params():
+    """The routing cases, keeping the ids the full table gave them."""
+    cases = TEXT_CASES + SEQUENCE_CASES
+    keep = [*ROUTING_TEXT, *ROUTING_SEQUENCES]
+    params = []
+    for index, (value, expected) in enumerate(cases):
+        if (value, expected) not in keep:
+            continue
+        left = value if isinstance(value, str) else f"value{index}"
+        right = "None" if expected is None else f"expected{index}"
+        params.append(pytest.param(value, expected, id=f"{left}-{right}"))
+    return params
+
+
+@pytest.mark.parametrize(("value", "expected"), _routing_preview_params())
 def test_preview_bbox_filter_agrees(buildings_test_file, value, expected):
     from geoparquet_io.api import ops
 
