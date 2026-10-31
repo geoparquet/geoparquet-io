@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Collection, Iterator, Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, Any, cast, overload
 
 from geoparquet_io.core.compression import resolve_codec
@@ -1172,6 +1172,17 @@ class WriteOptions:
     def pick(cls, values: Mapping[str, Any]) -> WriteOptions:
         """The options named in *values*; other keys are ignored, absent fields stay unset."""
         return cls(**{f.name: values[f.name] for f in fields(cls) if f.name in values})
+
+    def sets_output_layout(self) -> bool:
+        """Whether any option that decides the written bytes was set.
+
+        Codec, level, row-group size and output version shape the file; the
+        AWS profile and the memory limit do not. A writer that could copy its
+        input verbatim (``add bbox`` over a file that already has the column)
+        may do so only when this is False, since a copy reproduces whatever the
+        input was written with.
+        """
+        return replace(self, profile=None, memory_limit=None) != WriteOptions()
 
     def funnel_kwargs(self, *, exclude: tuple[str, ...] = ()) -> dict[str, Any]:
         """The keywords every funnel takes, for ``funnel(..., **options.funnel_kwargs())``.

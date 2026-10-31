@@ -266,35 +266,6 @@ def _bbox_covering_metadata(bbox_column_name: str) -> dict:
     }
 
 
-def _write_options_requested(
-    compression: str | None,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    geoparquet_version: str | None,
-) -> bool:
-    """Whether the caller explicitly asked for write settings the input may not have.
-
-    A verbatim copy of the input cannot honour ``--geoparquet-version``,
-    ``--compression``, ``--compression-level`` or ``--row-group-size``: it
-    reproduces whatever the input was written with. So when one of those is
-    explicitly requested, the copy shortcut is not an acceptable answer and the
-    column is recomputed instead. Every one of these arrives as ``None`` unless
-    the caller set it (the CLI passes ``compression=None`` when ``--compression``
-    was left at its default).
-    """
-    return any(
-        option is not None
-        for option in (
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            geoparquet_version,
-        )
-    )
-
-
 def _version_a_copy_would_miss(input_parquet: str) -> str | None:
     """The facade's version for this input, when a verbatim copy would declare another.
 
@@ -395,18 +366,16 @@ def add_bbox_column(
         except for GeoParquet 1.0 output: 'covering' was introduced in 1.1, so a
         1.0 file gets the bbox column without the covering key.
     """
-    # Whether a copy of the input could satisfy this call at all, decided before
-    # 'compression' is defaulted -- None here means "the caller did not ask".
-    write_options_requested = _write_options_requested(
-        compression, compression_level, row_group_size_mb, row_group_rows, geoparquet_version
-    )
+    # Built before anything is defaulted: None means "the caller did not ask",
+    # which is what decides whether a copy of the input could satisfy the call.
+    write = WriteOptions.pick(locals())
+    write_options_requested = write.sets_output_layout()
 
     warn_planar_math_for_file("add_bbox", input_parquet)
 
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
-    write = WriteOptions.pick(locals())
     if is_streaming and not dry_run:
         _add_bbox_streaming(
             input_parquet,

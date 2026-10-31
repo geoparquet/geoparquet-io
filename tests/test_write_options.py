@@ -179,3 +179,19 @@ def test_piped_reproject_honours_the_write_flags(points_file, tmp_path):
     )
     assert result.exit_code == 0, result.output
     _assert_footer(out)
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        (WriteOptions(), False),
+        (WriteOptions(profile="p", memory_limit="1GB"), False),
+        (WriteOptions(compression="zstd"), True),
+        (WriteOptions(compression_level=3), True),
+        (WriteOptions(row_group_size_mb=64), True),
+        (WriteOptions(row_group_rows=1000), True),
+        (WriteOptions(geoparquet_version="2.0"), True),
+    ],
+)
+def test_sets_output_layout_names_the_byte_shaping_options(options, expected):
+    assert options.sets_output_layout() is expected
