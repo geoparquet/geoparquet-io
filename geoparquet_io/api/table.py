@@ -29,7 +29,7 @@ from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.edges import edges_of, state_edges
-from geoparquet_io.core.file_utils import unlink_released_file
+from geoparquet_io.core.file_utils import get_all_parquet_files, scratch_path, unlink_released_file
 from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
 from geoparquet_io.core.index_ops import get_index_spec, validate_partition_arguments
@@ -82,11 +82,9 @@ def _run_partition_with_temp_file(
         directory, the number of ``.parquet`` files written under it, and
         whether they are laid out Hive-style.
     """
-    import tempfile
-    import uuid
     from pathlib import Path as PathLib
 
-    temp_input = PathLib(tempfile.gettempdir()) / f"{temp_prefix}_{uuid.uuid4()}.parquet"
+    temp_input = PathLib(scratch_path(prefix=f"{temp_prefix}_"))
 
     try:
         write_geoparquet_table(
@@ -105,7 +103,7 @@ def _run_partition_with_temp_file(
         )
 
         output_path = PathLib(output_dir)
-        parquet_files = list(output_path.rglob("*.parquet"))
+        parquet_files = get_all_parquet_files(str(output_path))
         return {
             "output_dir": str(output_path),
             "file_count": len(parquet_files),
@@ -269,7 +267,7 @@ def read_partition(
             for name, type_ in describe_query(con, query):
                 # A CRS-typed GEOMETRY crosses Arrow with its CRS; only a bare one is wrapped.
                 if duckdb_type_is_geometry(type_, allow_crs=False):
-                    query = _wrap_query_with_wkb_conversion(query, name, con=con)
+                    query = _wrap_query_with_wkb_conversion(query, name)
 
             arrow_table = con.sql(query).arrow().read_all()
         finally:
@@ -1330,8 +1328,6 @@ class Table:
         verbose: bool = False,
     ) -> Path:
         """Write table to GeoParquet format (supports local and cloud)."""
-        import tempfile
-        import uuid
         from pathlib import Path as PathLib
 
         import pyarrow as pa
@@ -1342,7 +1338,7 @@ class Table:
         )
         from geoparquet_io.core.remote import is_remote_url
         from geoparquet_io.core.upload import upload
-        from geoparquet_io.core.write_strategies import WriteStrategy, WriteStrategyFactory
+        from geoparquet_io.core.write_strategies import WriteStrategy
 
         self._require_geometry_column_present()
 
@@ -1382,8 +1378,7 @@ class Table:
 
         # For remote destinations, write to temp file first
         if is_remote:
-            temp_dir = PathLib(tempfile.gettempdir())
-            local_path = temp_dir / f"gpio_write_{uuid.uuid4()}.parquet"
+            local_path = PathLib(scratch_path(prefix="gpio_write_"))
         else:
             local_path = PathLib(path)
 
@@ -1411,7 +1406,6 @@ class Table:
 
             # Get the appropriate write strategy
             strategy_enum = WriteStrategy(write_strategy)
-            strategy = WriteStrategyFactory.get_strategy(strategy_enum)
 
             # duckdb-kv -- the default -- lets DuckDB's COPY have the last word
             # on row-group size, so a sub-vector request lands at 2,048 rows
@@ -1442,48 +1436,20 @@ class Table:
                 if table_crs_is_unknown(self._table, self._geometry_column):
                     input_crs = PARQUET_UNKNOWN_CRS
 
-            # Carry the table's non-geo file-level KV metadata (fiboa, vecorel,
-            # STAC fragments) into the write. The Arrow strategies copied it
-            # incidentally off the schema while the DuckDB COPY strategies —
-            # including the default — rebuilt the KV block from scratch and
-            # dropped it, so preservation depended on the strategy (#690).
-            # 'geo' is deliberately excluded: it is regenerated from the table.
-            from geoparquet_io.core.write_funnels import extract_preserved_kv_metadata
-
-            preserved_kv = extract_preserved_kv_metadata(self._table.schema.metadata)
-
-            # A strategy's `write_from_table` gets `original_metadata=None` on
-            # purpose: the input's stats no longer describe whatever happened to
-            # the table in between. A `covering` is not a stat, though -- it says
-            # which column holds the geometry's envelope, and nothing else in a
-            # write can establish that for a column not named exactly `bbox`. So
-            # it travels through the provenance channel instead, which is how a
-            # caller that computed a bbox column already declares one. Three of
-            # the four strategies could not see it at all, which lost a GDAL
-            # `geometry_bbox` covering and the one `add_bbox(column_name=...)`
-            # records on everything but `in-memory` (#1172).
+            # The funnel carries declarations and sidecars, and recomputes
+            # derived metadata. Coverings also travel as explicit provenance.
             from geoparquet_io.core.geo_metadata import carried_covering_as_provenance
 
             carried_covering = carried_covering_as_provenance(
                 self._table.schema.metadata, self._geometry_column, self._table.column_names
             )
 
-            # DuckDB refuses a GeoArrow column with non-planar edges, and the
-            # strategies rebuild the geo block without them. So the edges are
-            # read off the table, cleared for the write, and restored on the
-            # written file, as the CLI write paths do (#1253).
-            from geoparquet_io.core.arrow_geo_metadata import with_planar_edge_types
-            from geoparquet_io.core.write_funnels import (
-                apply_nonplanar_edges,
-                table_nonplanar_edges,
-            )
+            from geoparquet_io.core.write_funnels import write_geoparquet_table
 
-            edges_by_col = table_nonplanar_edges(self._table, self._geometry_column, None)
-            write_table = with_planar_edge_types(self._table)
-
-            strategy.write_from_table(
-                table=write_table,
-                output_path=str(local_path),
+            write_geoparquet_table(
+                table=self._table,
+                output_file=str(local_path),
+                write_strategy=write_strategy,
                 geometry_column=self._geometry_column,
                 geoparquet_version=geoparquet_version,
                 compression=compression,
@@ -1493,15 +1459,6 @@ class Table:
                 verbose=verbose,
                 input_crs=input_crs,
                 custom_metadata={"covering": carried_covering} if carried_covering else None,
-                extra_kv_metadata=preserved_kv or None,
-            )
-            apply_nonplanar_edges(
-                edges_by_col,
-                str(local_path),
-                compression=compression,
-                compression_level=compression_level,
-                row_group_rows=row_group_rows,
-                verbose=verbose,
             )
 
             # Upload to remote if needed
@@ -1523,8 +1480,6 @@ class Table:
         **format_options,
     ) -> Path:
         """Write table to non-parquet format (handles local and cloud)."""
-        import tempfile
-        import uuid
         from pathlib import Path as PathLib
 
         from geoparquet_io.core.remote import is_remote_url
@@ -1536,8 +1491,7 @@ class Table:
 
         # Determine output path (temp file for remote, direct for local)
         if is_remote:
-            temp_dir = PathLib(tempfile.gettempdir())
-            output_path = temp_dir / f"gpio_write_{uuid.uuid4()}{PathLib(path).suffix}"
+            output_path = PathLib(scratch_path(PathLib(path).suffix, prefix="gpio_write_"))
         else:
             output_path = PathLib(path)
 
@@ -1657,21 +1611,19 @@ class Table:
 
         finally:
             # Clean up temp parquet
-            if temp_parquet:
-                temp_parquet.unlink(missing_ok=True)
+            unlink_released_file(temp_parquet)
             # Clean up zip file if created
-            if zip_path:
-                zip_path.unlink(missing_ok=True)
+            unlink_released_file(zip_path)
             # Clean up temp output if remote
-            if is_remote and output_path.exists():
-                output_path.unlink(missing_ok=True)
+            if is_remote:
+                unlink_released_file(output_path)
             # Clean up shapefile sidecars if remote
             if is_remote and format == "shapefile":
                 # Remove all sidecar files (.shx, .dbf, .prj, etc.)
                 from geoparquet_io.core.format_writers import shapefile_members
 
                 for sidecar in shapefile_members(output_path):
-                    sidecar.unlink(missing_ok=True)
+                    unlink_released_file(sidecar)
 
     def _table_to_temp_parquet(self) -> Path:
         """Write table to temporary parquet file for format conversion.
@@ -1679,14 +1631,11 @@ class Table:
         Uses write_geoparquet_table to preserve GeoParquet metadata (CRS, geometry column).
         This is critical for format conversions that need metadata (e.g., GeoJSON reprojection).
         """
-        import tempfile
-        import uuid
         from pathlib import Path as PathLib
 
         from geoparquet_io.core.write_funnels import write_geoparquet_table
 
-        temp_dir = PathLib(tempfile.gettempdir())
-        temp_path = temp_dir / f"gpio_table_{uuid.uuid4()}.parquet"
+        temp_path = PathLib(scratch_path(prefix="gpio_table_"))
 
         # Use write_geoparquet_table to preserve metadata
         write_geoparquet_table(
@@ -2675,14 +2624,12 @@ class Table:
             ...     s3_use_ssl=False,
             ... )
         """
-        import tempfile
-        import uuid
         from pathlib import Path
 
         from geoparquet_io.core.upload import upload as do_upload
 
         # Write to temp file with uuid to avoid Windows file locking issues
-        temp_path = Path(tempfile.gettempdir()) / f"gpio_upload_{uuid.uuid4()}.parquet"
+        temp_path = Path(scratch_path(prefix="gpio_upload_"))
 
         try:
             self.write(
@@ -2984,11 +2931,9 @@ class Table:
         Returns:
             Result from func
         """
-        import tempfile
-        import uuid
         from pathlib import Path
 
-        temp_path = Path(tempfile.gettempdir()) / f"gpio_check_{uuid.uuid4()}.parquet"
+        temp_path = Path(scratch_path(prefix="gpio_check_"))
         try:
             # The bytes write() would produce with its defaults, so a
             # prospective verdict describes the file the caller would get.
@@ -3041,12 +2986,10 @@ class Table:
         Returns:
             PyArrow Table from the output file
         """
-        import tempfile
-        import uuid
         from pathlib import Path
 
-        temp_input = Path(tempfile.gettempdir()) / f"gpio_in_{uuid.uuid4()}.parquet"
-        temp_output = Path(tempfile.gettempdir()) / f"gpio_out_{uuid.uuid4()}.parquet"
+        temp_input = Path(scratch_path(prefix="gpio_in_"))
+        temp_output = Path(scratch_path(prefix="gpio_out_"))
 
         try:
             # Write table to temp input file

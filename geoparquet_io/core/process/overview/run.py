@@ -17,7 +17,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.column_selection import matching_columns
-from geoparquet_io.core.compression import resolve_process_compression_level
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import fetch_one, query_schema, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
@@ -290,7 +290,7 @@ def create_overviews(
         List of ``(level, output_path)`` for every overview written,
         coarse to fine.
     """
-    compression_level = resolve_process_compression_level(compression, compression_level)
+    compression_level = resolve_codec(compression, compression_level, context="process").level
     configure_verbose(verbose)
     with aggregate_connection(input_parquet, verbose, memory_limit) as (con, relation):
         info = detect_aggregate_info(con, relation, cell_column, scheme)
@@ -433,7 +433,7 @@ def create_overview_file(
     the knobs, the output path against the input and the ``level`` column,
     so a bad option costs no minutes of aggregation.
     """
-    compression_level = resolve_process_compression_level(compression, compression_level)
+    compression_level = resolve_codec(compression, compression_level, context="process").level
     from geoparquet_io.core.process.overview.overview_file import (
         DEFAULT_CELL_DETAIL,
         LevelInput,

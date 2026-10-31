@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 import duckdb
 import pyarrow as pa
 
@@ -22,6 +20,7 @@ from geoparquet_io.core.file_utils import (
     handle_output_overwrite,
     is_partition_path,
     resolve_file_url,
+    unlink_released_file,
 )
 from geoparquet_io.core.index_ops import ensure_index_column, get_index_spec
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
@@ -278,10 +277,9 @@ def sort_by_quadkey(
         if con:
             con.close()
         # Clean up temp file if we created one
-        if temp_file and os.path.exists(temp_file):
-            if verbose:
-                debug("Cleaning up temporary quadkey-enriched file...")
-            os.remove(temp_file)
+        if temp_file and verbose:
+            debug("Cleaning up temporary quadkey-enriched file...")
+        unlink_released_file(temp_file)
 
 
 def _sort_by_quadkey_streaming(
@@ -374,10 +372,8 @@ def _sort_by_quadkey_streaming(
 
     finally:
         # Clean up temp files
-        if temp_input_file and os.path.exists(temp_input_file):
-            os.remove(temp_input_file)
-        if temp_quadkey_file and os.path.exists(temp_quadkey_file):
-            os.remove(temp_quadkey_file)
+        unlink_released_file(temp_input_file)
+        unlink_released_file(temp_quadkey_file)
 
 
 if __name__ == "__main__":

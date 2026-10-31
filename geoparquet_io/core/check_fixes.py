@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 
+import contextlib
 import functools
-import os
 import shutil
-import tempfile
 
 from geoparquet_io.core.add.bbox import add_bbox_column
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata
@@ -17,7 +16,12 @@ from geoparquet_io.core.duckdb_utils import (
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import GeoParquetError
-from geoparquet_io.core.file_utils import is_same_file_path, resolve_file_url
+from geoparquet_io.core.file_utils import (
+    atomic_write,
+    is_same_file_path,
+    resolve_file_url,
+    scratch_file,
+)
 from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
     SchemaSource,
@@ -40,7 +44,6 @@ from geoparquet_io.core.parquet_writer import (
 from geoparquet_io.core.write_funnels import (
     rewrite_file_through_funnel,
     rewrite_footer_kv,
-    staged_replacement,
 )
 
 # Every fix below writes DEFAULT_ROW_GROUP_ROWS rows per row group.
@@ -390,7 +393,7 @@ def fix_bbox_all(
     if not needs_column and not needs_metadata:
         return {"fix_applied": None, "success": True}
 
-    with staged_replacement(output_file) as destination:
+    with atomic_write(output_file) as destination:
         if needs_column:
             # add_bbox_column writes the covering with the column, so a
             # separate metadata pass here would only re-read what it just wrote.
@@ -428,7 +431,7 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
     row_group_rows = resolve_row_group_rows_for_rewrite(
         file_meta.get("num_rows", 0), file_meta.get("num_row_groups", 0)
     )
-    with staged_replacement(output_file) as destination:
+    with atomic_write(output_file) as destination:
         hilbert_order(
             input_parquet=parquet_file,
             output_parquet=destination,
@@ -482,7 +485,7 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geopa
     return {"fix_applied": "Optimized row groups", "success": True}
 
 
-def _apply_cover_fix(check_results, current_file, temp_files, verbose, profile):
+def _apply_cover_fix(check_results, current_file, scratch, verbose, profile):
     """Drop a covering with no bbox member, before anything else reads the block.
 
     First, so the rest of the chain works from a file whose `geo` block is one
@@ -497,11 +500,7 @@ def _apply_cover_fix(check_results, current_file, temp_files, verbose, profile):
     if not (check_results.get("covering") or {}).get("fix_available", False):
         return current_file, []
 
-    fd, temp_file = tempfile.mkstemp(suffix=".parquet")
-    os.close(fd)
-    os.unlink(temp_file)
-    temp_files.append(temp_file)
-
+    temp_file = scratch.enter_context(scratch_file())
     summary = fix_bboxless_cover(current_file, temp_file, verbose, profile)
     if summary["fix_applied"] is None:
         # The check and the repair disagree about this file; keep the input.
@@ -509,7 +508,7 @@ def _apply_cover_fix(check_results, current_file, temp_files, verbose, profile):
     return temp_file, [summary["fix_applied"]]
 
 
-def _apply_bbox_column_fix(bbox_result, current_file, temp_files, verbose, profile):
+def _apply_bbox_column_fix(bbox_result, current_file, scratch, verbose, profile):
     """Handle bbox column addition or removal.
 
     Returns:
@@ -519,8 +518,7 @@ def _apply_bbox_column_fix(bbox_result, current_file, temp_files, verbose, profi
 
     # Remove bbox column if needed (v2/parquet-geo-only)
     if bbox_result.get("needs_bbox_removal", False):
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
-        temp_files.append(temp_file)
+        temp_file = scratch.enter_context(scratch_file())
         bbox_column_name = bbox_result.get("bbox_column_name")
         fix_bbox_removal(current_file, temp_file, bbox_column_name, verbose, profile)
         fixes.append(f"Removed bbox column '{bbox_column_name}'")
@@ -528,8 +526,7 @@ def _apply_bbox_column_fix(bbox_result, current_file, temp_files, verbose, profi
 
     # Add bbox column if needed (v1.x)
     if bbox_result.get("needs_bbox_column", False):
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
-        temp_files.append(temp_file)
+        temp_file = scratch.enter_context(scratch_file())
         if verbose:
             progress("\n[1/4] Adding bbox column...")
         fix_bbox_column(current_file, temp_file, verbose, profile)
@@ -539,7 +536,7 @@ def _apply_bbox_column_fix(bbox_result, current_file, temp_files, verbose, profi
     return current_file, fixes
 
 
-def _apply_bbox_metadata_fix(bbox_result, current_file, parquet_file, temp_files, verbose, profile):
+def _apply_bbox_metadata_fix(bbox_result, current_file, parquet_file, scratch, verbose, profile):
     """Handle bbox metadata addition.
 
     Returns:
@@ -563,8 +560,7 @@ def _apply_bbox_metadata_fix(bbox_result, current_file, parquet_file, temp_files
     if is_same_file_path(current_file, parquet_file):
         # The user's file is only read: the covering goes onto a scratch
         # written in one pass, and current_file leaves the user's path here.
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
-        temp_files.append(temp_file)
+        temp_file = scratch.enter_context(scratch_file())
         fix_bbox_metadata(current_file, temp_file, verbose, profile)
         return temp_file, ["Added bbox covering metadata"]
 
@@ -572,7 +568,7 @@ def _apply_bbox_metadata_fix(bbox_result, current_file, parquet_file, temp_files
     return current_file, ["Added bbox covering metadata"]
 
 
-def _apply_spatial_ordering_fix(check_results, current_file, temp_files, verbose, profile):
+def _apply_spatial_ordering_fix(check_results, current_file, scratch, verbose, profile):
     """Handle Hilbert spatial ordering.
 
     Returns:
@@ -582,12 +578,8 @@ def _apply_spatial_ordering_fix(check_results, current_file, temp_files, verbose
     if not spatial_result or not spatial_result.get("fix_available", False):
         return current_file, []
 
-    # Generate temp file path without creating the file (fixes issue #278)
-    # Use mkstemp to get unique name, then close and delete to avoid collision
-    fd, temp_file = tempfile.mkstemp(suffix=".parquet")
-    os.close(fd)
-    os.unlink(temp_file)
-    temp_files.append(temp_file)
+    # A path, not a file: hilbert_order refuses an existing output (#278).
+    temp_file = scratch.enter_context(scratch_file())
 
     if verbose:
         progress("\n[3/4] Applying Hilbert spatial ordering...")
@@ -597,35 +589,26 @@ def _apply_spatial_ordering_fix(check_results, current_file, temp_files, verbose
     return temp_file, ["Applied Hilbert spatial ordering"]
 
 
-def _place_result(result_file: str, output_file: str, *, owned: bool) -> None:
+def _place_result(result_file: str, output_file: str) -> None:
     """Leave the finished file at *output_file* without consuming the user's input.
 
-    ``owned`` says whether *result_file* is a scratch file this module made
-    (moved: nothing else refers to it, and it lives in the system temp
-    directory, so ``shutil.move``'s cross-device fallback is wanted) or the
-    user's own input, when every earlier step declined to rewrite anything
-    (copied: ``--fix-output`` names a path nobody backed up, so moving the
-    input away left the user with neither file nor ``.bak``, #1036). Either
-    way it lands through ``staged_replacement``, so an existing destination is
-    replaced atomically.
+    *result_file* is a scratch copy an earlier step made, or the user's own
+    input when every earlier step declined to rewrite anything. Either way it
+    is copied, never moved: ``--fix-output`` names a path nobody backed up, so
+    moving the input away left the user with neither file nor ``.bak`` (#1036),
+    and a scratch copy is removed by its owner (``file_utils.scratch_file``).
+    It lands through ``atomic_write``, so an existing destination is replaced
+    atomically.
     """
     if is_same_file_path(result_file, output_file):
         return
 
-    with staged_replacement(output_file) as destination:
-        if owned:
-            shutil.move(result_file, destination)
-        else:
-            shutil.copy2(result_file, destination)
+    with atomic_write(output_file) as destination:
+        shutil.copy2(result_file, destination)
 
 
-def _apply_compression_fix(
-    check_results, current_file, output_file, gp_version, verbose, profile, *, owned=False
-):
+def _apply_compression_fix(check_results, current_file, output_file, gp_version, verbose, profile):
     """Handle compression and row group optimization.
-
-    ``owned`` is whether *current_file* is a scratch file an earlier step
-    produced, as opposed to the user's input; see :func:`_place_result`.
 
     Returns:
         list: fixes_applied
@@ -639,7 +622,7 @@ def _apply_compression_fix(
     if not needs_compression and not needs_row_groups:
         # No compression/row group fixes needed; whatever the earlier steps
         # produced is the answer, so put it at the output path.
-        _place_result(current_file, output_file, owned=owned)
+        _place_result(current_file, output_file)
         return []
 
     if verbose:
@@ -655,14 +638,60 @@ def _apply_compression_fix(
     return fixes
 
 
-def _cleanup_temp_files(temp_files, output_file):
-    """Clean up temporary files, excluding the output file."""
-    for temp_file in temp_files:
-        if os.path.exists(temp_file) and not is_same_file_path(temp_file, output_file):
-            try:
-                os.remove(temp_file)
-            except OSError:
-                pass
+def _run_fix_chain(
+    check_results, parquet_file, output_file, geoparquet_version, scratch, verbose, profile
+):
+    """The fix steps in order, each reading the last one's result.
+
+    *scratch* is the ``ExitStack`` that owns every intermediate copy.
+    """
+    current_file = parquet_file
+    fixes_applied = []
+    bbox_result = check_results.get("bbox", {})
+
+    # Step 0: Drop a covering the spec does not allow (#1173)
+    current_file, fixes = _apply_cover_fix(check_results, current_file, scratch, verbose, profile)
+    fixes_applied.extend(fixes)
+
+    # Step 1: Handle bbox column (add or remove)
+    current_file, fixes = _apply_bbox_column_fix(
+        bbox_result, current_file, scratch, verbose, profile
+    )
+    fixes_applied.extend(fixes)
+
+    # Step 2: Handle bbox metadata
+    current_file, fixes = _apply_bbox_metadata_fix(
+        bbox_result, current_file, parquet_file, scratch, verbose, profile
+    )
+    fixes_applied.extend(fixes)
+
+    # Step 3: Apply Hilbert sorting
+    current_file, fixes = _apply_spatial_ordering_fix(
+        check_results, current_file, scratch, verbose, profile
+    )
+    fixes_applied.extend(fixes)
+
+    # Step 4: Fix compression + row groups
+    fixes = _apply_compression_fix(
+        check_results,
+        current_file,
+        output_file,
+        geoparquet_version,
+        verbose,
+        profile,
+    )
+    fixes_applied.extend(fixes)
+
+    if verbose:
+        progress("\n" + "=" * 60)
+        progress("Fix process completed successfully")
+        progress("=" * 60)
+
+    return {
+        "fixes_applied": fixes_applied,
+        "output_file": output_file,
+        "success": True,
+    }
 
 
 def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, profile=None):
@@ -683,10 +712,6 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
         progress("Starting fix process...")
         progress("=" * 60)
 
-    fixes_applied = []
-    current_file = parquet_file
-    temp_files = []
-
     # A repair keeps the input's own version (the facade's preserve policy),
     # read off the bbox check, which already detected the file type.
     bbox_result = check_results.get("bbox", {})
@@ -702,57 +727,17 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
         debug(f"Preserving GeoParquet version: {geoparquet_version}")
 
     try:
-        # Step 0: Drop a covering the spec does not allow (#1173)
-        current_file, fixes = _apply_cover_fix(
-            check_results, current_file, temp_files, verbose, profile
-        )
-        fixes_applied.extend(fixes)
-
-        # Step 1: Handle bbox column (add or remove)
-        current_file, fixes = _apply_bbox_column_fix(
-            bbox_result, current_file, temp_files, verbose, profile
-        )
-        fixes_applied.extend(fixes)
-
-        # Step 2: Handle bbox metadata
-        current_file, fixes = _apply_bbox_metadata_fix(
-            bbox_result, current_file, parquet_file, temp_files, verbose, profile
-        )
-        fixes_applied.extend(fixes)
-
-        # Step 3: Apply Hilbert sorting
-        current_file, fixes = _apply_spatial_ordering_fix(
-            check_results, current_file, temp_files, verbose, profile
-        )
-        fixes_applied.extend(fixes)
-
-        # Step 4: Fix compression + row groups
-        fixes = _apply_compression_fix(
-            check_results,
-            current_file,
-            output_file,
-            geoparquet_version,
-            verbose,
-            profile,
-            owned=current_file in temp_files,
-        )
-        fixes_applied.extend(fixes)
-
-        _cleanup_temp_files(temp_files, output_file)
-
-        if verbose:
-            progress("\n" + "=" * 60)
-            progress("Fix process completed successfully")
-            progress("=" * 60)
-
-        return {
-            "fixes_applied": fixes_applied,
-            "output_file": output_file,
-            "success": True,
-        }
-
+        with contextlib.ExitStack() as scratch:
+            return _run_fix_chain(
+                check_results,
+                parquet_file,
+                output_file,
+                geoparquet_version,
+                scratch,
+                verbose,
+                profile,
+            )
     except BaseException as e:
-        _cleanup_temp_files(temp_files, output_file=None)
-        if not isinstance(e, Exception):  # Ctrl-C: clean up, then stop as asked
+        if not isinstance(e, Exception):  # Ctrl-C: cleaned up, then stop as asked
             raise
         raise GeoParquetError(f"Failed to apply fixes: {str(e)}") from e

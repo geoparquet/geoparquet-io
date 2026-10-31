@@ -5,6 +5,7 @@ from __future__ import annotations
 from geoparquet_io.core.column_selection import find_column
 from geoparquet_io.core.duckdb_metadata import get_schema_info, get_usable_column_names
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.file_utils import unlink_released_file
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
 from geoparquet_io.core.parquet_schema import root_schema_index
 from geoparquet_io.core.parquet_writer import WriteOptions
@@ -99,7 +100,6 @@ def partition_by_string(
         row_group_rows: Row group size in number of rows (mutually exclusive with row_group_size_mb)
         memory_limit: DuckDB memory limit for write operations (e.g., "2GB")
     """
-    import os
 
     # Configure logging verbosity
     configure_verbose(verbose)
@@ -183,10 +183,9 @@ def partition_by_string(
         success(f"Successfully created {num_partitions} partition file(s)")
     finally:
         # Clean up temporary file if created
-        if temp_file_path and os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-            if verbose:
-                debug(f"Cleaned up temporary file: {temp_file_path}")
+        if temp_file_path and verbose:
+            debug(f"Cleaning up temporary file: {temp_file_path}")
+        unlink_released_file(temp_file_path)
 
 
 if __name__ == "__main__":

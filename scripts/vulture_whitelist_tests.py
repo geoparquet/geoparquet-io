@@ -110,3 +110,4 @@ fake_aws_files  # unused function (tests/test_aws_profile_no_env_leak.py:211) --
 offline_wfs_probes  # unused function (tests/test_wfs.py:46) -- dynamic: pytest fixture, requested by name
 is_v2  # unused attribute (tests/test_duckdb_capabilities.py:146) -- dynamic: assigned to prove the dataclass is frozen
 native_writer_on  # unused function (tests/test_geojson_native_writer.py:104) -- dynamic: pytest fixture used via usefixtures
+_.do_PUT  # unused method (tests/_fake_s3.py:65) -- dynamic: http.server dispatches do_<COMMAND> by name (HANDOFFS row 43 test)

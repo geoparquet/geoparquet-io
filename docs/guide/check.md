@@ -852,8 +852,11 @@ gpio check all partitions/ --sample-files 3
     ```
 
     Each rewritten file gets a `.bak` alongside it (unless you pass
-    `--no-backup`, which asks for confirmation once for the whole run), and the
-    run ends with a `Fixed N files:` list naming every one of them. There is no
+    `--no-backup`, which asks for confirmation once for the whole run). A
+    backup never overwrites an earlier one: a second in-place fix of the same
+    file writes `<file>.bak.1`, the next `<file>.bak.2`, so the first `.bak`
+    stays the original. The run ends with a `Fixed N files:` list naming every
+    one of them. There is no
     confirmation prompt otherwise: run the command without `--fix` first and
     read the file count in the `📁 Checking first file (of N total)` notice.
 

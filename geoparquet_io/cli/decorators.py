@@ -266,7 +266,7 @@ def process_compression_options(func):
     Identical options; the help names ZSTD 9 instead of 15, because these
     commands compute a whole table and then write it, and the write is a large
     share of their wall clock. The resolution itself lives in the cores
-    (``core/compression.resolve_process_compression_level``), so the Python API
+    (``core/compression.resolve_codec(..., context="process")``), so the Python API
     gets it too -- this decorator only keeps ``--help`` honest.
     """
     return _add_compression_options(func, _compression_level_help("process"))

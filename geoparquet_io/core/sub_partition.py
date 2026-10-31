@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from geoparquet_io.core.duckdb_metadata import get_row_count
+from geoparquet_io.core.file_utils import get_all_parquet_files
 from geoparquet_io.core.index_ops import (
     get_index_spec,
     partition_index,
@@ -116,7 +117,7 @@ def _assert_no_rows_lost(source_file: str, output_dir: str) -> None:
         RuntimeError: If the output holds no files, or fewer rows than the source.
     """
 
-    output_files = sorted(Path(output_dir).glob("**/*.parquet"))
+    output_files = get_all_parquet_files(str(output_dir))
     if not output_files:
         raise RuntimeError(
             f"Sub-partition created no output files, keeping original: {source_file}"
@@ -151,11 +152,8 @@ def find_large_files(
         List of file paths exceeding the threshold, sorted by size descending
     """
     large_files = []
-    dir_path = Path(directory)
 
-    pattern = "**/*.parquet" if recursive else "*.parquet"
-
-    for parquet_file in dir_path.glob(pattern):
+    for parquet_file in map(Path, get_all_parquet_files(str(directory), recursive=recursive)):
         if parquet_file.is_file():
             size = parquet_file.stat().st_size
             if size >= min_size_bytes:

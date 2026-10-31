@@ -31,7 +31,6 @@ from functools import lru_cache
 from .base import (
     BaseWriteStrategy,
     WriteStrategy,
-    atomic_write,
     needs_metadata_rewrite,
 )
 
@@ -92,6 +91,5 @@ __all__ = [
     "WriteStrategy",
     "WriteStrategyFactory",
     "BaseWriteStrategy",
-    "atomic_write",
     "needs_metadata_rewrite",
 ]

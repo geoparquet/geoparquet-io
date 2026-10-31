@@ -34,8 +34,7 @@ from __future__ import annotations
 import json
 import math
 import os
-import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 import pyarrow as pa
@@ -43,7 +42,8 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
 from geoparquet_io.core.column_selection import matching_columns
-from geoparquet_io.core.compression import resolve_codec, resolve_process_compression_level
+from geoparquet_io.core.compression import resolve_codec
+from geoparquet_io.core.file_utils import atomic_write
 from geoparquet_io.core.geo_metadata import (
     OVERVIEW_LEVEL_COLUMN,
     OVERVIEWS_KEY,
@@ -55,9 +55,8 @@ from geoparquet_io.core.parquet_writer import (
     apply_output_kv_metadata,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
-    without_geometry_dictionary,
 )
-from geoparquet_io.core.write_funnels import extract_preserved_kv_metadata
+from geoparquet_io.core.write_funnels import extract_preserved_kv_metadata, open_parquet_writer
 
 __all__ = [
     "OVERVIEWS_KEY",
@@ -311,7 +310,7 @@ def _slices(pf: pq.ParquetFile, rows: int) -> Iterator[pa.Table]:
 
 
 def _write_levels(
-    writer: pq.ParquetWriter,
+    write_table: Callable[..., None],
     files: list[pq.ParquetFile],
     data_schema: pa.Schema,
     schema: pa.Schema,
@@ -324,7 +323,7 @@ def _write_levels(
             piece = piece.select(data_schema.names).cast(data_schema)
             level = pa.repeat(pa.scalar(ordinal, pa.int32()), piece.num_rows)
             piece = piece.append_column(level_field, level).replace_schema_metadata(schema.metadata)
-            writer.write_table(piece, row_group_size=rows_per_group)
+            write_table(piece, row_group_size=rows_per_group)
             groups += 1
         debug(f"level {ordinal}: {pf.metadata.num_rows} rows, {groups} row group(s)")
 
@@ -347,7 +346,7 @@ def write_overview_file(
     the output directory and moved into place, so a failure leaves nothing at
     ``output_path``. Returns the output path.
     """
-    compression_level = resolve_process_compression_level(compression, compression_level)
+    codec = resolve_codec(compression, compression_level, context="process")
     _validate(levels, output_path)
     files = [pq.ParquetFile(lv.path) for lv in levels]
     try:
@@ -362,33 +361,23 @@ def write_overview_file(
             [schema.field(n) for n in data_schema.names]
         )  # the facade may have retyped the geometry for the output version
 
-        fd, tmp_path = tempfile.mkstemp(
-            prefix=".gpio-overview-",
-            suffix=".parquet",
-            dir=os.path.dirname(os.path.abspath(output_path)),
-        )
-        os.close(fd)
-        try:
-            geometry_column = primary_geometry_column(schema)
+        geometry_column = primary_geometry_column(schema)
+        # Staged beside the output and moved into place (file_utils.atomic_write).
+        with atomic_write(output_path) as staged:
             # OVERVIEWS_SPEC 4.5: no dictionary encoding on the geometry.
-            writer_kwargs = without_geometry_dictionary(
-                resolve_codec(compression, compression_level, context="process").pyarrow_kwargs(),
+            with open_parquet_writer(
+                staged,
                 schema,
-                [geometry_column] if geometry_column else (),
-            )
-            with pq.ParquetWriter(tmp_path, schema, **writer_kwargs) as writer:
-                _write_levels(writer, files, data_schema, schema, rows_per_group)
-            written = pq.read_metadata(tmp_path).num_row_groups
+                codec.pyarrow_kwargs(),
+                geometry_columns=[geometry_column] if geometry_column else (),
+            ) as writer:
+                _write_levels(writer.write_table, files, data_schema, schema, rows_per_group)
+            written = pq.read_metadata(staged).num_row_groups
             if written != ends[-1] + 1:
                 raise RuntimeError(
                     f"wrote {written} row groups but the footer describes {ends[-1] + 1}; "
                     "the level boundaries would be wrong, so nothing was kept"
                 )
-            os.replace(tmp_path, output_path)
-        except BaseException:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-            raise
     finally:
         for pf in files:
             pf.close()

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-import tempfile
-import uuid
 
 from geoparquet_io.core.add.kdtree import (
     ITERATIONS_CONFLICT,
@@ -12,6 +10,7 @@ from geoparquet_io.core.add.kdtree import (
     require_iterations_or_auto,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, PartitionError
+from geoparquet_io.core.file_utils import scratch_path, unlink_released_file
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
@@ -27,14 +26,6 @@ from geoparquet_io.core.partition.common import (
     raise_if_no_rows,
 )
 from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file
-
-
-def _cleanup_temp_file(temp_file: str | None, verbose: bool = False) -> None:
-    """Clean up a temporary file if it exists."""
-    if temp_file and os.path.exists(temp_file):
-        if verbose:
-            debug("Cleaning up temporary file...")
-        os.remove(temp_file)
 
 
 def _add_kdtree_column_to_temp(
@@ -57,10 +48,7 @@ def _add_kdtree_column_to_temp(
     if verbose and iterations is not None:
         debug(f"Adding KD-tree column '{kdtree_column_name}' with {2**iterations} partitions...")
 
-    temp_dir = tempfile.gettempdir()
-    temp_file = os.path.join(
-        temp_dir, f"kdtree_enriched_{uuid.uuid4()}_{os.path.basename(input_file)}"
-    )
+    temp_file = scratch_path(f"_{os.path.basename(input_file)}", prefix="kdtree_enriched_")
 
     try:
         add_kdtree_column(
@@ -82,10 +70,10 @@ def _add_kdtree_column_to_temp(
     except InvalidParameterError:
         # A parameter fault is the caller's to fix, not a partition failure:
         # let it surface under its own type, as it does through `add kdtree`.
-        _cleanup_temp_file(temp_file)
+        unlink_released_file(temp_file)
         raise
     except Exception as e:
-        _cleanup_temp_file(temp_file)
+        unlink_released_file(temp_file)
         raise PartitionError(f"Failed to add KD-tree column: {str(e)}") from e
 
 
@@ -258,7 +246,7 @@ def partition_by_kdtree(
             try:
                 _show_partition_preview(working_input, kdtree_column_name, preview_limit, verbose)
             finally:
-                _cleanup_temp_file(temp_file)
+                unlink_released_file(temp_file)
             return
 
         # Build description for user feedback. In auto mode the count is not known
@@ -286,7 +274,7 @@ def partition_by_kdtree(
                 success(f"\nCreated {num_partitions} partition(s) in {output_folder}")
 
         finally:
-            _cleanup_temp_file(temp_file, verbose)
+            unlink_released_file(temp_file)
     finally:
         # Clean up stdin temp file
-        _cleanup_temp_file(stdin_temp_file)
+        unlink_released_file(stdin_temp_file)

@@ -178,8 +178,7 @@
     "ResolvedCodec",
     "codec_from_footer",
     "print_copy_dry_run",
-    "resolve_codec",
-    "resolve_process_compression_level"
+    "resolve_codec"
   ],
   "geoparquet_io.core.crs_utils": [
     "CRS_ABSENT",
@@ -408,6 +407,7 @@
     "parse_geometry_input"
   ],
   "geoparquet_io.core.file_utils": [
+    "atomic_write",
     "copy_file",
     "get_all_parquet_files",
     "get_first_parquet_file",
@@ -423,6 +423,9 @@
     "resolve_file_url",
     "resolve_object_store",
     "resolve_partition_path",
+    "scratch_dir",
+    "scratch_file",
+    "scratch_path",
     "unlink_released_file",
     "validate_output_path",
     "validate_parquet_extension"
@@ -452,6 +455,7 @@
     "DEFAULT_GEOPARQUET_VERSION",
     "DERIVED_STAT_KEYS",
     "DETECT_BBOX_COLUMN",
+    "GENERATED_COLUMN_FIELDS",
     "GEOARROW_ENCODINGS",
     "GEOPARQUET_VERSIONS",
     "GeoBlockOptions",
@@ -487,6 +491,7 @@
     "covering_lacks_bbox",
     "covering_supported",
     "declared_version",
+    "declared_write_metadata",
     "declares_covering_member",
     "geo_key_value",
     "geoarrow_dimension",
@@ -616,6 +621,7 @@
     "dictionary_columns",
     "estimate_row_size",
     "geoparquet_copy_options",
+    "located_row_group_layout",
     "note_duckdb_copy_rounding",
     "output_schema_metadata",
     "regroup",
@@ -676,10 +682,10 @@
     "collect_nonplanar_edges",
     "declared_nonplanar_edges",
     "extract_preserved_kv_metadata",
+    "open_parquet_writer",
     "read_preserved_kv_metadata",
     "rewrite_file_through_funnel",
     "rewrite_footer_kv",
-    "staged_replacement",
     "table_nonplanar_edges",
     "write_aggregate_table",
     "write_geoparquet_table",

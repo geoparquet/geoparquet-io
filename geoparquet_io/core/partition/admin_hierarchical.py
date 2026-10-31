@@ -38,7 +38,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.exceptions import PartitionError
-from geoparquet_io.core.file_utils import output_is_kept, resolve_file_url
+from geoparquet_io.core.file_utils import output_is_kept, resolve_file_url, unlink_released_file
 from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
     require_geometry_column,
@@ -565,8 +565,7 @@ def partition_by_admin_hierarchical(
         return partition_count
     finally:
         # Clean up stdin temp file
-        if stdin_temp_file and os.path.exists(stdin_temp_file):
-            os.remove(stdin_temp_file)
+        unlink_released_file(stdin_temp_file)
 
 
 def _get_preview_partitions(con, table_name, partition_columns, level_names):

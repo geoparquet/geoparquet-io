@@ -11,11 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
-import tempfile
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
-from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -192,63 +188,6 @@ class WriteStrategy(str, Enum):
     DISK_REWRITE = "disk-rewrite"
 
 
-@contextmanager
-def atomic_write(
-    output_path: str,
-    suffix: str = ".parquet",
-    *,
-    sidecar_suffixes: Iterable[str] | None = None,
-):
-    """
-    Context manager for atomic file writes with cleanup.
-
-    Stages in a temp directory beside the output, yields a path inside it, and
-    on success moves the result over ``output_path``. On any failure, including
-    a ``KeyboardInterrupt``, the whole directory is removed, so a partial file
-    (and anything the writer left next to it) never reaches the destination,
-    and a file that already existed there is never deleted.
-
-    The staged file is named after the output's stem plus ``suffix``, so a
-    writer that derives a name from the file (a GDAL layer) sees the output's.
-
-    ``sidecar_suffixes`` stages a set of files that share the output's stem
-    (a Shapefile's ``.shp``/``.shx``/``.dbf``/``.prj``/...). Every file the
-    writer leaves in the staging directory is published beside the output, and
-    an old file named ``<stem><suffix>`` for a listed suffix that the new set
-    lacks is removed, so a stale ``.cpg`` or ``.sbn`` cannot outlive an
-    overwrite. A multi-file publish is atomic per file, not as a set: a crash
-    between two moves leaves a mix of old and new files.
-
-    Args:
-        output_path: Final destination path for the file
-        suffix: File suffix for the staged file (default: .parquet)
-        sidecar_suffixes: Suffixes of sidecar files that belong to the output
-
-    Yields:
-        str: Path to the staged file to write to
-
-    Raises:
-        Any exception from the write operation (after cleanup)
-    """
-    final = Path(output_path)
-    stage_dir = Path(tempfile.mkdtemp(prefix=".gpio-stage-", dir=final.parent))
-    staged = stage_dir / f"{final.stem}{suffix}"
-    try:
-        yield str(staged)
-        if sidecar_suffixes is not None:
-            published = {part.name for part in stage_dir.iterdir()}
-            for sidecar in sorted(stage_dir.iterdir()):
-                if sidecar != staged:
-                    os.replace(sidecar, final.parent / sidecar.name)
-            for stale in sidecar_suffixes:
-                old = final.parent / f"{final.stem}{stale}"
-                if old.name not in published and old != final:
-                    old.unlink(missing_ok=True)
-        os.replace(staged, final)
-    finally:
-        shutil.rmtree(stage_dir, ignore_errors=True)
-
-
 #: The :meth:`BaseWriteStrategy.write_from_table` arguments a query write takes
 #: unchanged.
 _TABLE_WRITE_FORWARDED = (
@@ -334,6 +273,7 @@ class BaseWriteStrategy(ABC):
         input_crs: dict | None = None,
         custom_metadata: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        original_metadata: dict | None = None,
     ) -> None:
         """
         Write Arrow table to GeoParquet file.
@@ -370,7 +310,7 @@ class BaseWriteStrategy(ABC):
         self.write_from_query(
             con=con,
             query=query,
-            original_metadata=None,
+            original_metadata=table_args.get("original_metadata"),
             geoparquet_version=geoparquet_version,
             geometry_info=geometry_info,
             **forwarded,

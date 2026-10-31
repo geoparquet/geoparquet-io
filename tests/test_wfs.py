@@ -1921,7 +1921,8 @@ class TestGMLResponseParsing:
         table = self._fetch_gml()
         assert table.schema.metadata.get(_SERVER_CRS_METADATA_KEY) == b"EPSG:4326"
 
-    def test_leaves_no_temp_files_behind(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("closing_handle", [False, True])
+    def test_leaves_no_temp_files_behind(self, tmp_path, monkeypatch, closing_handle):
         """GDAL writes a .gfs sidecar for schema-less GML; nothing may survive.
 
         The GeoJSON path used a NamedTemporaryFile and unlinked exactly that one
@@ -1939,7 +1940,21 @@ class TestGMLResponseParsing:
         import tempfile
 
         monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        import os
+
+        real_unlink = os.unlink
+        failures = []
+
+        def unlink(path, *args, **kwargs):
+            if closing_handle and str(path).endswith("response.gml") and not failures:
+                failures.append(path)
+                raise PermissionError("GDAL handle still closing")
+            return real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "unlink", unlink)
         self._fetch_gml()
+        if closing_handle:
+            assert failures
 
         leaked = sorted(p.name for p in tmp_path.glob("gpio-wfs-*"))
         assert not leaked, f"GML parse leaked temp directories: {leaked}"

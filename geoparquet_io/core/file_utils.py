@@ -7,6 +7,10 @@ import fnmatch
 import functools
 import glob as glob_module
 import os
+import shutil
+import tempfile
+import uuid
+from collections.abc import Iterable, Iterator
 from pathlib import Path, PurePath
 
 from geoparquet_io.core.duckdb_utils import get_active_s3_config
@@ -147,12 +151,7 @@ def get_first_parquet_file(partition_path: str) -> str | None:
         return partition_path
 
     if os.path.isdir(partition_path):
-        for root, dirs, files in os.walk(partition_path):
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
-            for f in sorted(files):
-                if f.endswith(".parquet") and not f.startswith("."):
-                    return os.path.join(root, f)
-        return None
+        return next(iter(get_all_parquet_files(partition_path)), None)
 
     if has_glob_pattern(partition_path):
         return next(iter(_parquet_glob_matches(partition_path)), None)
@@ -160,11 +159,13 @@ def get_first_parquet_file(partition_path: str) -> str | None:
     return partition_path
 
 
-def get_all_parquet_files(partition_path: str) -> list[str]:
+def get_all_parquet_files(partition_path: str, *, recursive: bool = True) -> list[str]:
     """Every ``.parquet`` file under a directory or matched by a glob, sorted.
 
-    An object-store glob is listed (:func:`glob_matches`); any other remote
-    URL cannot be listed and is returned as given.
+    The one listing rule (#1367 HANDOFFS row 74): dotfiles and dot-directories
+    are not data. An object-store glob is listed (:func:`glob_matches`); any
+    other remote URL cannot be listed and is returned as given.
+    ``recursive=False`` lists a directory's own files only.
     """
     if is_remote_url(partition_path):
         if has_glob_pattern(partition_path) and needs_httpfs(partition_path):
@@ -177,7 +178,7 @@ def get_all_parquet_files(partition_path: str) -> list[str]:
         # orphaned `.gpio-stage-*` staging directory are not data.
         parquet_files = []
         for root, dirs, files in os.walk(partition_path):
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            dirs[:] = [d for d in dirs if not d.startswith(".")] if recursive else []
             for f in files:
                 if f.endswith(".parquet") and not f.startswith("."):
                     parquet_files.append(os.path.join(root, f))
@@ -428,21 +429,140 @@ def handle_output_overwrite(
 _UNLINK_WAITS = (0.1, 0.2, 0.3)
 
 
-def unlink_released_file(path: Path) -> None:
+def unlink_released_file(path: str | os.PathLike | None) -> None:
     """Delete a scratch file, waiting for Windows to release its handle.
 
-    Windows refuses to unlink a file another handle still holds, and a reader
-    gpio just closed can keep it briefly. Three tries, then give up quietly:
-    this is cleanup of a temporary file, never a write path.
+    The one scratch cleanup (#1367 concept 11): a missing file or ``None`` is
+    nothing to do. Windows refuses to unlink a file another handle still holds,
+    and a reader gpio just closed can keep it briefly. Three tries, then give
+    up quietly: this is cleanup of a temporary file, never a write path.
     """
     import time
 
+    if path is None:
+        return
     for wait in _UNLINK_WAITS:
         try:
-            path.unlink(missing_ok=True)
+            Path(path).unlink(missing_ok=True)
             return
         except OSError:
             time.sleep(wait)
+
+
+def _take_mode(staged: Path, source: Path | str | None) -> None:
+    """Give *staged* the permission bits of *source*; a missing source changes nothing."""
+    if source is None:
+        return
+    with contextlib.suppress(OSError):
+        shutil.copymode(source, staged)
+
+
+def _publish_sidecars(stage_dir: Path, staged: Path, final: Path, suffixes: Iterable[str]) -> None:
+    """Move every file the writer left beside *staged*, and drop the old set's leftovers."""
+    published = {part.name for part in stage_dir.iterdir()}
+    for sidecar in sorted(stage_dir.iterdir()):
+        if sidecar != staged:
+            os.replace(sidecar, final.parent / sidecar.name)
+    for stale in suffixes:
+        old = final.parent / f"{final.stem}{stale}"
+        if old.name not in published and old != final:
+            old.unlink(missing_ok=True)
+
+
+@contextlib.contextmanager
+def atomic_write(
+    destination: str,
+    suffix: str = ".parquet",
+    *,
+    sidecar_suffixes: Iterable[str] | None = None,
+    mode_from: str | None = None,
+) -> Iterator[str]:
+    """The path a write goes to, moved over *destination* once the block succeeds.
+
+    The one staging rule for every gpio output written where a reader may be
+    looking (#1367 concept 11). The writer gets a path in a fresh
+    ``.gpio-stage-*`` directory beside the destination -- the same filesystem,
+    so publishing is one ``os.replace`` -- named after the destination's stem
+    plus *suffix*, so a writer that derives a layer name from the file sees the
+    output's. On success the staged file is moved over the destination; on any
+    failure, a ``KeyboardInterrupt`` included, the staging directory is removed
+    and the destination is exactly as it was (#1076). The original is never
+    unlinked or truncated first, and the move happens only after the block has
+    closed its writer and every reader it opened: Windows refuses to rename
+    over a path a handle holds open (#1032, #959). A block that writes nothing
+    publishes nothing.
+
+    A symlinked destination is written through: the link's target is the file
+    replaced, and the link stays a link (#1076). The published file takes the
+    destination's mode when it replaces one, else *mode_from*'s when given (a
+    footer patch's copy takes its input's), else the umask's -- never a temp
+    file's 0600.
+
+    *sidecar_suffixes* publishes a set of files that share the output's stem (a
+    Shapefile's ``.shp``/``.shx``/``.dbf``/``.prj``/...): every file the writer
+    leaves in the staging directory lands beside the output, and an old
+    ``<stem><suffix>`` for a listed suffix the new set lacks is removed, so a
+    stale ``.cpg`` cannot outlive an overwrite. A multi-file publish is atomic
+    per file, not as a set.
+
+    A remote destination is yielded as given: there is no local file to rename
+    over, and the writer stages and uploads it (``remote_write_context``).
+    """
+    if is_remote_url(str(destination)):
+        yield str(destination)
+        return
+    final = Path(os.path.realpath(destination))
+    stage_dir = Path(tempfile.mkdtemp(prefix=".gpio-stage-", dir=final.parent))
+    staged = stage_dir / f"{final.stem}{suffix}"
+    try:
+        yield str(staged)
+        if not staged.exists():
+            return  # the writer decided there was nothing to write
+        _take_mode(staged, final if final.exists() else mode_from)
+        if sidecar_suffixes is not None:
+            _publish_sidecars(stage_dir, staged, final, sidecar_suffixes)
+        os.replace(staged, final)
+    finally:
+        shutil.rmtree(stage_dir, ignore_errors=True)
+
+
+def scratch_path(suffix: str = ".parquet", *, prefix: str = "gpio_") -> str:
+    """A fresh path in the temp directory for a scratch file that outlives a block.
+
+    For a copy whose lifetime crosses a function boundary -- returned to the
+    caller (stdin's spool), held by a strategy until its upload -- where
+    :func:`scratch_file` cannot own it. The file is not created; whoever holds
+    the path removes it with :func:`unlink_released_file`.
+    """
+    return os.path.join(tempfile.gettempdir(), f"{prefix}{uuid.uuid4().hex}{suffix}")
+
+
+@contextlib.contextmanager
+def scratch_file(suffix: str = ".parquet", *, prefix: str = "gpio_") -> Iterator[str]:
+    """A path for a scratch file that is read back and never published.
+
+    The one temp-naming rule for an intermediate copy (a pass between two
+    writes, a spooled input, an in-memory table a file-based call reads). The
+    path is in a fresh private directory (0700) under the temp directory, so
+    the copy of the user's data is no one else's to read, and the file is not
+    created -- the writer makes it. The directory and everything in it are
+    removed when the block exits, whatever the outcome.
+    """
+    with scratch_dir(prefix=prefix) as scratch:
+        yield str(Path(scratch) / f"scratch{suffix}")
+
+
+@contextlib.contextmanager
+def scratch_dir(*, prefix: str = "gpio_", directory: str | None = None) -> Iterator[str]:
+    """A private (0700) scratch directory, removed with its contents on exit."""
+    scratch = Path(tempfile.mkdtemp(prefix=prefix, dir=directory))
+    try:
+        yield str(scratch)
+    finally:
+        for leftover in scratch.rglob("*"):
+            if leftover.is_file() or leftover.is_symlink():
+                unlink_released_file(leftover)
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 # copy_file resolves the s3, gcs and azure families to a configured object store

@@ -329,18 +329,18 @@ class TestStreamIO:
 
     def test_wrap_query_with_wkb_conversion(self):
         """Test WKB wrapping of queries."""
-        from geoparquet_io.core.stream_io import _wrap_query_with_wkb_conversion
+        from geoparquet_io.core.duckdb_utils import _wrap_query_with_wkb_conversion
 
         query = "SELECT * FROM data"
         result = _wrap_query_with_wkb_conversion(query, "geometry")
         # The geometry column is an identifier and is quoted at every raw SQL
         # interpolation (see CLAUDE.md's DuckDB patterns; enforced since #662).
         assert 'ST_AsWKB("geometry")' in result
-        assert "__stream_source" in result
+        assert "REPLACE" in result
 
     def test_wrap_query_with_wkb_conversion_no_geom(self):
         """Test that None geometry skips wrapping."""
-        from geoparquet_io.core.stream_io import _wrap_query_with_wkb_conversion
+        from geoparquet_io.core.duckdb_utils import _wrap_query_with_wkb_conversion
 
         query = "SELECT * FROM data"
         result = _wrap_query_with_wkb_conversion(query, None)

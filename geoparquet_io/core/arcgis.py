@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
-import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -46,7 +44,11 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
     RemoteAccessError,
 )
-from geoparquet_io.core.file_utils import handle_output_overwrite
+from geoparquet_io.core.file_utils import (
+    handle_output_overwrite,
+    scratch_path,
+    unlink_released_file,
+)
 from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
     SchemaSource,
@@ -1291,7 +1293,7 @@ def _json_doc_to_table(doc: dict, exclude: str, suffix: str, con=None) -> pa.Tab
     owns_con = con is None
     if owns_con:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-    temp_file = tempfile.gettempdir() + f"/arcgis_page_{uuid.uuid4()}{suffix}"
+    temp_file = scratch_path(suffix, prefix="arcgis_page_")
 
     try:
         with open(temp_file, "w") as f:
@@ -1312,8 +1314,7 @@ def _json_doc_to_table(doc: dict, exclude: str, suffix: str, con=None) -> pa.Tab
     finally:
         if owns_con:
             con.close()
-        if os.path.exists(temp_file):
-            os.unlink(temp_file)
+        unlink_released_file(temp_file)
 
 
 def _geojson_page_to_table(features: list[dict], con=None) -> pa.Table | None:
@@ -1744,7 +1745,7 @@ def arcgis_to_table(
         debug(f"Requesting fields: {out_fields}")
 
     # Pass 1: Stream features to temp parquet file (memory-efficient)
-    temp_parquet = tempfile.gettempdir() + f"/arcgis_stream_{uuid.uuid4()}.parquet"
+    temp_parquet = scratch_path(prefix="arcgis_stream_")
 
     try:
         progress("Streaming features to temp file...")
@@ -1791,13 +1792,9 @@ def arcgis_to_table(
         return table
 
     finally:
-        # Clean up temp file (best-effort: on Windows pyarrow may still hold
-        # the file handle after read_table, raising PermissionError on unlink)
-        if os.path.exists(temp_parquet):
-            try:
-                os.unlink(temp_parquet)
-            except OSError:
-                debug(f"Could not remove temp file {temp_parquet}")
+        # Best-effort: on Windows pyarrow may still hold the file handle after
+        # read_table; the owner retries, then gives up quietly.
+        unlink_released_file(temp_parquet)
 
 
 @uses_aws_profile

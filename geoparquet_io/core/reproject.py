@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
-import shutil
-import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -41,7 +39,12 @@ from geoparquet_io.core.duckdb_utils import (
     uses_aws_profile,
 )
 from geoparquet_io.core.edges import PLANAR, edges_of, is_geodesic
-from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.file_utils import (
+    atomic_write,
+    resolve_file_url,
+    scratch_file,
+    unlink_released_file,
+)
 from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
     QuerySource,
@@ -354,7 +357,7 @@ def _warn_carried_bbox_structs(input_path: str, bbox_col: str | None) -> None:
         )
 
 
-def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, str | None]:
+def _sanitize_null_crs_file(raw_path: str, scratch: ExitStack, verbose: bool = False) -> str:
     """Strip an explicit ``crs: null`` so the file presents as default OGC:CRS84.
 
     DuckDB's GeoParquet reader rejects ``crs: null`` outright, so for the
@@ -368,11 +371,11 @@ def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, 
     SQL).
 
     Returns:
-        ``(path_to_read, temp_path_or_None)`` — the second element, when set, is a
-        temp file the caller must delete.
+        The path to read: *raw_path*, or the copy, a ``file_utils.scratch_file``
+        entered on *scratch*, so it is removed when the caller's stack closes.
     """
     if not geoparquet_crs_is_null(raw_path):
-        return raw_path, None
+        return raw_path
 
     # The footer wins over the Arrow schema's view of it: a `geo` key appended
     # after the writer opened is in the footer only, and the guard above read
@@ -401,31 +404,30 @@ def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, 
             ),
         )
 
-    # mkstemp creates the file atomically with 0600 perms (it holds a full copy
-    # of the user's data) and a collision-free name. Only the `geo` key
-    # changes, so the copy is a footer patch: every page is the input's.
-    fd, temp_path = tempfile.mkstemp(suffix=".parquet", prefix="gpio_assume_crs84_")
-    os.close(fd)
-    try:
-        patch_or_rewrite(
-            raw_path,
-            {"geo": geo_key_value(geo_meta)},
-            output_file=temp_path,
-            rewrite=rewrite_footer_kv,
-            verbose=verbose,
-        )
-    except BaseException:
-        # Self-clean on any failure after creation so we never orphan the copy.
-        Path(temp_path).unlink(missing_ok=True)
-        raise
+    # Only the `geo` key changes, so the copy is a footer patch: every page is
+    # the input's. The copy holds a full copy of the user's data, so it lives
+    # in a private scratch directory, removed with the caller's stack.
+    temp_path = scratch.enter_context(scratch_file(prefix="gpio_assume_crs84_"))
+    patch_or_rewrite(
+        raw_path,
+        {"geo": geo_key_value(geo_meta)},
+        output_file=temp_path,
+        rewrite=rewrite_footer_kv,
+        verbose=verbose,
+    )
     if verbose:
         debug(f"Treating unknown (null) CRS as OGC:CRS84 for {raw_path}")
-    return temp_path, temp_path
+    return temp_path
 
 
 def _resolve_null_crs_input(
-    raw_path: str, assume_crs84: bool, verbose: bool, source_crs: str | None = None
-) -> tuple[str, str | None, str | None]:
+    raw_path: str,
+    assume_crs84: bool,
+    verbose: bool,
+    source_crs: str | None = None,
+    *,
+    scratch: ExitStack,
+) -> tuple[str, str | None]:
     """Resolve an unknown input CRS before DuckDB reads the file.
 
     Unknown is ``crs: null``, an empty ``crs`` or a ``srid:0`` type, decided by
@@ -438,17 +440,18 @@ def _resolve_null_crs_input(
     ``raw_path`` must be the *unescaped* path/URL.
 
     Returns:
-        ``(path_to_read, temp_path_or_None, forced_source_or_None)``. The paths
-        are raw (unescaped). The third is ``"OGC:CRS84"`` when ``assume_crs84``
-        decides the source of an unknown input, else ``None``.
+        ``(path_to_read, forced_source_or_None)``. The path is raw (unescaped);
+        a sanitized copy is entered on *scratch*. The second is ``"OGC:CRS84"``
+        when ``assume_crs84`` decides the source of an unknown input, else
+        ``None``.
     """
     reason = unknown_crs_reason(raw_path)
     if reason is None:
-        return raw_path, None, None
+        return raw_path, None
     if source_crs is None and not assume_crs84:
         raise ValueError(unknown_crs_error(reason))
-    read_path, temp_path = _sanitize_null_crs_file(raw_path, verbose=verbose)
-    return read_path, temp_path, (None if source_crs is not None else "OGC:CRS84")
+    read_path = _sanitize_null_crs_file(raw_path, scratch, verbose=verbose)
+    return read_path, (None if source_crs is not None else "OGC:CRS84")
 
 
 @uses_aws_profile
@@ -501,70 +504,91 @@ def reproject_impl(
     # Resolve an unknown CRS before DuckDB reads the file: raise a friendly
     # error without --src-crs or --assume-crs84, or sanitize to a temp copy with
     # one. Pass the raw path (not the SQL-escaped URL) to the metadata helpers.
-    read_source, temp_sanitized, forced_source = _resolve_null_crs_input(
-        input_parquet, assume_crs84, verbose=verbose, source_crs=source_crs
-    )
-
-    # Safe URL for SQL interpolation, computed from the (possibly sanitized) path.
-    input_url = resolve_file_url(read_source, verbose=verbose)
-
-    # Create DuckDB connection with spatial extension
-    con = get_duckdb_connection(
-        load_spatial=True,
-        load_httpfs=needs_httpfs(input_parquet),
-    )
-
-    try:
-        # Detect geometry column
-        geom_col = require_geometry_column(
-            primary_geometry_column(read_source, verbose=verbose), read_source
+    # Every scratch copy (the sanitized input) is removed when this stack
+    # closes, whatever the outcome (file_utils.scratch_file).
+    with ExitStack() as scratch:
+        read_source, forced_source = _resolve_null_crs_input(
+            input_parquet, assume_crs84, verbose=verbose, source_crs=source_crs, scratch=scratch
         )
-        warn_planar_math_for_file("reproject", read_source, geom_col)
-        log(f"Geometry column: {geom_col}")
 
-        # An explicit --src-crs wins without reading the file's CRS, so it also
-        # works around one that cannot be resolved (#1258).
-        if source_crs is not None:
-            info(f"Using source CRS: {source_crs}")
-            effective_source_crs = source_crs
-        else:
-            effective_source_crs = forced_source or _detect_source_crs(
-                read_source, verbose, geom_col
+        # Safe URL for SQL interpolation, computed from the (possibly sanitized) path.
+        input_url = resolve_file_url(read_source, verbose=verbose)
+
+        # Create DuckDB connection with spatial extension
+        con = get_duckdb_connection(
+            load_spatial=True,
+            load_httpfs=needs_httpfs(input_parquet),
+        )
+
+        try:
+            # Detect geometry column
+            geom_col = require_geometry_column(
+                primary_geometry_column(read_source, verbose=verbose), read_source
             )
-            log(f"Source CRS: {transform_source_label(effective_source_crs)}")
+            warn_planar_math_for_file("reproject", read_source, geom_col)
+            log(f"Geometry column: {geom_col}")
 
-        log(f"Target CRS: {target_crs}")
+            # An explicit --src-crs wins without reading the file's CRS, so it also
+            # works around one that cannot be resolved (#1258).
+            if source_crs is not None:
+                info(f"Using source CRS: {source_crs}")
+                effective_source_crs = source_crs
+            else:
+                effective_source_crs = forced_source or _detect_source_crs(
+                    read_source, verbose, geom_col
+                )
+                log(f"Source CRS: {transform_source_label(effective_source_crs)}")
 
-        # Get feature count
-        count = fetch_one(con.execute(f"SELECT COUNT(*) FROM {sql_path(input_url)}"))[0]
-        log(f"Features: {count:,}")
+            log(f"Target CRS: {target_crs}")
 
-        # Check for existing bbox column to exclude (will be regenerated)
-        bbox_col = _get_bbox_column_name(read_source, verbose)
-        _warn_carried_bbox_structs(read_source, bbox_col)
-        exclude_cols = [geom_col]
-        if bbox_col:
-            exclude_cols.append(bbox_col)
-            if verbose:
-                debug(f"Excluding bbox column '{bbox_col}' (will be regenerated)")
-        # Quote column names to handle special characters (colons, spaces, etc.)
-        exclude_clause = ", ".join(quote_identifier(c) for c in exclude_cols)
+            # Get feature count
+            count = fetch_one(con.execute(f"SELECT COUNT(*) FROM {sql_path(input_url)}"))[0]
+            log(f"Features: {count:,}")
 
-        # Build SQL query with ST_Transform
-        # geometry_always_xy is set at connection level (DuckDB 1.5+)
-        log("Reprojecting...")
+            # Check for existing bbox column to exclude (will be regenerated)
+            bbox_col = _get_bbox_column_name(read_source, verbose)
+            _warn_carried_bbox_structs(read_source, bbox_col)
+            exclude_cols = [geom_col]
+            if bbox_col:
+                exclude_cols.append(bbox_col)
+                if verbose:
+                    debug(f"Excluding bbox column '{bbox_col}' (will be regenerated)")
+            # Quote column names to handle special characters (colons, spaces, etc.)
+            exclude_clause = ", ".join(quote_identifier(c) for c in exclude_cols)
 
-        # The detected source CRS may be a free-form string a file carried in
-        # its metadata or Parquet geo type (#866), so both CRS values are
-        # escaped like any other SQL literal.
-        source_crs_literal = sql_literal(effective_source_crs)
-        target_crs_literal = sql_literal(target_crs)
+            # Build SQL query with ST_Transform
+            # geometry_always_xy is set at connection level (DuckDB 1.5+)
+            log("Reprojecting...")
 
-        # Build bbox regeneration clause if input had bbox column
-        if bbox_col:
-            # Use CTE to avoid computing ST_Transform multiple times
-            query = f"""
-                WITH reprojected AS (
+            # The detected source CRS may be a free-form string a file carried in
+            # its metadata or Parquet geo type (#866), so both CRS values are
+            # escaped like any other SQL literal.
+            source_crs_literal = sql_literal(effective_source_crs)
+            target_crs_literal = sql_literal(target_crs)
+
+            # Build bbox regeneration clause if input had bbox column
+            if bbox_col:
+                # Use CTE to avoid computing ST_Transform multiple times
+                query = f"""
+                    WITH reprojected AS (
+                        SELECT
+                            * EXCLUDE ({exclude_clause}),
+                            ST_Transform(
+                                {quote_identifier(geom_col)},
+                                {source_crs_literal},
+                                {target_crs_literal}
+                            ) AS {quote_identifier(geom_col)}
+                        FROM {sql_path(input_url)}
+                    )
+                    SELECT
+                        *,
+                        {bbox_struct_sql(quote_identifier(geom_col), geom_col)} AS {quote_identifier(bbox_col)}
+                    FROM reprojected
+                """
+                if verbose:
+                    debug(f"Regenerating bbox column '{bbox_col}' with reprojected coordinates")
+            else:
+                query = f"""
                     SELECT
                         * EXCLUDE ({exclude_clause}),
                         ST_Transform(
@@ -573,106 +597,61 @@ def reproject_impl(
                             {target_crs_literal}
                         ) AS {quote_identifier(geom_col)}
                     FROM {sql_path(input_url)}
-                )
-                SELECT
-                    *,
-                    {bbox_struct_sql(quote_identifier(geom_col), geom_col)} AS {quote_identifier(bbox_col)}
-                FROM reprojected
-            """
-            if verbose:
-                debug(f"Regenerating bbox column '{bbox_col}' with reprojected coordinates")
-        else:
-            query = f"""
-                SELECT
-                    * EXCLUDE ({exclude_clause}),
-                    ST_Transform(
-                        {quote_identifier(geom_col)},
-                        {source_crs_literal},
-                        {target_crs_literal}
-                    ) AS {quote_identifier(geom_col)}
-                FROM {sql_path(input_url)}
-            """
+                """
 
-        # Determine output path
-        if output_parquet:
-            out_path = Path(output_parquet).resolve()
-        elif overwrite:
-            out_path = Path(input_parquet).resolve()
-        else:
-            # Generate output name: input_epsg_4326.parquet
-            input_path = Path(input_parquet)
-            target_suffix = target_crs.replace(":", "_").lower()
-            out_path = input_path.parent / f"{input_path.stem}_{target_suffix}.parquet"
+            # Determine output path
+            if output_parquet:
+                out_path = Path(output_parquet).resolve()
+            elif overwrite:
+                out_path = Path(input_parquet).resolve()
+            else:
+                # Generate output name: input_epsg_4326.parquet
+                input_path = Path(input_parquet)
+                target_suffix = target_crs.replace(":", "_").lower()
+                out_path = input_path.parent / f"{input_path.stem}_{target_suffix}.parquet"
 
-        log(f"Output: {out_path}")
+            log(f"Output: {out_path}")
 
-        # Validate compression settings
-        codec = resolve_codec(
-            write.compression, write.compression_level, context="write", verbose=verbose
-        )
-        write = replace(write, compression=codec.name, compression_level=codec.level)
+            # Validate compression settings
+            codec = resolve_codec(
+                write.compression, write.compression_level, context="write", verbose=verbose
+            )
+            write = replace(write, compression=codec.name, compression_level=codec.level)
 
-        # Get target CRS as PROJJSON for metadata
-        target_crs_projjson = parse_crs_string_to_projjson(target_crs, con)
+            # Get target CRS as PROJJSON for metadata
+            target_crs_projjson = parse_crs_string_to_projjson(target_crs, con)
 
-        # Read original metadata to preserve non-geo KV metadata (e.g., vecorel)
-        original_metadata, _ = get_parquet_metadata(input_parquet, verbose)
+            # Read original metadata to preserve non-geo KV metadata (e.g., vecorel)
+            original_metadata, _ = get_parquet_metadata(input_parquet, verbose)
 
-        # A projected destination invalidates the transformed column's
-        # non-planar `edges` declaration: the reprojected edges are straight
-        # lines there (#601). Untransformed columns keep theirs.
-        drop_edges_columns = _edges_columns_to_drop(read_source, target_crs, geom_col, con)
+            # A projected destination invalidates the transformed column's
+            # non-planar `edges` declaration: the reprojected edges are straight
+            # lines there (#601). Untransformed columns keep theirs.
+            drop_edges_columns = _edges_columns_to_drop(read_source, target_crs, geom_col, con)
 
-        # Auto version mode (todo 040): the funnel below decides it from
-        # `input_file=read_source`, through the facade, like every other write.
+            # Auto version mode (todo 040): the funnel below decides it from
+            # `input_file=read_source`, through the facade, like every other write.
 
-        # Handle in-place overwrite
-        is_overwrite = str(out_path) == str(Path(input_parquet).resolve())
-
-        if is_overwrite:
-            # Write to temp file first, then replace
-            with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-                tmp_path = Path(tmp.name)
-
-            try:
-                write_parquet_with_metadata(
-                    con,
-                    query,
-                    str(tmp_path),
-                    original_metadata=original_metadata,
-                    verbose=verbose,
-                    input_crs=target_crs_projjson,
-                    **write.funnel_kwargs(),
-                    input_file=read_source,
-                    invalidate_derived_stats=True,
-                    invalidate_derived_stats_columns={geom_col},
-                    drop_nonplanar_edges_columns=drop_edges_columns,
-                )
-                # Replace original with temp file
-                shutil.move(str(tmp_path), str(out_path))
-            except Exception:
-                if tmp_path.exists():
-                    tmp_path.unlink()
-                raise
-        else:
-            # Write directly to output
+            # Staged beside the output and moved over it (file_utils.atomic_write),
+            # in place or not: a failed write leaves the destination as it was.
             with remote_write_context(str(out_path), verbose=verbose) as (
                 actual_output,
                 is_remote,
             ):
-                write_parquet_with_metadata(
-                    con,
-                    query,
-                    actual_output,
-                    original_metadata=original_metadata,
-                    verbose=verbose,
-                    input_crs=target_crs_projjson,
-                    **write.funnel_kwargs(),
-                    input_file=read_source,
-                    invalidate_derived_stats=True,
-                    invalidate_derived_stats_columns={geom_col},
-                    drop_nonplanar_edges_columns=drop_edges_columns,
-                )
+                with atomic_write(actual_output) as staged:
+                    write_parquet_with_metadata(
+                        con,
+                        query,
+                        staged,
+                        original_metadata=original_metadata,
+                        verbose=verbose,
+                        input_crs=target_crs_projjson,
+                        **write.funnel_kwargs(),
+                        input_file=read_source,
+                        invalidate_derived_stats=True,
+                        invalidate_derived_stats_columns={geom_col},
+                        drop_nonplanar_edges_columns=drop_edges_columns,
+                    )
 
                 if is_remote:
                     upload_if_remote(
@@ -683,24 +662,21 @@ def reproject_impl(
                         verbose=verbose,
                     )
 
-        if verbose:
-            success(
-                f"Reprojected {count:,} features from "
-                f"{transform_source_label(effective_source_crs)} to {target_crs}"
+            if verbose:
+                success(
+                    f"Reprojected {count:,} features from "
+                    f"{transform_source_label(effective_source_crs)} to {target_crs}"
+                )
+
+            return ReprojectResult(
+                output_path=out_path,
+                source_crs=effective_source_crs,
+                target_crs=target_crs,
+                feature_count=count,
             )
 
-        return ReprojectResult(
-            output_path=out_path,
-            source_crs=effective_source_crs,
-            target_crs=target_crs,
-            feature_count=count,
-        )
-
-    finally:
-        con.close()
-        # unlink(missing_ok) avoids a TOCTOU and can't mask the real exception.
-        if temp_sanitized:
-            Path(temp_sanitized).unlink(missing_ok=True)
+        finally:
+            con.close()
 
 
 def _reproject_streaming(
@@ -717,23 +693,22 @@ def _reproject_streaming(
     if should_stream_output(output_path):
         verbose = False
 
-    temp_input_file = None
-    temp_sanitized = None
-
-    try:
+    # Every scratch copy (stdin's spool, the sanitized input) is removed when
+    # this stack closes, whatever the outcome.
+    with ExitStack() as scratch:
         # If reading from stdin, write to temp file first. The shared bridge
         # reconciles the stream's geo metadata with its schema on the way, so
         # the temp file is one DuckDB will actually open (#722).
         if is_stdin(input_path):
-            temp_input_file = read_stdin_to_temp_file(verbose)
-            working_file = temp_input_file
+            working_file = read_stdin_to_temp_file(verbose)
+            scratch.callback(unlink_released_file, working_file)
         else:
             working_file = input_path
 
         # Resolve an unknown CRS (raise without a flag, sanitize with one),
         # passing the raw path, not the SQL-escaped URL, to the PyArrow helpers.
-        working_file, temp_sanitized, forced_source = _resolve_null_crs_input(
-            working_file, assume_crs84, verbose=verbose, source_crs=source_crs
+        working_file, forced_source = _resolve_null_crs_input(
+            working_file, assume_crs84, verbose=verbose, source_crs=source_crs, scratch=scratch
         )
 
         # Get safe URL for SQL interpolation
@@ -847,13 +822,6 @@ def _reproject_streaming(
 
         finally:
             con.close()
-
-    finally:
-        # Clean up temp input file(s). unlink(missing_ok) avoids masking errors.
-        if temp_input_file:
-            Path(temp_input_file).unlink(missing_ok=True)
-        if temp_sanitized:
-            Path(temp_sanitized).unlink(missing_ok=True)
 
 
 def reproject(

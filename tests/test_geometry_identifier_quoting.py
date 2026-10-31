@@ -42,9 +42,13 @@ from geoparquet_io.core.duckdb_metadata import (
     get_compression_info,
     get_per_row_group_bbox_stats,
 )
-from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, quote_identifier
+from geoparquet_io.core.duckdb_utils import (
+    _wrap_query_with_wkb_conversion,
+    fetch_one,
+    get_duckdb_connection,
+    quote_identifier,
+)
 from geoparquet_io.core.parquet_writer import WriteOptions
-from geoparquet_io.core.stream_io import _wrap_query_with_wkb_conversion
 from tests.conftest import skip_if_geography_unavailable
 
 # A geometry column name with a space -- breaks unquoted identifier
@@ -173,7 +177,7 @@ class TestQuoteIdentifierContract:
             quote_identifier("ge\x00om")
 
 
-# --- Site 1: stream_io._wrap_query_with_wkb_conversion ----------------------
+# --- Site 1: duckdb_utils._wrap_query_with_wkb_conversion---------------------
 
 
 class TestStreamIoWkbConversionQuoting:

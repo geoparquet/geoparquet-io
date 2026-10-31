@@ -11,7 +11,7 @@ from geoparquet_io.core.admin_datasets import (
     open_admin_join_connection,
     resolve_admin_dataset,
 )
-from geoparquet_io.core.compression import resolve_process_compression_level
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet
 from geoparquet_io.core.duckdb_utils import (
     as_wkb_sql,
@@ -229,7 +229,7 @@ def aggregate_by_admin(
         memory_limit: DuckDB memory limit for the join and aggregation (e.g.
             ``"8GB"``). Default: half the process's memory ceiling.
     """
-    compression_level = resolve_process_compression_level(compression, compression_level)
+    compression_level = resolve_codec(compression, compression_level, context="process").level
     configure_verbose(verbose)
     if out_geometry not in VALID_OUT_GEOMETRY:
         raise InvalidParameterError(

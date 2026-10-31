@@ -28,11 +28,10 @@ from geoparquet_io.core.crs_utils import (
     source_crs_string,
 )
 from geoparquet_io.core.duckdb_utils import (
-    as_wkb_sql,
+    _wrap_query_with_wkb_conversion,
     describe_query,
     get_duckdb_connection,
     query_schema,
-    quote_identifier,
     register_arrow,
     sql_path,
 )
@@ -231,37 +230,6 @@ def _stream_input_metadata(table: pa.Table) -> dict:
         ),
     )
     return dict(with_geo_block(table, block).schema.metadata)
-
-
-def _wrap_query_with_wkb_conversion(
-    query: str,
-    geometry_column: str | list[str] | None,
-) -> str:
-    """
-    Wrap query to convert DuckDB geometry back to WKB for Arrow export.
-
-    DuckDB's Arrow export returns geometry in DuckDB's native format,
-    not WKB. This wraps the query to convert geometry back to WKB using ST_AsWKB.
-
-    Args:
-        query: Original SQL query
-        geometry_column: Geometry column name or names, or None to skip conversion
-
-    Returns:
-        Query wrapped with WKB conversion if needed
-    """
-    if not geometry_column:
-        return query
-
-    columns = [geometry_column] if isinstance(geometry_column, str) else geometry_column
-    replacements = ", ".join(
-        f"{as_wkb_sql(quote_identifier(name))} AS {quote_identifier(name)}" for name in columns
-    )
-    return f"""
-        WITH __stream_source AS ({query})
-        SELECT * REPLACE ({replacements})
-        FROM __stream_source
-    """
 
 
 def write_output(

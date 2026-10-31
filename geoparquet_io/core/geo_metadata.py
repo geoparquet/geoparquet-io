@@ -1366,8 +1366,8 @@ class GeoBlockOptions:
     (``resolve_output_geoparquet_version(..., preserve_input=True)``).
 
     ``geometry_info`` declares each column's entry. The carried-wins rule for
-    the primary's declared entry applies in description mode only; on a write
-    the primary entry describes the input and the composer builds the output.
+    the primary's derived fields apply in description mode only; on a write
+    the composer rebuilds those fields and carries the other declared keys.
     ``primary_column`` relabels the block's primary (a repair of DuckDB's
     first-column pick); otherwise the carried primary stays, or
     ``geometry_column`` is named. ``geometry_column`` is the column the
@@ -1444,8 +1444,34 @@ def _metadata_version(options: GeoBlockOptions, carried: dict) -> str | None:
     return GEOPARQUET_VERSIONS[version]["metadata_version"]
 
 
-#: The keys of a declared secondary entry the steps decide, not carry.
-_STEP_KEYS = frozenset({"encoding", "edges", "crs", "bbox", "geometry_types"})
+#: Facts DuckDB generates for each column; a verbatim carried block needs all.
+GENERATED_COLUMN_FIELDS = frozenset({"encoding", "bbox", "geometry_types"})
+#: Keys the composer decides rather than carrying declarations verbatim.
+_STEP_KEYS = GENERATED_COLUMN_FIELDS | {"edges", "crs"}
+
+
+def declared_write_metadata(metadata: dict | None) -> dict | None:
+    """Carry declarations and sidecars, leaving the composer's steps to rebuild facts.
+
+    Uses the composer's existing step-key policy: encoding, edges, CRS and
+    stats have their own output decisions; epoch, orientation and other
+    declarations survive. An input with no declarations needs no carried geo
+    block, so COPY can keep generating its own block from the output data.
+    """
+    if not metadata:
+        return metadata
+    carried = sanitized_carried_geo(metadata)
+    columns = {
+        name: {key: value for key, value in entry.items() if key not in _STEP_KEYS}
+        for name, entry in (carried.get("columns") or {}).items()
+    }
+    result = {key: value for key, value in metadata.items() if key not in ("geo", b"geo")}
+    if not any(columns.values()) and not (
+        carried.keys() - {"version", "primary_column", "columns"}
+    ):
+        return result
+    carried["columns"] = columns
+    return _rewrite_geo_metadata(metadata, lambda _: carried)
 
 
 @dataclass
@@ -1466,12 +1492,9 @@ def _secondary_inputs(
     One rule for every column ``geometry_info`` declares: only what the
     carried entry does not already say is an input (the carried keys win), and
     an option the caller set wins over it. The primary's declared entry is an
-    input to a *description* only (a stream's or a read's block, which no
-    later step re-measures): a write decides its primary's CRS and stats
-    itself, and a declared entry handed down the write path describes the
-    input, not the output (a forced-2D write, a rewrite of stale stats). The
-    primary's declared ``encoding`` and other keys are never inputs: step 3
-    decides its encoding.
+    input for CRS and stats only on a description. A write decides those
+    facts and encoding in their owning steps, and carries the primary's
+    other declared keys through step 7.
     """
     found = _Secondaries({}, {}, {}, {})
     if not geometry_info:
@@ -1489,6 +1512,11 @@ def _secondary_inputs(
             entry["encoding"] = declared.get("encoding") or "WKB"
         _declared_gaps(found, column, entry, declared)
         found.other[column] = {k: v for k, v in declared.items() if k not in _STEP_KEYS}
+    # Derived fields go through their owning steps; other declarations survive.
+    declared_primary = declared_by_col.get(primary) or {}
+    if not isinstance(declared_primary, Mapping):
+        declared_primary = {}
+    found.other[primary] = {k: v for k, v in declared_primary.items() if k not in _STEP_KEYS}
     if described and isinstance(declared_by_col.get(primary), Mapping):
         _declared_gaps(found, primary, columns[primary], declared_by_col[primary])
     return found
@@ -1629,7 +1657,7 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
     5. the ``crs`` (:func:`~geoparquet_io.core.crs_utils.apply_output_crs`, the
        one CRS writer; a description records the CRS its source declares);
     6. ``custom_metadata``: coverings merged into the primary's, other keys on top;
-    7. the secondaries' other declared keys (``epoch``, ``orientation``, ...);
+    7. every column's other declared keys (``epoch``, ``orientation``, ...);
     8. stats per column: a secondary's declared ones, then the measured ``stats``;
     9. the bbox covering request (``covering``);
     10. :func:`strip_unsupported_covering` (no ``covering`` before 1.1);
@@ -2610,9 +2638,9 @@ def carried_covering_as_provenance(
 ) -> dict | None:
     """The ``covering`` an Arrow table's own ``geo`` block declares, as provenance.
 
-    A ``write_from_table`` is handed a table and ``original_metadata=None`` --
-    deliberately, because the input's *stats* no longer describe whatever the
-    caller did to the table in between. The ``covering`` is not a stat, though: it
+    A table write recomputes derived metadata because the input's *stats*
+    no longer describe whatever the caller did to the table in between.
+    The ``covering`` is not a stat, though: it
     says which column holds the geometry's envelope, and nothing else in a write
     can establish that for a column not named exactly
     :data:`SELF_EVIDENT_BBOX_COLUMN`. Three of the four strategies therefore lost

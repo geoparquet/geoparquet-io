@@ -338,18 +338,20 @@ class TestAnInputThatChangesUnderTheCall:
     def test_a_file_replaced_after_the_copy_is_refused(self, geo_file, tmp_path, monkeypatch):
         """The narrow window: the staged file is complete and verified by now.
 
-        `_inherit_mode` is the last thing before the check, so a writer landing
-        there lands as late as this can still see. What is left after it is one
-        syscall, which no check can cover.
+        `_verify_data_untouched` is the last thing before the check, so a writer
+        landing there lands as late as this can still see. What is left after it
+        is the owner's mode copy and one syscall, which no check can cover.
         """
         other = _write_geoparquet(tmp_path / "other.parquet", rows=2500, label="other")
-        real_inherit = parquet_footer._inherit_mode
+        real_verify = parquet_footer._verify_data_untouched
 
-        def inherit_then_let_another_writer_land(staged, parquet_file, destination):
-            real_inherit(staged, parquet_file, destination)
+        def verify_then_let_another_writer_land(before, staged):
+            real_verify(before, staged)
             geo_file.write_bytes(other.read_bytes())
 
-        monkeypatch.setattr(parquet_footer, "_inherit_mode", inherit_then_let_another_writer_land)
+        monkeypatch.setattr(
+            parquet_footer, "_verify_data_untouched", verify_then_let_another_writer_land
+        )
 
         with pytest.raises(FooterPatchRaced, match="changed while it was being copied"):
             _patch_footer_file(str(geo_file), {"note": "x"})

@@ -19,8 +19,6 @@ their owner, ``geo_metadata`` (#1367 concept 5).
 Nothing new belongs here.
 """
 
-import os
-
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.column_selection import has_column
@@ -39,6 +37,7 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
 )
 from geoparquet_io.core.file_utils import (
+    atomic_write,
     get_first_parquet_file,
     is_partition_path,
     resolve_file_url,
@@ -314,11 +313,7 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
     quoted_geom_col = quote_identifier(geom_col)
     sql_expression = bbox_struct_sql(quoted_geom_col, geom_col)
 
-    # Create temporary file path
-    temp_file = parquet_file + ".tmp"
-
     try:
-        # Use add_computed_column to write to temp file
         # Declare the covering explicitly rather than leaving a writer to infer
         # it from the column's name. gpio computed this column from the geometry
         # in this same statement, so the assertion "these values bound that
@@ -327,24 +322,23 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
         # version-gated: strip_unsupported_covering drops the key for 1.0 output.
         bbox_covering = {"covering": {"bbox": build_bbox_covering(bbox_column_name)}}
 
-        add_computed_column(
-            input_parquet=parquet_file,
-            output_parquet=temp_file,
-            column_name=bbox_column_name,
-            sql_expression=sql_expression,
-            extensions=None,
-            dry_run=False,
-            verbose=verbose,
-            compression=None,
-            compression_level=None,
-            row_group_size_mb=None,
-            row_group_rows=None,
-            dry_run_description=None,
-            custom_metadata=bbox_covering,
-        )
-
-        # Replace original file with updated file
-        os.replace(temp_file, parquet_file)
+        # Staged beside the file and moved over it (file_utils.atomic_write).
+        with atomic_write(parquet_file) as staged:
+            add_computed_column(
+                input_parquet=parquet_file,
+                output_parquet=staged,
+                column_name=bbox_column_name,
+                sql_expression=sql_expression,
+                extensions=None,
+                dry_run=False,
+                verbose=verbose,
+                compression=None,
+                compression_level=None,
+                row_group_size_mb=None,
+                row_group_rows=None,
+                dry_run_description=None,
+                custom_metadata=bbox_covering,
+            )
 
         if verbose:
             success(f"Successfully added bbox column '{bbox_column_name}'")
@@ -352,7 +346,4 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
         return True
 
     except Exception as e:
-        # Clean up temporary file if something goes wrong
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
         raise GeoParquetError(f"Failed to add bbox: {str(e)}") from e

@@ -11,8 +11,6 @@ Speed: Slower (reads file twice, writes twice)
 
 from __future__ import annotations
 
-import os
-import tempfile
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
@@ -26,6 +24,7 @@ from geoparquet_io.core.duckdb_utils import (
     register_arrow,
     sql_path,
 )
+from geoparquet_io.core.file_utils import scratch_file, unlink_released_file
 from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
     QuerySource,
@@ -46,7 +45,7 @@ from geoparquet_io.core.parquet_writer import (
     resolve_row_group_rows_for_query,
     write_arrow_table,
 )
-from geoparquet_io.core.remote import is_remote_url, remote_write_context, upload_if_remote
+from geoparquet_io.core.remote import remote_write_context, upload_if_remote
 from geoparquet_io.core.write_strategies.arrow_streaming import to_geoarrow_column
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
@@ -162,19 +161,16 @@ class DiskRewriteStrategy(BaseWriteStrategy):
 
         codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
 
-        is_remote = is_remote_url(output_path)
-        work_dir = tempfile.mkdtemp(prefix="gpio_disk_rewrite_")
-
-        try:
-            temp_path = os.path.join(work_dir, "temp_duckdb.parquet")
-            final_path = os.path.join(work_dir, "final.parquet") if is_remote else output_path
-
+        with (
+            scratch_file(prefix="gpio_disk_rewrite_") as temp_path,
+            remote_write_context(output_path, verbose=verbose) as (final_path, is_remote),
+        ):
             if verbose:
                 debug("Computing bbox and geometry types via SQL...")
             stats = geometry_stats_of(QuerySource(con, query), geometry_column)
             bbox, geometry_types = stats.bbox, stats.geometry_types
 
-            final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
+            final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
 
             copy_options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
             if resolved_row_group_rows:
@@ -251,17 +247,10 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 native_geometry_crs=native_crs,
             )
 
-            os.unlink(temp_path)
+            unlink_released_file(temp_path)
 
             if is_remote:
                 upload_if_remote(final_path, output_path, is_directory=False, verbose=verbose)
-                os.unlink(final_path)
-
-        finally:
-            if os.path.exists(work_dir):
-                import shutil
-
-                shutil.rmtree(work_dir, ignore_errors=True)
 
     def write_from_table(
         self,
@@ -277,6 +266,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         input_crs: dict | None = None,
         custom_metadata: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        original_metadata: dict | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using temporary file and rewrite."""
 
@@ -363,12 +353,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         """
         codec = resolve_codec(compression, compression_level, context="write")
 
-        is_remote = is_remote_url(output_path)
-        work_dir = tempfile.mkdtemp(prefix="gpio_disk_rewrite_") if is_remote else None
-
-        try:
-            local_path = os.path.join(work_dir, "output.parquet") if is_remote else output_path
-
+        with remote_write_context(output_path, verbose=verbose) as (local_path, is_remote):
             copy_options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
             if row_group_rows:
                 copy_options.append(f"ROW_GROUP_SIZE {row_group_rows}")
@@ -390,11 +375,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             if verbose:
                 with pq.ParquetFile(local_path) as pf:
                     success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
-        finally:
-            if work_dir and os.path.exists(work_dir):
-                import shutil
-
-                shutil.rmtree(work_dir, ignore_errors=True)
 
     def _rewrite_with_metadata(
         self,

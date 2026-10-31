@@ -9,6 +9,7 @@ from typing import Any, TypedDict
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.compression import resolve_codec
+from geoparquet_io.core.file_utils import get_all_parquet_files
 
 
 # Type-safe operation definition
@@ -124,7 +125,7 @@ def _run_partition_quadkey(input_path: Path, output_dir: Path) -> dict[str, Any]
 
     output_path = output_dir / "partitioned"
     partition_by_quadkey(str(input_path), str(output_path), partition_resolution=4)
-    output_files = list(Path(output_path).glob("**/*.parquet"))
+    output_files = get_all_parquet_files(str(output_path))
     return {"partitions": len(output_files)}
 
 
@@ -264,7 +265,7 @@ def _run_chain_filter_reproject_partition(input_path: Path, output_dir: Path) ->
     partition_by_quadkey(
         str(step2b_output), str(partition_output), resolution=4, partition_resolution=4
     )
-    output_files = list(Path(partition_output).glob("**/*.parquet"))
+    output_files = get_all_parquet_files(str(partition_output))
 
     return {
         "filtered_rows": step1_table.num_rows,
@@ -354,7 +355,7 @@ def _run_partition_h3(input_path: Path, output_dir: Path) -> dict[str, Any]:
         resolution=4,  # Lower resolution for fewer partitions
         verbose=False,
     )
-    output_files = list(Path(output_path).glob("**/*.parquet"))
+    output_files = get_all_parquet_files(str(output_path))
     return {"partitions": len(output_files)}
 
 

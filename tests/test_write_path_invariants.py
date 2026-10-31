@@ -94,13 +94,7 @@ METADATA_ONLY = {"check_bbox_fix", "add_bbox_metadata"}
 #: The invariants a footer patch answers by passing the input's pages through.
 LAYOUT_INVARIANTS = {"codec", "row_groups", "level"}
 
-_EPOCH = "#1367: the rewrite rebuilds the geo block without the input's epoch"
-#: (path, invariant) -> reason, for every cell that fails on the base (3185269f).
-XFAIL = {
-    ("convert_geoparquet", "epoch"): _EPOCH,
-    **{(f"table_write_{s}", "epoch"): _EPOCH for s in STRATEGIES},
-}
-
+XFAIL: dict[tuple[str, str], str] = {}
 
 # ---------------------------------------------------------------------------
 # Running every path once

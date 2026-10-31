@@ -52,7 +52,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import stat
 import struct
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -63,9 +62,9 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.edges import GEOGRAPHY_EDGE_ALGORITHMS, set_edges
 from geoparquet_io.core.exceptions import GeoParquetError
+from geoparquet_io.core.file_utils import atomic_write
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.remote import is_remote_url
-from geoparquet_io.core.write_strategies import atomic_write
 
 #: Keys to set or, with a ``None`` value, to remove. A caller spells them as
 #: text; everything below the ``_normalized`` boundary works in the encoded
@@ -874,19 +873,6 @@ def _copy_below_footer(source: BinaryIO, sink: BinaryIO, footer_start: int) -> N
         remaining -= len(chunk)
 
 
-def _inherit_mode(staged: str, parquet_file: str, destination: str) -> None:
-    """Give the staged file the mode it is about to replace.
-
-    The staged file here is created by `open(..., "wb")` under the process
-    umask, so it carries neither the destination's mode nor the input's.
-    Replacing a published file with a differently-permissioned one is not a
-    metadata edit, so the destination's own mode wins, falling back to the
-    input's when the destination is new.
-    """
-    source = destination if os.path.exists(destination) else parquet_file
-    os.chmod(staged, stat.S_IMODE(os.stat(source).st_mode))
-
-
 def _file_stamp(parquet_file: str) -> tuple[int, int, int]:
     """What identifies this version of the file: inode, size, modification time."""
     info = os.stat(parquet_file)
@@ -1185,7 +1171,9 @@ def _patch_footer_file(
             f"{footer_start:,} bytes of data copied unchanged"
         )
 
-    with atomic_write(destination) as staged:
+    # The published file keeps the destination's mode, else the input's: a
+    # metadata edit is not a permission change.
+    with atomic_write(destination, mode_from=parquet_file) as staged:
         # The input is opened for the copy and closed again before the staged
         # file is moved over it: Windows refuses to replace an open file.
         with open(parquet_file, "rb") as source, open(staged, "wb") as sink:
@@ -1195,7 +1183,6 @@ def _patch_footer_file(
             sink.write(MAGIC)
             _refuse_if_the_pages_changed(parquet_file, source, footer_start, original)
         _verify_data_untouched(before, staged)
-        _inherit_mode(staged, parquet_file, destination)
         # Last, so that the gap between deciding the input is still the one
         # that was read and `atomic_write` replacing it is a single syscall.
         _refuse_if_the_file_changed(parquet_file, stamp)

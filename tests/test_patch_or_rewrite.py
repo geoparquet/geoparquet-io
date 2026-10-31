@@ -30,6 +30,7 @@ hand-off, not the refusal.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 from pathlib import Path
@@ -353,14 +354,12 @@ def test_the_assume_crs84_copy_is_a_footer_patch(tmp_path):
         compression_level=19,
     )
 
-    read_path, temp_path = _sanitize_null_crs_file(str(src))
-    try:
-        assert read_path == temp_path
+    with contextlib.ExitStack() as scratch:
+        temp_path = _sanitize_null_crs_file(str(src), scratch, verbose=False)
         assert _pages(Path(temp_path)) == _pages(src), "the sanitized copy re-encoded the data"
         assert "crs" not in json.loads(footer_kv(temp_path)[b"geo"])["columns"]["geometry"]
         assert _sidecars(Path(temp_path)) == SIDECARS
-    finally:
-        Path(temp_path).unlink(missing_ok=True)
+    assert not Path(temp_path).exists(), "the scratch copy outlived its scope"
 
 
 def test_an_mb_target_is_measured_on_the_facades_sample_not_the_first_row_group(tmp_path):

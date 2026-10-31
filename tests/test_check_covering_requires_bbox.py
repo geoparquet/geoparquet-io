@@ -13,6 +13,7 @@ deliberate extension (#694/#738) and stays valid; a covering with no bbox member
 at all is the broken shape.
 """
 
+import contextlib
 import json
 
 import pyarrow.parquet as pq
@@ -443,7 +444,7 @@ class TestTheRepairOnAFileThatDoesNotNeedIt:
 
         src = tmp_path / "plain.parquet"
         CliRunner().invoke(cli, ["convert", "tests/data/buildings_test.parquet", str(src)])
-        temp_files: list[str] = []
+        temp_files = contextlib.ExitStack()
         # The check offers the repair, but the file carries no illegal covering:
         # the two disagree, so the pipeline must keep the file it had.
         check_results = {"covering": {"fix_available": True}}

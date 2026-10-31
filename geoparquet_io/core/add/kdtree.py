@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import tempfile
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -18,7 +17,12 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.edges import PLANAR, representative_point_sql
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
+from geoparquet_io.core.file_utils import (
+    handle_output_overwrite,
+    resolve_file_url,
+    scratch_file,
+    unlink_released_file,
+)
 from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
     require_geometry_column,
@@ -396,11 +400,8 @@ def add_kdtree_table(
     # Find geometry column
     geom_col = resolve_geometry_column(table, geometry_column, where="the table")
 
-    # Write table to temp file for processing (kdtree needs file access)
-    temp_fd, temp_path = tempfile.mkstemp(suffix=".parquet")
-    os.close(temp_fd)
-
-    try:
+    # Write table to a scratch copy for processing (kdtree needs file access)
+    with scratch_file() as temp_path:
         # DuckDB reads a GEOGRAPHY column back as planar GEOMETRY, so the temp
         # copy is the planar view and the result gets the input's edges back (#1253).
         warn_planar_math("add_kdtree", table, geom_col)
@@ -434,9 +435,6 @@ def add_kdtree_table(
             return registered.restore_edges(result)
         finally:
             con.close()
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
 
 
 def add_kdtree_column(
@@ -774,8 +772,7 @@ def _add_kdtree_streaming(
             )
     finally:
         # Clean up temp file
-        if temp_input_file and os.path.exists(temp_input_file):
-            os.remove(temp_input_file)
+        unlink_released_file(temp_input_file)
 
 
 if __name__ == "__main__":

@@ -363,7 +363,7 @@ def test_wkb_conversion_keeps_the_geometry_in_place():
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         query = "SELECT 1 AS id, ST_Point(0, 0) AS geometry, 2 AS after"
-        wrapped = _wrap_query_with_wkb_conversion(query, "geometry", con)
+        wrapped = _wrap_query_with_wkb_conversion(query, "geometry")
         names = [d[0] for d in con.execute(wrapped).description]
     finally:
         con.close()

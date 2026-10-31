@@ -20,13 +20,14 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.bbox_structure import bbox_covering_column_for
-from geoparquet_io.core.compression import resolve_codec, resolve_process_compression_level
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import is_geographic_crs
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
     InvalidParameterError,
 )
+from geoparquet_io.core.file_utils import atomic_write, scratch_file
 from geoparquet_io.core.geo_metadata import (
     ArrowTableSource,
     GeoBlockOptions,
@@ -54,11 +55,11 @@ from geoparquet_io.core.parquet_writer import (
     resolve_row_group_rows,
     sized_stream,
     version_to_describe,
-    without_geometry_dictionary,
 )
 from geoparquet_io.core.remote import is_remote_url
 from geoparquet_io.core.write_funnels import (
     apply_nonplanar_edges,
+    open_parquet_writer,
     table_nonplanar_edges,
     write_geoparquet_table,
 )
@@ -500,8 +501,6 @@ def _footer_kv_via_funnel(
     would have written (carried stats win over recomputation, so the empty
     table contributes nothing). One assembly of the geo block, one owner.
     """
-    import tempfile
-
     metadata = dict(schema.metadata or {})
     # A description of the merged stats (``version=None`` keeps the input's
     # version); the funnel composes the output's block from it. Zero valid
@@ -519,13 +518,10 @@ def _footer_kv_via_funnel(
         ),
     )
     empty = with_geo_block(schema.with_metadata(metadata).empty_table(), geo)
-    fd, tmp_path = tempfile.mkstemp(suffix=".parquet", prefix="gpio_simplify_footer_")
-    os.close(fd)
-    try:
+    with scratch_file(prefix="gpio_simplify_footer_") as tmp_path:
         write_geoparquet_table(empty, tmp_path, geometry_column=geom_col, **write.funnel_kwargs())
-        footer = pq.ParquetFile(tmp_path).schema_arrow.metadata or {}
-    finally:
-        os.remove(tmp_path)
+        with pq.ParquetFile(tmp_path) as written:
+            footer = written.schema_arrow.metadata or {}
     return {k.decode("utf-8"): v.decode("utf-8") for k, v in footer.items()}
 
 
@@ -618,27 +614,24 @@ def _simplify_file_streaming(
         actual_output,
         is_remote,
     ):
-        writer_kwargs = resolve_codec(
+        codec_kwargs = resolve_codec(
             write.compression, write.compression_level, context="write"
         ).pyarrow_kwargs()
-        # A local write streams into a pid-scoped sibling and is published by
-        # os.replace only once the footer is complete: pyarrow's writer
-        # finalizes a readable file even when the loop raises, and a mid-run
-        # failure must not leave a truncated, geo-less file at the user's
-        # destination. The remote branch already uploads only on success.
-        write_target = (
-            actual_output if is_remote else f"{actual_output}.stream-{os.getpid()}.tmp.parquet"
-        )
-        try:
+        # Streamed into a staged sibling and published only once the footer is
+        # complete (file_utils.atomic_write): pyarrow's writer finalizes a
+        # readable file even when the loop raises, and a mid-run failure must
+        # not leave a truncated, geo-less file at the user's destination.
+        with atomic_write(actual_output) as write_target:
             # store_schema=False: the geo footer arrives via add_key_value_metadata
             # at close (stats are only known then), and an embedded ARROW:schema
             # written at open would shadow it on read. DuckDB-written GeoParquet
             # carries no ARROW:schema either, so readers already live without it.
-            with pq.ParquetWriter(
+            with open_parquet_writer(
                 write_target,
                 writer_schema,
+                codec_kwargs,
+                geometry_columns=[geom_col],
                 store_schema=False,
-                **without_geometry_dictionary(writer_kwargs, schema, [geom_col]),
             ) as writer:
                 for group in regroup(
                     *sized_stream(
@@ -654,11 +647,6 @@ def _simplify_file_streaming(
                         write,
                     )
                 )
-            if not is_remote:
-                os.replace(write_target, actual_output)
-        finally:
-            if not is_remote and os.path.exists(write_target):
-                os.remove(write_target)
         # A non-planar column's block bbox is the geodesic bound over the
         # written rows, which the zero-row footer table cannot give: the funnel
         # computes it from the real file, as for every other write.
@@ -758,7 +746,7 @@ def simplify_file(
     # routed through add geometry-metrics -- writes at the same level. The
     # streaming writer would otherwise inherit pyarrow's default of 1 and the
     # funnel the global 15, from one unset argument (#1299).
-    compression_level = resolve_process_compression_level(compression, compression_level)
+    compression_level = resolve_codec(compression, compression_level, context="process").level
     write = WriteOptions.pick(locals())
     options = {
         "coverage": coverage,
@@ -843,8 +831,9 @@ def _simplify_then_refresh_metrics(
     """Simplify, then recompute vecorel metric columns from the result.
 
     The stale columns are dropped during the simplify pass (streamed or
-    in-memory) into a pid-scoped temp sibling of the output — never a
-    cwd-relative path, which collides across concurrent jobs — and the
+    in-memory) into a scratch copy (``file_utils.scratch_file``) -- never a
+    sibling of a remote output nobody can clean up, nor a cwd-relative path,
+    which collides across concurrent jobs -- and the
     ``add geometry-metrics`` core computes them fresh while writing the
     final file. Inherits that core's WGS84 geodesic assumption.
     """
@@ -863,8 +852,7 @@ def _simplify_then_refresh_metrics(
         )
         _simplify_file(input_parquet, output_parquet, tolerance, write, options)
         return
-    tmp_path = f"{output_parquet}.refresh-{os.getpid()}.tmp.parquet"
-    try:
+    with scratch_file(prefix="gpio_simplify_refresh_") as tmp_path:
         _simplify_file(input_parquet, tmp_path, tolerance, write, options, present)
         add_geometry_metrics(
             tmp_path,
@@ -873,6 +861,3 @@ def _simplify_then_refresh_metrics(
             verbose=options["verbose"],
             **write.funnel_kwargs(),
         )
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)

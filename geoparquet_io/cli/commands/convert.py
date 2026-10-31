@@ -28,7 +28,11 @@ from geoparquet_io.cli.decorators import (
 from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.crs_utils import transform_source_label
-from geoparquet_io.core.file_utils import handle_output_overwrite, validate_parquet_extension
+from geoparquet_io.core.file_utils import (
+    handle_output_overwrite,
+    scratch_file,
+    validate_parquet_extension,
+)
 from geoparquet_io.core.format_writers import EXTENSION_TO_FORMAT, default_output_name
 from geoparquet_io.core.logging_config import configure_verbose
 from geoparquet_io.core.reproject import reproject as reproject_core
@@ -337,8 +341,6 @@ def _convert_streaming(
     force_2d=False,
 ):
     """Handle streaming output for convert command."""
-    import tempfile
-    import uuid
 
     # Registers the GeoArrow extension types process-wide, so the `pq.read_table`
     # below materialises a Parquet GEOMETRY/GEOGRAPHY column as `geoarrow.wkb`
@@ -351,9 +353,7 @@ def _convert_streaming(
     from geoparquet_io.core.streaming import write_arrow_stream
 
     # Convert to temp file first, then stream
-    temp_path = Path(tempfile.gettempdir()) / f"gpio_convert_{uuid.uuid4()}.parquet"
-
-    try:
+    with scratch_file(prefix="gpio_convert_") as temp_path:
         convert_to_geoparquet(
             input_file,
             str(temp_path),
@@ -382,7 +382,7 @@ def _convert_streaming(
         )
 
         # Read and stream to stdout. Through `ParquetFile` so the file handle is
-        # closed here, before the `unlink` below, rather than whenever the
+        # closed here, before the scratch copy is removed, rather than whenever the
         # reader `pq.read_table` creates internally is collected: with the
         # extension types registered the table it returns is reachable through
         # Python-side objects that outlive this frame's refcount drop, and
@@ -392,9 +392,6 @@ def _convert_streaming(
         with pq.ParquetFile(temp_path) as reader:
             table = reader.read()
         write_arrow_stream(table)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
 
 
 def _reproject_impl_cli(

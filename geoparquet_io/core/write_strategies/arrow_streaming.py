@@ -245,7 +245,7 @@ def _check_geometry_type(
         msg = "wrapping with WKB conversion" if needs_wkb else "no conversion needed"
         debug(f"Geometry column is {duckdb_type}, {msg}")
 
-    final_sql = _wrap_query_with_wkb_conversion(query, geometry_column, con) if needs_wkb else query
+    final_sql = _wrap_query_with_wkb_conversion(query, geometry_column) if needs_wkb else query
     return needs_wkb, final_sql
 
 
@@ -666,6 +666,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         input_crs: dict | None = None,
         custom_metadata: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        original_metadata: dict | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using batch streaming."""
 
@@ -760,7 +761,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         # to write a struct the spec forbids or a covering with no bbox member
         # left (#1172, #1035, #954).
         geo_meta = compose_geo_block(
-            SchemaSource(table.schema),
+            SchemaSource(table.schema, original_metadata),
             GeoBlockOptions(
                 geometry_column=geometry_column,
                 version=effective_version,

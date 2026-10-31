@@ -259,11 +259,8 @@ ignore = [
 "geoparquet_io/core/add/kdtree.py" = ["TID251"]
 "geoparquet_io/core/arcgis.py" = ["TID251"]
 "geoparquet_io/core/carto.py" = ["TID251"]
-"geoparquet_io/core/constants.py" = ["TID251"]
 "geoparquet_io/core/duckdb_utils.py" = ["TID251"]
 "geoparquet_io/core/overture.py" = ["TID251"]
-"geoparquet_io/core/process/overview/overview_file.py" = ["TID251"]
-"geoparquet_io/core/process/simplify.py" = ["TID251"]
 "geoparquet_io/core/streaming.py" = ["TID251"]
 "geoparquet_io/core/wfs.py" = ["TID251"]
 

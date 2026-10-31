@@ -115,7 +115,7 @@ from geoparquet_io.core import stac as core_stac
 from geoparquet_io.core import str_order as core_str
 from geoparquet_io.core import upload as core_upload
 from geoparquet_io.core import validate as core_validate
-from geoparquet_io.core import write_strategies as core_write_strategies
+from geoparquet_io.core import write_funnels as core_write_funnels
 from geoparquet_io.core.add import a5 as core_a5
 from geoparquet_io.core.add import bbox as core_bbox
 from geoparquet_io.core.add import h3 as core_h3
@@ -165,16 +165,6 @@ class _Recorder:
         if self._result is ECHO_FIRST_ARG:
             return args[0] if args else next(iter(kwargs.values()))
         return self._result
-
-
-class _StrategyStub:
-    """Minimal write-strategy object whose `write_from_table` records its kwargs."""
-
-    def __init__(self, recorder: _Recorder):
-        self._recorder = recorder
-
-    def write_from_table(self, **kwargs):
-        return self._recorder(**kwargs)
 
 
 @dataclass(frozen=True)
@@ -301,20 +291,6 @@ def _table(
 # end, not on `ops`. That makes it constructed exactly like `_table`; the alias keeps
 # the call sites at the case list reading as "ops, via Table" without a duplicate body.
 _ops_via_table = _table
-
-
-def _install_write_strategy(_frontend, recorder: _Recorder):
-    """Patch the strategy factory so Table.write's core write call is recorded.
-
-    `get_strategy` is a `classmethod`; `patch.object` restores the descriptor
-    itself rather than the bound method `getattr` would hand back, so the class
-    is left exactly as it was found.
-    """
-    return patch.object(
-        core_write_strategies.WriteStrategyFactory,
-        "get_strategy",
-        lambda *_args, **_kwargs: _StrategyStub(recorder),
-    )
 
 
 # --------------------------------------------------------------------------
@@ -637,13 +613,12 @@ CASES: list[ParityCase] = [
             module=cli_convert,
         ),
         # `Table.write` has no core twin of `convert_to_geoparquet`: it resolves a
-        # write strategy and calls `strategy.write_from_table`. That call *is* the
-        # API's core write boundary, and is what the write facade will replace.
+        # write strategy and calls the shared table-write funnel. Capture that
+        # boundary before the funnel writes or repairs the output layout.
         table=Frontend(
-            patch_site=(core_write_strategies.WriteStrategyFactory, "get_strategy"),
+            patch_site=(core_write_funnels, "write_geoparquet_table"),
             reference=None,
             invoke=lambda c: c.gpio_table.write(c.output_file),
-            install=_install_write_strategy,
         ),
         normalize={
             "compression": ("compression", "compression"),

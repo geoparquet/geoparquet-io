@@ -18,9 +18,9 @@ from __future__ import annotations
 import json
 import os
 import re
-import tempfile
 import time
 import xml.etree.ElementTree as ET  # nosec B405 - the one parse here (_is_empty_gml_collection) refuses any body declaring a DTD, so no entity expansion is possible; stdlib ET never resolves external entities regardless
+from contextlib import ExitStack
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -69,7 +69,7 @@ from geoparquet_io.core.exceptions import (
     fatal_status_message,
     is_auth_status,
 )
-from geoparquet_io.core.file_utils import handle_output_overwrite
+from geoparquet_io.core.file_utils import handle_output_overwrite, scratch_dir
 from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
     SchemaSource,
@@ -2217,7 +2217,6 @@ def _accept_header_for(output_format: str | None) -> str:
 class _WfsDownload:
     """One downloaded GetFeature page: where it landed and how to parse it."""
 
-    tmp_dir: tempfile.TemporaryDirectory
     tmp_path: str
     content_type: str
     body_kind: str
@@ -2225,7 +2224,7 @@ class _WfsDownload:
     started: float = 0.0
 
 
-def _download_wfs_page(url: str, accept: str, tmp_dir: tempfile.TemporaryDirectory) -> _WfsDownload:
+def _download_wfs_page(url: str, accept: str, tmp_dir: str) -> _WfsDownload:
     """One attempt at streaming a GetFeature response into ``tmp_dir``.
 
     Raises ``httpx`` errors for ``run_with_retry`` to classify and ``WFSError``
@@ -2265,13 +2264,13 @@ def _download_wfs_page(url: str, accept: str, tmp_dir: tempfile.TemporaryDirecto
             raise _error_page_error(content_type, preview)
 
         suffix = ".gml" if body_kind == "gml" else ".json"
-        tmp_path = str(Path(tmp_dir.name) / f"response{suffix}")
+        tmp_path = str(Path(tmp_dir) / f"response{suffix}")
         with open(tmp_path, "wb") as tmp_file:
             for chunk in response.iter_bytes(chunk_size=65536):
                 tmp_file.write(chunk)
                 total_bytes += len(chunk)
 
-    return _WfsDownload(tmp_dir, tmp_path, content_type, body_kind, total_bytes)
+    return _WfsDownload(tmp_path, content_type, body_kind, total_bytes)
 
 
 def _fetch_wfs_page(
@@ -2307,95 +2306,95 @@ def _fetch_wfs_page(
     """
     import httpx
 
-    accept = _accept_header_for(output_format)
-    attempts_made = 0
+    with ExitStack() as stack:
+        accept = _accept_header_for(output_format)
+        attempts_made = 0
 
-    def attempt() -> _WfsDownload:
-        nonlocal attempts_made
-        start_time = time.time()
-        if attempts_made > 0:
-            debug(f"Retry {attempts_made}/{max_retries - 1}: {url[:80]}...")
-        else:
-            debug(f"Fetching: {url[:100]}...")
-        attempts_made += 1
+        def attempt() -> _WfsDownload:
+            nonlocal attempts_made
+            start_time = time.time()
+            if attempts_made > 0:
+                debug(f"Retry {attempts_made}/{max_retries - 1}: {url[:80]}...")
+            else:
+                debug(f"Fetching: {url[:100]}...")
+            attempts_made += 1
 
-        # Stream the response into a temp *directory*, not a temp file: GDAL
-        # writes a .gfs schema sidecar next to a schema-less GML body, and only
-        # a directory cleanup is guaranteed to take it with it.
-        tmp_dir = tempfile.TemporaryDirectory(prefix="gpio-wfs-")
+            # Stream the response into a temp *directory*, not a temp file: GDAL
+            # writes a .gfs schema sidecar next to a schema-less GML body, and only
+            # a directory cleanup is guaranteed to take it with it.
+            with ExitStack() as attempt_stack:
+                tmp_dir = attempt_stack.enter_context(scratch_dir(prefix="gpio-wfs-"))
+                download = _download_wfs_page(url, accept, tmp_dir)
+                stack.enter_context(attempt_stack.pop_all())
+            download.started = start_time
+            download_time = time.time() - start_time
+            size_mb = download.total_bytes / (1024 * 1024)
+            debug(f"Downloaded {size_mb:.1f} MB in {download_time:.1f}s")
+            return download
+
         try:
-            download = _download_wfs_page(url, accept, tmp_dir)
-        except BaseException:
-            tmp_dir.cleanup()
-            raise
-        download.started = start_time
-        download_time = time.time() - start_time
-        size_mb = download.total_bytes / (1024 * 1024)
-        debug(f"Downloaded {size_mb:.1f} MB in {download_time:.1f}s")
-        return download
-
-    try:
-        download = run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay)
-    except (httpx.HTTPStatusError, RetryExhaustedError) as e:
-        error, cause = final_request_error(
-            url, e, max_retries=max_retries, credentials=WFS_CREDENTIALS_HINT
-        )
-        raise WFSError(error.message) from cause
-
-    tmp_dir, tmp_path = download.tmp_dir, download.tmp_path
-    content_type, body_kind = download.content_type, download.body_kind
-    start_time = download.started
-
-    con = None
-    try:
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-
-        if body_kind == "gml":
-            parse_start = time.time()
-            table = _parse_gml_response(con, tmp_path, extract_fid, content_type)
-            debug(
-                f"Parsed {table.num_rows:,} GML rows in {time.time() - parse_start:.1f}s "
-                f"(total: {time.time() - start_time:.1f}s)"
+            download = run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay)
+        except (httpx.HTTPStatusError, RetryExhaustedError) as e:
+            error, cause = final_request_error(
+                url, e, max_retries=max_retries, credentials=WFS_CREDENTIALS_HINT
             )
-            return table
+            raise WFSError(error.message) from cause
 
-        # Read the feature count (DuckDB can't UNNEST empty JSON arrays) and the
-        # authoritative CRS the server reported in its GeoJSON response, if any,
-        # in a single scan over the response.
-        feature_count, server_crs = _read_count_and_server_crs(con, tmp_path)
+        tmp_path = download.tmp_path
+        content_type, body_kind = download.content_type, download.body_kind
+        start_time = download.started
 
-        if feature_count == 0:
-            debug("Empty response, returning empty table")
-            empty = pa.table({BUILT_GEOMETRY_COLUMN: pa.array([], type=pa.binary())})
-            return _with_server_crs(empty, server_crs)
+        con = None
+        try:
+            con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
 
-        # Detect property type and build extraction query
-        props_type, can_unnest_props = _probe_properties_type(
-            con, tmp_path, _json_object_size_for(tmp_path)
-        )
-        if not can_unnest_props:
-            debug(f"Properties type is {props_type}, cannot unnest - returning geometry-only table")
+            if body_kind == "gml":
+                parse_start = time.time()
+                table = _parse_gml_response(con, tmp_path, extract_fid, content_type)
+                debug(
+                    f"Parsed {table.num_rows:,} GML rows in {time.time() - parse_start:.1f}s "
+                    f"(total: {time.time() - start_time:.1f}s)"
+                )
+                return table
 
-        parse_start = time.time()
-        query = _build_wfs_feature_query(
-            tmp_path, extract_fid, can_unnest_props, _json_object_size_for(tmp_path)
-        )
+            # Read the feature count (DuckDB can't UNNEST empty JSON arrays) and the
+            # authoritative CRS the server reported in its GeoJSON response, if any,
+            # in a single scan over the response.
+            feature_count, server_crs = _read_count_and_server_crs(con, tmp_path)
 
-        result = con.sql(query)
-        table = result.arrow().read_all()
+            if feature_count == 0:
+                debug("Empty response, returning empty table")
+                empty = pa.table({BUILT_GEOMETRY_COLUMN: pa.array([], type=pa.binary())})
+                return _with_server_crs(empty, server_crs)
 
-        parse_time = time.time() - parse_start
-        total_time = time.time() - start_time
-        debug(f"Parsed {table.num_rows:,} rows in {parse_time:.1f}s (total: {total_time:.1f}s)")
-        return _with_server_crs(table, server_crs)
-    except WFSError:
-        raise
-    except Exception as e:
-        raise WFSError(f"Failed to parse WFS response: {e}") from e
-    finally:
-        if con:
-            con.close()
-        tmp_dir.cleanup()
+            # Detect property type and build extraction query
+            props_type, can_unnest_props = _probe_properties_type(
+                con, tmp_path, _json_object_size_for(tmp_path)
+            )
+            if not can_unnest_props:
+                debug(
+                    f"Properties type is {props_type}, cannot unnest - returning geometry-only table"
+                )
+
+            parse_start = time.time()
+            query = _build_wfs_feature_query(
+                tmp_path, extract_fid, can_unnest_props, _json_object_size_for(tmp_path)
+            )
+
+            result = con.sql(query)
+            table = result.arrow().read_all()
+
+            parse_time = time.time() - parse_start
+            total_time = time.time() - start_time
+            debug(f"Parsed {table.num_rows:,} rows in {parse_time:.1f}s (total: {total_time:.1f}s)")
+            return _with_server_crs(table, server_crs)
+        except WFSError:
+            raise
+        except Exception as e:
+            raise WFSError(f"Failed to parse WFS response: {e}") from e
+        finally:
+            if con:
+                con.close()
 
 
 def _generate_tile_grid(

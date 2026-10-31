@@ -34,6 +34,7 @@ from geoparquet_io.core.add.stac_metadata import add_stac_metadata as _add_stac_
 from geoparquet_io.core.add.stac_metadata import add_stac_metadata_table as _add_stac_metadata_table
 from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT
 from geoparquet_io.core.extract import extract_table
+from geoparquet_io.core.file_utils import scratch_path as _scratch_path
 from geoparquet_io.core.file_utils import unlink_released_file as _unlink_released_file
 from geoparquet_io.core.hilbert_order import hilbert_order_table
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
@@ -2124,8 +2125,6 @@ def convert_to_geojson(
     Returns:
         Output path if writing to file, None if streaming to stdout
     """
-    import tempfile
-    import uuid
     from pathlib import Path
 
     from geoparquet_io.core.geojson_stream import (
@@ -2136,8 +2135,7 @@ def convert_to_geojson(
         raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
 
     # Write table to temp parquet file for processing
-    temp_dir = Path(tempfile.gettempdir())
-    temp_input = temp_dir / f"gpio_geojson_{uuid.uuid4()}.parquet"
+    temp_input = Path(_scratch_path(prefix="gpio_geojson_"))
 
     try:
         import pyarrow.parquet as pq
@@ -2173,15 +2171,12 @@ def _file_round_trip(
     Writes table to a temp input file, calls func(input_parquet, output_parquet, **kwargs),
     reads the output back, and cleans up both temp files.
     """
-    import tempfile
-    import uuid
     from pathlib import Path
 
     import pyarrow.parquet as pq
 
-    temp_dir = Path(tempfile.gettempdir())
-    temp_input = temp_dir / f"gpio_in_{uuid.uuid4()}.parquet"
-    temp_output = temp_dir / f"gpio_out_{uuid.uuid4()}.parquet"
+    temp_input = Path(_scratch_path(prefix="gpio_in_"))
+    temp_output = Path(_scratch_path(prefix="gpio_out_"))
 
     try:
         pq.write_table(table, str(temp_input))
@@ -2221,16 +2216,13 @@ def _table_to_temp_parquet_and_convert(
     Raises:
         TypeError: If table is not a PyArrow Table
     """
-    import tempfile
-    import uuid
     from pathlib import Path
 
     if not isinstance(table, pa.Table):
         raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
 
     # Write table to temp parquet file for processing
-    temp_dir = Path(tempfile.gettempdir())
-    temp_input = temp_dir / f"gpio_{prefix}_{uuid.uuid4()}.parquet"
+    temp_input = Path(_scratch_path(prefix=f"gpio_{prefix}_"))
 
     try:
         import pyarrow.parquet as pq
