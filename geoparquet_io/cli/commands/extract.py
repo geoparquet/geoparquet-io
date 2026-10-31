@@ -34,7 +34,6 @@ from geoparquet_io.cli.decorators import (
     verbose_option,
     write_strategy_option,
 )
-from geoparquet_io.core.bbox_parse import parse_bbox
 from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT
 from geoparquet_io.core.edges import PLANAR, SPHERICAL
 from geoparquet_io.core.extract import extract as extract_impl
@@ -446,8 +445,6 @@ def extract_arcgis(
     # Validate mutual exclusivity of row group options and get MB value
     row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
-    bbox_tuple = parse_bbox(bbox) if bbox else None
-
     with _activate_s3(ctx, aws_profile=aws_profile):
         convert_arcgis_to_geoparquet(
             service_url=service_url,
@@ -458,7 +455,7 @@ def extract_arcgis(
             password=password,
             portal_url=portal_url,
             where=where,
-            bbox=bbox_tuple,
+            bbox=bbox or None,
             include_cols=include_cols,
             exclude_cols=exclude_cols,
             limit=limit,
@@ -1070,8 +1067,6 @@ def extract_wfs_cmd(
     # Parse row group options
     row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
-    bbox_tuple = parse_bbox(bbox) if bbox else None
-
     if is_multi_layer:
         # Multi-layer parallel extraction
         convert_wfs_layers_to_directory(
@@ -1082,7 +1077,7 @@ def extract_wfs_cmd(
             max_workers=workers,
             page_size=page_size,
             version=wfs_version,
-            bbox=bbox_tuple,
+            bbox=bbox or None,
             bbox_mode=bbox_mode,
             output_crs=output_crs,
             limit=limit,
@@ -1108,7 +1103,7 @@ def extract_wfs_cmd(
             typename=typenames[0],
             output_file=output_file,
             version=wfs_version,
-            bbox=bbox_tuple,
+            bbox=bbox or None,
             bbox_mode=bbox_mode,
             output_crs=output_crs,
             limit=limit,
@@ -1263,15 +1258,13 @@ def extract_carto_cmd(
     # Parse row group options
     row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
-    bbox_tuple = parse_bbox(bbox) if bbox else None
-
     with _activate_s3(ctx, aws_profile=aws_profile):
         convert_carto_to_geoparquet(
             url=url,
             table_name=table_name,
             output_file=output_file,
             where=where,
-            bbox=bbox_tuple,
+            bbox=bbox or None,
             limit=limit,
             include_cols=include_cols,
             exclude_cols=exclude_cols,

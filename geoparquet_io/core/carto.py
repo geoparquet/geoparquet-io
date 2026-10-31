@@ -16,6 +16,7 @@ from urllib.parse import quote, urlparse
 
 import pyarrow as pa
 
+from geoparquet_io.core.bbox_parse import BBox, any_piece, parse_optional_bbox
 from geoparquet_io.core.column_selection import (
     resolve_columns_against_schema,
     split_column_list,
@@ -227,13 +228,7 @@ def _build_carto_query(
         # '--' in the clause cannot comment out the bbox condition or the LIMIT.
         conditions.append(where_condition_fragment(where))
     if bbox and include_geom:
-        minx, miny, maxx, maxy = bbox
-        # Use ST_Intersects with ST_MakeEnvelope for spatial filter
-        # the_geom is quoted for safety
-        conditions.append(
-            f"ST_Intersects({quote_identifier('the_geom')}, "
-            f"ST_MakeEnvelope({minx}, {miny}, {maxx}, {maxy}, 4326))"
-        )
+        conditions.append(_bbox_condition(bbox))
 
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
@@ -242,6 +237,17 @@ def _build_carto_query(
         sql += f" LIMIT {limit}"
 
     return sql
+
+
+def _bbox_condition(bbox: tuple[float, float, float, float]) -> str:
+    """The PostGIS bbox condition on ``the_geom``; a wrapped bbox ORs its two lobes."""
+    geom = quote_identifier("the_geom")
+    return any_piece(
+        BBox(*bbox),
+        lambda b: (
+            f"ST_Intersects({geom}, ST_MakeEnvelope({b.xmin}, {b.ymin}, {b.xmax}, {b.ymax}, 4326))"
+        ),
+    )
 
 
 def _build_carto_count_query(
@@ -266,11 +272,7 @@ def _build_carto_count_query(
     if where:
         conditions.append(where_condition_fragment(where))
     if bbox:
-        minx, miny, maxx, maxy = bbox
-        conditions.append(
-            f"ST_Intersects({quote_identifier('the_geom')}, "
-            f"ST_MakeEnvelope({minx}, {miny}, {maxx}, {maxy}, 4326))"
-        )
+        conditions.append(_bbox_condition(bbox))
 
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
@@ -1050,6 +1052,8 @@ def carto_to_table(
     # extraction alike) funnels through.
     if where:
         validate_where_clause(where)
+    # The one bbox verdict (bbox_parse); a wrapped bbox is ORed in the SQL.
+    bbox = parse_optional_bbox(bbox)
 
     # Validate URL
     url = _validate_carto_url(url)

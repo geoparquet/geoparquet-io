@@ -14,7 +14,7 @@ import re
 import duckdb
 import pyarrow as pa
 
-from geoparquet_io.core.bbox_parse import parse_bbox
+from geoparquet_io.core.bbox_parse import any_piece, parse_bbox
 from geoparquet_io.core.column_selection import (
     resolve_columns_against_schema,
     split_column_list,
@@ -959,16 +959,21 @@ def _build_dry_run_query(
     else:
         progress(f"Bbox mode: {bbox_mode}")
 
-    xmin, ymin, xmax, ymax = parse_bbox(bbox)
-    wkt = f"POLYGON(({xmin} {ymin}, {xmax} {ymin}, {xmax} {ymax}, {xmin} {ymax}, {xmin} {ymin}))"
+    parsed = parse_bbox(bbox)
 
     if bbox_mode == "local":
         query = f"SELECT {select_cols} FROM bigquery_scan({sql_literal(table_id)})"
-        query += f" WHERE ST_Intersects(<geometry_column>, ST_GeomFromText('{wkt}'))"
+        query += " WHERE " + any_piece(
+            parsed,
+            lambda b: f"ST_Intersects(<geometry_column>, ST_GeomFromText('{b.polygon_wkt()}'))",
+        )
     else:
         # Server or auto mode - show server-side as example. Escaped once here,
         # mirroring the real path in _build_bigquery_query.
-        bq_filter = f"ST_INTERSECTS(<geometry_column>, ST_GEOGFROMTEXT('{wkt}'))"
+        bq_filter = any_piece(
+            parsed,
+            lambda b: f"ST_INTERSECTS(<geometry_column>, ST_GEOGFROMTEXT('{b.polygon_wkt()}'))",
+        )
         query = (
             f"SELECT {select_cols} FROM bigquery_scan("
             f"{sql_literal(table_id)}, filter={sql_literal(bq_filter)})"
@@ -1079,9 +1084,7 @@ def _build_bbox_filters(
         are returned as plain GoogleSQL -- the caller escapes them once when
         embedding them in the ``filter='...'`` DuckDB string literal.
     """
-    xmin, ymin, xmax, ymax = parse_bbox(bbox)
-    wkt = f"POLYGON(({xmin} {ymin}, {xmax} {ymin}, {xmax} {ymax}, {xmin} {ymax}, {xmin} {ymin}))"
-
+    parsed = parse_bbox(bbox)
     bq_filters = []
     local_conditions = []
 
@@ -1090,30 +1093,28 @@ def _build_bbox_filters(
         # backtick-quoted, because "..." is a STRING literal here.
         bq_col = _quote_bigquery_identifier(geom_col)
         if is_native_geometry:
-            # Native GEOGRAPHY column - use directly
-            bbox_filter = f"ST_INTERSECTS({bq_col}, ST_GEOGFROMTEXT('{wkt}'))"
+            subject = bq_col  # Native GEOGRAPHY column - use directly
         elif geometry_format == "geojson":
-            # VARCHAR with GeoJSON - parse first
-            bbox_filter = f"ST_INTERSECTS(ST_GEOGFROMGEOJSON({bq_col}), ST_GEOGFROMTEXT('{wkt}'))"
+            subject = f"ST_GEOGFROMGEOJSON({bq_col})"
         else:
-            # VARCHAR with WKT - parse first
-            bbox_filter = f"ST_INTERSECTS(ST_GEOGFROMTEXT({bq_col}), ST_GEOGFROMTEXT('{wkt}'))"
+            subject = f"ST_GEOGFROMTEXT({bq_col})"
+        bbox_filter = any_piece(
+            parsed, lambda b: f"ST_INTERSECTS({subject}, ST_GEOGFROMTEXT('{b.polygon_wkt()}'))"
+        )
         bq_filters.append(bbox_filter)
         debug(f"BigQuery filter: {bbox_filter}")
     else:
         # DuckDB local filter - DuckDB dialect, so quote_identifier applies.
         local_col = quote_identifier(geom_col)
         if is_native_geometry:
-            # Native GEOMETRY column - use directly
-            bbox_filter = f"ST_Intersects({local_col}, ST_GeomFromText('{wkt}'))"
+            subject = local_col
         elif geometry_format == "geojson":
-            # VARCHAR with GeoJSON - parse first
-            bbox_filter = (
-                f"ST_Intersects(ST_GeomFromGeoJSON({local_col}), ST_GeomFromText('{wkt}'))"
-            )
+            subject = f"ST_GeomFromGeoJSON({local_col})"
         else:
-            # VARCHAR with WKT - parse first
-            bbox_filter = f"ST_Intersects(ST_GeomFromText({local_col}), ST_GeomFromText('{wkt}'))"
+            subject = f"ST_GeomFromText({local_col})"
+        bbox_filter = any_piece(
+            parsed, lambda b: f"ST_Intersects({subject}, ST_GeomFromText('{b.polygon_wkt()}'))"
+        )
         local_conditions.append(bbox_filter)
         debug(f"DuckDB filter: {bbox_filter}")
 

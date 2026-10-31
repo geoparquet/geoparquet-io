@@ -19,6 +19,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure, dataset_bounds
 from geoparquet_io.core.bbox_parse import parse_bbox
+from geoparquet_io.core.bbox_parse import BBox, any_piece, parse_bbox
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.column_selection import (
     reject_blank_column_entries,
@@ -541,16 +542,28 @@ def build_spatial_filter(
     conditions = []
 
     if bbox:
-        xmin, ymin, xmax, ymax = bbox
+        # A wrapped bbox (xmin > xmax) is its two lobes, ORed (bbox_parse.any_piece).
         if bbox_info.get("has_bbox_column"):
-            bbox_col = bbox_info["bbox_column_name"]
+            col = quote_identifier(bbox_info["bbox_column_name"])
             conditions.append(
-                f"({quote_identifier(bbox_col)}.xmax >= {xmin} AND {quote_identifier(bbox_col)}.xmin <= {xmax} "
-                f"AND {quote_identifier(bbox_col)}.ymax >= {ymin} AND {quote_identifier(bbox_col)}.ymin <= {ymax})"
+                any_piece(
+                    BBox(*bbox),
+                    lambda b: (
+                        f"({col}.xmax >= {b.xmin} AND {col}.xmin <= {b.xmax} "
+                        f"AND {col}.ymax >= {b.ymin} AND {col}.ymin <= {b.ymax})"
+                    ),
+                )
             )
         else:
+            geom = quote_identifier(geometry_col)
             conditions.append(
-                f"ST_Intersects({quote_identifier(geometry_col)}, ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))"
+                any_piece(
+                    BBox(*bbox),
+                    lambda b: (
+                        f"ST_Intersects({geom}, "
+                        f"ST_MakeEnvelope({b.xmin}, {b.ymin}, {b.xmax}, {b.ymax}))"
+                    ),
+                )
             )
 
     if geometry_wkt:

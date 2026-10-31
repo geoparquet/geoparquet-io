@@ -48,6 +48,7 @@ __all__ = [
 ]
 
 from geoparquet_io.core.arrow_types import _cast_table_to_schema, _compute_unified_schema
+from geoparquet_io.core.bbox_parse import BBox, parse_bbox, refuse_wrap
 from geoparquet_io.core.crs_utils import _projjson_from_authority
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
@@ -3154,21 +3155,19 @@ def _get_tiling_bbox(
     (it is already in the request CRS). Otherwise falls back to the layer's
     advertised WGS84 bbox from capabilities, reprojected into ``crs``, since
     each tile is sent labelled with ``crs``. Returns None if no bbox is
-    available, a bbox crosses the antimeridian (xmin > xmax, which a midpoint
-    split cannot tile), or the layer bbox cannot be reprojected.
+    available, the layer bbox crosses the antimeridian (xmin > xmax, which a
+    midpoint split cannot tile), or the layer bbox cannot be reprojected.
 
     Like every bbox gpio holds, the result is in x,y order (east-first, see
     ``_first_axis_is_north``). ``_build_bbox_param`` swaps it, once, when the
     request goes out.
     """
     if user_bbox and use_server_bbox:
-        if user_bbox[0] > user_bbox[2]:
-            warn("The --bbox crosses the antimeridian (xmin > xmax), so auto-tiling is off.")
-            return None
+        # wfs_to_table has refused a wrapped user bbox already (refuse_wrap).
         return user_bbox
     if not layer_info.bbox:
         return None
-    if layer_info.bbox[0] > layer_info.bbox[2]:
+    if BBox(*layer_info.bbox).crosses_antimeridian:
         warn("The layer bbox crosses the antimeridian, so auto-tiling is off.")
         return None
     if _crs_matches(crs, "EPSG:4326"):
@@ -3319,6 +3318,10 @@ def wfs_to_table(
         PyArrow Table with GeoParquet-compatible geometry
     """
     configure_verbose(verbose)
+    # The one bbox verdict (bbox_parse), before any request. A WFS BBOX has no
+    # wrapped form (and a midpoint split cannot tile one), so it is refused by name.
+    if bbox is not None:
+        bbox = refuse_wrap(parse_bbox(bbox), "WFS")
 
     # Handle auto version negotiation
     if version == "auto":
@@ -3772,6 +3775,8 @@ def convert_wfs_layers_to_directory(
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     configure_verbose(verbose)
+    if bbox is not None:
+        bbox = refuse_wrap(parse_bbox(bbox), "WFS")
 
     output_path = Path(output_dir)
 

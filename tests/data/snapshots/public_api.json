@@ -136,6 +136,14 @@
     "error_text",
     "handle_core_exception"
   ],
+  "geoparquet_io.core.bbox_parse": [
+    "AntimeridianBBoxError",
+    "BBox",
+    "any_piece",
+    "parse_bbox",
+    "parse_optional_bbox",
+    "refuse_wrap"
+  ],
   "geoparquet_io.core.column_selection": [
     "join_column_list",
     "reject_blank_column_entries",

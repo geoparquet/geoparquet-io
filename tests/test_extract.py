@@ -138,9 +138,9 @@ class TestParseBbox:
         assert "numeric" in str(exc_info.value).lower()
 
     def test_bbox_reversed_x_coordinates(self):
-        """Test bbox with reversed x coordinates (xmax < xmin)."""
+        """Reversed x beyond longitudes (xmax < xmin, not an antimeridian wrap)."""
         with pytest.raises(GeoParquetError) as exc_info:
-            parse_bbox("10,0,5,10")  # xmin=10, xmax=5 is invalid
+            parse_bbox("500000,0,400000,10")
         assert "reversed" in str(exc_info.value).lower()
         assert "xmin" in str(exc_info.value).lower()
 

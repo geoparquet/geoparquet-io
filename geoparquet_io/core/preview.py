@@ -25,7 +25,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from geoparquet_io.core.bbox_parse import parse_bbox
+from geoparquet_io.core.bbox_parse import BBox, parse_bbox
 
 #: The one reason a preview carries no estimate.
 NO_STATS_REASON = (
@@ -210,7 +210,15 @@ def _matching_row_groups(
 
 
 def _intersects(stat: dict, bbox: tuple[float, float, float, float]) -> bool:
-    """Whether a row group's bbox statistics intersect the query bbox (edges count)."""
+    """Whether a row group's bbox statistics intersect the query bbox (edges count).
+
+    A query bbox that wraps the antimeridian intersects when either lobe does.
+    """
+    return any(_intersects_piece(stat, piece) for piece in BBox(*bbox).pieces())
+
+
+def _intersects_piece(stat: dict, bbox: BBox) -> bool:
+    """:func:`_intersects` for one non-wrapping query box."""
     xmin, ymin, xmax, ymax = bbox
     if stat["ymax"] < ymin or stat["ymin"] > ymax:
         return False

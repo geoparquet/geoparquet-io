@@ -26,8 +26,10 @@ TEXT_CASES = [
     (" -122.5 , 37.5 , -122.0 , 38.0 ", (-122.5, 37.5, -122.0, 38.0)),
     ("-180,-90,180,90", (-180.0, -90.0, 180.0, 90.0)),
     ("0,0,0,0", (0.0, 0.0, 0.0, 0.0)),
-    ("1,0,0,1", None),  # xmin > xmax
+    ("1,0,0,1", (1.0, 0.0, 0.0, 1.0)),  # xmin > xmax: the antimeridian wrap
+    ("170,-10,-170,10", (170.0, -10.0, -170.0, 10.0)),
     ("0,1,1,0", None),  # ymin > ymax
+    ("500000,0,400000,1", None),  # xmin > xmax outside longitudes: swapped, not a wrap
     ("nan,0,1,1", None),
     ("0,0,inf,1", None),
     ("0,0,1", None),
@@ -38,7 +40,8 @@ TEXT_CASES = [
 SEQUENCE_CASES = [
     ([0, 0, 1, 1], (0.0, 0.0, 1.0, 1.0)),
     ((0.5, -1, 2, 3.25), (0.5, -1.0, 2.0, 3.25)),
-    ([1, 0, 0, 1], None),
+    ([1, 0, 0, 1], (1.0, 0.0, 0.0, 1.0)),
+    ([0, 1, 1, 0], None),
     ([math.nan, 0, 1, 1], None),
     ([0, 0, 1], None),
     (["a", 0, 1, 1], None),
@@ -122,3 +125,163 @@ def test_preview_bbox_filter_agrees(buildings_test_file, value, expected):
             ops.preview_bbox_filter(buildings_test_file, value)
     else:
         ops.preview_bbox_filter(buildings_test_file, value)
+
+
+# --- The antimeridian wrap (#1367 audit ruling) ---------------------------
+#
+# ``xmin > xmax`` is the antimeridian wrap (RFC 7946 5.2), the one reading
+# ``validate`` and ``check_bbox_values`` already give it. Base refused such a
+# bbox outright; now every SQL filter honours it through BBox.pieces, and a
+# service that cannot send one says so with AntimeridianBBoxError.
+
+
+def test_the_wrap_predicate_and_pieces():
+    from geoparquet_io.core.bbox_parse import BBox
+
+    plain = parse_bbox("0,0,1,1")
+    assert isinstance(plain, BBox)
+    assert not plain.crosses_antimeridian
+    assert plain.pieces() == (plain,)
+    wrapped = parse_bbox("170,-10,-170,10")
+    assert wrapped.crosses_antimeridian
+    assert wrapped.pieces() == (BBox(170.0, -10.0, 180.0, 10.0), BBox(-180.0, -10.0, -170.0, 10.0))
+
+
+def test_non_finite_corners_are_still_refused_when_wrapped():
+    with pytest.raises(InvalidParameterError):
+        parse_bbox("170,-10,-inf,10")
+
+
+@pytest.fixture(scope="module")
+def dateline_points(tmp_path_factory):
+    """Three points: two either side of the antimeridian, one at Greenwich."""
+    import pyarrow as pa
+
+    root = tmp_path_factory.mktemp("dateline")
+    shapely = pytest.importorskip("shapely")
+    pts = [shapely.Point(175, 0), shapely.Point(-175, 0), shapely.Point(0, 0)]
+    from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+    plain = root / "plain.parquet"
+    write_geoparquet_table(
+        pa.table({"name": ["east", "west", "zero"], "geometry": shapely.to_wkb(pts).tolist()}),
+        str(plain),
+        geometry_column="geometry",
+    )
+    with_bbox = root / "bbox.parquet"
+    result = CliRunner().invoke(cli, ["add", "bbox", str(plain), str(with_bbox)])
+    assert result.exit_code == 0, result.output
+    return {"plain": str(plain), "bbox": str(with_bbox)}
+
+
+@pytest.mark.parametrize("variant", ["plain", "bbox"])
+def test_extract_keeps_both_sides_of_a_wrapped_bbox(dateline_points, variant, tmp_path):
+    import pyarrow.parquet as pq
+
+    out = tmp_path / "out.parquet"
+    result = CliRunner().invoke(
+        cli, ["extract", dateline_points[variant], str(out), "--bbox", "170,-10,-170,10"]
+    )
+    assert result.exit_code == 0, result.output
+    assert sorted(pq.read_table(out).column("name").to_pylist()) == ["east", "west"]
+
+
+def test_convert_keeps_both_sides_of_a_wrapped_bbox(dateline_points, tmp_path):
+    out = tmp_path / "out.csv"
+    result = CliRunner().invoke(
+        cli, ["convert", "csv", dateline_points["plain"], str(out), "--bbox", "170,-10,-170,10"]
+    )
+    assert result.exit_code == 0, result.output
+    text = out.read_text()
+    assert "east" in text and "west" in text and "zero" not in text
+
+
+def test_preview_counts_a_wrapped_bbox(dateline_points):
+    from geoparquet_io.api import ops
+
+    preview = ops.preview_bbox_filter(dateline_points["bbox"], "170,-10,-170,10")
+    if preview.has_estimate:
+        assert preview.est_rows >= 2
+
+
+def test_preview_intersects_either_lobe():
+    from geoparquet_io.core.preview import _intersects
+
+    east = {"xmin": 175.0, "ymin": 0.0, "xmax": 176.0, "ymax": 1.0}
+    zero = {"xmin": 0.0, "ymin": 0.0, "xmax": 1.0, "ymax": 1.0}
+    wrapped = parse_bbox("170,-10,-170,10")
+    assert _intersects(east, wrapped)
+    assert not _intersects(zero, wrapped)
+
+
+def test_carto_sql_ors_the_two_lobes():
+    from geoparquet_io.core.carto import _build_carto_count_query, _build_carto_query
+
+    for sql in (
+        _build_carto_query("t", bbox=parse_bbox("170,-10,-170,10")),
+        _build_carto_count_query("t", bbox=parse_bbox("170,-10,-170,10")),
+    ):
+        assert "ST_MakeEnvelope(170.0, -10.0, 180.0, 10.0, 4326)" in sql
+        assert "ST_MakeEnvelope(-180.0, -10.0, -170.0, 10.0, 4326)" in sql
+        assert " OR " in sql
+
+
+def test_bigquery_filters_or_the_two_lobes():
+    from geoparquet_io.core.extract_bigquery import _build_bbox_filters
+
+    for server in (True, False):
+        bq, local = _build_bbox_filters("170,-10,-170,10", "geog", use_server_side=server)
+        (condition,) = bq or local
+        assert "170.0 -10.0, 180.0 -10.0" in condition
+        assert "-180.0 -10.0, -170.0 -10.0" in condition
+        assert " OR " in condition
+
+
+@pytest.mark.parametrize("service", ["arcgis", "wfs"])
+def test_a_service_that_cannot_send_a_wrap_says_so(service, tmp_path, monkeypatch):
+    """ArcGIS envelopes and WFS BBOX have no wrapped form: one named error, before any request."""
+    import socket
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("the bbox should have been refused before any request")
+
+    monkeypatch.setattr(socket, "getaddrinfo", no_network)
+    args = [*SERVICES[service], str(tmp_path / "out.parquet"), "--bbox", "170,-10,-170,10"]
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code != 0
+    assert "antimeridian" in result.output.lower(), result.output
+
+
+@pytest.mark.parametrize("entry", ["from_arcgis", "from_wfs"])
+def test_the_api_raises_the_named_error(entry, monkeypatch):
+    import socket
+
+    from geoparquet_io.api import ops
+    from geoparquet_io.core.bbox_parse import AntimeridianBBoxError
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: (_ for _ in ()).throw(OSError()))
+    args = {
+        "from_arcgis": ("https://gpio.invalid/arcgis/rest/services/x/FeatureServer/0",),
+        "from_wfs": ("https://gpio.invalid/wfs", "layer"),
+    }[entry]
+    with pytest.raises(AntimeridianBBoxError):
+        getattr(ops, entry)(*args, bbox=(170, -10, -170, 10))
+
+
+@pytest.mark.parametrize("entry", ["from_arcgis", "from_wfs", "from_carto"])
+def test_the_api_parses_with_the_owner(entry, monkeypatch):
+    """The core entries parse, so bbox= on the API gets the CLI's verdict."""
+    import socket
+
+    from geoparquet_io.api import ops
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: (_ for _ in ()).throw(OSError()))
+
+    args = {
+        "from_arcgis": ("https://gpio.invalid/arcgis/rest/services/x/FeatureServer/0",),
+        "from_wfs": ("https://gpio.invalid/wfs", "layer"),
+        "from_carto": ("https://gpio.invalid/carto", "table"),
+    }[entry]
+    with pytest.raises(InvalidParameterError) as exc:
+        getattr(ops, entry)(*args, bbox=(0, 0, float("nan"), 1))
+    assert exc.value.param_name == "bbox"
