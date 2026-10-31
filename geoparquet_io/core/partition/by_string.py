@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from geoparquet_io.core.duckdb_metadata import get_column_names, get_schema_info
+from geoparquet_io.core.column_selection import bound_column
+from geoparquet_io.core.duckdb_metadata import get_schema_info, get_usable_column_names
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
 from geoparquet_io.core.parquet_writer import WriteOptions
@@ -10,6 +11,7 @@ from geoparquet_io.core.partition.common import (
     partition_by_column,
     preview_partition,
     raise_if_no_rows,
+    readable_geoparquet,
 )
 from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file
 
@@ -27,9 +29,12 @@ def validate_column_exists(parquet_file: str, column_name: str, verbose: bool = 
         InvalidParameterError: If the column doesn't exist
     """
 
-    column_names = get_column_names(parquet_file)
+    # The reader's own view of the file, so a non-conformant one is refused the
+    # way every other partition read refuses it (#722).
+    with readable_geoparquet(parquet_file):
+        column_names = get_usable_column_names(parquet_file)
 
-    if column_name not in column_names:
+    if bound_column(column_name, column_names, option_name="column") is None:
         available_columns = ", ".join(column_names)
         raise InvalidParameterError(
             "column",

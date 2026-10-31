@@ -85,6 +85,30 @@ def test_same_column_is_the_fold_rule():
     assert not cs.same_column("É", "é")
 
 
+# The geometry resolver folds with the same rule, so the two cannot drift.
+GEOMETRY_FOLD_CASES = [
+    # (name, schema, answer)
+    ("GEOM", ["id", "geom"], "geom"),
+    ("É", ["é"], None),  # not an ASCII fold, here as in every other lookup
+    ("É", ["É"], "É"),
+]
+
+
+@pytest.mark.parametrize(("name", "schema", "answer"), GEOMETRY_FOLD_CASES)
+def test_geometry_resolver_folds_like_the_owner(name, schema, answer):
+    from geoparquet_io.core.geometry_detection import _in_schema
+
+    assert _in_schema(name, schema) == answer
+    assert (cs.find_column(name, schema) == answer) or answer is None
+
+
+def test_geometry_name_match_folds_like_the_owner():
+    from geoparquet_io.core.geometry_detection import _name_match
+
+    assert _name_match(["id", "GEOMETRY"]) == "GEOMETRY"
+    assert _name_match(["É"], extra_names=["é"]) is None
+
+
 # ---------------------------------------------------------------------------
 # unique_name
 # ---------------------------------------------------------------------------
@@ -295,3 +319,38 @@ def test_1109_reserved_internal_names_are_reserved_in_any_case(tmp_path):
     con = duckdb.connect()
     con.execute('CREATE TABLE t AS SELECT 1 AS a, 2 AS "__PT"')
     assert build_exclude_clause(con, "t", ("__pt",)) == ' EXCLUDE ("__PT")'
+
+
+# ---------------------------------------------------------------------------
+# #963: a column a query can name is a column, whether or not a file carries it
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def hive_dataset(tmp_path):
+    """Two files under ``yr=0/`` and ``yr=1/``: ``yr`` is in no file's schema."""
+    root = tmp_path / "hive"
+    con = duckdb.connect()
+    con.execute("INSTALL spatial; LOAD spatial")
+    con.execute(
+        f"""COPY (SELECT i AS id, ST_AsWKB(ST_Point(i, i)) AS geometry, (i % 2)::INT AS yr
+            FROM range(6) t(i)) TO '{root}'
+            (FORMAT PARQUET, PARTITION_BY (yr), WRITE_PARTITION_COLUMNS false)"""
+    )
+    return f"{root}/*/*.parquet"
+
+
+def test_963_partition_string_accepts_a_hive_column(hive_dataset, tmp_path):
+    out = tmp_path / "out"
+    result = CliRunner().invoke(
+        cli, ["partition", "string", hive_dataset, str(out), "--column", "yr", "--skip-analysis"]
+    )
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in out.rglob("*.parquet"))
+
+
+def test_963_the_reader_names_a_hive_column(hive_dataset):
+    from geoparquet_io.core.duckdb_metadata import get_column_names, get_usable_column_names
+
+    assert "yr" not in get_column_names(hive_dataset)
+    assert "yr" in get_usable_column_names(hive_dataset)

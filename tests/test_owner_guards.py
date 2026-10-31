@@ -2354,7 +2354,7 @@ def _find_column_fold(m: _Module) -> Iterator[Hit]:
     some ASCII, one exact-only) that disagreed about whether ``--bucket-point
     PT`` meant ``pt`` (#1109), and the three suffixers that started at ``_1``,
     ``_2`` and ``_1`` with three notions of "taken". The geometry column's own
-    name folds in ``geometry_detection`` (the second owner).
+    name folds through the same ``fold`` (``geometry_detection`` calls it).
 
     Not seen (named so a reviewer looks for them): a fold of a name held in a
     variable that does not say column (``n = names[0]; n.lower()``), a
@@ -2430,7 +2430,7 @@ ARMS = {
     "footer_patch": Arm(_find_footer_patch, ("geoparquet_io/core/parquet_footer.py",)),
     "column_fold": Arm(
         _find_column_fold,
-        ("geoparquet_io/core/column_selection.py", "geoparquet_io/core/geometry_detection.py"),
+        ("geoparquet_io/core/column_selection.py",),
     ),
     "geometry_identity": Arm(
         _find_geometry_identity, ("geoparquet_io/core/geometry_detection.py",)

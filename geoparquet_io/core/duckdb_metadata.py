@@ -561,6 +561,17 @@ def get_usable_columns(parquet_file: str, con=None) -> list[dict]:
             connection.close()
 
 
+def get_usable_column_names(parquet_file: str, con=None) -> list[str]:
+    """The names :func:`get_usable_columns` lists: what a query over the file can name.
+
+    The answer for "can the SQL I am about to write name this column?" (#963).
+    The physical schema (:func:`get_column_names`) cannot say yes to a hive
+    partition column, which ``read_parquet`` synthesizes from the directory
+    names and no file carries.
+    """
+    return [col["name"] for col in get_usable_columns(parquet_file, con)]
+
+
 def get_row_group_metadata(parquet_file: str, con=None) -> list[dict]:
     """
     Get per-row-group statistics using parquet_metadata().

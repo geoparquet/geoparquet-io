@@ -260,6 +260,7 @@
     "get_row_group_sizes",
     "get_row_group_stats_summary",
     "get_schema_info",
+    "get_usable_column_names",
     "get_usable_columns",
     "is_geometry_column",
     "is_native_geo_column",

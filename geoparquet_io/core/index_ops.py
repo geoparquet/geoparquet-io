@@ -23,7 +23,7 @@ from geoparquet_io.core.crs_utils import (
     source_crs_string,
     transform_geom_sql,
 )
-from geoparquet_io.core.duckdb_metadata import get_column_names
+from geoparquet_io.core.duckdb_metadata import get_usable_column_names
 from geoparquet_io.core.duckdb_utils import (
     as_wkb_sql,
     describe_query,
@@ -58,6 +58,7 @@ from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.common import preview_partition
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
+    needs_httpfs,
     validate_profile_for_urls,
 )
 from geoparquet_io.core.streaming import (
@@ -415,6 +416,25 @@ def _index_from_clause(path: str, allow_schema_diff: bool, hive_input: bool | No
     return f"read_parquet({sql_path(path)}, {', '.join(options)})"
 
 
+def _readable_columns(path: str, allow_schema_diff: bool, hive_input: bool | None) -> list[str]:
+    """The names the add will be able to say: what a read of ``path`` exposes.
+
+    Hive partition columns are in it, and under ``--allow-schema-diff`` the union
+    of every file's columns, because the add reads through the same clause
+    (:func:`_index_from_clause`).
+    """
+    if not (allow_schema_diff or hive_input):
+        return get_usable_column_names(path)
+    con = get_duckdb_connection(load_spatial=False, load_httpfs=needs_httpfs(path))
+    try:
+        source = _index_from_clause(
+            resolve_file_url(path, verbose=False), allow_schema_diff, hive_input
+        )
+        return [name for name, _ in describe_query(con, f"SELECT * FROM {source}")]
+    finally:
+        con.close()
+
+
 def ensure_index_column(
     spec,
     input_parquet,
@@ -431,7 +451,11 @@ def ensure_index_column(
 ):
     """Return (working path, resolved column, temporary path), reusing existing cells."""
     is_table = hasattr(input_parquet, "column_names")
-    columns = input_parquet.column_names if is_table else get_column_names(input_parquet)
+    columns = (
+        input_parquet.column_names
+        if is_table
+        else _readable_columns(input_parquet, allow_schema_diff, hive_input)
+    )
     resolved = next(iter(matching_columns(column_name, columns)), None)
     if reject_existing:
         if resolved:

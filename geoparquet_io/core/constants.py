@@ -5,8 +5,9 @@ This module defines constants that are shared across multiple modules to ensure
 consistency and make it easy to change values in one place.
 """
 
+from geoparquet_io.core.column_selection import has_column
 from geoparquet_io.core.common import add_computed_column
-from geoparquet_io.core.duckdb_metadata import get_column_names
+from geoparquet_io.core.duckdb_metadata import get_column_names, get_usable_column_names
 
 # Default column name for H3 cell IDs
 DEFAULT_H3_COLUMN_NAME = "h3_cell"
@@ -124,10 +125,8 @@ def ensure_vecorel_columns(
     import os
     import tempfile
 
-    columns = get_column_names(parquet_file)
-
     # Add id column if missing
-    if "id" not in columns:
+    if not has_column(get_usable_column_names(parquet_file), "id"):
         fd, temp_out = tempfile.mkstemp(suffix=".parquet")
         os.close(fd)
         os.unlink(temp_out)

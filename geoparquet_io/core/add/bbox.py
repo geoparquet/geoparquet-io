@@ -12,7 +12,7 @@ from geoparquet_io.core.bbox_structure import (
     resolve_bbox_name,
 )
 from geoparquet_io.core.common import add_computed_column
-from geoparquet_io.core.duckdb_metadata import get_column_names, get_schema_info
+from geoparquet_io.core.duckdb_metadata import get_schema_info, get_usable_column_names
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     get_duckdb_connection,
@@ -567,7 +567,9 @@ def _add_bbox_file_based(
     # same file wrote `bbox_1` (#1176).
     if replace_column is None:
         bbox_column_name = resolve_bbox_name(
-            get_column_names(input_parquet), write.geoparquet_version, requested=bbox_column_name
+            get_usable_column_names(input_parquet),
+            write.geoparquet_version,
+            requested=bbox_column_name,
         )
 
     # A column is being computed. Say which bbox-shaped structs it will sit
