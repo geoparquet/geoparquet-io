@@ -420,9 +420,6 @@ class TestAddCommands:
         assert result.exit_code != 0
         assert "No valid bbox column found" in result.output
 
-    # Note: add admin-divisions tests are skipped because they require a countries file
-    # and network access. These should be tested separately with appropriate test data.
-
 
 @pytest.fixture(scope="module")
 def bbox_default_run(tmp_path_factory):

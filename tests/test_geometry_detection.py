@@ -268,20 +268,20 @@ class TestGeometryDetectionIntegration:
         first_file = get_first_parquet_file(country_partition_dir)
         if first_file:
             result = primary_geometry_column(first_file)
-            assert result is not None
+            assert result == "geometry"
 
     def test_different_file_formats(
         self, places_test_file, fields_v2_file, fields_geom_type_only_file
     ):
         """Detection works across different GeoParquet formats."""
         # GeoParquet 1.x
-        assert primary_geometry_column(places_test_file) is not None
+        assert primary_geometry_column(places_test_file) == "geometry"
 
         # GeoParquet 2.0
-        assert primary_geometry_column(fields_v2_file) is not None
+        assert primary_geometry_column(fields_v2_file) == "geometry"
 
         # Parquet Geo Only
-        assert primary_geometry_column(fields_geom_type_only_file) is not None
+        assert primary_geometry_column(fields_geom_type_only_file) == "geometry"
 
 
 # =============================================================================

@@ -608,7 +608,7 @@ class TestRunTileJoin:
             tj.subprocess, "run", lambda *a, **k: self._FakeProc(0, "joined 2 tilesets\n")
         )
         tj._run_tile_join(["tile-join", "-o", "x"], verbose=True)
-        assert "joined 2 tilesets" in messages  # must not raise
+        assert "joined 2 tilesets" in messages
 
 
 class TestMergePyramidMetadata:

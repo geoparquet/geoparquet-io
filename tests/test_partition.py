@@ -195,8 +195,6 @@ class TestPartitionCommands:
         # Nothing must be written on failure.
         assert _partition_files(temp_output_dir) == []
 
-    # Admin partition tests - skip because test files don't have admin:country_code column
-
     def test_partition_admin_no_output_folder(self, places_test_file):
         """partition admin without an output folder is the same usage error."""
         runner = CliRunner()

@@ -40,7 +40,7 @@ class TestCheckSpatialOrder:
             verbose=True,
             return_results=True,
         )
-        assert isinstance(result, dict)
+        assert result["passed"] is True
 
     def test_with_small_sample(self, places_test_file):
         """Test check_spatial_order with small sample size."""
@@ -51,7 +51,7 @@ class TestCheckSpatialOrder:
             verbose=False,
             return_results=True,
         )
-        assert isinstance(result, dict)
+        assert result["passed"] is True
 
     def test_buildings_file(self, buildings_test_file):
         """Test check_spatial_order on buildings file."""

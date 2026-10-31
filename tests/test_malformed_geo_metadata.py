@@ -1112,7 +1112,7 @@ def test_crs_of_finds_a_projected_crs_after_recovery(col, tmp_path):
     src = _malformed_primary_file(
         tmp_path, "proj_bad_primary", col, {"encoding": "WKB", "crs": _crs_5070()}
     )
-    assert crs_of(src) is not None
+    assert crs_of(src) == _crs_5070()
 
 
 @pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
@@ -1166,7 +1166,7 @@ def test_crs_of_a_table_finds_a_projected_crs_after_recovery(col):
         },
         col=col,
     )
-    assert crs_of(table) is not None
+    assert crs_of(table) == _crs_5070()
 
 
 # =============================================================================

@@ -1,5 +1,6 @@
 """Tests for core/common.py utility functions."""
 
+import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure, get_bbox_advice
@@ -304,7 +305,7 @@ class TestGetParquetMetadata:
     def test_with_verbose(self, places_test_file):
         """Test with verbose flag."""
         result = get_parquet_metadata(places_test_file, verbose=True)
-        assert result[1].field("geometry").name == "geometry"
+        assert result[1].names == pq.read_schema(places_test_file).names
 
 
 class TestCheckBboxStructure:
@@ -325,7 +326,7 @@ class TestCheckBboxStructure:
     def test_with_verbose(self, places_test_file):
         """Test with verbose flag."""
         result = check_bbox_structure(places_test_file, verbose=True)
-        assert isinstance(result, dict)
+        assert result["bbox_column_name"] == "bbox"
 
 
 class TestGetDuckdbConnection:

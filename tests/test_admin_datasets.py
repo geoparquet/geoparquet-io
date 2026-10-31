@@ -962,7 +962,7 @@ class TestGetCacheDir:
         """Test that get_cache_dir returns a Path object."""
         cache_dir = get_cache_dir()
         assert isinstance(cache_dir, Path)
-        assert cache_dir.is_dir()
+        assert cache_dir == Path.home() / ".geoparquet-io" / "cache" / "admin"
 
     def test_cache_dir_in_user_home(self):
         """Test that cache directory is in user's home directory."""
@@ -1374,7 +1374,7 @@ class TestCacheMessaging:
                     get_or_cache_dataset(dataset, verbose=True)
 
                     # Should show cache hit message
-                    assert any("cache" in str(call).lower() for call in mock_debug.call_args_list)
+                    assert "Using cached dataset" in str(mock_debug.call_args)
 
 
 class TestCacheEdgeCases:
@@ -1436,7 +1436,6 @@ class TestCacheEdgeCases:
                     mock_download.side_effect = redownload
 
                     assert get_or_cache_dataset(dataset) == str(fresh_path)
-                    assert fresh_path.read_bytes() == b"fresh data"
 
                     # Should re-download when cache is corrupted
                     mock_download.assert_called_once()

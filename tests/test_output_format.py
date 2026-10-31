@@ -486,8 +486,11 @@ class TestPartition:
             # Validate each partition file
             for partition_file in ["A.parquet", "B.parquet"]:
                 partition_path = os.path.join(temp_dir, partition_file)
-                if os.path.exists(partition_path):
-                    validate_output_format(partition_path, expect_bbox=False)
+                assert os.path.exists(partition_path)
+                validate_output_format(partition_path, expect_bbox=False)
+                partition_table = pq.read_table(partition_path)
+                assert partition_table.num_rows == 2
+                assert partition_table.column("category").to_pylist() == [partition_file[0]] * 2
 
         finally:
             if os.path.exists(tmp_input_name):

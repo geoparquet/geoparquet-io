@@ -37,7 +37,7 @@ from geoparquet_io.core.convert import (
     _st_read_layer_meta,
     convert_to_geoparquet,
 )
-from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 from geoparquet_io.core.geo_metadata import read_raw_geo
 from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
@@ -375,7 +375,7 @@ class TestConvertBestPractices:
         source_wkts = {
             row[0]
             for row in con.execute(
-                f"SELECT ST_AsText(geom) FROM ST_Read('{TEST_DATA_DIR / 'buildings_test.shp'}')"
+                f"SELECT ST_AsText(geom) FROM ST_Read({sql_path(str(TEST_DATA_DIR / 'buildings_test.shp'))})"
             ).fetchall()
         }
         assert result[0] in source_wkts
