@@ -401,7 +401,7 @@ class TestWhereClauseValidation:
         def _fail_urlopen(*_args, **_kwargs):
             raise AssertionError("network request attempted before where-clause validation")
 
-        monkeypatch.setattr(carto_module.urllib.request, "urlopen", _fail_urlopen)
+        monkeypatch.setattr(carto_module, "make_request_with_retry", _fail_urlopen)
 
         with pytest.raises(ValidationError, match="not a single filtering expression"):
             carto_to_table(

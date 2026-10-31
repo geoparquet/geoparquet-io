@@ -351,7 +351,7 @@ repos:
         entry: uv run vulture
         language: system
         pass_filenames: false
-        stages: [pre-push]
+        stages: [pre-commit, pre-push]
 
       - id: pylint-duplicates
         name: pylint-duplicates
@@ -360,7 +360,7 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
-        stages: [pre-push]
+        stages: [pre-commit, pre-push]
 
       - id: vulture-tests
         name: vulture (tests)
@@ -368,7 +368,7 @@ repos:
         entry: uv run vulture tests scripts/vulture_whitelist_tests.py --min-confidence 60
         language: system
         pass_filenames: false
-        stages: [pre-push]
+        stages: [pre-commit, pre-push]
 
       - id: xenon
         name: xenon

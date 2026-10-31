@@ -4,9 +4,9 @@ vulture runs at ``min_confidence = 60`` (``[tool.vulture]`` in pyproject.toml), 
 alone, so a name only a test calls is still reported. At 80 it reported only
 unused imports and arguments, so a function with no caller passed.
 
-Each line is a finding on the tree it was generated from, tagged either
+Each line is a finding on the tree it was generated from, tagged
 ``dynamic: <how it is used>`` (a name used only by a framework, a decorator,
-reflection or the public API) or ``dead: <track> deletes``. Reasons for the
+reflection or the public API). Reasons for the
 baseline as a whole are in ``scripts/owner_exemptions.toml`` (``[G4]``);
 ``tests/test_owner_guards.py`` pins the entry count and fails on an entry whose
 name no longer occurs in its file's AST. Delete a line with the code it names.

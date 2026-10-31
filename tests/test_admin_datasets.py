@@ -922,8 +922,8 @@ class TestAdminDatasetVersion:
         original_cached = overture_mod._cached_release
         try:
             dataset = OvertureAdminDataset()
-            with patch("geoparquet_io.core.overture._fetch_latest_release") as mock:
-                mock.return_value = "2099-01-01.0"
+            with patch("geoparquet_io.core.overture.make_request_with_retry") as mock:
+                mock.return_value = {"latest": "2099-01-01.0"}
                 overture_mod._cached_release = None
                 version = dataset.get_version()
                 assert version == "2099-01-01.0"
@@ -939,8 +939,8 @@ class TestAdminDatasetVersion:
         original_cached = overture_mod._cached_release
         try:
             dataset = OvertureAdminDataset()
-            with patch("geoparquet_io.core.overture._fetch_latest_release") as mock:
-                mock.return_value = "malicious-input; DROP TABLE"
+            with patch("geoparquet_io.core.overture.make_request_with_retry") as mock:
+                mock.return_value = {"latest": "malicious-input; DROP TABLE"}
                 overture_mod._cached_release = None
                 version = dataset.get_version()
                 assert version == OvertureAdminDataset.VERSION

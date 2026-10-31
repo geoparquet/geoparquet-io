@@ -9,9 +9,7 @@ from __future__ import annotations
 import json
 import os
 import time
-import urllib.error
-import urllib.request
-from typing import NamedTuple
+from typing import NamedTuple, cast
 from urllib.parse import quote, urlparse
 
 import pyarrow as pa
@@ -57,6 +55,7 @@ from geoparquet_io.core.http_retry import (
     RetryExhaustedError,
     RetryVerdict,
     is_retryable_status,
+    make_request_with_retry,
     response_retry_after,
     run_with_retry,
 )
@@ -141,7 +140,7 @@ def _validate_carto_url(url: str) -> str:
     parsed = urlparse(url)
 
     # Restrict to http(s) — rejects empty, file://, and other schemes so the
-    # URL can be safely handed to urllib.request.urlopen (see _carto_sql_json).
+    # URL can be safely handed to the HTTP owner (see _carto_sql_json).
     if not has_http_scheme(url):
         raise InvalidParameterError(
             "url",
@@ -387,10 +386,19 @@ def _carto_sql_json(
 
     try:
         # url scheme is constrained to http(s) by _validate_carto_url upstream.
-        request = urllib.request.Request(full_url, headers={"User-Agent": "geoparquet-io"})
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310  # nosec B310
-            payload = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError) as e:
+        payload = json.loads(
+            cast(
+                bytes,
+                make_request_with_retry(
+                    "GET",
+                    full_url,
+                    headers={"User-Agent": "geoparquet-io"},
+                    timeout=timeout,
+                    parse_json=False,
+                ),
+            )
+        )
+    except (GeoParquetError, OSError, ValueError) as e:
         raise CartoError(f"Carto SQL request failed: {e}") from e
 
     if not isinstance(payload, dict):

@@ -493,22 +493,6 @@ class TestTheStdoutStreamIsGatedLikeAFileWrite:
 # ---------------------------------------------------------------------------
 
 
-def _rewrite_covering(source: Path, target: Path, covering: dict | None, **columns) -> Path:
-    """``source`` with the primary column's ``covering`` replaced."""
-    table = pq.read_table(str(source))
-    metadata = dict(table.schema.metadata or {})
-    geo = json.loads(metadata[b"geo"].decode("utf-8"))
-    col_meta = geo["columns"][geo["primary_column"]]
-    if covering is None:
-        col_meta.pop("covering", None)
-    else:
-        col_meta["covering"] = covering
-    col_meta.update(columns)
-    metadata[b"geo"] = json.dumps(geo).encode("utf-8")
-    pq.write_table(table.replace_schema_metadata(metadata), str(target))
-    return target
-
-
 @pytest.fixture
 def gdal_style_covering(tmp_path) -> Path:
     """A ``geometry_bbox`` struct and a covering naming it -- what GDAL writes.

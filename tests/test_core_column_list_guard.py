@@ -126,9 +126,6 @@ def _layer_info() -> arcgis.ArcGISLayerInfo:
     )
 
 
-ARCGIS_URL = "https://example.com/arcgis/rest/services/x/FeatureServer/0"
-
-
 class TestSplitColumnList:
     """The splitter itself: one place that decides "unset" from "blank entry".
 

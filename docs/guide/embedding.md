@@ -113,3 +113,9 @@ is gpio's internal layering (see
 [contributing](../contributing.md) for the architecture). The Python API
 (`geoparquet_io.api`) remains the supported interface for applications that
 *can* install gpio from PyPI; vendoring is only for hosts that cannot.
+
+## Core helper migrations
+
+See the [one-owner migration reference](one-owner-migration.md) for the owner table,
+removed public names and signature changes. Import policy helpers from their owner;
+former convenience re-exports and deleted wrappers are unsupported.

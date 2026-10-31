@@ -286,3 +286,14 @@ class TestCodeowners:
         # One line per owner module: a glob would quietly widen ownership.
         patterns = [p for p, _owners in _codeowners_entries() if any(c in p for c in "*?[")]
         assert not patterns, f"CODEOWNERS should name files, not patterns: {patterns}"
+
+
+def test_every_documented_concept_owner_has_codeowners():
+    """G11 covers the final owner table, including owners added after T0a."""
+    content = (PROJECT_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    table = content.split("## One owner per concept\n", 1)[1].split("\n## ", 1)[0]
+    documented = set(re.findall(r"`(geoparquet_io/[^`]+\.py)`", table))
+    assert documented, "the concept owner table is empty"
+    listed = {path.lstrip("/") for path, _ in _codeowners_entries()}
+    assert not PENDING_CODEOWNERS_PATHS, "all owners must exist at close-out"
+    assert documented <= listed, f"concept owners missing CODEOWNERS: {documented - listed}"

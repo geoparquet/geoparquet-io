@@ -23,7 +23,7 @@
 path = "geoparquet_io/api/ops.py"
 name = "pyarrow.parquet.write_table"
 count = 3
-reason = "permanent scratch copy: stages the in-memory input table to a temp file a file-based core call reads back; never an output, so not a facade write. Its hand-rolled temp path (gettempdir + uuid) is T2f's (concept 11)"
+reason = "permanent scratch copy: stages the in-memory input table to a temp file a file-based core call reads back; never an output, so not a facade write. Its path comes from file_utils.scratch_path"
 [[G1.tid251]]
 path = "geoparquet_io/benchmarks/operations.py"
 name = "pyarrow.parquet.write_table"
@@ -31,15 +31,15 @@ reason = "permanent: benchmark fixture write that measures pyarrow itself; not a
 [[G1.tid251]]
 path = "geoparquet_io/core/add/kdtree.py"
 name = "pyarrow.parquet.write_table"
-reason = "permanent scratch copy: the planar view the kdtree pass reads back with DuckDB; never an output, so not a facade write. Its hand-rolled temp path (mkstemp) is T2f's (concept 11)"
+reason = "permanent scratch copy: the planar view the kdtree pass reads back with DuckDB; never an output, so not a facade write. Its path comes from file_utils.scratch_file"
 [[G1.tid251]]
 path = "geoparquet_io/core/arcgis.py"
 name = "pyarrow.parquet.ParquetWriter"
-reason = "permanent scratch copy: the paged ArcGIS spool, read back by pq.read_table; never an output, so not a facade write. Its hand-rolled temp path is T2f's (concept 11)"
+reason = "permanent scratch copy: the paged ArcGIS spool, read back by pq.read_table; never an output, so not a facade write. Its path comes from file_utils.scratch_path"
 [[G1.tid251]]
 path = "geoparquet_io/core/carto.py"
 name = "httpx"
-reason = "permanent: CARTO status probe streams one request with httpx.stream to read the status without the body; accepted by the T4a audit"
+reason = "permanent: CARTO status probe streams one request with httpx.stream to read the status without the body; accepted caller-specific classification"
 [[G1.tid251]]
 path = "geoparquet_io/core/duckdb_utils.py"
 name = "psutil"
@@ -52,17 +52,8 @@ reason = "permanent scratch copy: stdin spooled to a temp file the command then 
 path = "geoparquet_io/core/wfs.py"
 name = "httpx"
 count = 3
-reason = "permanent: WFS request, feature count, streaming page download and startIndex probe use httpx for its exception types and stream; retries run through http_retry (T4a)"
-[[G1.tid251]]
-path = "geoparquet_io/core/carto.py"
-name = "urllib.request"
-count = 3
-reason = "CARTO SQL API GET via urllib.request outside http_retry (no retry, its own timeout); T4c moves it behind make_request_with_retry"
-[[G1.tid251]]
-path = "geoparquet_io/core/overture.py"
-name = "urllib.request"
-count = 2
-reason = "latest-release lookup via urllib.request with its own 5 s timeout, outside http_retry; T4c"
+reason = "permanent: WFS request, feature count, streaming page download and startIndex probe use httpx for its exception types and stream; retries run through http_retry"
+
 # Row-group count: core/parquet_writer.py owns the default and every resolver (#981, #1215).
 [[G1.row_group_policy]]
 path = "geoparquet_io/core/benchmark.py"
@@ -77,7 +68,7 @@ reason = "permanent: the same baseline, named in the benchmark's report"
 path = "geoparquet_io/core/carto.py"
 name = "_probe_request_status"
 count = 2
-reason = "400 <= code < 500 and code != 429 picks which 4xx answers get a detail probe for the error message; not a retry decision (T4a kept it)"
+reason = "permanent: 400 <= code < 500 and code != 429 picks which 4xx answers get a detail probe for the error message; not a retry decision"
 [[G1.retry_status_sets]]
 path = "geoparquet_io/core/arcgis.py"
 name = "_is_page_pressure_error"
@@ -90,85 +81,85 @@ reason = "permanent: ArcGIS JSON error-body code 500 marks page pressure (halve 
 [[G1.json_dumps]]
 path = "geoparquet_io/core/add/stac_metadata.py"
 count = "*"
-reason = "metadata serialization, not a report: stac-geoparquet footer payload"
+reason = "permanent: metadata serialization, not a report: stac-geoparquet footer payload"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/arcgis.py"
 count = "*"
-reason = "metadata serialization, not a report: geo block and a staged ArcGIS JSON document"
+reason = "permanent: metadata serialization, not a report: geo block and a staged ArcGIS JSON document"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/bbox_structure.py"
 count = "*"
-reason = "metadata serialization, not a report: debug dump of the geo block"
+reason = "permanent: metadata serialization, not a report: debug dump of the geo block"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/constants.py"
 count = "*"
-reason = "metadata serialization, not a report: collection footer key"
+reason = "permanent: metadata serialization, not a report: collection footer key"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/crs_utils.py"
 count = "*"
-reason = "metadata serialization, not a report: PROJJSON for SQL, cache keys and messages"
+reason = "permanent: metadata serialization, not a report: PROJJSON for SQL, cache keys and messages"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/duckdb_metadata.py"
 count = "*"
-reason = "metadata serialization, not a report: CRS inside a GEOMETRY type string"
+reason = "permanent: metadata serialization, not a report: CRS inside a GEOMETRY type string"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/duckdb_utils.py"
 count = "*"
-reason = "metadata serialization, not a report: ARROW:extension:metadata"
+reason = "permanent: metadata serialization, not a report: ARROW:extension:metadata"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/extract.py"
 count = "*"
-reason = "metadata serialization, not a report: GeoJSON geometry handed to SQL"
+reason = "permanent: metadata serialization, not a report: GeoJSON geometry handed to SQL"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/format_writers.py"
 count = "*"
-reason = "metadata serialization, not a report: SRS parameter for GDAL"
+reason = "permanent: metadata serialization, not a report: SRS parameter for GDAL"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/geo_metadata.py"
 name = "geo_key_value"
 line_pattern = 'json\.dumps'
 count = 1
-reason = "metadata serialization, not a report: geo block (owner of its encoding)"
+reason = "permanent: metadata serialization, not a report: geo block (owner of its encoding)"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/geoarrow_compat.py"
 count = "*"
-reason = "metadata serialization, not a report: ARROW:extension:metadata"
+reason = "permanent: metadata serialization, not a report: ARROW:extension:metadata"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/geojson_stream.py"
 count = "*"
-reason = "metadata serialization, not a report: GeoJSON output (the data, not a report)"
+reason = "permanent: metadata serialization, not a report: GeoJSON output (the data, not a report)"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/metadata_utils.py"
 count = "*"
-reason = "metadata serialization, not a report: PROJJSON/covering pretty-printed inside the human meta view"
+reason = "permanent: metadata serialization, not a report: PROJJSON/covering pretty-printed inside the human meta view"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/parquet_footer.py"
 count = "*"
-reason = "metadata serialization, not a report: ARROW:extension:metadata"
+reason = "permanent: metadata serialization, not a report: ARROW:extension:metadata"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/pmtiles.py"
 count = "*"
-reason = "metadata serialization, not a report: GeoJSON feature lines fed to tippecanoe"
+reason = "permanent: metadata serialization, not a report: GeoJSON feature lines fed to tippecanoe"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/pmtiles_chunks.py"
 count = "*"
-reason = "metadata serialization, not a report: chunk manifest file"
+reason = "permanent: metadata serialization, not a report: chunk manifest file"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/process/overview/overview_file.py"
 count = "*"
-reason = "metadata serialization, not a report: geo block and overviews footer key"
+reason = "permanent: metadata serialization, not a report: geo block and overviews footer key"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/stac.py"
 count = "*"
-reason = "metadata serialization, not a report: STAC item/collection JSON file"
+reason = "permanent: metadata serialization, not a report: STAC item/collection JSON file"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/write_strategies/base.py"
 count = "*"
-reason = "metadata serialization, not a report: PROJJSON literal for SQL"
+reason = "permanent: metadata serialization, not a report: PROJJSON literal for SQL"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/write_strategies/duckdb_kv.py"
 count = "*"
-reason = "metadata serialization, not a report: PROJJSON for SQL"
+reason = "permanent: metadata serialization, not a report: PROJJSON for SQL"
 
 # Who owns one key of a geo block's column entry (#1367 concept 4). The
 # geo_compose arm reads this table: an edit of a LISTED key in its module is the
@@ -193,7 +184,7 @@ modules = ["geoparquet_io/core/parquet_schema.py"]
 path = "geoparquet_io/core/geo_metadata.py"
 line_pattern = '\.get\("primary_column"\)'
 count = "*"
-reason = "permanent: T3a's geo-block decoder; reading the block's primary_column claim is its business"
+reason = "permanent: the geo-block decoder; reading the block's primary_column claim is its business"
 [[G1.geometry_identity]]
 path = "geoparquet_io/core/validate.py"
 name = "_check_primary_column_present"
@@ -205,24 +196,24 @@ reason = "permanent: the validator checks the block's primary_column claim itsel
 [[G1.geometry_identity]]
 path = "geoparquet_io/core/derive_geo_from_file.py"
 name = "_with_primary_column"
-reason = "a block repoint: compares the claim it is about to rewrite"
+reason = "permanent: a block repoint: compares the claim it is about to rewrite"
 [[G1.geometry_identity]]
 path = "geoparquet_io/core/inspect.py"
 name = "inspect_summary"
 count = 2
-reason = "extract_geo_info's result: the resolver's answer, not the block's claim (two reads)"
+reason = "permanent: extract_geo_info's result: the resolver's answer, not the block's claim (two reads)"
 [[G1.geometry_identity]]
 path = "geoparquet_io/core/inspect.py"
 name = "inspect_preview"
-reason = "extract_geo_info's result: the resolver's answer, not the block's claim"
+reason = "permanent: extract_geo_info's result: the resolver's answer, not the block's claim"
 [[G1.geometry_identity]]
 path = "geoparquet_io/core/inspect.py"
 name = "inspect_stats"
-reason = "extract_geo_info's result: the resolver's answer, not the block's claim"
+reason = "permanent: extract_geo_info's result: the resolver's answer, not the block's claim"
 [[G1.geometry_identity]]
 path = "geoparquet_io/core/wfs.py"
 name = "_probe_properties_type"
-reason = "the GeoJSON properties column's type (unnest a STRUCT), not a geometry read kind"
+reason = "permanent: the GeoJSON properties column's type (unnest a STRUCT), not a geometry read kind"
 
 [[G1.schema_probe]]
 path = "geoparquet_io/core/carto.py"
@@ -368,13 +359,13 @@ reason = "permanent: constant geometry filter, not a spatial join"
 # Owners named above that do not exist yet (none today).
 [G2.pending_owners]
 
-# The definitions outside their owner today, each with the track that deletes
-# it. count = how many defs of that name the file holds (default 1); the check
-# fails when the tree differs.
+# Reviewed permanent name collisions outside the owner. count = how many defs
+# of that name the file holds (default 1); the check fails when the tree differs.
+# No deferred track-owned copies remain.
 [[G2.exemptions]]
 path = "geoparquet_io/core/carto.py"
 name = "_fetch_with_retry"
-reason = "permanent: caller-specific classify wrapper over run_with_retry, accepted by the T4a audit"
+reason = "permanent: caller-specific classify wrapper over run_with_retry, accepted caller-specific classification"
 
 # ---------------------------------------------------------------------------
 # G3: near-duplicate functions (scripts/check_duplicates.py; pylint R0801)
@@ -432,9 +423,6 @@ reason = "permanent: the same keyword-argument list forwarded to one callee (API
 block = "cli.commands.add:add_h3|cli.commands.sort:str_order_command"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
-block = "core.crs_utils:<module>|core.duckdb_metadata:_get_pyarrow_logical_type"
-reason = "GeoArrow extension-name list copied; T3a's decoder owner"
-[[G3.pylint]]
 block = "core.extract:_extract_streaming|core.str_order:_str_order_streaming"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
@@ -487,11 +475,11 @@ reason = "permanent: two meanings, benchmark suite's profiling switch and check'
 [[G13.options]]
 option = "--resolution"
 fields = ["type", "default"]
-reason = "permanent: per-index bounds and defaults (H3 0-15, A5 0-30, quadkey 0-23; partition/aggregate None = auto); T5b's index specs carry them"
+reason = "permanent: per-index bounds and defaults (H3 0-15, A5 0-30, quadkey 0-23; partition/aggregate None = auto); IndexSpec carries them"
 [[G13.options]]
 option = "--timeout"
 fields = ["default"]
-reason = "permanent: one type since T5c (cli.decorators.timeout_option); the 60 s (arcgis) and 120 s (carto) defaults are per-service budgets the T4a audit accepted"
+reason = "permanent: one type via cli.decorators.timeout_option; the 60 s (arcgis) and 120 s (carto) defaults are per-service budgets the service retry audit accepted"
 [[G13.options]]
 option = "--where"
 fields = ["default"]
@@ -504,7 +492,7 @@ reason = "permanent: ArcGIS REST requires a where clause, so extract arcgis defa
 [G4]
 whitelist = "scripts/vulture_whitelist.py"
 tests_whitelist = "scripts/vulture_whitelist_tests.py"
-reason = "The findings vulture reported at 60 when the level dropped from 80 (#1367), package and tests scanned apart so a test is not a use: dead code (tagged with the track that deletes it, T0e for most) plus names used only dynamically (tagged with how). Delete a whitelist line with the code it names."
+reason = "Only names used dynamically remain; each line explains its dynamic dispatch. Package and tests are scanned separately so a test does not count as a production use. Delete a whitelist line when its dynamic use disappears."
 
 # ---------------------------------------------------------------------------
 # G5: core/common.py (tests/test_common_split_guards.py)

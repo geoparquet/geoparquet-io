@@ -286,7 +286,7 @@ retries, ...) has one owner module, and these checks fail a new copy of it (#136
   count) and fails a new pair of functions with 8 or
   more statements at 0.90 similarity or above; the pairs that exist are in
   `scripts/duplicate_pairs_baseline.txt`, which only falls (`--update` drops a gone pair).
-  pylint `R0801` (8 similar lines) runs at pre-push through
+  pylint `R0801` (8 similar lines) runs at both hook stages through
   `scripts/check_pylint_duplicates.py`, held to the blocks pinned under `[G3.pylint]` (the
   module and function on each side, so swapping one copy for another still fails).
 - **G6, public-API snapshot** — `tests/data/snapshots/public_api.json` pins the public names
@@ -301,7 +301,7 @@ retries, ...) has one owner module, and these checks fail a new copy of it (#136
 - **G4, dead code** — vulture at `min_confidence = 60`, the package on its own (a test
   calling a name is not a use; baseline `scripts/vulture_whitelist.py`) and the tests on
   their own (the `vulture-tests` hook; `scripts/vulture_whitelist_tests.py`). Each
-  whitelist line is tagged `dynamic: <how>` or `dead: <track> deletes`.
+  whitelist line is tagged `dynamic: <how>`; no dead-code allowances remain.
 - **G5, `core/common.py`** — `tests/test_common_split_guards.py` pins its public and
   private names and its size, both ways: shrinking it fails until the pin is lowered.
 
@@ -310,6 +310,27 @@ Every exemption lives in `scripts/owner_exemptions.toml` with a reason, and
 `count` no longer matches the tree. A failure means: call the owner. When you delete a
 copy, delete its entry and lower the count in the same commit. Never add an entry to make
 new code pass.
+
+A G1 failure prints `path:line`, the enclosing function, the offending expression
+and the arm (for example `geo_parse` or `staging`). Read that arm's docstring in
+`tests/test_owner_guards.py` to find the owner and the forbidden shape, then route
+the caller to the owner. A `TID251` import diagnostic names the owner directly.
+A stale-exemption failure means the recorded copy disappeared: remove the entry
+and lower `EXPECTED_COUNTS` in the same change.
+
+All guards block: G1/G2/G4/G5/G12 run in the fast suite; `owner-only-defs`,
+`check-duplicates`, `pylint-duplicates`, `vulture` and `vulture-tests` return failure
+at both hook stages. G6–G11 and G13 assert their contracts in pytest/CI. The AST
+duplicate baseline is empty. A disappeared historical duplicate may be removed
+with `--update`; this never admits a new pair.
+
+An exemption is justified only for a reviewed semantic false positive, such as a
+benchmark measuring pyarrow itself, a scratch spool rather than a final write,
+or dynamic Click dispatch. Record the exact site, count and enduring reason in
+`scripts/owner_exemptions.toml`; dynamic vulture entries explain their dispatch
+beside the whitelist name. Review the source before keeping an allowance. A track
+name or a promise to fix a copy later is not a permanent justification. Counts
+only go down; never raise a baseline or add an exemption to make a new copy pass.
 
 ### External extractors
 

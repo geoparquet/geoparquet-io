@@ -66,7 +66,7 @@ CHECK_OWNER_DEFS = REPO / "scripts" / "check_owner_defs.py"
 #: The pinned number of exemption entries per check (G1 per arm). Lower it with
 #: the commit that deletes a copy; raising it needs a reason in review.
 EXPECTED_COUNTS = {
-    "G1.tid251": 10,
+    "G1.tid251": 8,
     "G1.geo_parse": 0,
     "G1.set_memory_limit": 0,
     "G1.sql_escape": 0,
@@ -96,11 +96,11 @@ EXPECTED_COUNTS = {
     "G2.exemptions": 1,
     "G3.pairs": 0,
     "G3.baseline": 0,
-    "G3.pylint": 16,
+    "G3.pylint": 15,
     "G13.options": 11,
     "G13.bbox_parsers": 0,
     "G4.whitelist": 148,
-    "G4.tests_whitelist": 96,
+    "G4.tests_whitelist": 90,
 }
 
 
@@ -3693,7 +3693,7 @@ def test_g2_the_schema_rule_it_replaced_is_still_in_the_table():
 # ---------------------------------------------------------------------------
 
 _WHITELIST_LINE = re.compile(
-    r"^(?P<name>[\w.]+)\s+# unused [\w ]+ \((?P<path>[^:()]+):\d+\) -- (?P<tag>dynamic|dead): \S.*$"
+    r"^(?P<name>[\w.]+)\s+# unused [\w ]+ \((?P<path>[^:()]+):\d+\) -- (?P<tag>dynamic): \S.*$"
 )
 _WHITELISTS = ("whitelist", "tests_whitelist")
 
@@ -3729,16 +3729,13 @@ def test_g4_the_tests_run_has_its_own_hook_and_whitelist():
     assert "tests" in entry.split()
     assert load_exemptions()["G4"]["tests_whitelist"] in entry
     assert "--min-confidence 60" in entry
-    assert hook["stages"] == ["pre-push"]
+    assert hook["stages"] == ["pre-commit", "pre-push"]
 
 
 @pytest.mark.parametrize("key", _WHITELISTS)
-def test_g4_every_whitelist_entry_is_tagged_dynamic_or_dead(key):
+def test_g4_every_whitelist_entry_is_tagged_dynamic(key):
     untagged = [line for line in _whitelist_lines(key) if not _WHITELIST_LINE.match(line)]
-    assert not untagged, (
-        "tag each line '-- dynamic: <how it is used>' or '-- dead: <track> deletes':\n  "
-        + "\n  ".join(untagged)
-    )
+    assert not untagged, "tag each line '-- dynamic: <how it is used>':\n  " + "\n  ".join(untagged)
 
 
 def _ast_identifiers(path: Path) -> set[str]:
@@ -3851,7 +3848,7 @@ def test_g3_hooks_run_both_layers():
     assert "stages" not in dups  # commit stage
     pylint = hook_entry("pylint-duplicates")
     assert pylint["entry"] == "uv run python scripts/check_pylint_duplicates.py"
-    assert pylint["stages"] == ["pre-push"]
+    assert pylint["stages"] == ["pre-commit", "pre-push"]
 
 
 def test_g3_pylint_runs_r0801_alone_at_8_lines():

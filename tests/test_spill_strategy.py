@@ -108,7 +108,7 @@ requires_unprivileged_posix = pytest.mark.skipif(
 
 
 class TestSpillDirectoryHelper:
-    """``spill_directory()`` picks the location; it never creates it."""
+    """``spill_directory()`` protects a private location before DuckDB spills."""
 
     def test_defaults_under_the_os_temp_directory(self):
         path = Path(spill_directory())
@@ -118,11 +118,13 @@ class TestSpillDirectoryHelper:
         path = Path(spill_directory(tmp_path))
         assert path.parent == tmp_path
 
-    def test_is_not_created_eagerly(self, tmp_path):
-        # Nothing is written unless DuckDB actually spills, and DuckDB removes
-        # a directory it created itself when the connection closes.
-        assert not Path(spill_directory(tmp_path)).exists()
-        assert list(tmp_path.iterdir()) == []
+    def test_ownership_marker_precedes_the_first_spill(self, tmp_path):
+        path = Path(spill_directory(tmp_path))
+        if os.name == "nt":
+            assert not path.exists()
+        else:
+            assert (path / ".gpio-owner.lock").is_file()
+            assert sweep_orphaned_spill_dirs(tmp_path) == []
 
     def test_is_unique_per_call(self, tmp_path):
         paths = {spill_directory(tmp_path) for _ in range(50)}
@@ -215,8 +217,8 @@ class TestSpillsActuallyLandThere:
         # unlink/replace), and a leftover is not the thing this test is about:
         # what bounds leftovers is the sweep in ``spill_directory()``, pinned in
         # TestOrphanedSpillDirectoriesAreReaped below.
-        if os.name != "nt":
-            assert not spill_dir.exists()
+        if os.name != "nt" and spill_dir.exists():
+            assert list(spill_dir.iterdir()) == [spill_dir / ".gpio-owner.lock"]
 
     def test_concurrent_connections_do_not_corrupt_each_other(self):
         """Regression guard for the shared-directory hazard in the docstring."""
@@ -591,3 +593,25 @@ def test_the_reaper_pattern_is_not_hand_written_twice():
 
     assert isinstance(duckdb_utils._SPILL_DIR_RE, re.Pattern)
     assert admin_datasets.sweep_orphaned_spill_dirs is duckdb_utils.sweep_orphaned_spill_dirs
+
+
+def test_a_dead_pid_with_a_held_spill_lock_survives(tmp_path, dead_pid):
+    """A host pid can appear dead from a sibling pid namespace (row 82)."""
+    fcntl = pytest.importorskip("fcntl")
+    leaf = _plant_leaf(tmp_path, dead_pid)
+    with (leaf / ".gpio-owner.lock").open("a+b") as marker:
+        fcntl.flock(marker, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert sweep_orphaned_spill_dirs(tmp_path) == []
+        assert leaf.is_dir()
+    assert sweep_orphaned_spill_dirs(tmp_path) == [str(leaf)]
+    assert not leaf.exists()
+
+
+def test_spill_sweep_without_fcntl_uses_the_pid_check(tmp_path, dead_pid, monkeypatch):
+    """Windows keeps a live owner and reaps a dead one without flock support."""
+    live = _plant_leaf(tmp_path, os.getpid())
+    dead = _plant_leaf(tmp_path, dead_pid)
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    assert sweep_orphaned_spill_dirs(tmp_path) == [str(dead)]
+    assert live.is_dir()
+    assert not dead.exists()
