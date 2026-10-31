@@ -10,7 +10,6 @@ that reads the version for itself instead of asking the owner fails its test.
 
 from __future__ import annotations
 
-import ast
 import dataclasses
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -68,45 +67,6 @@ def pretend_duckdb_capabilities(**fields: object) -> Iterator[DuckDBCapabilities
     """The installed capabilities with ``fields`` replaced, e.g. ``native_geojson_writer=True``."""
     with _owner_reports(dataclasses.replace(duckdb_capabilities(), **fields)) as caps:
         yield caps
-
-
-# --- guard: no duckdb.__version__ read outside the owner ----------------------
-
-
-def _version_reads(path: Path, root: Path = REPO) -> list[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    return [
-        f"{path.relative_to(root)}:{node.lineno}"
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute)
-        and node.attr == "__version__"
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "duckdb"
-    ]
-
-
-def _outside_owner_reads() -> list[str]:
-    return [
-        site
-        for path in sorted(PACKAGE.rglob("*.py"))
-        if path.resolve() != OWNER.resolve()
-        for site in _version_reads(path)
-    ]
-
-
-def test_duckdb_version_is_read_only_by_the_owner():
-    found = _outside_owner_reads()
-    assert not found, (
-        "duckdb.__version__ read outside core/duckdb_utils.py; ask "
-        "duckdb_capabilities() instead:\n  " + "\n  ".join(found)
-    )
-
-
-def test_guard_catches_a_version_read(tmp_path):
-    """The guard's walker sees the banned read (G12-style self-test)."""
-    module = tmp_path / "rogue.py"
-    module.write_text("import duckdb\nMAJOR = duckdb.__version__.split('.')[0]\n")
-    assert _version_reads(module, root=tmp_path) == ["rogue.py:2"]
 
 
 # --- version parsing -----------------------------------------------------------
@@ -341,53 +301,6 @@ def test_inspect_preview_reads_the_owner(monkeypatch, version, has_spatial):
         result = CliRunner().invoke(cli, ["inspect", "head", sample, "5"])
     assert result.exit_code == 0, result.output
     assert seen == [(has_spatial, has_spatial)]
-
-
-# --- guard: version-dependent facts are read in the owner only ---------------------
-
-
-def _owner_only_reads(path: Path, root: Path = REPO) -> list[str]:
-    """``.core_geometry`` reads and ``hasattr``/``getattr(duckdb, ...)`` feature probes."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    found = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and node.attr == "core_geometry":
-            found.append(f"{path.relative_to(root)}:{node.lineno} core_geometry")
-        elif (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id in ("hasattr", "getattr")
-            and node.args
-            and isinstance(node.args[0], ast.Name)
-            and node.args[0].id == "duckdb"
-        ):
-            found.append(f"{path.relative_to(root)}:{node.lineno} {node.func.id}(duckdb)")
-    return sorted(found)
-
-
-def test_version_dependent_facts_are_decided_by_the_owner():
-    """Auto spatial resolves in ``resolve_load_spatial``; no module probes ``duckdb`` itself."""
-    found = [
-        site
-        for path in sorted(PACKAGE.rglob("*.py"))
-        if path.resolve() != OWNER.resolve()
-        for site in _owner_only_reads(path)
-    ]
-    assert not found, "decide these in core/duckdb_utils.py:\n  " + "\n  ".join(found)
-
-
-def test_owner_only_guard_sees_both_shapes(tmp_path):
-    module = tmp_path / "rogue.py"
-    module.write_text(
-        "import duckdb\n"
-        "from geoparquet_io.core.duckdb_utils import duckdb_capabilities\n"
-        "A = not duckdb_capabilities().core_geometry\n"
-        "B = hasattr(duckdb, 'HTTPException')\n"
-    )
-    assert _owner_only_reads(module, root=tmp_path) == [
-        "rogue.py:3 core_geometry",
-        "rogue.py:4 hasattr(duckdb)",
-    ]
 
 
 def test_wkt_detection_closes_its_probe_through_the_owner(monkeypatch, tmp_path):

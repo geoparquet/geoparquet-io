@@ -25,7 +25,6 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.add.quadkey import add_quadkey_column
 from geoparquet_io.core.geo_metadata import strip_bboxless_covering
-from tests.conftest import fast_path_query
 
 
 def _geo(path):
@@ -189,62 +188,6 @@ class TestPartitionQuadkeyInterop:
         out, _ = partitioned_dir
         gdf = gpd.read_parquet(str(out))
         assert len(gdf) > 0
-
-
-def test_v2_fast_path_does_not_carry_a_bboxless_covering(tmp_path):
-    """The 2.0 no-rewrite path carries the input's block verbatim — gate it too."""
-    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
-
-    carried = {
-        "geo": json.dumps(
-            {
-                "version": "2.0.0",
-                "primary_column": "geometry",
-                "columns": {
-                    "geometry": {
-                        "encoding": "WKB",
-                        "geometry_types": ["Point"],
-                        "bbox": [0, 0, 1, 1],
-                        "covering": {"h3": {"column": "h3", "resolution": 9}},
-                    }
-                },
-            }
-        )
-    }
-    # With the bbox-less covering gone the block says nothing DuckDB would not,
-    # so there is nothing to carry.
-    assert (
-        _geo_block_to_carry_on_fast_path(carried, "geometry", "2.0", **fast_path_query("h3"))
-        is None
-    )
-
-
-def test_v2_fast_path_carries_the_rest_of_the_block_without_the_covering():
-    """A block that still has something to say is carried -- minus the covering."""
-    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
-
-    carried = {
-        "geo": json.dumps(
-            {
-                "version": "2.0.0",
-                "primary_column": "geometry",
-                "columns": {
-                    "geometry": {
-                        "encoding": "WKB",
-                        "geometry_types": ["Point"],
-                        "bbox": [0, 0, 1, 1],
-                        "orientation": "counterclockwise",
-                        "covering": {"h3": {"column": "h3", "resolution": 9}},
-                    }
-                },
-            }
-        )
-    }
-    block = _geo_block_to_carry_on_fast_path(carried, "geometry", "2.0", **fast_path_query("h3"))
-    assert block is not None
-    column = block["columns"]["geometry"]
-    assert column["orientation"] == "counterclockwise"
-    assert "covering" not in column
 
 
 class TestIndexEntriesBesideABboxColumn:

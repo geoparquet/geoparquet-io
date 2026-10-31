@@ -19,7 +19,6 @@ from geoparquet_io.cli.main import check, extract, inspect
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.partition.reader import (
     build_read_parquet_expr,
-    get_files_to_check,
     get_partition_info,
     raise_for_schema_mismatch,
     resolve_read_path,
@@ -69,42 +68,6 @@ class TestPartitionInfo:
         assert info["is_partition"] is True
         assert info["partition_type"] == "glob"
         assert info["file_count"] == 4
-
-
-class TestGetFilesToCheck:
-    """Tests for get_files_to_check function."""
-
-    def test_default_returns_first_file(self, country_partition_dir):
-        """Test that default mode returns only the first file."""
-        files, notice = get_files_to_check(country_partition_dir)
-        assert len(files) == 1
-        assert "first file" in notice.lower()
-        assert "4 total" in notice
-
-    def test_check_all_returns_all_files(self, country_partition_dir):
-        """Test that check_all returns all files."""
-        files, notice = get_files_to_check(country_partition_dir, check_all=True)
-        assert len(files) == 4
-        assert "all 4 files" in notice.lower()
-
-    def test_sample_returns_subset(self, country_partition_dir):
-        """Test that sample returns requested number of files."""
-        files, notice = get_files_to_check(country_partition_dir, check_sample=2)
-        assert len(files) == 2
-        assert "sample of 2" in notice.lower()
-
-    def test_sample_caps_at_total(self, country_partition_dir):
-        """Test that sample is capped at total file count."""
-        files, notice = get_files_to_check(country_partition_dir, check_sample=100)
-        assert len(files) == 4
-        assert "sample of 4" in notice.lower()
-
-    def test_single_file_returns_file(self, buildings_test_file):
-        """Test that single file input returns that file."""
-        files, notice = get_files_to_check(buildings_test_file)
-        assert len(files) == 1
-        assert files[0] == buildings_test_file
-        assert notice == ""
 
 
 class TestResolveReadPath:

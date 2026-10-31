@@ -521,7 +521,7 @@ class TestFiltersOnUnsupportedFormats:
 class TestWriteFormatRouter:
     def test_the_csv_branch_forwards_the_filters(self, tmp_path):
         out = tmp_path / "routed.csv"
-        format_writers.write_format(PLACES, str(out), "csv", bbox=BBOX)
+        format_writers.write_csv(PLACES, str(out), bbox=BBOX)
         assert len(Path(out).read_text(encoding="utf-8").strip().splitlines()) == BBOX_ROWS + 1
 
 

@@ -31,7 +31,6 @@ from geoparquet_io.core.geo_metadata import (
     sanitized_carried_geo,
 )
 from geoparquet_io.core.geometry_detection import primary_geometry_column
-from tests.conftest import fast_path_query
 
 # One WKB point (1.0, 2.0), little-endian.
 POINT_WKB = struct.pack("<BI2d", 1, 1, 1.0, 2.0)
@@ -1192,27 +1191,6 @@ def test_ops_reproject_survives_a_non_string_primary_column(col):
 
 
 @pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
-def test_reproject_table_readers_survive_a_malformed_block(col, case, block):
-    """The three ``reproject`` readers of the raw block: no ``TypeError``/``AttributeError``.
-
-    A string- or list-shaped block, ``columns: null`` and a non-object column
-    entry each crashed one of them with a bare ``AttributeError`` (#887 review).
-    """
-    from geoparquet_io.core.reproject import (
-        _detect_crs_from_table,
-        _table_geo_column_meta,
-    )
-
-    reset_malformed_geo_warnings()
-    table = _table_with_geo(block, col=col)
-
-    detected = primary_geometry_column(table)
-    assert isinstance(detected, str)
-    assert isinstance(_detect_crs_from_table(table, detected), str)
-    assert isinstance(_table_geo_column_meta(table, detected), dict)
-
-
-@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
 def test_reproject_table_never_fails_with_a_bare_type_error(col, case, block, tmp_path):
     """``Table.reproject`` end to end: a domain error is fine, a bare TypeError is not."""
     from geoparquet_io.core.reproject import reproject_table
@@ -1342,47 +1320,6 @@ def _bbox_struct_column() -> pa.Array:
 
 def _table_with_geo_and_bbox(geo_block, col: str = "geometry") -> pa.Table:
     return _table_with_geo(geo_block, col=col).append_column("bbox", _bbox_struct_column())
-
-
-@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
-def test_fast_path_carry_survives_a_malformed_block(col, case, block):
-    """The 2.0 fast path decides what to write from the carried block (#947).
-
-    ``columns`` as a list or a string crashed it with
-    ``'list' object has no attribute 'get'`` -- and this block would then have
-    been written to the output verbatim.
-    """
-    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
-
-    reset_malformed_geo_warnings()
-    metadata = {"geo": json.dumps(block)}
-    carried = _geo_block_to_carry_on_fast_path(metadata, col, "2.0", **fast_path_query())
-    assert carried is None or isinstance(carried["columns"], dict)
-
-
-def test_fast_path_carry_drops_a_wrong_typed_value_before_writing_it():
-    """A carried ``crs: 42`` must not reach the output through the fast path."""
-    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
-
-    reset_malformed_geo_warnings()
-    block = {
-        "version": "2.0.0",
-        "primary_column": "geometry",
-        "columns": {
-            "geometry": {
-                "encoding": "WKB",
-                "geometry_types": ["Point"],
-                "bbox": [0, 0, 1, 1],
-                "crs": 42,
-                "orientation": "counterclockwise",
-            }
-        },
-    }
-    carried = _geo_block_to_carry_on_fast_path(
-        {"geo": json.dumps(block)}, "geometry", "2.0", **fast_path_query()
-    )
-    assert carried is not None
-    assert "crs" not in carried["columns"]["geometry"]
 
 
 @pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)

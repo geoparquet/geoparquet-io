@@ -138,7 +138,9 @@ count = "*"
 reason = "metadata serialization, not a report: SRS parameter for GDAL"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/geo_metadata.py"
-count = "*"
+name = "geo_key_value"
+line_pattern = 'json\.dumps'
+count = 1
 reason = "metadata serialization, not a report: geo block (owner of its encoding)"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/geoarrow_compat.py"
@@ -521,3 +523,28 @@ reason = "The findings vulture reported at 60 when the level dropped from 80 (#1
 # G5: core/common.py (tests/test_common_split_guards.py)
 # ---------------------------------------------------------------------------
 # No exemptions: the pinned name sets and the size ceilings live in the test.
+
+[[G1.schema_probe]]
+path = "geoparquet_io/core/carto.py"
+count = 1
+reason = "permanent: remote CARTO SQL API probe"
+[[G1.schema_probe]]
+path = "geoparquet_io/core/convert.py"
+count = 1
+reason = "permanent: ST_Read column bind detects non-UTF-8 names"
+[[G1.spatial_filter]]
+path = "geoparquet_io/core/carto.py"
+count = 1
+reason = "permanent: constant geometry filter, not a spatial join"
+[[G1.spatial_filter]]
+path = "geoparquet_io/core/extract.py"
+count = 2
+reason = "permanent: constant geometry filter, not a spatial join"
+[[G1.spatial_filter]]
+path = "geoparquet_io/core/extract_bigquery.py"
+count = 2
+reason = "permanent: constant geometry filter, not a spatial join"
+[[G1.spatial_filter]]
+path = "geoparquet_io/core/wfs.py"
+count = 1
+reason = "permanent: constant geometry filter, not a spatial join"

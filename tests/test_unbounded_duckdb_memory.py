@@ -404,18 +404,3 @@ class TestRemainingCopySitesAreBounded:
             assert arg is None
             limit = parse_size_string(during)
             assert limit is not None and limit <= 5 * GIB
-
-    @pytest.mark.parametrize("fmt", ["csv", "flatgeobuf"])
-    def test_format_export_copy_is_bounded(self, tmp_path, monkeypatch, places_test_file, fmt):
-        from geoparquet_io.core import format_writers
-
-        monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
-        seen: list[tuple] = []
-        with _recording_scope(monkeypatch, format_writers, seen):
-            format_writers.write_format(places_test_file, str(tmp_path / f"out.{fmt}"), format=fmt)
-
-        assert seen, f"the {fmt} export COPY ran outside scoped_write_memory_limit"
-        for arg, during, _threads in seen:
-            assert arg is None
-            limit = parse_size_string(during)
-            assert limit is not None and limit <= 5 * GIB

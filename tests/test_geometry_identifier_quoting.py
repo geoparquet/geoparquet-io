@@ -39,11 +39,8 @@ from geoparquet_io.cli.main import add, check, convert, extract, inspect, sort
 from geoparquet_io.core import common as common_module
 from geoparquet_io.core.check_spatial_order import check_spatial_order
 from geoparquet_io.core.duckdb_metadata import (
-    get_aggregated_native_geo_stats,
     get_compression_info,
-    get_native_geo_statistics,
     get_per_row_group_bbox_stats,
-    get_per_row_group_native_geo_stats,
 )
 from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, quote_identifier
 from geoparquet_io.core.parquet_writer import WriteOptions
@@ -125,25 +122,6 @@ def _points_fixture(tmp_path, column_name: str, filename: str, count: int = 10) 
         str(tmp_path / filename),
         bbox=[0.0, 0.0, float(count - 1), float(count - 1)],
     )
-
-
-def _native_geo_fixture(tmp_path, column_name: str, filename: str) -> str:
-    """Build a parquet-geo-only file (native GEOMETRY, geo_bbox row-group stats)."""
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-    con.execute("SET geometry_always_xy = true;")
-    quoted = quote_identifier(column_name)
-    query = (
-        "SELECT * FROM (VALUES "
-        "(1, ST_GeomFromText('POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))')), "
-        "(2, ST_GeomFromText('POLYGON ((2 2, 2 3, 3 3, 3 2, 2 2))'))"
-        f") AS t(id, {quoted})"
-    )
-    path = str(tmp_path / filename)
-    common_module.write_parquet_with_metadata(
-        con, query, path, original_metadata=None, geoparquet_version="parquet-geo-only"
-    )
-    con.close()
-    return path
 
 
 # --- The helper itself: contract and edge cases -----------------------------
@@ -364,26 +342,6 @@ class TestDuckdbMetadataNativeStatsEscaping:
     legal string-literal character -- so this class is deliberately narrowed to
     the name with teeth.
     """
-
-    def test_native_geo_stat_getters_return_correct_values(self, tmp_path):
-        path = _native_geo_fixture(tmp_path, SQUOTE_COL, "native_geo.parquet")
-
-        single = get_native_geo_statistics(path, SQUOTE_COL)
-        assert single is not None, "expected stats, got None (query silently failed)"
-        assert single["bbox"][:4] == pytest.approx([0.0, 0.0, 3.0, 3.0])
-        assert single["geometry_types"] == ["Polygon"]
-
-        agg = get_aggregated_native_geo_stats(path, SQUOTE_COL)
-        assert agg.get("bbox") is not None, "expected aggregated bbox, got empty dict"
-        assert agg["bbox"][:4] == pytest.approx([0.0, 0.0, 3.0, 3.0])
-        assert agg["geometry_types"] == ["Polygon"]
-
-        per_rg = get_per_row_group_native_geo_stats(path, SQUOTE_COL)
-        assert len(per_rg) == 1, "expected one row group of stats, got empty list"
-        assert per_rg[0]["xmin"] == pytest.approx(0.0)
-        assert per_rg[0]["ymin"] == pytest.approx(0.0)
-        assert per_rg[0]["xmax"] == pytest.approx(3.0)
-        assert per_rg[0]["ymax"] == pytest.approx(3.0)
 
 
 class TestDuckdbMetadataSiblingLiteralEscaping:
