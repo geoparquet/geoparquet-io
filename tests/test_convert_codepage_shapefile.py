@@ -34,6 +34,9 @@ from geoparquet_io.core.source_text import (
     plan_source_text,
 )
 
+pytestmark = pytest.mark.fresh_duckdb
+
+
 DATA = Path(__file__).parent / "data"
 ROWS = struct.unpack("<I", (DATA / "buildings_test.dbf").read_bytes()[4:8])[0]
 

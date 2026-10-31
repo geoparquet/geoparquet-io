@@ -185,6 +185,7 @@ addopts = [
     "--ignore=tests/data/geoparquet-testing",
 ]
 markers = [
+    "fresh_duckdb: requires an independent database to inspect connection initialization or extension state",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "network: marks tests requiring network access (deselect with '-m \"not network\"')",
     "integration: marks end-to-end integration tests; runs in the fast suite unless also marked slow/network (see tests/e2e/test_integration_lane.py)",

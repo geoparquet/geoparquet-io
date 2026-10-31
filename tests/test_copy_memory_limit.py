@@ -96,6 +96,7 @@ class TestFastPathMemoryLimit:
                 memory_limit="1MB",
             )
 
+    @pytest.mark.fresh_duckdb
     def test_fast_path_default_leaves_headroom_under_the_ceiling(
         self, tmp_path, monkeypatch, caplog
     ):
