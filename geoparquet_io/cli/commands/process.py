@@ -589,12 +589,11 @@ def process_simplify(
         gpio process simplify admin.parquet simplified.parquet \\
             --tolerance 0.001 --coverage
     """
-    if coverage and preserve_topology is not None:
-        raise click.UsageError(
-            "--preserve-topology/--no-preserve-topology applies to plain mode "
-            "and cannot be combined with --coverage (coverage simplification "
-            "always preserves the coverage's topology)."
-        )
+    refuse_together(
+        ("--coverage", coverage),
+        ("--preserve-topology/--no-preserve-topology", preserve_topology is not None),
+        end=": coverage simplification always preserves the coverage's topology.",
+    )
     if not coverage and simplify_boundary is not None:
         raise click.UsageError(
             "--simplify-boundary/--no-simplify-boundary only applies with --coverage."
@@ -803,9 +802,6 @@ def process_contour(
     """
     from geoparquet_io.core.process.raster.contour import contour_file
 
-    refuse_together(("--levels", levels is not None), ("--interval", interval is not None), end=".")
-    if levels is None and interval is None:
-        raise click.UsageError("one of --levels or --interval is required.")
     level_list = _parse_float_csv(levels, "--levels")
     with _activate_s3(ctx):
         try:

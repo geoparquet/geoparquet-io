@@ -56,3 +56,35 @@ def test_the_cli_messages_are_unchanged(buildings_test_file, tmp_path, args, mes
     result = CliRunner().invoke(cli, argv)
     assert result.exit_code == 2, result.output
     assert f"Error: {message} are mutually exclusive\n" in result.output
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (
+            ["check", "bbox", "{f}", "--all-rows", "--sample-rows", "5"],
+            "--all-rows and --sample-rows are mutually exclusive: --all-rows compares every row.",
+        ),
+        (
+            [
+                "process",
+                "simplify",
+                "{f}",
+                "{o}",
+                "--tolerance",
+                "1",
+                "--coverage",
+                "--no-preserve-topology",
+            ],
+            "--coverage and --preserve-topology/--no-preserve-topology are mutually exclusive: "
+            "coverage simplification always preserves the coverage's topology.",
+        ),
+    ],
+)
+def test_the_two_audit_sites_use_the_one_wording(buildings_test_file, tmp_path, args, message):
+    """check bbox and process simplify raised their own sentence (#1367 audit 12)."""
+    out = str(tmp_path / "out.parquet")
+    argv = [a.format(f=buildings_test_file, o=out) for a in args]
+    result = CliRunner().invoke(cli, argv)
+    assert result.exit_code == 2, result.output
+    assert " ".join(message.split()) in " ".join(result.output.split())

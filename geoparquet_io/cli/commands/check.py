@@ -32,6 +32,7 @@ from geoparquet_io.cli.decorators import (
     check_partition_options,
     enable_verbose_logging,
     overwrite_option,
+    refuse_together,
     strict_option,
     verbose_option,
 )
@@ -1354,10 +1355,11 @@ def check_bbox_cmd(
     from geoparquet_io.core.check_parquet_structure import check_bbox
 
     configure_verbose(verbose)
-    if all_rows and ctx.get_parameter_source("sample_rows") is not ParameterSource.DEFAULT:
-        raise click.UsageError(
-            "--all-rows compares every row; it cannot be combined with --sample-rows"
-        )
+    refuse_together(
+        ("--all-rows", all_rows),
+        ("--sample-rows", ctx.get_parameter_source("sample_rows") is not ParameterSource.DEFAULT),
+        end=": --all-rows compares every row.",
+    )
     bbox_recheck = quiet_recheck(check_bbox, False, verify_rows=sample_rows, all_rows=all_rows)
 
     with _activate_s3(ctx):
