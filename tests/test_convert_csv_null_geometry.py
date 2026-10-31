@@ -10,6 +10,8 @@ dropped or failing the conversion.
 unparsable are still dropped. Only *missing* geometry is retained.
 """
 
+import re
+
 import duckdb
 import pytest
 from click.testing import CliRunner
@@ -187,29 +189,12 @@ class TestSkipInvalidOrdering:
 
 
 class TestNonFiniteBounds:
-    """A non-finite envelope must fall back to an unordered query (#1157).
+    """A non-finite coordinate never reaches ``ST_MakeEnvelope`` (#1157).
 
-    ``POINT(1e400 1)`` parses to an infinite coordinate, so the dataset bounds
-    come back as ``inf``; interpolated as a Python float that renders as the
-    bare token ``inf`` inside ``ST_MakeEnvelope`` and fails binding. (The
-    later geo-stats pass still cannot digest such a geometry — a separate,
-    pre-existing failure — so the guard is tested at the query level.)
+    ``POINT(1e400 1)`` parses to an infinite coordinate. The bounds owner
+    refuses it where it is measured (#1165), so convert's own non-finite
+    fallback is gone; only "nothing to measure" falls back to unordered.
     """
-
-    def test_nonfinite_bounds_warn_and_are_discarded(self, caplog):
-        import logging
-
-        from geoparquet_io.core.convert import _usable_bounds
-
-        with caplog.at_level(logging.WARNING):
-            assert _usable_bounds((1.0, 1.0, float("inf"), 5.0)) is None
-        # The no-bounds warning ends the same way; name the non-finite one.
-        assert "NaN or infinite" in caplog.text
-
-        caplog.clear()
-        with caplog.at_level(logging.WARNING):
-            assert _usable_bounds((float("nan"), 1.0, 5.0, 5.0)) is None
-        assert "NaN or infinite" in caplog.text
 
     def test_finite_bounds_pass_through_silently(self, caplog):
         import logging
@@ -220,28 +205,23 @@ class TestNonFiniteBounds:
             assert _usable_bounds((1.0, 1.0, 5.0, 5.0)) == (1.0, 1.0, 5.0, 5.0)
         assert caplog.text == ""
 
-    def test_wkt_inf_coordinate_builds_an_unordered_query(self, tmp_path, caplog):
-        """End to end through _convert_csv_path: no ORDER BY, no binder error."""
-        import logging
+    def test_wkt_inf_coordinate_is_refused_naming_the_geometry(self, tmp_path):
+        """End to end through the CLI: one clear refusal, not a raw DuckDB error (#1165).
 
-        from geoparquet_io.core.convert import _convert_csv_path
-        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-
+        #1157 kept the infinite bound out of ``ST_MakeEnvelope`` and wrote
+        unordered, but the same row then killed the stats pass with
+        ``UnsupportedOperationException``. The bounds owner now refuses the
+        geometry where it is first measured, naming the column and the value.
+        """
         source = _write(
             tmp_path / "wkt.csv",
             "id,geom\n1,POINT(1 1)\n2,POINT(1e400 1)\n3,POINT(5 5)\n",
         )
-        con = get_duckdb_connection()
-        try:
-            with caplog.at_level(logging.WARNING):
-                query, _, order_by, _geom = _convert_csv_path(
-                    con, str(source), None, "geom", None, None, "EPSG:4326", False, False, False
-                )
-            assert order_by is None
-            assert "NaN or infinite" in caplog.text
-            assert len(con.execute(query).fetchall()) == 3
-        finally:
-            con.close()
+        result = _convert(source, tmp_path / "out.parquet")
+        assert result.exit_code != 0
+        assert "non-finite" in result.output
+        assert re.search(r"POINT \((inf|Infinity) 1\)", result.output), result.output
+        assert "UnsupportedOperationException" not in result.output
 
 
 class TestNullLatLon:

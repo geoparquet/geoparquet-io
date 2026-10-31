@@ -48,10 +48,6 @@ class TestQuoteIdentifier:
         """Test quoting a simple identifier."""
         assert quote_identifier("name") == '"name"'
 
-    def test_name_with_spaces(self):
-        """Test quoting identifier with spaces."""
-        assert quote_identifier("my column") == '"my column"'
-
     def test_name_with_quotes(self):
         """Test quoting identifier with embedded quotes."""
         assert quote_identifier('foo"bar') == '"foo""bar"'
@@ -280,14 +276,14 @@ class TestPipelineIntegration:
         """Test geometry column detection from Arrow table schema."""
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.streaming import find_geometry_column_from_table
+        from geoparquet_io.core.geometry_detection import primary_geometry_column
 
         # Read test data
         table = pq.read_table(str(PLACES_PARQUET))
 
         # Find geometry column from the table
-        geom_col = find_geometry_column_from_table(table)
-        assert geom_col is not None
+        geom_col = primary_geometry_column(table)
+        assert geom_col == "geometry"
 
     def test_no_geometry_column_raises_error(self):
         """Test that missing geometry column raises ValueError with helpful message."""
@@ -302,7 +298,9 @@ class TestPipelineIntegration:
 
         # Mock read_arrow_stream at the source module
         with patch("geoparquet_io.core.streaming.read_arrow_stream", return_value=table_no_geom):
-            with pytest.raises(ValueError) as exc_info:
+            from geoparquet_io.core.geometry_detection import GeometryColumnNotFoundError
+
+            with pytest.raises(GeometryColumnNotFoundError) as exc_info:
                 _convert_from_stream()
 
             # Check error message contains helpful information
@@ -613,9 +611,9 @@ class TestNeedsReprojection:
         """OGC:CRS84 is WGS84 and should not need reprojection."""
         assert _needs_reprojection("OGC:CRS84") is False
 
-    def test_wgs84_crs84_no_reprojection(self):
-        """CRS84 variant should not need reprojection."""
-        assert _needs_reprojection("CRS84") is False
+    def test_bare_crs84_is_not_a_default_transform_source(self):
+        """The predicate follows the owner; unresolved bare labels are not defaults."""
+        assert _needs_reprojection("CRS84") is True
 
     def test_wgs84_case_insensitive(self):
         """WGS84 detection should be case insensitive."""

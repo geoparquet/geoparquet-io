@@ -350,6 +350,30 @@ Levels come from [`gpio process overview`](process-overview.md) — existing `_r
     )
     ```
 
+### Memory
+
+Band planning (the worst-tile probe) and any overview level built on the fly run
+in DuckDB under gpio's usual memory bound: half the memory ceiling (physical RAM,
+or the container or Slurm job cap when lower). `--write-memory` (`memory_limit=`
+in Python) sets that limit explicitly; the tippecanoe and tile-join runs are
+separate processes and are not bounded by it.
+
+=== "CLI"
+
+    <!-- doctest: needs-tippecanoe, setup="gpio process aggregate h3 input.parquet cells.parquet --resolution 5" -->
+    ```bash
+    gpio pmtiles pyramid cells.parquet cells.pmtiles --write-memory 8GB
+    ```
+
+=== "Python"
+
+    <!-- doctest: needs-tippecanoe, setup="gpio process aggregate h3 input.parquet cells.parquet --resolution 5" -->
+    ```python
+    from geoparquet_io.api import ops
+
+    ops.create_pmtiles_pyramid('cells.parquet', 'cells.pmtiles', memory_limit='8GB')
+    ```
+
 ### Layer Modes
 
 `--layer-mode` controls how bands map to vector tile layers, which drives how you style them in MapLibre:
@@ -420,7 +444,7 @@ Reduce output size by selecting only needed columns:
 
 <!-- doctest: needs-tippecanoe -->
 ```bash
-gpio extract data.parquet --include-cols name,type,population | \
+gpio extract data.parquet --include-cols name,address | \
   gpio convert geojson - | \
   tippecanoe -P -o output.pmtiles
 ```
@@ -482,8 +506,9 @@ GeoJSON output is lon/lat (RFC 7946), so gpio reprojects any other input CRS fir
 | An `id` that is malformed or that PROJ does not know, next to a valid definition | Warns once and reprojects from the definition |
 | A PROJ string with an `init=` parameter | Fails without reading the file it names |
 | Anything PROJ cannot read | Fails and asks for an explicit source CRS |
+| Written as it is (absent, unknown or lon/lat CRS) but the extent lies outside lon/lat | Fails and suggests `--src-crs` on `convert reproject`; the extent is the `geo` block's `bbox`, else the bbox column or the geometry |
 
-`--keep-crs` skips all of this and writes the input coordinates unchanged. When the CRS cannot be read, reproject with an explicit source CRS first:
+`--keep-crs` skips all of this, the extent check included, and writes the input coordinates unchanged. When the CRS cannot be read, reproject with an explicit source CRS first:
 
 === "CLI"
 

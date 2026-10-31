@@ -85,7 +85,9 @@ def test_no_dotted_patch_target_walks_through_the_cli_package():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for lineno, target in _patch_string_targets(tree):
             if target.startswith(SHADOWED_PREFIX):
-                offenders.append(f"{path.relative_to(TESTS_DIR.parent)}:{lineno}: {target}")
+                offenders.append(
+                    f"{path.relative_to(TESTS_DIR.parent).as_posix()}:{lineno}: {target}"
+                )
 
     assert not offenders, (
         "These dotted patch targets walk through `geoparquet_io.cli`, which "

@@ -143,8 +143,9 @@ class TestAddBboxTableFidelity:
         )
         result = add_bbox_table(table, geometry_column="geometry")
         assert result.num_rows == 2
-        box = result.column("bbox").to_pylist()[1]
-        assert box == {"xmin": None, "ymin": None, "xmax": None, "ymax": None}
+        # The stats owner's rule (#1367): a NULL geometry has no bbox, so the
+        # row is a NULL struct, as every other bbox writer now says it.
+        assert result.column("bbox").to_pylist()[1] is None
 
 
 class TestRepairSingleScan:
@@ -265,11 +266,14 @@ class TestNoWholeTableRoundTrip:
 
     def test_bbox_registers_only_geometry_and_keeps_buffers(self, rich_table, register_spy):
         import geoparquet_io.core.add.bbox as mod
+        import geoparquet_io.core.duckdb_utils as duckdb_utils
 
-        spies = register_spy(mod)
+        spies = register_spy(duckdb_utils)
         result = mod.add_bbox_table(rich_table, geometry_column="geometry")
 
-        assert _registered_columns(spies) == {"geometry"}
+        # The bbox comes from the stats owner's Arrow kernel (#1367), so no
+        # attribute column is ever handed to DuckDB.
+        assert _registered_columns(spies) <= {"geometry"}
         # Zero-copy: every input column is the caller's own buffers, untouched.
         for name in rich_table.column_names:
             assert _buffer_addresses(result.column(name)) == _buffer_addresses(
@@ -585,7 +589,7 @@ def test_bbox_of_unreadable_wkb_is_null(con):
     table = pa.table({"geometry": pa.array([_wkb(con, "POINT(1 2)"), b"\x01\x02"], pa.binary())})
     boxes = add_bbox_table(table, geometry_column="geometry").column("bbox").to_pylist()
     assert boxes[0] == {"xmin": 1.0, "ymin": 2.0, "xmax": 1.0, "ymax": 2.0}
-    assert boxes[1] == {"xmin": None, "ymin": None, "xmax": None, "ymax": None}
+    assert boxes[1] is None
 
 
 def test_hilbert_multi_chunk_geoarrow_wkb_column(con):

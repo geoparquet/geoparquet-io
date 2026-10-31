@@ -14,21 +14,30 @@ import re
 import duckdb
 import pyarrow as pa
 
+from geoparquet_io.core.bbox_parse import any_piece, parse_bbox
 from geoparquet_io.core.column_selection import (
+    exclude_columns,
+    find_column,
+    has_column,
     resolve_columns_against_schema,
+    same_column,
     split_column_list,
 )
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
+    as_wkb_sql,
+    describe_query,
+    duckdb_type_is_geometry,
     fetch_one,
     get_duckdb_connection,
     quote_identifier,
+    sql_literal,
     validate_where_clause,
     where_condition_fragment,
 )
+from geoparquet_io.core.edges import SPHERICAL
 from geoparquet_io.core.exceptions import ValidationError
-from geoparquet_io.core.extract import parse_bbox
 from geoparquet_io.core.file_utils import handle_output_overwrite
+from geoparquet_io.core.geometry_detection import GEOGRAPHY_SOURCE_NAMES, primary_geometry_column
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -37,9 +46,9 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
-from geoparquet_io.core.memory_limits import validate_memory_limit
-from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
-from geoparquet_io.core.write_funnels import write_geoparquet_table
+from geoparquet_io.core.memory_limits import bound_open_connection
+from geoparquet_io.core.parquet_writer import WriteOptions
+from geoparquet_io.core.write_funnels import write_geoparquet_table, write_plain_parquet_table
 
 # Regex patterns for GCP resource validation
 # Project IDs: 6-30 chars, lowercase letters, digits, hyphens, must start with letter
@@ -283,6 +292,29 @@ def _setup_bigquery_connection() -> duckdb.DuckDBPyConnection:
         raise
 
 
+def _googlesql_string(value: str) -> str:
+    """Quote a RAW value as a **GoogleSQL** single-quoted string literal.
+
+    The string-literal twin of :func:`_quote_bigquery_identifier`: GoogleSQL
+    backslash-escapes inside quotes, so a backslash and the delimiter are
+    escaped with a backslash (DuckDB's ``''`` doubling would end the string).
+
+    This is not a second copy of :func:`~geoparquet_io.core.duckdb_utils.sql_literal`:
+    GoogleSQL and DuckDB SQL are different dialects with different escape
+    rules, and each literal is built by its own dialect's owner. For SQL that
+    BigQuery runs, never for DuckDB SQL; a GoogleSQL statement that travels
+    inside DuckDB SQL is then escaped once more, as a DuckDB literal, by
+    :func:`_bigquery_query_relation`.
+
+    Raises:
+        ValueError: If the value contains a NUL byte.
+    """
+    if "\x00" in value:
+        raise ValueError(f"GoogleSQL string contains a NUL byte: {value!r}")
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
 def _get_table_row_count(
     con: duckdb.DuckDBPyConnection,
     table_id: str,
@@ -312,20 +344,16 @@ def _get_table_row_count(
         else:
             return None
 
-        # Build metadata query using __TABLES__
-        if project:
-            metadata_table = f"`{project}.{dataset}.__TABLES__`"
-            query_project = project
-        else:
-            metadata_table = f"`{dataset}.__TABLES__`"
-            query_project = ""
-
-        query = f"""
-        SELECT * FROM bigquery_query(
-            '{query_project}',
-            'SELECT row_count FROM {metadata_table} WHERE table_id = "{table}"'
+        # Build metadata query using __TABLES__. The GoogleSQL quotes the
+        # dataset path as a backtick identifier and the table as a GoogleSQL
+        # string; _bigquery_query_relation then escapes the whole statement
+        # once into the DuckDB literal.
+        path = f"{project}.{dataset}.__TABLES__" if project else f"{dataset}.__TABLES__"
+        googlesql = (
+            f"SELECT row_count FROM {_quote_bigquery_identifier(path)} "
+            f"WHERE table_id = {_googlesql_string(table)}"
         )
-        """
+        query = f"SELECT * FROM {_bigquery_query_relation(project or '', googlesql)}"
         result = fetch_one(con.execute(query))
         return result[0] if result else None
     except Exception:
@@ -342,74 +370,11 @@ def _detect_geometry_column(table: pa.Table) -> str | None:
     Returns:
         Name of detected geometry column, or None
     """
-    # Look for known geometry column names (case insensitive)
-    common_names = ["geometry", "geom", "the_geom", "shape", "geo", "geography"]
-    lower_names = {name.lower(): name for name in table.column_names}
-
-    for name in common_names:
-        if name in lower_names:
-            return lower_names[name]
-
-    # Fallback: look for GEOMETRY type columns by checking for binary/blob types
-    # that might contain WKB data
-    for field in table.schema:
-        field_name_lower = field.name.lower()
-        if "geom" in field_name_lower or "geo" in field_name_lower:
-            return field.name
-
-    return None
-
-
-def extract_bigquery_table(
-    table: pa.Table,
-    limit: int | None = None,
-    columns: list[str] | None = None,
-    exclude_columns: list[str] | None = None,
-) -> pa.Table:
-    """
-    Apply column selection and row limits to an in-memory PyArrow Table.
-
-    This function processes tables that have already been loaded from BigQuery.
-    For filtering with WHERE clauses or bbox, use extract_bigquery() which
-    pushes filters to BigQuery for better performance.
-
-    Args:
-        table: Input PyArrow Table (already loaded from BigQuery)
-        limit: Maximum rows to return (0 returns empty table)
-        columns: Columns to include (None = all)
-        exclude_columns: Columns to exclude
-
-    Returns:
-        Filtered PyArrow Table
-
-    Raises:
-        ValueError: If limit is negative
-    """
-    # Validate limit
-    if limit is not None and limit < 0:
-        raise ValueError(f"limit must be non-negative, got {limit}")
-
-    result = table
-
-    # Apply column selection
-    if columns:
-        # Ensure geometry column is included
-        geom_col = _detect_geometry_column(result)
-        if geom_col and geom_col not in columns:
-            columns = list(columns) + [geom_col]
-        available = [c for c in columns if c in result.column_names]
-        result = result.select(available)
-
-    # Apply column exclusion
-    if exclude_columns:
-        keep_cols = [c for c in result.column_names if c not in exclude_columns]
-        result = result.select(keep_cols)
-
-    # Apply limit (limit=0 returns empty table)
-    if limit is not None and result.num_rows > limit:
-        result = result.slice(0, limit)
-
-    return result
+    # The one resolver over the table's typed columns: its names, then
+    # BigQuery's own (its geometry type is called GEOGRAPHY, so a column named
+    # for it, or ``geo``, is a candidate), then a GeoArrow-typed column. A name
+    # that merely contains "geo" is not an answer (#1367).
+    return primary_geometry_column(table, extra_names=GEOGRAPHY_SOURCE_NAMES)
 
 
 # The Storage Read API backs bigquery_scan, and it serves physical tables
@@ -489,8 +454,8 @@ def _bigquery_query_relation(project: str, googlesql: str) -> str:
     fallback in :func:`_bigquery_view_relation` and the ``--sql`` source --
     come through here, so the escaping contract is stated once: the statement
     travels inside a DuckDB **single-quoted string literal** and is escaped
-    exactly once, here, at the point of interpolation. ``_escape_sql_string``
-    is not idempotent, so no caller may pre-escape.
+    exactly once, here, at the point of interpolation, by ``sql_literal``.
+    Escaping is not idempotent, so no caller may pre-escape.
 
     Containment, not sanitation, is what this guarantees. ``--sql`` exists to
     run arbitrary BigQuery SQL, so there is nothing to sanitize on the
@@ -505,7 +470,7 @@ def _bigquery_query_relation(project: str, googlesql: str) -> str:
             :func:`_validate_project_id` or taken from a normalized table id
         googlesql: The statement BigQuery should run, raw and unescaped
     """
-    return f"bigquery_query('{_escape_sql_string(project)}', '{_escape_sql_string(googlesql)}')"
+    return f"bigquery_query({sql_literal(project)}, {sql_literal(googlesql)})"
 
 
 def _bigquery_view_relation(
@@ -660,11 +625,10 @@ def _schema_rows(
     """
     if relation is None:
         if table_source == "bigquery":
-            relation = f"bigquery_scan('{table_id}')"
+            relation = f"bigquery_scan({sql_literal(table_id)})"
         else:
             relation = quote_identifier(table_id)
-    schema_query = f"DESCRIBE SELECT * FROM {relation} LIMIT 0"
-    return [(row[0], str(row[1])) for row in con.execute(schema_query).fetchall()]
+    return describe_query(con, f"SELECT * FROM {relation}")
 
 
 def _detect_geometry_column_from_schema(
@@ -701,17 +665,16 @@ def _detect_geometry_column_from_schema(
     all_cols = []
     for col_name, col_type in schema_rows:
         all_cols.append(col_name)
-        if "GEOMETRY" in col_type.upper():
+        if duckdb_type_is_geometry(col_type):
             geometry_cols.append(col_name)
 
     # If explicit column provided and it's a native GEOMETRY column, use it
     if geography_column:
-        lower_map = {c.lower(): c for c in geometry_cols}
-        if geography_column.lower() in lower_map:
-            return lower_map[geography_column.lower()]
+        found = find_column(geography_column, geometry_cols)
+        if found is not None:
+            return found
         # Check column exists (for better error messages later)
-        all_lower = {c.lower() for c in all_cols}
-        if geography_column.lower() not in all_lower:
+        if not has_column(all_cols, geography_column):
             raise ValueError(
                 f"Column '{geography_column}' not found in table '{table_id}'. "
                 f"Available columns: {all_cols}."
@@ -720,11 +683,10 @@ def _detect_geometry_column_from_schema(
         # can handle it as VARCHAR with WKT/GeoJSON parsing
         return None
 
-    # Return first native GEOMETRY column found
-    if geometry_cols:
-        return geometry_cols[0]
-
-    return None
+    # The owner over the GEOMETRY-typed columns only (a VARCHAR is never one
+    # here): a standard name among them, else the first.
+    typed = [(c, t) for c, t in schema_rows if duckdb_type_is_geometry(t)]
+    return primary_geometry_column(typed, extra_names=GEOGRAPHY_SOURCE_NAMES)
 
 
 def _schema_column_names(
@@ -768,10 +730,10 @@ def _get_column_type(
     """
     if schema_rows is None:
         schema_rows = _schema_rows(con, table_id)
-    for name, col_type in schema_rows:
-        if name.lower() == column_name.lower():
-            return col_type.upper()
-    return "VARCHAR"
+    found = find_column(column_name, [name for name, _ in schema_rows])
+    if found is None:
+        return "VARCHAR"
+    return next(col_type for name, col_type in schema_rows if name == found).upper()
 
 
 def _resolve_column_name(
@@ -794,10 +756,8 @@ def _resolve_column_name(
     Returns:
         The actual column name from the schema, or the input if not found
     """
-    for name in _schema_column_names(con, table_id, table_source, schema_rows):
-        if name.lower() == column_name.lower():
-            return name
-    return column_name
+    names = _schema_column_names(con, table_id, table_source, schema_rows)
+    return find_column(column_name, names) or column_name
 
 
 def _build_geometry_select_expr(
@@ -821,13 +781,13 @@ def _build_geometry_select_expr(
     Returns:
         SQL expression string for the SELECT clause
     """
-    if "GEOMETRY" in column_type:
-        return f"ST_AsWKB({quote_identifier(column_name)}) AS {quote_identifier(column_name)}"
+    if duckdb_type_is_geometry(column_type):
+        return f"{as_wkb_sql(quote_identifier(column_name))} AS {quote_identifier(column_name)}"
     elif geometry_format == "geojson":
-        return f"ST_AsWKB(ST_GeomFromGeoJSON({quote_identifier(column_name)})) AS {quote_identifier(column_name)}"
+        return f"{as_wkb_sql(f'ST_GeomFromGeoJSON({quote_identifier(column_name)})')} AS {quote_identifier(column_name)}"
     else:
         # Default: WKT
-        return f"ST_AsWKB(ST_GeomFromText({quote_identifier(column_name)})) AS {quote_identifier(column_name)}"
+        return f"{as_wkb_sql(f'ST_GeomFromText({quote_identifier(column_name)})')} AS {quote_identifier(column_name)}"
 
 
 def _build_select_with_wkb(
@@ -870,7 +830,7 @@ def _build_select_with_wkb(
     # Build SELECT with appropriate geometry conversion
     select_parts = []
     for col in columns:
-        if geometry_column and col.lower() == geometry_column.lower():
+        if geometry_column and same_column(col, geometry_column):
             select_parts.append(_build_geometry_select_expr(col, geom_col_type, geometry_format))
         else:
             select_parts.append(quote_identifier(col))
@@ -929,7 +889,7 @@ def _build_dry_run_query(
 ) -> str:
     """Build a dry run query string for display."""
     if not bbox:
-        return f"SELECT {select_cols} FROM bigquery_scan('{table_id}')"
+        return f"SELECT {select_cols} FROM bigquery_scan({sql_literal(table_id)})"
 
     # Show bbox mode info
     if bbox_mode == "auto":
@@ -938,19 +898,24 @@ def _build_dry_run_query(
     else:
         progress(f"Bbox mode: {bbox_mode}")
 
-    xmin, ymin, xmax, ymax = parse_bbox(bbox)
-    wkt = f"POLYGON(({xmin} {ymin}, {xmax} {ymin}, {xmax} {ymax}, {xmin} {ymax}, {xmin} {ymin}))"
+    parsed = parse_bbox(bbox)
 
     if bbox_mode == "local":
-        query = f"SELECT {select_cols} FROM bigquery_scan('{table_id}')"
-        query += f" WHERE ST_Intersects(<geometry_column>, ST_GeomFromText('{wkt}'))"
+        query = f"SELECT {select_cols} FROM bigquery_scan({sql_literal(table_id)})"
+        query += " WHERE " + any_piece(
+            parsed,
+            lambda b: f"ST_Intersects(<geometry_column>, ST_GeomFromText('{b.polygon_wkt()}'))",
+        )
     else:
         # Server or auto mode - show server-side as example. Escaped once here,
         # mirroring the real path in _build_bigquery_query.
-        bq_filter = f"ST_INTERSECTS(<geometry_column>, ST_GEOGFROMTEXT('{wkt}'))"
+        bq_filter = any_piece(
+            parsed,
+            lambda b: f"ST_INTERSECTS(<geometry_column>, ST_GEOGFROMTEXT('{b.polygon_wkt()}'))",
+        )
         query = (
             f"SELECT {select_cols} FROM bigquery_scan("
-            f"'{table_id}', filter='{_escape_sql_string(bq_filter)}')"
+            f"{sql_literal(table_id)}, filter={sql_literal(bq_filter)})"
         )
 
     return query
@@ -988,7 +953,7 @@ def _build_column_list(
         all_schema_cols = (
             schema_columns if schema_columns is not None else _schema_column_names(con, table_id)
         )
-        return [c for c in all_schema_cols if c not in exclude_list]
+        return exclude_columns(all_schema_cols, exclude_list)
 
     return None  # All columns
 
@@ -1058,9 +1023,7 @@ def _build_bbox_filters(
         are returned as plain GoogleSQL -- the caller escapes them once when
         embedding them in the ``filter='...'`` DuckDB string literal.
     """
-    xmin, ymin, xmax, ymax = parse_bbox(bbox)
-    wkt = f"POLYGON(({xmin} {ymin}, {xmax} {ymin}, {xmax} {ymax}, {xmin} {ymax}, {xmin} {ymin}))"
-
+    parsed = parse_bbox(bbox)
     bq_filters = []
     local_conditions = []
 
@@ -1069,30 +1032,28 @@ def _build_bbox_filters(
         # backtick-quoted, because "..." is a STRING literal here.
         bq_col = _quote_bigquery_identifier(geom_col)
         if is_native_geometry:
-            # Native GEOGRAPHY column - use directly
-            bbox_filter = f"ST_INTERSECTS({bq_col}, ST_GEOGFROMTEXT('{wkt}'))"
+            subject = bq_col  # Native GEOGRAPHY column - use directly
         elif geometry_format == "geojson":
-            # VARCHAR with GeoJSON - parse first
-            bbox_filter = f"ST_INTERSECTS(ST_GEOGFROMGEOJSON({bq_col}), ST_GEOGFROMTEXT('{wkt}'))"
+            subject = f"ST_GEOGFROMGEOJSON({bq_col})"
         else:
-            # VARCHAR with WKT - parse first
-            bbox_filter = f"ST_INTERSECTS(ST_GEOGFROMTEXT({bq_col}), ST_GEOGFROMTEXT('{wkt}'))"
+            subject = f"ST_GEOGFROMTEXT({bq_col})"
+        bbox_filter = any_piece(
+            parsed, lambda b: f"ST_INTERSECTS({subject}, ST_GEOGFROMTEXT('{b.polygon_wkt()}'))"
+        )
         bq_filters.append(bbox_filter)
         debug(f"BigQuery filter: {bbox_filter}")
     else:
         # DuckDB local filter - DuckDB dialect, so quote_identifier applies.
         local_col = quote_identifier(geom_col)
         if is_native_geometry:
-            # Native GEOMETRY column - use directly
-            bbox_filter = f"ST_Intersects({local_col}, ST_GeomFromText('{wkt}'))"
+            subject = local_col
         elif geometry_format == "geojson":
-            # VARCHAR with GeoJSON - parse first
-            bbox_filter = (
-                f"ST_Intersects(ST_GeomFromGeoJSON({local_col}), ST_GeomFromText('{wkt}'))"
-            )
+            subject = f"ST_GeomFromGeoJSON({local_col})"
         else:
-            # VARCHAR with WKT - parse first
-            bbox_filter = f"ST_Intersects(ST_GeomFromText({local_col}), ST_GeomFromText('{wkt}'))"
+            subject = f"ST_GeomFromText({local_col})"
+        bbox_filter = any_piece(
+            parsed, lambda b: f"ST_Intersects({subject}, ST_GeomFromText('{b.polygon_wkt()}'))"
+        )
         local_conditions.append(bbox_filter)
         debug(f"DuckDB filter: {bbox_filter}")
 
@@ -1187,7 +1148,7 @@ def extract_bigquery(
     dry_run: bool = False,
     show_sql: bool = False,
     verbose: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
@@ -1239,7 +1200,7 @@ def extract_bigquery(
             Auto-detected for native GEOGRAPHY columns. Use this to
             specify a VARCHAR column containing WKT or GeoJSON geometry.
         geometry_format: Format of geometry in VARCHAR columns ("wkt" or "geojson")
-        edges: Edge interpretation for GeoParquet metadata ("spherical" or "planar").
+        edges: Edge interpretation for GeoParquet metadata, one of ``edges.EDGES``.
             If None (default), uses "spherical" for native GEOGRAPHY columns (BigQuery
             uses S2 spherical geometry) and "planar" for VARCHAR columns.
         dry_run: Show SQL without executing
@@ -1306,7 +1267,7 @@ def extract_bigquery(
 
     # Check if output file exists and handle overwrite (fixes issue #278)
     if output_parquet and not dry_run:
-        handle_output_overwrite(output_parquet, overwrite)
+        handle_output_overwrite(output_parquet, overwrite, remove=False)
 
     # Handle dry_run without connecting to BigQuery
     if dry_run:
@@ -1336,14 +1297,9 @@ def extract_bigquery(
         limit=limit,
         show_sql=show_sql,
         output_parquet=output_parquet,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        geoparquet_version=geoparquet_version,
+        write=WriteOptions.pick(locals()),
         verbose=verbose,
         repair_geometry=repair_geometry,
-        memory_limit=memory_limit,
     )
 
 
@@ -1415,14 +1371,9 @@ def _execute_bigquery_extraction(
     limit: int | None,
     show_sql: bool,
     output_parquet: str | None,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    geoparquet_version: str | None,
+    write: WriteOptions,
     verbose: bool,
     repair_geometry: bool = True,
-    memory_limit: str | None = None,
 ) -> pa.Table | None:
     """Execute the BigQuery extraction with the given parameters."""
     debug("Connecting to BigQuery...")
@@ -1431,12 +1382,10 @@ def _execute_bigquery_extraction(
         credentials_file=credentials_file,
     ) as con:
         # The BigQuery scan is what actually consumes memory here (the result is
-        # materialised as an Arrow table before the PyArrow write), so apply the
-        # user's limit to this connection. validate_memory_limit guards the
-        # interpolation — a SET value cannot be parameterised.
-        if memory_limit is not None:
-            con.execute(f"SET memory_limit = '{validate_memory_limit(memory_limit)}'")
-            debug(f"DuckDB memory limit: {memory_limit}")
+        # materialised as an Arrow table before the PyArrow write), so the
+        # user's limit -- and the thread cap it affords -- bound this connection.
+        if write.memory_limit is not None:
+            bound_open_connection(con, write.memory_limit, verbose=True)
 
         # --sql is its own relation. Building it once here means every step
         # below -- the DESCRIBE, the geometry detection, the read -- is
@@ -1484,7 +1433,7 @@ def _execute_bigquery_extraction(
         if edges is not None:
             final_edges = edges
         elif is_native_geometry:
-            final_edges = "spherical"
+            final_edges = SPHERICAL
         else:
             final_edges = None  # Planar (no edges metadata)
 
@@ -1557,38 +1506,23 @@ def _execute_bigquery_extraction(
                     result,
                     output_parquet,
                     geometry_column=final_geom_col,
-                    compression=compression,
-                    compression_level=compression_level,
-                    row_group_size_mb=row_group_size_mb,
-                    row_group_rows=row_group_rows,
-                    geoparquet_version=geoparquet_version,
                     verbose=verbose,
                     edges=final_edges,
+                    **write.funnel_kwargs(),
                 )
             else:
-                # No geometry: plain Parquet, but with the row-group count the
-                # geometry branch above gets. This used to hand pq.write_table a
-                # byte count where a row count goes -- `--row-group-size-mb 128`
-                # asked for 134,217,728 rows per group -- and None when no flag
-                # was given, so DEFAULT_ROW_GROUP_ROWS never applied and the
-                # output was one row group for the whole file (#1021).
-                #
-                # It stays a direct write rather than routing through
-                # write_geoparquet_table because that helper reads
-                # geometry_column=None as "auto-detect by name": it would call a
-                # plain VARCHAR column named `geom` or `shape` geometry and
-                # stamp a geo key on it, which is precisely what BigQuery's own
-                # schema said this table does not have.
-                import pyarrow.parquet as pq
-
-                pq.write_table(
+                # No geometry: plain Parquet through the geometry-free funnel,
+                # which takes the row-group count, codec and level the geometry
+                # branch above gets and stages a remote output (#1021, #1026).
+                # Not write_geoparquet_table: it reads geometry_column=None as
+                # "auto-detect by name" and would stamp a geo key on a plain
+                # VARCHAR column named `geom` or `shape`, which is precisely
+                # what BigQuery's own schema said this table does not have.
+                write_plain_parquet_table(
                     result,
                     output_parquet,
-                    compression=compression,
-                    compression_level=compression_level,
-                    row_group_size=resolve_row_group_rows_for_table(
-                        result, row_group_rows, row_group_size_mb
-                    ),
+                    verbose=verbose,
+                    **write.funnel_kwargs(),
                 )
 
             success(f"Extracted {row_count:,} rows to {output_parquet}")
@@ -1648,13 +1582,13 @@ def _build_bigquery_query(
         # The GoogleSQL filter travels inside a DuckDB string literal, so it is
         # escaped once, here, at the point of interpolation. A BigQuery flexible
         # column name may legally contain an apostrophe (gpio #932).
-        filter_str = _escape_sql_string(" AND ".join(bq_filters))
+        filter_literal = sql_literal(" AND ".join(bq_filters))
         query = (
-            f"SELECT {select_cols} FROM bigquery_scan('{validated_table_id}', "
-            f"filter='{filter_str}')"
+            f"SELECT {select_cols} FROM bigquery_scan({sql_literal(validated_table_id)}, "
+            f"filter={filter_literal})"
         )
     else:
-        query = f"SELECT {select_cols} FROM bigquery_scan('{validated_table_id}')"
+        query = f"SELECT {select_cols} FROM bigquery_scan({sql_literal(validated_table_id)})"
 
     # Add WHERE clause
     conditions = local_conditions.copy()

@@ -14,19 +14,20 @@ falls inside it.
 """
 
 import json
+from dataclasses import replace
 
 import duckdb
 import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME, aggregate_by_a5
 from geoparquet_io.core.process.aggregate.by_h3 import H3_SCHEME, aggregate_by_h3
-from geoparquet_io.core.process.aggregate.common import (
-    antimeridian_aware_bbox,
-    geometry_to_geom_expr,
-)
+from geoparquet_io.core.process.aggregate.common import geometry_to_geom_expr
 from geoparquet_io.core.process.aggregate.grid_common import GridScheme, wrap_grid_geometry
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
 # Fiji sits on the antimeridian, so cells here straddle it at low resolutions.
 ANTIMERIDIAN_POINTS = [
@@ -138,9 +139,7 @@ def _ring_case_scheme():
     )
     return GridScheme(
         name="ringcase",
-        extension="",
-        min_resolution=0,
-        max_resolution=0,
+        spec=replace(get_index_spec("h3"), extension=None, min_resolution=0, max_resolution=0),
         default_column="cell",
         key_template="{pt}",
         boundary_template=f"ST_GeomFromText(CASE {{cell}} {cases} END)",
@@ -311,7 +310,7 @@ def _bbox_of(wkts):
     try:
         values = ", ".join(f"(ST_AsWKB(ST_GeomFromText('{w}')))" for w in wkts)
         con.execute(f"CREATE TEMP TABLE g AS SELECT * FROM (VALUES {values}) t(geometry)")
-        return antimeridian_aware_bbox(con, "g", "geometry")
+        return bounds_of(QuerySource(con, "SELECT * FROM g"), "geometry", antimeridian=True)
     finally:
         con.close()
 
@@ -363,7 +362,7 @@ def test_result_bbox_reads_an_arrow_table():
             .read_all()
         )
         assert _result_geo_bbox(con, result) == pytest.approx([179.0, -17.0, -179.0, -16.0])
-        # The registration is cleaned up, so a second result can reuse the name.
+        # Measuring is repeatable on the same connection.
         assert _result_geo_bbox(con, result) is not None
     finally:
         con.close()
@@ -373,7 +372,8 @@ def test_bbox_is_none_without_geometry():
     con = _spatial_connection()
     try:
         con.execute("CREATE TEMP TABLE g AS SELECT NULL::BLOB AS geometry WHERE false")
-        assert antimeridian_aware_bbox(con, "g", "geometry") is None
+        source = QuerySource(con, "SELECT * FROM g")
+        assert bounds_of(source, "geometry", antimeridian=True) is None
     finally:
         con.close()
 
@@ -524,7 +524,9 @@ def test_aggregate_writes_the_wrap_form_bbox(antimeridian_parquet, tmp_path):
 @pytest.mark.network
 def test_out_geometry_both_keeps_one_frame(antimeridian_parquet, tmp_path):
     out = tmp_path / "h3_both.parquet"
-    aggregate_by_h3(antimeridian_parquet, str(out), resolution=3, out_geometry="both")
+    aggregate_by_h3(
+        antimeridian_parquet, str(out), resolution=3, options=AggregateOptions(out_geometry="both")
+    )
     con = _spatial_connection()
     relation = f"read_parquet('{out}')"
     try:

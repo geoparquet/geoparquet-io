@@ -5,16 +5,20 @@ column) instead of the full geometry, so the (usually huge) geometry column is
 never scanned for the common cell-polygon output.
 """
 
+from dataclasses import replace
+
 import duckdb
 import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.duckdb_utils import fetch_one, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
 
 def _write_points_with_bbox(path, rows, bbox_col="bbox"):
@@ -161,21 +165,36 @@ def test_bbox_mode_errors_when_no_bbox_column(tmp_path):
     src = tmp_path / "f.parquet"
     _write_plain_points(src, POINTS)
     with pytest.raises(InvalidParameterError, match="bbox"):
-        aggregate_by_a5(str(src), str(tmp_path / "o.parquet"), resolution=5, bucket_point="bbox")
+        aggregate_by_a5(
+            str(src),
+            str(tmp_path / "o.parquet"),
+            resolution=5,
+            options=AggregateOptions(bucket_point="bbox"),
+        )
 
 
 def test_bbox_column_requires_bbox_mode(tmp_path):
     src = tmp_path / "f.parquet"
     _write_points_with_bbox(src, POINTS)
     with pytest.raises(InvalidParameterError, match="bucket-point"):
-        aggregate_by_a5(str(src), str(tmp_path / "o.parquet"), resolution=5, bbox_column="bbox")
+        aggregate_by_a5(
+            str(src),
+            str(tmp_path / "o.parquet"),
+            resolution=5,
+            options=AggregateOptions(bbox_column="bbox"),
+        )
 
 
 def test_h3_bbox_mode_errors_when_no_bbox_column(tmp_path):
     src = tmp_path / "f.parquet"
     _write_plain_points(src, POINTS)
     with pytest.raises(InvalidParameterError, match="bbox"):
-        aggregate_by_h3(str(src), str(tmp_path / "o.parquet"), resolution=5, bucket_point="bbox")
+        aggregate_by_h3(
+            str(src),
+            str(tmp_path / "o.parquet"),
+            resolution=5,
+            options=AggregateOptions(bucket_point="bbox"),
+        )
 
 
 def test_admin_bbox_mode_errors_when_no_bbox_column(tmp_path):
@@ -202,7 +221,7 @@ def test_table_bbox_mode_errors_when_no_bbox_column():
     )
     con.close()
     with pytest.raises(InvalidParameterError, match="bbox"):
-        aggregate_a5_table(tbl, resolution=5, bucket_point="bbox")
+        aggregate_a5_table(tbl, resolution=5, options=AggregateOptions(bucket_point="bbox"))
 
 
 def test_table_bbox_mode_autodetects_from_schema():
@@ -240,7 +259,8 @@ def test_admin_joined_sql_uses_point_expr_and_select_list():
         "geometry",
         select_list='"height", "bbox", ',
     )
-    inner = sql.split("FROM (")[1].split(") s")[0]
+    # The input scan's projection: everything between its SELECT and the join point.
+    inner = sql.split("AS __cen")[0].rsplit("SELECT ", 1)[1]
     assert "ST_Point((bbox.xmin" in inner
     assert '"height", "bbox", ' in inner
     # The narrowed list is the whole projection: no passthrough star, so the
@@ -348,7 +368,12 @@ def test_bucket_point_empty_string_rejected(tmp_path):
     src = tmp_path / "f.parquet"
     _write_plain_points(src, POINTS)
     with pytest.raises(InvalidParameterError, match="empty"):
-        aggregate_by_a5(str(src), str(tmp_path / "o.parquet"), resolution=5, bucket_point="")
+        aggregate_by_a5(
+            str(src),
+            str(tmp_path / "o.parquet"),
+            resolution=5,
+            options=AggregateOptions(bucket_point=""),
+        )
 
 
 def test_explicit_bbox_column_missing_fails_fast(tmp_path):
@@ -360,8 +385,7 @@ def test_explicit_bbox_column_missing_fails_fast(tmp_path):
             str(src),
             str(tmp_path / "o.parquet"),
             auto=True,  # would be expensive; validation must precede it
-            bucket_point="bbox",
-            bbox_column="nope",
+            options=AggregateOptions(bucket_point="bbox", bbox_column="nope"),
         )
 
 
@@ -373,8 +397,7 @@ def test_explicit_bbox_column_not_a_struct_fails_fast(tmp_path):
             str(src),
             str(tmp_path / "o.parquet"),
             resolution=5,
-            bucket_point="bbox",
-            bbox_column="height",
+            options=AggregateOptions(bucket_point="bbox", bbox_column="height"),
         )
 
 
@@ -396,8 +419,7 @@ def test_explicit_bbox_column_wrong_struct_fields_fails_fast(tmp_path):
             str(src),
             str(tmp_path / "o.parquet"),
             resolution=5,
-            bucket_point="bbox",
-            bbox_column="my_box",
+            options=AggregateOptions(bucket_point="bbox", bbox_column="my_box"),
         )
 
 
@@ -405,7 +427,12 @@ def test_nonexistent_point_column_fails_fast(tmp_path):
     src = tmp_path / "f.parquet"
     _write_plain_points(src, POINTS)
     with pytest.raises(InvalidParameterError, match="anchor"):
-        aggregate_by_a5(str(src), str(tmp_path / "o.parquet"), resolution=5, bucket_point="anchor")
+        aggregate_by_a5(
+            str(src),
+            str(tmp_path / "o.parquet"),
+            resolution=5,
+            options=AggregateOptions(bucket_point="anchor"),
+        )
 
 
 def test_wrong_case_bbox_keyword_gets_hint(tmp_path):
@@ -413,7 +440,12 @@ def test_wrong_case_bbox_keyword_gets_hint(tmp_path):
     src = tmp_path / "f.parquet"
     _write_points_with_bbox(src, POINTS)
     with pytest.raises(InvalidParameterError, match="did you mean 'bbox'"):
-        aggregate_by_a5(str(src), str(tmp_path / "o.parquet"), resolution=5, bucket_point="BBOX")
+        aggregate_by_a5(
+            str(src),
+            str(tmp_path / "o.parquet"),
+            resolution=5,
+            options=AggregateOptions(bucket_point="BBOX"),
+        )
 
 
 def test_core_error_messages_are_flag_neutral(tmp_path):
@@ -421,12 +453,22 @@ def test_core_error_messages_are_flag_neutral(tmp_path):
     src = tmp_path / "f.parquet"
     _write_plain_points(src, POINTS)
     with pytest.raises(InvalidParameterError) as exc1:
-        aggregate_by_a5(str(src), str(tmp_path / "o.parquet"), resolution=5, bucket_point="bbox")
+        aggregate_by_a5(
+            str(src),
+            str(tmp_path / "o.parquet"),
+            resolution=5,
+            options=AggregateOptions(bucket_point="bbox"),
+        )
     assert "--" not in str(exc1.value)
     src2 = tmp_path / "g.parquet"
     _write_points_with_bbox(src2, POINTS)
     with pytest.raises(InvalidParameterError) as exc2:
-        aggregate_by_a5(str(src2), str(tmp_path / "o.parquet"), resolution=5, bbox_column="bbox")
+        aggregate_by_a5(
+            str(src2),
+            str(tmp_path / "o.parquet"),
+            resolution=5,
+            options=AggregateOptions(bbox_column="bbox"),
+        )
     assert "--" not in str(exc2.value)
 
 
@@ -643,7 +685,10 @@ class TestBothPathsAgreeOnTheSecondarysBbox:
 
         with pytest.raises(InvalidParameterError, match="bbox"):
             aggregate_by_a5(
-                str(src), str(tmp_path / "out.parquet"), resolution=5, bucket_point="bbox"
+                str(src),
+                str(tmp_path / "out.parquet"),
+                resolution=5,
+                options=AggregateOptions(bucket_point="bbox"),
             )
 
     @pytest.mark.parametrize(
@@ -657,7 +702,9 @@ class TestBothPathsAgreeOnTheSecondarysBbox:
         src = _secondary_bbox_file(tmp_path, case, **kwargs)
 
         with pytest.raises(InvalidParameterError, match="bbox"):
-            aggregate_a5_table(pq.read_table(str(src)), resolution=5, bucket_point="bbox")
+            aggregate_a5_table(
+                pq.read_table(str(src)), resolution=5, options=AggregateOptions(bucket_point="bbox")
+            )
 
     def test_both_paths_still_find_the_primarys_own_covering(self, tmp_path):
         """The positive half: provenance on the primary is honoured either way."""
@@ -743,8 +790,11 @@ class _FakeAdminDataset:
     def supports_per_level_sources(self):
         return True
 
-    def get_source_for_level(self, level):
+    def source_for_level(self, level, no_cache=False):
         return self._path
+
+    def table_reference(self, source=None):
+        return sql_path(source or self._path)
 
 
 def _write_admin_polygons(path):
@@ -767,8 +817,8 @@ def _run_admin_offline(monkeypatch, admin_path):
 
     monkeypatch.setattr(
         by_admin,
-        "_setup_admin_dataset",
-        lambda dataset, verbose, levels: (_FakeAdminDataset(admin_path), None),
+        "resolve_admin_dataset",
+        lambda dataset, levels, **k: (_FakeAdminDataset(admin_path), None, None),
     )
 
 
@@ -937,9 +987,7 @@ def test_build_grid_query_with_metric_and_breakdown(tmp_path):
 
     scheme = GridScheme(
         name="dummy",
-        extension="",
-        min_resolution=0,
-        max_resolution=5,
+        spec=replace(get_index_spec("h3"), extension=None, min_resolution=0, max_resolution=5),
         default_column="cell",
         key_template="CAST(floor(ST_X({pt})) AS INTEGER)",
         boundary_template="ST_MakeEnvelope(CAST({cell} AS DOUBLE), 0.0, CAST({cell} AS DOUBLE) + 1.0, 1.0)",
@@ -999,8 +1047,15 @@ def test_aggregate_a5_bbox_matches_geometry_keying(tmp_path):
     _write_points_with_bbox(src, POINTS)
     out_geom = tmp_path / "geom.parquet"
     out_bbox = tmp_path / "bbox.parquet"
-    aggregate_by_a5(str(src), str(out_geom), resolution=5, metric="avg:height")
-    aggregate_by_a5(str(src), str(out_bbox), resolution=5, metric="avg:height", bucket_point="bbox")
+    aggregate_by_a5(
+        str(src), str(out_geom), resolution=5, options=AggregateOptions(metric="avg:height")
+    )
+    aggregate_by_a5(
+        str(src),
+        str(out_bbox),
+        resolution=5,
+        options=AggregateOptions(metric="avg:height", bucket_point="bbox"),
+    )
     df_g = pq.read_table(out_geom).to_pandas().sort_values("a5_cell").reset_index(drop=True)
     df_b = pq.read_table(out_bbox).to_pandas().sort_values("a5_cell").reset_index(drop=True)
     assert list(df_g["a5_cell"]) == list(df_b["a5_cell"])
@@ -1014,7 +1069,7 @@ def test_aggregate_a5_bbox_autodetects_column(tmp_path):
     src = tmp_path / "f.parquet"
     _write_points_with_bbox(src, POINTS)  # conventional name "bbox" -> auto-detected
     out = tmp_path / "o.parquet"
-    aggregate_by_a5(str(src), str(out), resolution=5, bucket_point="bbox")
+    aggregate_by_a5(str(src), str(out), resolution=5, options=AggregateOptions(bucket_point="bbox"))
     assert sum(pq.read_table(out).column("count").to_pylist()) == 3
 
 
@@ -1024,7 +1079,12 @@ def test_aggregate_a5_bbox_explicit_nonstandard_column(tmp_path):
     src = tmp_path / "f.parquet"
     _write_points_with_bbox(src, POINTS, bbox_col="my_box")  # convention can't find this
     out = tmp_path / "o.parquet"
-    aggregate_by_a5(str(src), str(out), resolution=5, bucket_point="bbox", bbox_column="my_box")
+    aggregate_by_a5(
+        str(src),
+        str(out),
+        resolution=5,
+        options=AggregateOptions(bucket_point="bbox", bbox_column="my_box"),
+    )
     assert sum(pq.read_table(out).column("count").to_pylist()) == 3
 
 
@@ -1034,7 +1094,7 @@ def test_aggregate_h3_bbox_mode(tmp_path):
     src = tmp_path / "f.parquet"
     _write_points_with_bbox(src, POINTS)
     out = tmp_path / "o.parquet"
-    aggregate_by_h3(str(src), str(out), resolution=5, bucket_point="bbox")
+    aggregate_by_h3(str(src), str(out), resolution=5, options=AggregateOptions(bucket_point="bbox"))
     assert sum(pq.read_table(out).column("count").to_pylist()) == 3
 
 

@@ -11,11 +11,11 @@ Two independent mechanisms keep the two entries apart today, and each has its
 own test here:
 
 * an *undeclared* conventional `bbox` column is declared by
-  ``declare_carried_bbox_column`` (``core/geo_metadata.py``), which
+  the composer's bbox-covering step (``core/geo_metadata.py``), which
   uses ``setdefault`` so the index entry already in ``covering`` survives;
 * a covering the input *declared* — including one whose bbox columns are not
   named ``bbox``, which nothing can re-derive — survives only because
-  ``build_geo_metadata`` (``write_strategies/base.py``) merges a custom
+  ``compose_geo_block`` (``geo_metadata.py``) merges a custom
   ``covering`` one entry deep instead of replacing the dict.
 """
 
@@ -60,9 +60,9 @@ def _covering(path):
 def places_named_covering_file(tmp_path):
     """A 1.1 input that *declares* a bbox covering over a column not named ``bbox``.
 
-    ``declare_carried_bbox_column`` only recognises the literal name ``bbox``
+    the composer's bbox-covering step only recognises the literal name ``bbox``
     (``SELF_EVIDENT_BBOX_COLUMN``), so it cannot re-derive this covering. The
-    one-entry-deep ``covering`` merge in ``build_geo_metadata`` is the only thing
+    one-entry-deep ``covering`` merge in ``compose_geo_block`` is the only thing
     that keeps it when an ``add`` command contributes its own entry.
 
     Written through DuckDB's ``KV_METADATA`` for the same reasons as
@@ -124,7 +124,7 @@ class TestSpatialIndexCoveringWithBbox:
         """A declared covering keeps its provenance when the columns aren't named ``bbox``.
 
         Nothing can re-derive ``my_bounds``; only the one-entry-deep merge in
-        ``build_geo_metadata`` protects it.
+        ``compose_geo_block`` protects it.
         """
         output = tmp_path / f"{index_key}.parquet"
 

@@ -17,31 +17,34 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core import bbox_parse
+from geoparquet_io.core.bbox_structure import check_bbox_structure, dataset_bounds
 from geoparquet_io.core.column_selection import (
-    reject_blank_column_entries,
+    exclude_columns,
+    resolve_columns_against_schema,
     split_column_list,
 )
 from geoparquet_io.core.common import get_parquet_metadata, should_skip_bbox
-from geoparquet_io.core.crs_utils import get_crs_display_name
+from geoparquet_io.core.crs_utils import crs_of, get_crs_display_name, is_projected
 from geoparquet_io.core.duckdb_metadata import (
-    get_geo_metadata,
     get_row_count,
-    get_schema_info,
-    parse_geometry_logical_type,
 )
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
+    _get_query_columns,
+    as_wkb_sql,
+    describe_query,
     fetch_one,
     get_duckdb_connection,
     get_duckdb_connection_for_s3,
     quote_identifier,
     register_arrow,
+    sql_literal,
     sql_path,
     validate_where_clause,
 )
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
+    GeometryError,
     GeoParquetError,
     InvalidParameterError,
 )
@@ -55,29 +58,33 @@ from geoparquet_io.core.file_utils import (
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
     prune_geo_metadata_to_columns,
+    sanitized_carried_geo,
     strip_derived_stats,
     strip_orientation,
 )
 from geoparquet_io.core.geometry_detection import (
-    STANDARD_GEOMETRY_NAMES,
-    find_primary_geometry_column,
+    create_geometry_view,
+    primary_geometry_column,
+    resolve_geometry_column,
 )
 from geoparquet_io.core.geometry_repair import (
     nonplanar_edges_of_arrow_table,
     repair_query_geometry,
 )
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
-from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+from geoparquet_io.core.parquet_writer import (
+    WriteOptions,
+    resolve_output_geoparquet_version,
+    resolve_row_group_rows_for_query,
+)
 from geoparquet_io.core.partition.reader import build_read_parquet_expr, require_parquet_files
 from geoparquet_io.core.remote import (
-    _sanitize_url_for_logging,
+    display_path,
     is_remote_url,
     needs_httpfs,
 )
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
-    find_geometry_column_from_metadata,
-    find_geometry_column_from_table,
     is_stdin,
     should_stream_output,
 )
@@ -100,108 +107,17 @@ def looks_like_latlong_bbox(bbox: tuple[float, float, float, float]) -> bool:
     return -180 <= xmin <= 180 and -180 <= xmax <= 180 and -90 <= ymin <= 90 and -90 <= ymax <= 90
 
 
-def is_geographic_crs(crs_info: dict | str | None) -> bool | None:
-    """
-    Check if CRS is geographic (lat/long) vs projected.
-
-    Returns:
-        True if geographic, False if projected, None if unknown
-    """
-    if crs_info is None:
-        return None
-
-    if isinstance(crs_info, str):
-        crs_upper = crs_info.upper()
-        # Common geographic CRS codes
-        if any(
-            code in crs_upper for code in ["4326", "CRS84", "CRS:84", "OGC:CRS84", "4269", "4267"]
-        ):
-            return True
-        return None
-
-    if isinstance(crs_info, dict):
-        # Check PROJJSON type
-        crs_type = crs_info.get("type", "")
-        if crs_type == "GeographicCRS":
-            return True
-        if crs_type == "ProjectedCRS":
-            return False
-
-        # Check EPSG code
-        crs_id = crs_info.get("id", {})
-        if isinstance(crs_id, dict):
-            code = crs_id.get("code")
-            if code in [4326, 4269, 4267]:  # Common geographic codes
-                return True
-
-    return None
-
-
-def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | None:
-    """
-    Get CRS info from GeoParquet metadata or Parquet geo logical type.
-
-    Returns CRS info dict/string or None if not found.
-    """
-
-    # First try GeoParquet file-level metadata
-    try:
-        geo_meta = get_geo_metadata(input_parquet)
-        if geo_meta:
-            columns_meta = geo_meta.get("columns", {})
-            if geometry_col in columns_meta:
-                crs_info = columns_meta[geometry_col].get("crs")
-                if crs_info:
-                    return crs_info
-    except Exception:
-        # CRS extraction is optional
-        pass
-
-    # Fall back to Parquet geo logical type (for GeoParquet 2.0 / parquet-geo)
-    try:
-        schema_info = get_schema_info(input_parquet)
-        for col in schema_info:
-            name = col.get("name", "")
-            if name != geometry_col:
-                continue
-            logical_type = col.get("logical_type") or ""
-            # DuckDB returns GeometryType(...) and GeographyType(...) from parquet_schema()
-            if logical_type and (
-                logical_type.startswith("GeometryType(")
-                or logical_type.startswith("GeographyType(")
-            ):
-                parsed = parse_geometry_logical_type(logical_type)
-                if parsed and "crs" in parsed:
-                    return parsed["crs"]
-    except Exception:
-        # CRS extraction is optional
-        pass
-
-    return None
-
-
 def _get_data_bounds(input_parquet: str, geometry_col: str) -> tuple | None:
-    """Get actual data bounds from file."""
+    """The file's data bounds through the one file entry point (covering first), or None.
+
+    Only the CRS-mismatch warning reads them, so the owner's refusal of an
+    infinite coordinate is reported there rather than ending the extract.
+    """
     try:
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
-        raw_url = resolve_file_url(input_parquet, verbose=False)
-        result = fetch_one(
-            con.execute(f"""
-            SELECT
-                MIN(ST_XMin({quote_identifier(geometry_col)})) as xmin,
-                MIN(ST_YMin({quote_identifier(geometry_col)})) as ymin,
-                MAX(ST_XMax({quote_identifier(geometry_col)})) as xmax,
-                MAX(ST_YMax({quote_identifier(geometry_col)})) as ymax
-            FROM read_parquet({sql_path(raw_url)})
-        """)
-        )
-        con.close()
-        if result and all(v is not None for v in result):
-            return result
-    except Exception:
-        # Bounds extraction is optional - used only for warning messages
-        pass
-    return None
+        return dataset_bounds(input_parquet, geometry_col, advise=False)
+    except GeometryError as exc:
+        warn(f"Data bounds not shown: {exc}")
+        return None
 
 
 def _warn_if_crs_mismatch(
@@ -213,10 +129,8 @@ def _warn_if_crs_mismatch(
     if not looks_like_latlong_bbox(bbox):
         return  # User's bbox doesn't look like lat/long, no warning needed
 
-    crs_info = _get_crs_from_file(input_parquet, geometry_col)
-    is_geographic = is_geographic_crs(crs_info)
-
-    if is_geographic is False:  # Definitely projected
+    crs_info = crs_of(input_parquet, geometry_column=geometry_col, quiet=True)
+    if is_projected(crs_info):  # Definitely projected
         crs_name = get_crs_display_name(crs_info)
         data_bounds = _get_data_bounds(input_parquet, geometry_col)
 
@@ -234,43 +148,6 @@ def _warn_if_crs_mismatch(
         warn(msg)
 
 
-def parse_bbox(bbox_str: str) -> tuple[float, float, float, float]:
-    """
-    Parse bounding box string into tuple of floats.
-
-    Args:
-        bbox_str: Comma-separated string "xmin,ymin,xmax,ymax"
-
-    Returns:
-        tuple: (xmin, ymin, xmax, ymax)
-
-    Raises:
-        InvalidParameterError: If format is invalid or coordinates are reversed
-    """
-    try:
-        parts = [float(x.strip()) for x in bbox_str.split(",")]
-        if len(parts) != 4:
-            raise InvalidParameterError(
-                "bbox", f"expected 4 values (xmin,ymin,xmax,ymax), got {len(parts)}"
-            )
-        xmin, ymin, xmax, ymax = parts
-
-        # Validate coordinate ordering
-        if xmin > xmax or ymin > ymax:
-            raise InvalidParameterError(
-                "bbox",
-                f"coordinates appear to be reversed. "
-                f"xmin ({xmin}) must be <= xmax ({xmax}), and ymin ({ymin}) must be <= ymax ({ymax}). "
-                "Expected order: xmin,ymin,xmax,ymax.",
-            )
-
-        return (xmin, ymin, xmax, ymax)
-    except ValueError as e:
-        raise InvalidParameterError(
-            "bbox", f"expected numeric values: xmin,ymin,xmax,ymax. Error: {e}"
-        ) from e
-
-
 def convert_geojson_to_wkt(geojson: dict) -> str:
     """
     Convert GeoJSON geometry to WKT using DuckDB.
@@ -283,10 +160,10 @@ def convert_geojson_to_wkt(geojson: dict) -> str:
     """
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        geojson_str = _escape_sql_string(json.dumps(geojson))
+        geojson_str = sql_literal(json.dumps(geojson))
         result = fetch_one(
             con.execute(f"""
-            SELECT ST_AsText(ST_GeomFromGeoJSON('{geojson_str}'))
+            SELECT ST_AsText(ST_GeomFromGeoJSON({geojson_str}))
         """)
         )
         return result[0]
@@ -468,8 +345,7 @@ def get_schema_columns(input_parquet: str) -> list[str]:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         raw_url = resolve_file_url(file_to_check, verbose=False)
-        result = con.execute(f"DESCRIBE SELECT * FROM read_parquet({sql_path(raw_url)})").fetchall()
-        return [row[0] for row in result]
+        return _get_query_columns(con, f"SELECT * FROM read_parquet({sql_path(raw_url)})")
     finally:
         con.close()
 
@@ -480,6 +356,9 @@ def build_column_selection(
     exclude_cols: list[str] | None,
     geometry_col: str | None,
     bbox_col: str | None,
+    *,
+    include_option: str = "columns",
+    exclude_option: str = "exclude_cols",
 ) -> list[str]:
     """
     Build list of columns to select.
@@ -490,83 +369,41 @@ def build_column_selection(
     - If both: select include_cols, but exclude_cols can remove geometry/bbox
     - geometry and bbox always included unless in exclude_cols
 
+    Names are resolved against the schema (:mod:`core.column_selection`), so an
+    unknown or ambiguous one is reported here by name rather than surfacing later
+    as a writer error about a different column (#731).
+
     Args:
         all_columns: All columns in schema
         include_cols: Columns to include (or None)
         exclude_cols: Columns to exclude (or None)
         geometry_col: Name of geometry column (or None for a table that has none)
         bbox_col: Name of bbox column (or None if not present)
+        include_option: Option to name in an error about ``include_cols``
+        exclude_option: Option to name in an error about ``exclude_cols``
 
     Returns:
         list: Columns to select (preserving original order)
 
     Raises:
-        InvalidParameterError: If the selection leaves no columns at all. The
-            empty list used to reach the three SQL builders below it and come
-            back as a raw ``ParserException: SELECT clause without selection
-            list`` -- on the file-based path, the streaming path and
-            ``extract_table`` alike. This is the guard ``extract arcgis``
-            already makes, in the one place all three share (#1176).
+        InvalidParameterError: If a name is blank, absent or ambiguous, or if the
+            exclusion leaves no columns at all (``exclude_columns``' refusal;
+            the empty list used to reach the SQL builders and come back as a raw
+            ``ParserException``, #1176)
     """
-    exclude_set = set(exclude_cols) if exclude_cols else set()
+    include = resolve_columns_against_schema(include_cols, all_columns, include_option)
+    if not include:
+        if exclude_cols:
+            return exclude_columns(all_columns, exclude_cols, option_name=exclude_option)
+        return list(all_columns)
 
-    if include_cols:
-        selected = set(include_cols)
-        # Always add geometry unless explicitly excluded
-        if geometry_col and geometry_col not in exclude_set:
-            selected.add(geometry_col)
-        # Always add bbox unless explicitly excluded
-        if bbox_col and bbox_col not in exclude_set:
-            selected.add(bbox_col)
-    elif exclude_cols:
-        selected = set(all_columns) - exclude_set
-    else:
-        selected = set(all_columns)
-
-    # Preserve original column order
-    result = [c for c in all_columns if c in selected]
-    if all_columns and not result:
-        raise InvalidParameterError(
-            "exclude_cols" if exclude_cols else "columns",
-            f"this selection leaves no columns to extract (available: {', '.join(all_columns)})",
-        )
-    return result
-
-
-def validate_columns(
-    requested_cols: list[str] | None, all_columns: list[str], option_name: str
-) -> None:
-    """
-    Validate that requested columns exist in schema.
-
-    Matching is exact, because the caller selects from an Arrow schema, where
-    a column name is case-sensitive. Contrast
-    ``column_selection.resolve_columns_against_schema``, which the backends that
-    build SQL or a service request use to *resolve* the spelling.
-
-    Args:
-        requested_cols: Columns requested by user
-        all_columns: All columns in schema
-        option_name: Name of the option for error message
-
-    Raises:
-        InvalidParameterError: If any entry is blank, or any column not found
-    """
-    if not requested_cols:
-        return
-
-    # A blank entry is not a missing column, and saying so beat reporting
-    # "Columns not found in schema: ." at a caller who passed columns=["id", ""]
-    # from the Python API (#980).
-    reject_blank_column_entries(requested_cols, option_name)
-
-    missing = set(requested_cols) - set(all_columns)
-    if missing:
-        raise InvalidParameterError(
-            option_name,
-            f"Columns not found in schema: {', '.join(sorted(missing))}. "
-            f"Available columns: {', '.join(all_columns)}",
-        )
+    excluded = set(resolve_columns_against_schema(exclude_cols, all_columns, exclude_option) or [])
+    selected = set(include)
+    # Geometry and bbox ride along unless explicitly excluded
+    for implied in (geometry_col, bbox_col):
+        if implied and implied not in excluded:
+            selected.add(implied)
+    return [c for c in all_columns if c in selected]
 
 
 def build_spatial_filter(
@@ -584,22 +421,34 @@ def build_spatial_filter(
     conditions = []
 
     if bbox:
-        xmin, ymin, xmax, ymax = bbox
+        # A wrapped bbox (xmin > xmax) is its two lobes, ORed (bbox_parse.any_piece).
         if bbox_info.get("has_bbox_column"):
-            bbox_col = bbox_info["bbox_column_name"]
+            col = quote_identifier(bbox_info["bbox_column_name"])
             conditions.append(
-                f"({quote_identifier(bbox_col)}.xmax >= {xmin} AND {quote_identifier(bbox_col)}.xmin <= {xmax} "
-                f"AND {quote_identifier(bbox_col)}.ymax >= {ymin} AND {quote_identifier(bbox_col)}.ymin <= {ymax})"
+                bbox_parse.any_piece(
+                    bbox_parse.BBox(*bbox),
+                    lambda b: (
+                        f"({col}.xmax >= {b.xmin} AND {col}.xmin <= {b.xmax} "
+                        f"AND {col}.ymax >= {b.ymin} AND {col}.ymin <= {b.ymax})"
+                    ),
+                )
             )
         else:
+            geom = quote_identifier(geometry_col)
             conditions.append(
-                f"ST_Intersects({quote_identifier(geometry_col)}, ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))"
+                bbox_parse.any_piece(
+                    bbox_parse.BBox(*bbox),
+                    lambda b: (
+                        f"ST_Intersects({geom}, "
+                        f"ST_MakeEnvelope({b.xmin}, {b.ymin}, {b.xmax}, {b.ymax}))"
+                    ),
+                )
             )
 
     if geometry_wkt:
-        escaped_wkt = _escape_sql_string(geometry_wkt)
+        wkt_literal = sql_literal(geometry_wkt)
         conditions.append(
-            f"ST_Intersects({quote_identifier(geometry_col)}, ST_GeomFromText('{escaped_wkt}'))"
+            f"ST_Intersects({quote_identifier(geometry_col)}, ST_GeomFromText({wkt_literal}))"
         )
 
     return " AND ".join(conditions) if conditions else None
@@ -672,7 +521,7 @@ def _get_table_column_info(
 ) -> tuple[list[str], str | None, dict]:
     """Get column information from an Arrow table."""
     all_columns = table.column_names
-    geometry_col = find_geometry_column_from_table(table)
+    geometry_col = primary_geometry_column(table)
 
     # Check for bbox column
     bbox_col = None
@@ -689,32 +538,6 @@ def _get_table_column_info(
     return all_columns, geometry_col, bbox_info
 
 
-def _setup_geometry_view(
-    con,
-    table: pa.Table,
-    geom_col: str,
-) -> tuple[str, bool]:
-    """
-    Setup geometry view if needed for BLOB geometry columns.
-
-    Returns (source_ref, needs_wkb_conversion).
-    """
-    columns_info = con.execute("DESCRIBE __input_table").fetchall()
-    geom_is_blob = any(col[0] == geom_col and "BLOB" in col[1].upper() for col in columns_info)
-
-    if not (geom_is_blob and geom_col in table.column_names):
-        return "__input_table", False
-
-    # Create view with geometry conversion (quote column names for special chars)
-    other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
-    col_defs = other_cols + [
-        f"ST_GeomFromWKB({quote_identifier(geom_col)}) AS {quote_identifier(geom_col)}"
-    ]
-    view_query = f"CREATE VIEW __input_view AS SELECT {', '.join(col_defs)} FROM __input_table"
-    con.execute(view_query)
-    return "__input_view", True
-
-
 def _build_query_with_wkb_conversion(
     source_ref: str,
     selected_columns: list[str],
@@ -725,7 +548,7 @@ def _build_query_with_wkb_conversion(
 ) -> str:
     """Build query with WKB conversion for geometry column."""
     cols_with_wkb = [
-        f"ST_AsWKB({quote_identifier(geom_col)}) AS {quote_identifier(geom_col)}"
+        f"{as_wkb_sql(quote_identifier(geom_col))} AS {quote_identifier(geom_col)}"
         if c == geom_col
         else quote_identifier(c)
         for c in selected_columns
@@ -779,15 +602,10 @@ def extract_table(
             named ``geometry_column`` is absent, or if ``bbox`` is requested on a
             table that has no geometry column.
     """
-    all_columns, detected_geom, bbox_info = _get_table_column_info(table)
-    geom_col = geometry_column or detected_geom
+    all_columns, _, bbox_info = _get_table_column_info(table)
+    # None for an attribute table; a named column the table lacks raises.
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table", required=False)
     bbox_col = bbox_info.get("bbox_column_name")
-
-    if geom_col is not None and geom_col not in all_columns:
-        raise InvalidParameterError(
-            "geometry_column",
-            f"geometry_column '{geom_col}' not found in table columns: {list(all_columns)}",
-        )
 
     # A table with no geometry column is a legitimate input (an attribute table
     # from an earlier exclude_columns=['geometry'], say): project and filter its
@@ -805,11 +623,13 @@ def extract_table(
     _validate_column_overlap(
         columns, exclude_columns, geom_col, bbox_col, param_name="columns/exclude_columns"
     )
-    validate_columns(columns, list(all_columns), "columns")
-    validate_columns(exclude_columns, list(all_columns), "exclude_columns")
-
     selected_columns = build_column_selection(
-        all_columns, columns, exclude_columns, geom_col, bbox_col
+        all_columns,
+        columns,
+        exclude_columns,
+        geom_col,
+        bbox_col,
+        exclude_option="exclude_columns",
     )
     spatial_filter = build_spatial_filter(bbox, None, bbox_info, geom_col) if bbox else None
 
@@ -821,9 +641,12 @@ def extract_table(
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         registered = register_arrow(con, "__input_table", table)
-        source_ref, needs_wkb = (
-            _setup_geometry_view(con, table, geom_col) if geom_col else ("__input_table", False)
+        source_ref = (
+            create_geometry_view(con, "__input_table", geom_col, "__input_view")
+            if geom_col
+            else "__input_table"
         )
+        needs_wkb = source_ref != "__input_table"
 
         if needs_wkb and keeps_geometry:
             query = _build_query_with_wkb_conversion(
@@ -962,12 +785,7 @@ def _extract_streaming(
     where: str | None,
     limit: int | None,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
+    write: WriteOptions,
     repair_geometry: bool = True,
 ) -> None:
     """Handle extraction with streaming input/output."""
@@ -979,18 +797,12 @@ def _extract_streaming(
         input_path, verbose=verbose, stream_output=should_stream_output(output_path)
     ) as (source, metadata, is_stream, con):
         # Get column names from query result (works with both table names and read_parquet)
-        sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
-        all_columns = [col[0] for col in sample]
+        # One relation: its reader has already de-duplicated the names.
+        described = describe_query(con, f"SELECT * FROM {source}")
+        all_columns = [name for name, _ in described]
 
         # Find geometry column
-        geom_col = find_geometry_column_from_metadata(metadata)
-        if not geom_col:
-            for name in STANDARD_GEOMETRY_NAMES:
-                if name in all_columns:
-                    geom_col = name
-                    break
-        if not geom_col:
-            geom_col = "geometry"
+        geom_col = primary_geometry_column(described, geo=sanitized_carried_geo(metadata))
 
         # Check for bbox column
         bbox_col = None
@@ -1060,17 +872,19 @@ def _extract_streaming(
             output_path,
             original_metadata=metadata,
             geometry_column=geom_col,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
+            **write.funnel_kwargs(),
         )
 
         if not should_stream_output(output_path):
             success(f"Extracted data to {output_path}")
+
+
+def _extract_connection(input_parquet: str):
+    """The connection an extraction reads ``input_parquet`` with (S3 auto-detected)."""
+    if needs_httpfs(input_parquet):
+        return get_duckdb_connection_for_s3(input_parquet, load_spatial=True)
+    return get_duckdb_connection(load_spatial=True, load_httpfs=False)
 
 
 def _print_dry_run_output(
@@ -1086,17 +900,13 @@ def _print_dry_run_output(
     query: str,
     compression: str,
     compression_level: int | None,
+    row_group_rows: int | None = None,
+    row_group_size_mb: float | None = None,
 ) -> None:
     """Print dry run output."""
     warn("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n")
-    display_input = (
-        _sanitize_url_for_logging(input_parquet) if is_remote_url(input_parquet) else input_parquet
-    )
-    display_output = (
-        _sanitize_url_for_logging(output_parquet)
-        if is_remote_url(output_parquet)
-        else output_parquet
-    )
+    display_input = display_path(input_parquet)
+    display_output = display_path(output_parquet)
     info(f"-- Input: {display_input}")
     info(f"-- Output: {display_output}")
     info(f"-- Geometry column: {geometry_col}")
@@ -1113,18 +923,14 @@ def _print_dry_run_output(
         info(f"-- Limit: {limit}")
     progress("")
 
-    compression_desc = compression
-    if compression in ["GZIP", "ZSTD", "BROTLI"] and compression_level:
-        compression_desc = f"{compression}:{compression_level}"
+    from geoparquet_io.core.compression import print_copy_dry_run
 
-    duckdb_compression = compression.lower() if compression != "UNCOMPRESSED" else "uncompressed"
-    display_query = f"""COPY ({query})
-TO {sql_path(output_parquet)}
-(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
-
+    # The count the funnel will resolve, measured the same way for an MB target,
+    # so the printed COPY writes what gpio writes.
+    with _extract_connection(input_parquet) as con:
+        rows = resolve_row_group_rows_for_query(con, query, row_group_rows, row_group_size_mb)
     info("-- Main query:")
-    progress(display_query)
-    info(f"\n-- Note: Using {compression_desc} compression")
+    print_copy_dry_run(query, output_parquet, compression, compression_level, rows)
 
 
 def _advise_spatial_stats_on_merge(
@@ -1167,8 +973,8 @@ def _advise_spatial_stats_on_merge(
     if bbox_col and bbox_col in selected_columns:
         return
 
-    effective_version = (
-        resolve_output_geoparquet_version(geoparquet_version, input_file=input_parquet) or "1.1"
+    effective_version = resolve_output_geoparquet_version(
+        geoparquet_version, input_file=input_parquet
     )
     if should_skip_bbox(effective_version):
         return
@@ -1196,14 +1002,8 @@ def _execute_extraction(
     selected_columns: list[str],
     verbose: bool,
     show_sql: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None = None,
+    write: WriteOptions,
     write_strategy: str = "duckdb-kv",
-    memory_limit: str | None = None,
     geometry_col: str | None = None,
     repair_geometry: bool = True,
 ) -> None:
@@ -1220,10 +1020,7 @@ def _execute_extraction(
             debug(f"Limiting to {limit:,} rows")
 
     # Use auto-detecting S3 connection for S3 paths
-    if needs_httpfs(input_parquet):
-        con = get_duckdb_connection_for_s3(input_parquet, load_spatial=True)
-    else:
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+    con = _extract_connection(input_parquet)
 
     try:
         # Get total row count from input file metadata (fast - reads footer only)
@@ -1275,19 +1072,13 @@ def _execute_extraction(
             query,
             output_parquet,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
             show_sql=show_sql,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
             write_strategy=write_strategy,
-            memory_limit=memory_limit,
             input_file=input_parquet,
             invalidate_derived_stats=stale_columns is None or bool(stale_columns),
             invalidate_derived_stats_columns=stale_columns,
+            **write.funnel_kwargs(),
         )
 
         # Get extracted row count from output file metadata (fast - reads footer only)
@@ -1318,7 +1109,7 @@ def extract(
     dry_run: bool = False,
     show_sql: bool = False,
     verbose: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
@@ -1433,10 +1224,11 @@ def _extract_impl(
 
     # Check if output file exists and handle overwrite (fixes issue #278)
     if output_parquet and not is_streaming and not dry_run:
-        handle_output_overwrite(output_parquet, overwrite, input_parquet)
+        handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
 
+    write = WriteOptions.pick(locals())
     if is_streaming and not dry_run:
-        bbox_tuple = parse_bbox(bbox) if bbox else None
+        bbox_tuple = bbox_parse.parse_bbox(bbox) if bbox else None
         geometry_wkt = parse_geometry_input(geometry, use_first_geometry) if geometry else None
         if where:
             validate_where_clause(where)
@@ -1450,12 +1242,7 @@ def _extract_impl(
             where,
             limit,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
+            write,
             repair_geometry=repair_geometry,
         )
 
@@ -1465,20 +1252,24 @@ def _extract_impl(
     # expression is built, several DuckDB errors too late (#867).
     require_parquet_files(input_parquet)
     all_columns = get_schema_columns(input_parquet)
-    geometry_col = find_primary_geometry_column(input_parquet, verbose)
+    geometry_col = primary_geometry_column(input_parquet, verbose=verbose)
     bbox_info = check_bbox_structure(input_parquet, verbose=False)
     bbox_col = bbox_info.get("bbox_column_name")
 
     _validate_column_overlap(include_list, exclude_list, geometry_col, bbox_col)
-    validate_columns(include_list, all_columns, "--include-cols")
-    validate_columns(exclude_list, all_columns, "--exclude-cols")
     if where:
         validate_where_clause(where)
 
     selected_columns = build_column_selection(
-        all_columns, include_list, exclude_list, geometry_col, bbox_col
+        all_columns,
+        include_list,
+        exclude_list,
+        geometry_col,
+        bbox_col,
+        include_option="--include-cols",
+        exclude_option="--exclude-cols",
     )
-    bbox_tuple = parse_bbox(bbox) if bbox else None
+    bbox_tuple = bbox_parse.parse_bbox(bbox) if bbox else None
     if bbox_tuple and not dry_run:
         _warn_if_crs_mismatch(bbox_tuple, input_parquet, geometry_col)
 
@@ -1508,6 +1299,8 @@ def _extract_impl(
             query,
             compression,
             compression_level,
+            row_group_rows,
+            row_group_size_mb,
         )
     else:
         _advise_spatial_stats_on_merge(
@@ -1524,14 +1317,8 @@ def _extract_impl(
             selected_columns,
             verbose,
             show_sql,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
+            write,
             write_strategy,
-            memory_limit,
             geometry_col=geometry_col,
             repair_geometry=repair_geometry,
         )

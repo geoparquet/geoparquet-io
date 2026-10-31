@@ -17,6 +17,7 @@ from typing import IO
 
 from geoparquet_io.core.column_selection import split_column_list
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geojson_stream import require_planar_geojson_file
 from geoparquet_io.core.logging_config import debug, success
 from geoparquet_io.core.streaming import is_stdin
@@ -560,6 +561,40 @@ def _run_pipeline(
         raise
 
 
+def _addressed_tiles(archive_path: str) -> int | None:
+    """The tile count in a PMTiles archive's header, or None when it has no readable one."""
+    from pmtiles.tile import deserialize_header
+
+    try:
+        with open(archive_path, "rb") as handle:
+            raw = handle.read(127)
+        return int(deserialize_header(raw)["addressed_tiles_count"])
+    except (OSError, ValueError, KeyError, IndexError):
+        return None
+
+
+def _refuse_tileless_archive(input_path: str, output_path: str) -> None:
+    """Fail, and remove the archive, when tippecanoe wrote one with no tiles from rows.
+
+    Tippecanoe exits 0 after "More than half the features were clipped away at
+    zoom level 0. Is your data in the wrong projection?" and leaves a ~900 byte
+    archive whose only hint is that warning in stderr (#1258, #1263). An input
+    with no rows still makes an empty archive.
+    """
+    from geoparquet_io.core.duckdb_metadata import get_row_count
+
+    if _addressed_tiles(output_path) != 0 or get_row_count(input_path) == 0:
+        return
+    Path(output_path).unlink(missing_ok=True)
+    raise RuntimeError(
+        f"tippecanoe wrote {output_path} with no tiles from {input_path}, which has rows. "
+        "The usual cause is coordinates that are not lon/lat (an uncoded or wrongly "
+        "labelled projected CRS); name the CRS with --src-crs, for example "
+        "'--src-crs EPSG:3857'. If a --bbox or --where filter excluded every feature, "
+        "widen it."
+    )
+
+
 def create_pmtiles_from_geoparquet(
     input_path: str,
     output_path: str,
@@ -659,16 +694,16 @@ def create_pmtiles_from_geoparquet(
     # tippecanoe probe, so a bad option is not reported as a missing binary.
     cols = split_column_list(include_cols, "--include-cols")
     scratch = resolve_scratch_directory(temporary_directory)
+    # tippecanoe (or tile-join, for --chunks) replaces the archive itself on
+    # --force; refused here, before any tiling work, when the flag is absent.
+    handle_output_overwrite(output_path, force, flag="--force", remove=False)
 
     if not _check_tippecanoe():
         raise TippecanoeNotFoundError()
 
     # Check the source before an extract/reproject child can lose its edge
     # declaration, and before tippecanoe can create or overwrite an archive.
-    preprocessed = bbox or where or cols or src_crs is not None or chunks
-    require_planar_geojson_file(
-        input_path, profile=profile, use_primary_geometry=bool(preprocessed)
-    )
+    require_planar_geojson_file(input_path, profile=profile)
 
     if chunks:
         # Deferred: pmtiles_chunks tiles each chunk through this function.
@@ -741,6 +776,7 @@ def create_pmtiles_from_geoparquet(
     )
 
     _run_pipeline(gpio_commands, tippecanoe_cmd, verbose, layer_by_column, scratch)
+    _refuse_tileless_archive(input_path, output_path)
 
     if verbose:
         success(f"Created {output_path}")

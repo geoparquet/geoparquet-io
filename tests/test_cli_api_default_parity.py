@@ -245,11 +245,6 @@ def collect_divergences() -> list[tuple[str, str, str, str, str]]:
 # was closed in #762 by giving the API the same `auto=True` the CLI has, not by
 # writing a better excuse.
 
-_GEOMETRY_COLUMN_FROM_TABLE = (
-    "Intentional. The CLI is handed a path and names the conventional column; the API is handed "
-    "a Table that already tracks its own geometry column, so None means 'use that one'. Pinning "
-    "the API to 'geometry' would break every table whose column is named something else."
-)
 _KEEP_TRISTATE = (
     "Intentional. CLI flag False and API None both mean 'follow hive' at runtime; the API spells "
     "it as a tri-state so it can also express an explicit drop, which a bare Click flag cannot."
@@ -329,20 +324,6 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str, str, str], str] = {
         "'<unset>'",
         "False",
     ): _KDTREE_AUTO_SPELLING,
-    (
-        "sort hilbert",
-        "ops.sort_hilbert",
-        "geometry_column",
-        "'geometry'",
-        "'<unset>'",
-    ): _GEOMETRY_COLUMN_FROM_TABLE,
-    (
-        "sort str",
-        "ops.sort_str",
-        "geometry_column",
-        "'geometry'",
-        "'<unset>'",
-    ): _GEOMETRY_COLUMN_FROM_TABLE,
     (
         "partition a5",
         "ops.partition_by_a5",
@@ -794,3 +775,23 @@ class TestWfsParity:
         assert _param_default(getattr(wfs_module, name), "auto_tile") is True, (
             f"core.wfs.{name} defaults auto_tile=False and will silently truncate"
         )
+
+
+class TestRequestTimeoutsAreTheOwnerConstants:
+    """ArcGIS/WFS use ``http_retry.DEFAULT_TIMEOUT``; Carto uses ``CARTO_REQUEST_TIMEOUT``."""
+
+    def test_arcgis_cli_and_api_defaults_are_the_shared_timeout(self):
+        from geoparquet_io.api import table as table_module
+        from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
+
+        cmd = cli.commands["extract"].commands["arcgis"]
+        assert _cli_option_default(cmd, "--timeout") == DEFAULT_TIMEOUT
+        assert _param_default(ops.from_arcgis, "timeout") == DEFAULT_TIMEOUT
+        assert _param_default(table_module.extract_arcgis, "timeout") == DEFAULT_TIMEOUT
+
+    def test_carto_cli_and_api_defaults_are_the_carto_timeout(self):
+        from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT
+
+        cmd = cli.commands["extract"].commands["carto"]
+        assert _cli_option_default(cmd, "--timeout") == CARTO_REQUEST_TIMEOUT
+        assert _param_default(ops.from_carto, "timeout") == CARTO_REQUEST_TIMEOUT

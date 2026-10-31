@@ -22,7 +22,8 @@ Usage in CLI:
 
 import logging
 import sys
-from contextlib import contextmanager
+
+from geoparquet_io.core.exceptions import clean_error_text
 
 # Package-level logger
 logger = logging.getLogger("geoparquet_io")
@@ -109,16 +110,6 @@ class CLIFormatter(logging.Formatter):
         return message
 
 
-class LibraryFormatter(logging.Formatter):
-    """Standard formatter for library usage with timestamps and levels."""
-
-    def __init__(self):
-        super().__init__(
-            fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
-
-
 class DynamicStreamHandler(logging.StreamHandler):
     """
     A StreamHandler that works correctly with Click's CliRunner and piping.
@@ -191,23 +182,6 @@ def get_logger(name: str | None = None) -> logging.Logger:
     return logging.getLogger(name)
 
 
-@contextmanager
-def verbose_logging():
-    """
-    Context manager to temporarily enable verbose (DEBUG) logging.
-
-    Usage:
-        with verbose_logging():
-            debug("This will be shown")
-    """
-    original_level = logger.level
-    logger.setLevel(logging.DEBUG)
-    try:
-        yield
-    finally:
-        logger.setLevel(original_level)
-
-
 def _bootstrap_default_handler(verbose: bool) -> None:
     """Attach a default handler for non-CLI usage without hijacking the host's.
 
@@ -248,8 +222,7 @@ def configure_verbose(verbose: bool) -> None:
     all of which default to ``verbose=False``. Lowering the level on a
     non-verbose call would (a) truncate an outer ``--verbose`` run the moment it
     reached a nested default call, and (b) stamp gpio's idea of a level onto an
-    embedding application's logger on every single default call. Use
-    :func:`verbose_logging` when a raise has to be undone again.
+    embedding application's logger on every single default call.
 
     Args:
         verbose: If True, set logger to DEBUG level
@@ -281,8 +254,11 @@ def warn(message: str) -> None:
     Log a warning message (displayed in yellow in CLI).
 
     Use for: Non-critical issues, recommendations, deprecation notices.
+
+    Text goes through the one ``clean_error_text`` policy here, once (credential
+    values, query strings on URLs, control characters), so a caller can interpolate a caught exception without cleaning it first.
     """
-    logger.warning(message)
+    logger.warning(clean_error_text(message))
 
 
 def error(message: str) -> None:
@@ -291,7 +267,7 @@ def error(message: str) -> None:
 
     Use for: Failed operations, validation failures, critical issues.
     """
-    logger.error(message)
+    logger.error(clean_error_text(message))
 
 
 def info(message: str) -> None:

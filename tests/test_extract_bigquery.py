@@ -20,7 +20,7 @@ import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
-from geoparquet_io.cli.main import extract
+from geoparquet_io.cli.main import cli, extract
 from geoparquet_io.core.duckdb_utils import fetch_one
 from tests.conftest import safe_unlink
 
@@ -94,8 +94,8 @@ class TestDetectGeometryColumn:
         )
         assert _detect_geometry_column(table) == "geom"
 
-    def test_detect_fallback_to_geo_in_name(self):
-        """Test fallback to columns containing 'geo' in name."""
+    def test_a_name_containing_geo_is_not_detected(self):
+        """The substring fallback is gone (#1367): name the column explicitly."""
         from geoparquet_io.core.extract_bigquery import _detect_geometry_column
 
         table = pa.table(
@@ -104,7 +104,7 @@ class TestDetectGeometryColumn:
                 "building_geom_wkb": [b"test", b"test2"],
             }
         )
-        assert _detect_geometry_column(table) == "building_geom_wkb"
+        assert _detect_geometry_column(table) is None
 
     def test_detect_returns_none_when_not_found(self):
         """Test that None is returned when no geometry column found."""
@@ -117,53 +117,6 @@ class TestDetectGeometryColumn:
             }
         )
         assert _detect_geometry_column(table) is None
-
-
-class TestExtractBigQueryTable:
-    """Test the extract_bigquery_table function for in-memory tables."""
-
-    def test_extract_with_limit(self):
-        """Test extracting with a row limit."""
-        from geoparquet_io.core.extract_bigquery import extract_bigquery_table
-
-        table = pa.table(
-            {
-                "id": [1, 2, 3, 4, 5],
-                "name": ["a", "b", "c", "d", "e"],
-            }
-        )
-        result = extract_bigquery_table(table, limit=3)
-        assert result.num_rows == 3
-
-    def test_extract_with_columns(self):
-        """Test extracting specific columns."""
-        from geoparquet_io.core.extract_bigquery import extract_bigquery_table
-
-        table = pa.table(
-            {
-                "id": [1, 2, 3],
-                "name": ["a", "b", "c"],
-                "value": [10, 20, 30],
-            }
-        )
-        result = extract_bigquery_table(table, columns=["id", "name"])
-        assert result.column_names == ["id", "name"]
-
-    def test_extract_with_exclude_columns(self):
-        """Test excluding specific columns."""
-        from geoparquet_io.core.extract_bigquery import extract_bigquery_table
-
-        table = pa.table(
-            {
-                "id": [1, 2, 3],
-                "name": ["a", "b", "c"],
-                "value": [10, 20, 30],
-            }
-        )
-        result = extract_bigquery_table(table, exclude_columns=["value"])
-        assert "value" not in result.column_names
-        assert "id" in result.column_names
-        assert "name" in result.column_names
 
 
 class TestBuildGeometrySelectExpr:
@@ -768,7 +721,7 @@ class TestGeometryIdentifierQuoting:
 class TestColumnValidation:
     """``--include-cols``/``--exclude-cols`` are checked against the table (#969).
 
-    The parquet backend has run ``validate_columns`` since #731; the BigQuery
+    The parquet backend has run its column check since #731; the BigQuery
     backend had no equivalent, so a name the table does not carry was quoted
     into the SELECT and failed as a DuckDB binder error (or, for
     ``--exclude-cols``, silently excluded nothing). A blank entry was worse
@@ -809,20 +762,20 @@ class TestColumnValidation:
         result = resolve_columns_against_schema(["ID", "GeoM"], ["id", "geom"], "--exclude-cols")
         assert result == ["id", "geom"]
 
-    def test_an_exact_match_wins_over_a_case_fold(self):
-        """Case folding cannot be allowed to collapse two distinct columns.
+    @pytest.mark.parametrize("requested", ["id", "ID"])
+    def test_an_exact_spelling_does_not_rescue_a_case_twin(self, requested):
+        """DuckDB binds ``id`` and ``ID`` to one name, so an exact spelling is no answer.
 
         ``_schema_column_names`` also serves ``table_source="local"``, and DuckDB
-        lets a local table carry both ``id`` and ``ID``. A ``{col.lower(): col}``
-        map keeps only the last of those, so an exactly-spelled request has to be
-        honoured as itself before any folding is tried.
+        lets a local table carry both. The request is refused, naming both.
         """
         from geoparquet_io.core.column_selection import resolve_columns_against_schema
+        from geoparquet_io.core.exceptions import InvalidParameterError
 
         schema = ["id", "ID", "geom"]
-        assert resolve_columns_against_schema(["id"], schema, "--exclude-cols") == ["id"]
-        assert resolve_columns_against_schema(["ID"], schema, "--exclude-cols") == ["ID"]
-        # A spelling that matches neither exactly still folds, as before.
+        with pytest.raises(InvalidParameterError, match="matches ID, id"):
+            resolve_columns_against_schema([requested], schema, "--exclude-cols")
+        # A name with a single fold is resolved to the schema's spelling.
         assert resolve_columns_against_schema(["GeoM"], schema, "--include-cols") == ["geom"]
 
     @pytest.mark.parametrize("requested", ["Id", "iD"])
@@ -991,9 +944,11 @@ class TestSchemaIsReadOnce:
 
         # One, now that the three sources a schema can come from -- a scan, a
         # local table, a pre-built --sql relation -- differ only in the
-        # relation they name, and the DESCRIBE around it is written once.
-        assert helper_source.count("DESCRIBE SELECT") == 1
-        assert module_source.count("DESCRIBE SELECT") == 1
+        # relation they name, and the probe around it is called once. The
+        # DESCRIBE itself is spelled only in duckdb_utils.describe_query (#1367).
+        assert helper_source.count("describe_query(") == 1
+        assert module_source.count("describe_query(") == 1
+        assert "DESCRIBE SELECT" not in module_source
 
     def test_given_rows_are_used_without_touching_the_connection(self):
         from geoparquet_io.core.extract_bigquery import _detect_geometry_column_from_schema
@@ -1239,7 +1194,7 @@ def _bq_result_table(num_rows: int) -> pa.Table:
     """One table both branches write, so a row-size estimate is identical.
 
     The geometry column is called ``geom`` -- a name
-    ``detect_geometry_column_from_names`` matches -- on purpose: the
+    the owner's name match takes -- on purpose: the
     geometry-less branch must stay plain Parquet even then.
     """
     return pa.table(
@@ -1416,17 +1371,28 @@ class TestFacadeSizesAnMbTarget:
         assert rows is not None
         assert 1 <= rows < 20_000
 
-    def test_an_mb_target_never_exceeds_the_table(self):
-        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+    def test_an_mb_target_bigger_than_the_table_is_one_group_in_whole_vectors(self):
+        """Not capped at the table: one group either way, and a whole vector
+        keeps the next resolve along the write from announcing a rounding."""
+        from geoparquet_io.core.parquet_writer import (
+            WRITER_VECTOR_ROWS,
+            resolve_row_group_rows_for_table,
+        )
 
         table = _bq_result_table(100)
-        assert resolve_row_group_rows_for_table(table, None, 1024.0) == 100
+        rows = resolve_row_group_rows_for_table(table, None, 1024.0)
+        assert rows >= table.num_rows
+        assert rows % WRITER_VECTOR_ROWS == 0
 
-    def test_an_empty_table_keeps_the_mb_target_unsized(self):
-        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+    def test_an_empty_table_gets_the_default(self):
+        """Nothing to measure: a row count all the same, never None for a writer."""
+        from geoparquet_io.core.parquet_writer import (
+            DEFAULT_ROW_GROUP_ROWS,
+            resolve_row_group_rows_for_table,
+        )
 
         table = pa.table({"id": pa.array([], pa.int64())})
-        assert resolve_row_group_rows_for_table(table, None, 1.0) is None
+        assert resolve_row_group_rows_for_table(table, None, 1.0) == DEFAULT_ROW_GROUP_ROWS
 
     def test_an_explicit_row_count_wins_over_an_mb_target(self):
         from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
@@ -1443,11 +1409,14 @@ class TestFacadeSizesAnMbTarget:
         table = _bq_result_table(20_000)
         assert resolve_row_group_rows_for_table(table, None, 0.001) == WRITER_VECTOR_ROWS
 
-    def test_the_floor_still_caps_at_the_table(self):
-        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+    def test_the_floor_holds_on_a_small_table(self):
+        from geoparquet_io.core.parquet_writer import (
+            WRITER_VECTOR_ROWS,
+            resolve_row_group_rows_for_table,
+        )
 
         table = _bq_result_table(100)
-        assert resolve_row_group_rows_for_table(table, None, 0.001) == 100
+        assert resolve_row_group_rows_for_table(table, None, 0.001) == WRITER_VECTOR_ROWS
 
     @pytest.mark.parametrize("mb", [0.0, -1.0])
     def test_a_non_positive_mb_target_is_rejected(self, mb):
@@ -2557,7 +2526,7 @@ class TestSqlCommandLine:
     """The CLI wiring: argument arity, and the mutual-exclusion rule."""
 
     def _invoke(self, args):
-        return CliRunner().invoke(extract, ["bigquery", *args])
+        return CliRunner().invoke(cli, ["extract", "bigquery", *args])
 
     def _invoke_captured(self, args):
         """Invoke with the core patched out; returns (result, call kwargs)."""
@@ -2850,8 +2819,9 @@ class TestEmptySqlIsNotAbsentSql:
     def test_cli_empty_sql_with_a_table_id_is_refused(self, tmp_path):
         with patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as conn:
             result = CliRunner().invoke(
-                extract,
+                cli,
                 [
+                    "extract",
                     "bigquery",
                     "--sql",
                     "",
@@ -2868,8 +2838,16 @@ class TestEmptySqlIsNotAbsentSql:
     def test_cli_empty_sql_with_one_positional_names_the_sql(self, tmp_path):
         with patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as conn:
             result = CliRunner().invoke(
-                extract,
-                ["bigquery", "--sql", "", "--project", "my-project", str(tmp_path / "o.parquet")],
+                cli,
+                [
+                    "extract",
+                    "bigquery",
+                    "--sql",
+                    "",
+                    "--project",
+                    "my-project",
+                    str(tmp_path / "o.parquet"),
+                ],
             )
         assert result.exit_code != 0
         assert not conn.called

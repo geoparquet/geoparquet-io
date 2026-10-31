@@ -27,7 +27,7 @@ import pyarrow.parquet as pq
 import pytest
 from pyproj import CRS as PyprojCRS
 
-from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+from geoparquet_io.core.crs_utils import crs_of
 from geoparquet_io.core.duckdb_metadata import (
     get_schema_info,
     parse_geometry_logical_type,
@@ -343,7 +343,7 @@ class TestCompactCrsFileValidatesEndToEnd:
         out = tmp_path / "compact_no_geo.parquet"
         pq.write_table(pa.table({"geometry": array}), out)
 
-        crs = extract_crs_from_parquet(str(out))
+        crs = crs_of(str(out))
         assert isinstance(crs, dict)
         assert crs["id"] == {"authority": "EPSG", "code": 32633}
 

@@ -31,12 +31,13 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import memory_limits
 from geoparquet_io.core.duckdb_utils import (
-    _displayed_size_max,
     fetch_one,
     get_duckdb_connection,
     restore_duckdb_settings,
     sql_path,
 )
+from geoparquet_io.core.parquet_writer import WriteOptions
+from geoparquet_io.core.sizing import displayed_size_max, parse_size_string
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 GIB = 1024**3
@@ -95,13 +96,14 @@ class TestFastPathMemoryLimit:
                 memory_limit="1MB",
             )
 
+    @pytest.mark.fresh_duckdb
     def test_fast_path_default_leaves_headroom_under_the_ceiling(
         self, tmp_path, monkeypatch, caplog
     ):
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
         # Opened under the same stub, so the session limit *is* the 5.0GB default
         # the write then applies -- which is the case DuckDB's truncated display
-        # of a size used to hide (it reads "5.0GB" back as "4.6 GiB", a stricter
+        # of a size used to hide (it read "5.0GB" back as "4.6 GiB", a stricter
         # limit gpio must not loosen, so nothing was ever set and nothing logged).
         # A connection opened before the stub would carry the host's own share
         # instead, and on a small host that really is stricter than 5.0GB, so the
@@ -118,11 +120,11 @@ class TestFastPathMemoryLimit:
             )
         finally:
             connection.close()
-        assert "DuckDB memory limit: 5.0GB" in caplog.text
+        assert "DuckDB memory limit: 5.0GiB" in caplog.text
 
     def test_small_ceiling_formats_in_megabytes(self, monkeypatch):
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: GIB)
-        assert memory_limits.default_memory_limit() == "512MB"
+        assert memory_limits.default_memory_limit() == "512MiB"
 
     def test_unknown_ceiling_leaves_duckdb_default(self, tmp_path, monkeypatch, caplog, con):
         """No ceiling to measure: keep DuckDB's own limit rather than invent one."""
@@ -166,7 +168,7 @@ class TestFastPathMemoryLimit:
     def test_default_tightens_duckdbs_own_default(self, con, monkeypatch):
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: GIB)
         with memory_limits.scoped_write_memory_limit(con, None, verbose=False):
-            assert _setting(con, "memory_limit") == "488.2 MiB"  # 512MB
+            assert _setting(con, "memory_limit") == "512.0 MiB"  # 512MiB
 
     def test_threads_shrink_with_the_limit_and_come_back(self, con):
         """Under ~250MB a thread, DuckDB raises OutOfMemory instead of spilling."""
@@ -210,8 +212,8 @@ class TestResolveLimitReadsTheSessionThroughTheDisplay:
         connection.close()
 
     def test_the_connections_own_default_is_recognised_and_re_set(self, bounded):
-        assert _setting(bounded, "memory_limit") == "4.6 GiB"  # 5.0GB, truncated
-        assert memory_limits._resolve_limit(bounded, None) == "5.0GB"
+        assert _setting(bounded, "memory_limit") == "5.0 GiB"
+        assert memory_limits._resolve_limit(bounded, None) == "5.0GiB"
 
     def test_a_stricter_caller_limit_is_still_left_alone(self, bounded):
         bounded.execute("SET memory_limit = '300MB'")
@@ -219,7 +221,7 @@ class TestResolveLimitReadsTheSessionThroughTheDisplay:
 
     def test_a_looser_caller_limit_is_tightened_to_the_default(self, bounded):
         bounded.execute("SET memory_limit = '100GB'")
-        assert memory_limits._resolve_limit(bounded, None) == "5.0GB"
+        assert memory_limits._resolve_limit(bounded, None) == "5.0GiB"
 
     def test_an_explicit_limit_wins_whatever_the_session_says(self, bounded):
         bounded.execute("SET memory_limit = '300MB'")
@@ -238,23 +240,6 @@ class TestRestoreSettings:
             restore_duckdb_settings(con, {"threads; DROP TABLE x": 1})
 
 
-class TestParseSize:
-    @pytest.mark.parametrize(
-        "text, expected",
-        [
-            ("2GB", 2 * 10**9),
-            ("14.3 GiB", int(14.3 * GIB)),
-            ("512MB", 512 * 10**6),
-            ("0 bytes", 0),
-            ("1.5GIB", int(1.5 * GIB)),
-            ("lots", None),
-            ("5 parsecs", None),
-        ],
-    )
-    def test_units(self, text, expected):
-        assert memory_limits.parse_size(text) == expected
-
-
 class TestDisplayedSizeMax:
     """One display step up: what a truncated size could be hiding."""
 
@@ -269,7 +254,7 @@ class TestDisplayedSizeMax:
         ],
     )
     def test_one_step_up_from_the_display(self, displayed, expected):
-        assert _displayed_size_max(displayed) == expected
+        assert displayed_size_max(displayed) == expected
 
 
 def _fake_cgroups(tmp_path, proc_lines: list[str], files: dict[str, str]):
@@ -379,7 +364,7 @@ class TestCgroupMemory:
             },
         )
         self._point_at(monkeypatch, proc, root, ram=512 * GIB)
-        assert memory_limits.get_default_memory_limit() == "60.0GB"
+        assert memory_limits.default_memory_limit() == "60.0GiB"
 
 
 class TestCeilingWithoutPsutil:
@@ -402,7 +387,7 @@ class TestCeilingWithoutPsutil:
         proc, root = _fake_cgroups(tmp_path, ["0::/job"], {"job/memory.max": str(2 * GIB)})
         self._point_at(monkeypatch, proc, root)
         assert memory_limits.memory_ceiling() == 2 * GIB
-        assert memory_limits.default_memory_limit() == "1.0GB"
+        assert memory_limits.default_memory_limit() == "1.0GiB"
 
     def test_ceiling_is_unknown_without_a_cgroup_cap(self, tmp_path, monkeypatch):
         self._point_at(monkeypatch, str(tmp_path / "missing"), str(tmp_path / "missing_root"))
@@ -532,7 +517,7 @@ class TestDirectCopyMemoryLimit:
     def test_pmtiles_split_copy_is_memory_bounded(self, tmp_path, monkeypatch, test_data_dir):
         """pmtiles chunking has no --write-memory, so the ceiling-based default applies."""
         from geoparquet_io.core import pmtiles_chunks as pc
-        from geoparquet_io.core.common import get_dataset_bounds
+        from geoparquet_io.core.bbox_structure import dataset_bounds
         from geoparquet_io.core.partition import staging
 
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
@@ -547,7 +532,7 @@ class TestDirectCopyMemoryLimit:
             str(parts_dir),
             geometry_column="geometry",
             key_sql=pc.chunk_key_sql(
-                "geometry", tuple(get_dataset_bounds(buildings, geometry_column="geometry")), 2, 2
+                "geometry", tuple(dataset_bounds(buildings, geometry_column="geometry")), 2, 2
             ),
             where=None,
             projection="*",
@@ -557,8 +542,8 @@ class TestDirectCopyMemoryLimit:
 
         ((memory_limit_arg, during, _threads),) = seen
         assert memory_limit_arg is None
-        limit_bytes = memory_limits.parse_size(during)
-        assert limit_bytes is not None and limit_bytes <= 5 * 10**9  # half the ceiling
+        limit_bytes = parse_size_string(during)
+        assert limit_bytes is not None and limit_bytes <= 5 * GIB  # half the ceiling
         assert list(parts_dir.glob("chunk_*.parquet"))
 
     @pytest.mark.parametrize("write_memory", [None, "700MB"])
@@ -587,8 +572,8 @@ class TestDirectCopyMemoryLimit:
         assert memory_limit_arg == write_memory
         if write_memory is not None:
             assert during == "667.5 MiB"
-        limit_bytes = memory_limits.parse_size(during)
-        assert limit_bytes is not None and limit_bytes <= 5 * 10**9
+        limit_bytes = parse_size_string(during)
+        assert limit_bytes is not None and limit_bytes <= 5 * GIB
 
     def test_admin_per_level_cache_copy_is_memory_bounded(self, tmp_path, monkeypatch):
         """The Overture per-level cache COPY runs inside the scoped limit too.
@@ -628,24 +613,35 @@ class TestDirectCopyMemoryLimit:
         assert scopes == [None] * len(dataset.get_available_levels())
 
     def test_bbox_metadata_rewrite_fallback_is_memory_bounded(self, monkeypatch, places_v11_file):
-        """The full-file rewrite behind an unpatchable footer is bounded too."""
+        """The full-file rewrite behind an unpatchable footer is bounded too.
+
+        It is the funnel's one footer rewrite (``write_funnels.rewrite_footer_kv``),
+        which streams one row group at a time through pyarrow and opens no
+        DuckDB connection: never a whole-file read (#1155). Its peak memory is
+        measured in tests/test_v2_zm_geo_metadata.py.
+        """
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core import write_funnels
         from geoparquet_io.core.add import bbox_metadata as bm
         from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
 
         def refuse(*args, **kwargs):
             raise FooterPatchUnsupported("forced for the test")
 
-        monkeypatch.setattr(bm, "patch_footer_kv", refuse)
-        monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
-        seen = []
-        self._spy_scoped_limit(monkeypatch, bm, seen)
+        def unbounded(*args, **kwargs):
+            raise AssertionError("the fallback read the whole file")
+
+        def no_duckdb(*args, **kwargs):
+            raise AssertionError("the fallback opened a DuckDB connection")
+
+        monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
+        monkeypatch.setattr(pq, "read_table", unbounded)
+        monkeypatch.setattr(write_funnels, "get_duckdb_connection", no_duckdb)
 
         bm.add_bbox_metadata(places_v11_file)
 
-        ((memory_limit_arg, during, _threads),) = seen
-        assert memory_limit_arg is None
-        limit_bytes = memory_limits.parse_size(during)
-        assert limit_bytes is not None and limit_bytes <= 5 * 10**9
+        assert b"covering" in pq.read_metadata(places_v11_file).metadata[b"geo"]
 
 
 class TestDirectCopyRegressions:
@@ -709,7 +705,7 @@ class TestDirectCopyRegressions:
             str(tmp_path / "out"),
             column_name="cat",
             skip_analysis=True,
-            memory_limit="700MB",
+            write=WriteOptions(memory_limit="700MB"),
         )
 
         assert seen, "the no-geometry write ran outside scoped_write_memory_limit"
@@ -719,18 +715,27 @@ class TestDirectCopyRegressions:
         self, tmp_path, monkeypatch, places_test_file
     ):
         """--write-memory reaches the admin dataset whose downloads it bounds."""
+        from geoparquet_io.core import admin_datasets
         from geoparquet_io.core.partition import admin_hierarchical as ah
 
         class Stop(Exception):
             pass
 
-        dataset = SimpleNamespace(memory_limit=None)
-        monkeypatch.setattr(ah, "_setup_admin_dataset", lambda *a, **k: (dataset, ["country"]))
+        seen = []
 
-        def stop(*args, **kwargs):
-            raise Stop
+        class FakeDataset:
+            memory_limit = None
 
-        monkeypatch.setattr(ah, "_get_input_file_info", stop)
+            def get_dataset_name(self):
+                return "fake"
+
+            def validate_levels(self, levels):
+                seen.append(self.memory_limit)
+                raise Stop
+
+        monkeypatch.setattr(
+            admin_datasets.AdminDatasetFactory, "create", lambda *a, **k: FakeDataset()
+        )
 
         with pytest.raises(Stop):
             ah.partition_by_admin_hierarchical(
@@ -740,7 +745,7 @@ class TestDirectCopyRegressions:
                 levels=["country"],
                 memory_limit="700MB",
             )
-        assert dataset.memory_limit == "700MB"
+        assert seen == ["700MB"]
 
     def test_add_admin_divisions_hands_write_memory_to_the_dataset(
         self, monkeypatch, places_test_file
@@ -763,7 +768,11 @@ class TestDirectCopyRegressions:
                 seen.append(self.memory_limit)
                 raise Stop
 
-        monkeypatch.setattr(ad.AdminDatasetFactory, "create", lambda *a, **k: FakeDataset())
+        from geoparquet_io.core import admin_datasets
+
+        monkeypatch.setattr(
+            admin_datasets.AdminDatasetFactory, "create", lambda *a, **k: FakeDataset()
+        )
 
         with pytest.raises(Stop):
             ad._setup_dataset_and_columns(

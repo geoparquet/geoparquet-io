@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
@@ -63,12 +64,12 @@ def offline_wfs_probes():
     fetcher. It swallows ``httpx.HTTPError`` the same way.
 
     Stubbing both probes to ``None`` reproduces exactly what the failed requests
-    already returned, so no assertion changes meaning. ``_make_request`` is
+    already returned, so no assertion changes meaning. ``make_request_with_retry`` is
     additionally replaced with a tripwire, and the recorded calls are asserted
     on teardown so a *future* unmocked network path fails loudly instead of
     silently sleeping.
 
-    Scope note: the tripwire covers only ``_make_request``-mediated traffic.
+    Scope note: the tripwire covers only ``make_request_with_retry``-mediated traffic.
     ``_fetch_wfs_page`` and ``_probe_startindex_limit`` drive httpx directly and
     bypass it; they are covered by the explicit stubs above, not by the
     tripwire. A new httpx-driven helper would therefore escape silently -- add
@@ -76,14 +77,14 @@ def offline_wfs_probes():
     """
     escaped_requests: list[str] = []
 
-    def _blocked_request(url, *args, **kwargs):
+    def _blocked_request(method, url, *args, **kwargs):
         escaped_requests.append(url)
         raise AssertionError(f"unmocked WFS HTTP request to {url}")
 
     with (
         patch.object(wfs_module, "_get_feature_count", return_value=None),
         patch.object(wfs_module, "_probe_startindex_limit", return_value=None),
-        patch.object(wfs_module, "_make_request", side_effect=_blocked_request),
+        patch.object(wfs_module, "make_request_with_retry", side_effect=_blocked_request),
     ):
         yield
 
@@ -699,40 +700,6 @@ class TestWFSExceptionHierarchy:
 
 # Helper Data Structures for Tests
 # =============================================================================
-
-
-class MockLayerInfo:
-    """Mock WFSLayerInfo for unit testing pure logic functions."""
-
-    def __init__(
-        self,
-        typename: str = "test:cities",
-        title: str | None = "Cities",
-        crs_list: list[str] | None = None,
-        default_crs: str | None = "urn:ogc:def:crs:EPSG::4326",
-        bbox: tuple[float, float, float, float] | None = (-180.0, -90.0, 180.0, 90.0),
-        geometry_column: str = "geometry",
-    ):
-        self.typename = typename
-        self.title = title
-        self.crs_list = crs_list or ["urn:ogc:def:crs:EPSG::4326", "urn:ogc:def:crs:EPSG::3857"]
-        self.default_crs = default_crs
-        self.bbox = bbox
-        self.geometry_column = geometry_column
-
-
-class MockCapabilities:
-    """Mock WFS capabilities for unit testing."""
-
-    def __init__(
-        self,
-        supports_bbox: bool = True,
-        version: str = "1.1.0",
-        max_features: int | None = None,
-    ):
-        self.supports_bbox = supports_bbox
-        self.version = version
-        self.max_features = max_features
 
 
 # =============================================================================
@@ -1457,8 +1424,8 @@ class TestCRSNegotiation:
             # EPSG inside another word is not a URI part, so not a code
             ("not-a-crs-EPSG:4326", "not-a-crs-EPSG:4326"),
             ("urn:ogc:def:crs:XEPSG::4326", "urn:ogc:def:crs:XEPSG::4326"),
-            # Non-ASCII digits are not a code
-            ("EPSG:\u0664\u0663\u0662\u0666", "EPSG:\u0664\u0663\u0662\u0666"),
+            # The shared equality owner recognizes this equivalent default identifier.
+            ("EPSG:\u0664\u0663\u0662\u0666", "EPSG:4326"),
         ],
     )
     def test_crs_variant_normalization(self, crs_variant, expected_normalized):
@@ -1921,7 +1888,8 @@ class TestGMLResponseParsing:
         table = self._fetch_gml()
         assert table.schema.metadata.get(_SERVER_CRS_METADATA_KEY) == b"EPSG:4326"
 
-    def test_leaves_no_temp_files_behind(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("closing_handle", [False, True])
+    def test_leaves_no_temp_files_behind(self, tmp_path, monkeypatch, closing_handle):
         """GDAL writes a .gfs sidecar for schema-less GML; nothing may survive.
 
         The GeoJSON path used a NamedTemporaryFile and unlinked exactly that one
@@ -1939,7 +1907,19 @@ class TestGMLResponseParsing:
         import tempfile
 
         monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        real_unlink = Path.unlink
+        failures = []
+
+        def unlink(path, *args, **kwargs):
+            if closing_handle and str(path).endswith("response.gml") and not failures:
+                failures.append(path)
+                raise PermissionError("GDAL handle still closing")
+            return real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", unlink)
         self._fetch_gml()
+        if closing_handle:
+            assert failures
 
         leaked = sorted(p.name for p in tmp_path.glob("gpio-wfs-*"))
         assert not leaked, f"GML parse leaked temp directories: {leaked}"
@@ -2279,7 +2259,7 @@ class TestResponseDispatchHelpers:
         from geoparquet_io.core.wfs import WFSError, _fetch_wfs_page
 
         with _mock_wfs_http_response(b"Unknown typeName", "text/plain", status_code=400):
-            with pytest.raises(WFSError, match="HTTP 400.*Unknown typeName"):
+            with pytest.raises(WFSError, match="HTTP error 400.*Unknown typeName"):
                 _fetch_wfs_page("http://mock.wfs/wfs?service=WFS")
 
     def test_http_400_names_the_startindex_limit(self):
@@ -2755,7 +2735,7 @@ class TestAxisOrder:
 
     def test_is_geographic_crs_detects_geographic_systems(self):
         """Should correctly identify geographic (lat/lon) CRS."""
-        from geoparquet_io.core.wfs import _is_geographic_crs
+        from geoparquet_io.core.crs_utils import is_geographic as _is_geographic_crs
 
         assert _is_geographic_crs("EPSG:4326") is True
         assert _is_geographic_crs("urn:ogc:def:crs:EPSG::4326") is True
@@ -2770,7 +2750,7 @@ class TestAxisOrder:
         pyproj-backed detection identifies any geographic CRS; a hardcoded list
         would misclassify these and trigger a false coordinate mismatch.
         """
-        from geoparquet_io.core.wfs import _is_geographic_crs
+        from geoparquet_io.core.crs_utils import is_geographic as _is_geographic_crs
 
         assert _is_geographic_crs("EPSG:4171") is True  # RGF93 (geographic)
         assert _is_geographic_crs("EPSG:4258") is True  # ETRS89 (geographic)
@@ -3775,7 +3755,7 @@ class TestResolveCRSForOutput:
         import json
         from unittest.mock import MagicMock, patch
 
-        from geoparquet_io.core.crs_utils import parse_crs_string_to_projjson
+        from geoparquet_io.core.crs_utils import projjson_for_label
         from geoparquet_io.core.wfs import _with_server_crs, wfs_to_table
 
         table = _with_server_crs(self._point_table(4527586.01, 6386852.32), "EPSG:22174")
@@ -3805,7 +3785,7 @@ class TestResolveCRSForOutput:
         mock_validate.assert_not_called()
         # Output metadata must encode EPSG:22174, not a bbox guess.
         geo = json.loads(result.schema.metadata[b"geo"])
-        expected = parse_crs_string_to_projjson("EPSG:22174")
+        expected = projjson_for_label("EPSG:22174")
         assert geo["columns"]["geometry"]["crs"] == expected
 
     @pytest.mark.usefixtures("offline_wfs_probes")
@@ -3820,7 +3800,7 @@ class TestResolveCRSForOutput:
         import json
         from unittest.mock import MagicMock, patch
 
-        from geoparquet_io.core.crs_utils import parse_crs_string_to_projjson
+        from geoparquet_io.core.crs_utils import projjson_for_label
         from geoparquet_io.core.wfs import _with_server_crs, wfs_to_table
 
         table = _with_server_crs(self._point_table(4527586.01, 6386852.32), "EPSG:22174")
@@ -3852,7 +3832,7 @@ class TestResolveCRSForOutput:
         mock_validate.assert_not_called()
         assert result.num_rows == 1
         geo = json.loads(result.schema.metadata[b"geo"])
-        assert geo["columns"]["geometry"]["crs"] == parse_crs_string_to_projjson("EPSG:22174")
+        assert geo["columns"]["geometry"]["crs"] == projjson_for_label("EPSG:22174")
 
     @pytest.mark.usefixtures("offline_wfs_probes")
     def test_local_bbox_filter_reprojects_bbox_to_server_crs(self):
@@ -3989,7 +3969,7 @@ class TestOutputCrsProjjson:
     def test_a_cached_entry_that_is_not_an_object_falls_back_to_pyproj(self):
         from geoparquet_io.core.wfs import _output_crs_projjson
 
-        with patch("geoparquet_io.core.wfs._projjson_from_authority", return_value="[]"):
+        with patch("geoparquet_io.core.crs_utils._projjson_from_authority", return_value="[]"):
             projjson = _output_crs_projjson("EPSG:31287")
 
         assert projjson["id"] == {"authority": "EPSG", "code": 31287}
@@ -4424,9 +4404,9 @@ class TestBboxAxisRuleByCrs:
         assert _first_axis_is_north(info) is expected
 
     def test_an_oversized_crs_string_is_not_read(self):
-        from geoparquet_io.core.wfs import _MAX_CRS_STRING, _request_pyproj_crs
+        from geoparquet_io.core.crs_utils import load_crs
 
-        assert _request_pyproj_crs("EPSG:" + "9" * _MAX_CRS_STRING) is None
+        assert load_crs("EPSG:" + "9" * 1024) is None
 
     def test_a_layer_bbox_across_the_antimeridian_says_so(self, caplog):
         from geoparquet_io.core.wfs import _get_tiling_bbox
@@ -4489,22 +4469,21 @@ class TestBboxAxisRuleByCrs:
         assert sent[0] <= a0 <= sent[2]
         assert sent[1] <= a1 <= sent[3]
 
-    def test_a_user_bbox_across_the_antimeridian_is_not_tiled(self, caplog):
-        """Fourth review of #1278: treat it like a layer bbox that crosses it."""
-        from geoparquet_io.core.wfs import _get_tiling_bbox
+    def test_a_user_bbox_across_the_antimeridian_is_refused_before_tiling(self):
+        """Fourth review of #1278, now one rule: a WFS BBOX has no wrapped form.
 
-        layer = WFSLayerInfo(
-            typename="t:l",
-            title="",
-            crs_list=[],
-            default_crs=None,
-            bbox=(-180.0, -90.0, 180.0, 90.0),
-            geometry_column="geom",
-            available_formats=[],
-        )
-        with caplog.at_level(logging.WARNING):
-            assert _get_tiling_bbox((170.0, 50.0, -130.0, 72.0), True, layer, "EPSG:4326") is None
-        assert "antimeridian" in caplog.text
+        wfs_to_table refuses it by name (bbox_parse.refuse_wrap) before any
+        request, so the tiler never sees one.
+        """
+        from geoparquet_io.core.bbox_parse import AntimeridianBBoxError
+        from geoparquet_io.core.wfs import wfs_to_table
+
+        with (
+            patch("socket.getaddrinfo", side_effect=AssertionError("no request")) as dns,
+            pytest.raises(AntimeridianBBoxError),
+        ):
+            wfs_to_table("https://gpio.invalid/wfs", "t:l", bbox=(170.0, 50.0, -130.0, 72.0))
+        dns.assert_not_called()
 
 
 # =============================================================================
@@ -5159,7 +5138,7 @@ class TestGetFeatureCountErrorVisibility:
 
         with (
             patch(
-                "geoparquet_io.core.wfs._make_request",
+                "geoparquet_io.core.wfs.make_request_with_retry",
                 side_effect=WFSError("Request failed after 3 attempts: connection refused"),
             ),
             caplog.at_level(logging.WARNING, logger="geoparquet_io"),
@@ -5179,7 +5158,7 @@ class TestGetFeatureCountErrorVisibility:
 
         with (
             patch(
-                "geoparquet_io.core.wfs._make_request",
+                "geoparquet_io.core.wfs.make_request_with_retry",
                 side_effect=httpx.ConnectError("nodename nor servname provided"),
             ),
             caplog.at_level(logging.WARNING, logger="geoparquet_io"),
@@ -5196,8 +5175,10 @@ class TestGetFeatureCountErrorVisibility:
 
         with (
             patch(
-                "geoparquet_io.core.wfs._make_request",
-                side_effect=TypeError("_make_request() got an unexpected keyword argument"),
+                "geoparquet_io.core.wfs.make_request_with_retry",
+                side_effect=TypeError(
+                    "make_request_with_retry() got an unexpected keyword argument"
+                ),
             ),
             pytest.raises(TypeError),
         ):
@@ -5208,7 +5189,9 @@ class TestGetFeatureCountErrorVisibility:
         from geoparquet_io.core.wfs import _get_feature_count
 
         with (
-            patch("geoparquet_io.core.wfs._make_request", return_value=b'numberMatched="7"'),
+            patch(
+                "geoparquet_io.core.wfs.make_request_with_retry", return_value=b'numberMatched="7"'
+            ),
             caplog.at_level(logging.WARNING, logger="geoparquet_io"),
         ):
             result = _get_feature_count("http://mock/wfs", "layer", "2.0.0")
@@ -5221,7 +5204,10 @@ class TestGetFeatureCountErrorVisibility:
         from geoparquet_io.core.wfs import _get_feature_count
 
         with (
-            patch("geoparquet_io.core.wfs._make_request", return_value=b"<wfs:FeatureCollection/>"),
+            patch(
+                "geoparquet_io.core.wfs.make_request_with_retry",
+                return_value=b"<wfs:FeatureCollection/>",
+            ),
             caplog.at_level(logging.WARNING, logger="geoparquet_io"),
         ):
             result = _get_feature_count("http://mock/wfs", "layer", "1.1.0")
@@ -5235,7 +5221,7 @@ class TestGetFeatureCountErrorVisibility:
 
         seen = []
 
-        def fake_request(url, params=None, **kwargs):
+        def fake_request(method, url, params=None, **kwargs):
             from urllib.parse import parse_qs, urlparse
 
             # Root tile is over the limit; every quadrant is under it. The
@@ -5245,7 +5231,7 @@ class TestGetFeatureCountErrorVisibility:
             n = 500 if len(seen) == 1 else 10
             return f'numberOfFeatures="{n}"'.encode()
 
-        with patch("geoparquet_io.core.wfs._make_request", side_effect=fake_request):
+        with patch("geoparquet_io.core.wfs.make_request_with_retry", side_effect=fake_request):
             tiles = _refine_tiles_adaptive(
                 [(0.0, 0.0, 4.0, 4.0)],
                 "http://mock/wfs",
@@ -5264,7 +5250,7 @@ class TestGetFeatureCountErrorVisibility:
 
         with (
             patch(
-                "geoparquet_io.core.wfs._make_request",
+                "geoparquet_io.core.wfs.make_request_with_retry",
                 side_effect=WFSError("HTTP error 400: version not supported"),
             ),
             patch("geoparquet_io.core.wfs.warn") as mock_warn,
@@ -5305,7 +5291,7 @@ class TestSpeculativeCountProbeIsQuiet:
         )
 
         with (
-            patch("geoparquet_io.core.wfs._make_request", side_effect=fake_request),
+            patch("geoparquet_io.core.wfs.make_request_with_retry", side_effect=fake_request),
             patch(
                 "geoparquet_io.core.wfs.negotiate_wfs_version", return_value=("1.1.0", MagicMock())
             ),
@@ -5325,7 +5311,7 @@ class TestSpeculativeCountProbeIsQuiet:
     def test_healthy_2_0_0_fallback_does_not_warn(self, caplog):
         """2.0.0 rejected, negotiated 1.1.0 answers: no probe warning at all."""
 
-        def fake_request(url, params=None, **kwargs):
+        def fake_request(method, url, params=None, **kwargs):
             from urllib.parse import parse_qs, urlparse
 
             # The probe pre-merges its params into the URL (issue #828).
@@ -5340,7 +5326,7 @@ class TestSpeculativeCountProbeIsQuiet:
         """When the negotiated-version probe fails too, the count is genuinely
         lost — that one must still be loud."""
 
-        def fake_request(url, params=None, **kwargs):
+        def fake_request(method, url, params=None, **kwargs):
             raise WFSError("Request failed after 3 attempts: connection refused")
 
         warnings = self._run_wfs_to_table(fake_request, caplog)
@@ -5530,7 +5516,8 @@ class TestFetchWithSpatialTiles:
                 available_formats=["application/json"],
                 bbox=(3.0, 50.0, 7.0, 54.0),
             )
-            wfs_to_table("http://mock/wfs", "layer", auto_tile=True)
+            result = wfs_to_table("http://mock/wfs", "layer", auto_tile=True)
+            assert result.equals(mock_table)
 
         mock_tile.assert_called_once()
 
@@ -5923,7 +5910,7 @@ class TestStartIndexProbeErrorVisibility:
 
         with (
             patch(
-                "geoparquet_io.core.wfs._get_shared_http_client",
+                "geoparquet_io.core.wfs.get_shared_http_client",
                 side_effect=httpx.ConnectError("nodename nor servname provided"),
             ),
             caplog.at_level(logging.WARNING, logger="geoparquet_io"),
@@ -5956,7 +5943,7 @@ class TestStartIndexProbeErrorVisibility:
         client.get.return_value = response
 
         with (
-            patch("geoparquet_io.core.wfs._get_shared_http_client", return_value=client),
+            patch("geoparquet_io.core.wfs.get_shared_http_client", return_value=client),
             caplog.at_level(logging.WARNING, logger="geoparquet_io"),
         ):
             result = _probe_startindex_limit("http://mock/wfs", "layer", "2.0.0")
@@ -5975,7 +5962,7 @@ class TestStartIndexProbeErrorVisibility:
         client.get.return_value = response
 
         with (
-            patch("geoparquet_io.core.wfs._get_shared_http_client", return_value=client),
+            patch("geoparquet_io.core.wfs.get_shared_http_client", return_value=client),
             caplog.at_level(logging.WARNING, logger="geoparquet_io"),
         ):
             result = _probe_startindex_limit("http://mock/wfs", "layer", "2.0.0")

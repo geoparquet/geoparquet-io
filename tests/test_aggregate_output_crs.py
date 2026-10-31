@@ -10,8 +10,8 @@ from pyproj import CRS
 from shapely import box, from_wkb, to_wkb, total_bounds
 
 import geoparquet_io as gpio
-from geoparquet_io.core.crs_utils import extract_crs_from_parquet
-from geoparquet_io.core.geo_metadata import parse_geo_metadata
+from geoparquet_io.core.crs_utils import crs_of
+from geoparquet_io.core.geo_metadata import read_raw_geo
 
 
 @pytest.fixture(scope="module")
@@ -26,17 +26,31 @@ def _assert_geographic_output(result, path, version="1.1"):
     assert result.crs is not None
     assert CRS.from_user_input(result.crs).equals(CRS("OGC:CRS84"))
     result.write(str(path), geoparquet_version=version)
-    assert extract_crs_from_parquet(str(path)) is None
-    geo = parse_geo_metadata(pq.read_schema(path).metadata)
+    assert crs_of(str(path)) is None
+    geo = read_raw_geo(pq.read_schema(path).metadata).value
     if version == "parquet-geo-only":
         assert geo is None
     else:
         assert "crs" not in geo["columns"]["geometry"]
 
 
-@pytest.mark.parametrize(("scheme", "resolution"), [("h3", 7), ("a5", 10)])
-@pytest.mark.parametrize("out_geometry", ["polygon", "centroid", "both", "none"])
-@pytest.mark.parametrize("version", ["1.0", "1.1", "2.0", "parquet-geo-only"])
+#: Every scheme x every ``out_geometry`` on 1.1, where the replacement is
+#: decided; each other output version once, on h3 polygons. Which version a
+#: written CRS lands in is the write facade's question (G7), not aggregate's.
+GRID_CASES = [
+    *(
+        ("1.1", out_geometry, scheme, resolution)
+        for out_geometry in ["polygon", "centroid", "both", "none"]
+        for scheme, resolution in [("h3", 7), ("a5", 10)]
+    ),
+    *((v, "polygon", "h3", 7) for v in ["1.0", "2.0", "parquet-geo-only"]),
+]
+
+
+@pytest.mark.parametrize(
+    ("version", "out_geometry", "scheme", "resolution"),
+    [pytest.param(*case, id="-".join(map(str, case))) for case in GRID_CASES],
+)
 def test_grid_aggregate_replaces_the_source_crs(
     projected_pair, tmp_path, scheme, resolution, out_geometry, version
 ):

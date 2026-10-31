@@ -1,0 +1,5 @@
+# Near-duplicate function pairs that exist today (guard G3, scripts/check_duplicates.py).
+# One pair per line, fileA:qualnameA|fileB:qualnameB, the two sides in sorted order.
+# Each pair's reason (the track that removes it, or permanent) is in
+# scripts/owner_exemptions.toml under [[G3.pairs]]. This list only falls: delete a
+# line with the copy (check_duplicates.py --update drops gone pairs). Never add one.

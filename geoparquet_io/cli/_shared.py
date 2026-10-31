@@ -24,6 +24,7 @@ from contextlib import contextmanager
 
 import click
 
+from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.logging_config import setup_cli_logging
 
 
@@ -127,7 +128,7 @@ def prepare_output(
     try:
         validate_output(output_path)
     except StreamingError as e:
-        raise click.ClickException(str(e)) from None
+        raise click_error_for(e) from None
 
     # ``validate_parquet_extension`` returns immediately on ``None``, but is
     # annotated ``str``. Skipping the call keeps the None-handling visible here

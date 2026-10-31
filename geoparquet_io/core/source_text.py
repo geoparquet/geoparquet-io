@@ -27,7 +27,12 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from geoparquet_io.core.duckdb_utils import _escape_sql_string, fetch_one, quote_identifier
+from geoparquet_io.core.duckdb_utils import (
+    describe_query,
+    fetch_one,
+    quote_identifier,
+    sql_literal,
+)
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.logging_config import warn
 from geoparquet_io.core.remote import is_remote_url
@@ -240,16 +245,15 @@ def decoded_names(names: list[str] | None, plan: SourceText) -> list[str] | None
 
 def _guard(column: str) -> str:
     quoted = quote_identifier(column)
-    message = _escape_sql_string(f'Column "{column}" {_NOT_UTF8}. {_ENCODING_HINT}')
+    message = sql_literal(f'Column "{column}" {_NOT_UTF8}. {_ENCODING_HINT}')
     return (
         f"CASE WHEN {quoted} IS NULL OR TRY(decode(encode({quoted}))) IS NOT NULL "
-        f"THEN {quoted} ELSE error('{message}') END AS {quoted}"
+        f"THEN {quoted} ELSE error({message}) END AS {quoted}"
     )
 
 
 def _bind(con, table_expr: str) -> list[tuple[str, str]]:
-    description = con.execute(f"SELECT * FROM {table_expr} LIMIT 0").description
-    return [(col[0], str(col[1])) for col in description]
+    return describe_query(con, f"SELECT * FROM {table_expr}")
 
 
 def _guarded(table_expr: str, text: list[str]) -> str:

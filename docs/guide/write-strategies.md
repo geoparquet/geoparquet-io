@@ -215,6 +215,24 @@ the buffers they build from it.
 `--write-memory` overrides the default on the commands that have the option, including the
 admin joins; `gpio pmtiles create`, `gpio add bbox-metadata` and the format exports do not
 have it, so they always use the default.
+Writes that pyarrow does rather than DuckDB accept a memory limit without effect: the
+ArcGIS, WFS and Carto extracts, `process contour`, `process polygonize`, `process simplify`
+and the BigQuery write. (`extract bigquery --write-memory` still bounds the BigQuery scan.)
+
+Sizes read the same way in every gpio option that takes one (`--write-memory`,
+`--row-group-size-mb`, `--min-size`): `KB`, `MB`, `GB` and `TB` are powers of 1000 and
+`KiB`, `MiB`, `GiB` and `TiB` powers of 1024, as DuckDB reads them; case and spaces do not
+matter, and a bare number means MB. So `--write-memory 1GB` is 1,000,000,000 bytes and
+`--write-memory 1GiB` is 1,073,741,824. `--row-group-size-mb 128MB` targets 128,000,000
+bytes per row group, and the sizes gpio prints (`inspect`, `check`, `--min-size` reports)
+use the same 1000-based units.
+
+`--row-group-size-mb` becomes a row count the same way on every write path and strategy:
+gpio measures the rows' in-memory size once (a 20,000-row sample of the query, or the
+whole table for `Table.write`), snaps the count to whole 2,048-row writer vectors, never
+below one, and writes that. The plain `COPY` a GeoParquet 2.0 input takes and the
+`streaming` strategy used to ignore the target and write 122,880 and 100,000 rows per
+group ([#1215](https://github.com/geoparquet/geoparquet-io/issues/1215)).
 
 The precedence, highest first:
 

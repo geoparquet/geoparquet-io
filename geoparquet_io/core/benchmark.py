@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import tracemalloc
+from functools import partial
 from pathlib import Path
 from statistics import mean, stdev
 from typing import Any
@@ -22,17 +23,22 @@ from typing import Any
 import duckdb
 import psutil
 
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
+    describe_query,
+    duckdb_capabilities,
     fetch_one,
     get_duckdb_connection,
     quote_identifier,
     sql_path,
 )
 from geoparquet_io.core.exceptions import FileNotFoundGeoParquetError, GeoParquetError
-from geoparquet_io.core.geometry_detection import STANDARD_GEOMETRY_NAMES
+from geoparquet_io.core.geometry_detection import primary_geometry_column
+from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.logging_config import progress
+from geoparquet_io.core.parquet_writer import resolve_row_group_rows
 from geoparquet_io.core.remote import needs_httpfs
+from geoparquet_io.core.sizing import bytes_to_mb
 
 # Converter registry with detection functions
 CONVERTERS = {
@@ -130,17 +136,9 @@ def get_file_info(filepath: Path) -> dict[str, Any]:
             feature_count = result[0] if result else 0
 
             # Get schema to find geometry column
-            schema = conn.execute(f"""
-                SELECT * FROM ST_Read({sql_path(filepath)}) LIMIT 0
-            """).description
-
-            # Find geometry column (common names)
-            geom_col = None
-            for col_info in schema:
-                col_name = col_info[0].lower()
-                if col_name in [n.lower() for n in STANDARD_GEOMETRY_NAMES]:
-                    geom_col = col_info[0]
-                    break
+            geom_col = primary_geometry_column(
+                describe_query(conn, f"SELECT * FROM ST_Read({sql_path(filepath)})")
+            )
 
             # Try to get geometry type from first row
             geom_type = "unknown"
@@ -157,7 +155,7 @@ def get_file_info(filepath: Path) -> dict[str, Any]:
         return {
             "name": filepath.name,
             "format": filepath.suffix,
-            "size_mb": round(filepath.stat().st_size / (1024 * 1024), 2),
+            "size_mb": round(bytes_to_mb(filepath.stat().st_size), 2),
             "feature_count": feature_count,
             "geometry_type": geom_type,
         }
@@ -165,7 +163,7 @@ def get_file_info(filepath: Path) -> dict[str, Any]:
         return {
             "name": filepath.name,
             "format": filepath.suffix,
-            "size_mb": round(filepath.stat().st_size / (1024 * 1024), 2),
+            "size_mb": round(bytes_to_mb(filepath.stat().st_size), 2),
             "error": str(e),
         }
 
@@ -229,7 +227,7 @@ def get_environment_info() -> dict[str, Any]:
     env = {
         "os": platform.system(),
         "python_version": platform.python_version(),
-        "duckdb_version": duckdb.__version__,
+        "duckdb_version": duckdb_capabilities().version,
         "cpu": _get_cpu_info(),
     }
 
@@ -260,10 +258,12 @@ def benchmark_duckdb(input_path: Path, output_path: Path) -> tuple[float, float]
     tracemalloc.start()
     start = time.perf_counter()
     try:
+        # DuckDB's fast ZSTD 3, named through the owner rather than by default.
+        codec_options = ", ".join(resolve_codec("ZSTD", 3, context="write").duckdb_copy_options())
         conn.execute(f"""
             COPY (SELECT * FROM ST_Read({sql_path(input_path)}))
             TO {sql_path(output_path)}
-            (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000)
+            (FORMAT PARQUET, {codec_options}, ROW_GROUP_SIZE {resolve_row_group_rows(100000, None)})
         """)
         elapsed = time.perf_counter() - start
         _, peak = tracemalloc.get_traced_memory()
@@ -271,14 +271,14 @@ def benchmark_duckdb(input_path: Path, output_path: Path) -> tuple[float, float]
         tracemalloc.stop()
         conn.close()
 
-    peak_memory_mb = peak / (1024 * 1024)
+    peak_memory_mb = bytes_to_mb(peak)
 
     return elapsed, peak_memory_mb
 
 
-def benchmark_geopandas_fiona(input_path: Path, output_path: Path) -> tuple[float, float]:
+def benchmark_geopandas(input_path: Path, output_path: Path, *, engine: str) -> tuple[float, float]:
     """
-    Benchmark Geopandas with Fiona engine.
+    Benchmark Geopandas reading with ``engine`` ("fiona" or "pyogrio").
 
     Returns:
         Tuple of (elapsed_time_seconds, peak_memory_mb)
@@ -289,39 +289,15 @@ def benchmark_geopandas_fiona(input_path: Path, output_path: Path) -> tuple[floa
 
     start = time.perf_counter()
 
-    gdf = gpd.read_file(input_path, engine="fiona")
-    gdf.to_parquet(output_path, compression="zstd")
+    try:
+        gdf = gpd.read_file(input_path, engine=engine)
+        gdf.to_parquet(output_path, compression="zstd")
+    finally:
+        elapsed = time.perf_counter() - start
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
 
-    elapsed = time.perf_counter() - start
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-
-    peak_memory_mb = peak / (1024 * 1024)
-
-    return elapsed, peak_memory_mb
-
-
-def benchmark_geopandas_pyogrio(input_path: Path, output_path: Path) -> tuple[float, float]:
-    """
-    Benchmark Geopandas with Pyogrio engine.
-
-    Returns:
-        Tuple of (elapsed_time_seconds, peak_memory_mb)
-    """
-    import geopandas as gpd
-
-    tracemalloc.start()
-
-    start = time.perf_counter()
-
-    gdf = gpd.read_file(input_path, engine="pyogrio")
-    gdf.to_parquet(output_path, compression="zstd")
-
-    elapsed = time.perf_counter() - start
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-
-    peak_memory_mb = peak / (1024 * 1024)
+    peak_memory_mb = bytes_to_mb(peak)
 
     return elapsed, peak_memory_mb
 
@@ -358,7 +334,7 @@ def benchmark_gdal(input_path: Path, output_path: Path) -> tuple[float, float]:
 
         while process.poll() is None:
             try:
-                mem = ps_process.memory_info().rss / (1024 * 1024)
+                mem = bytes_to_mb(ps_process.memory_info().rss)
                 peak_memory = max(peak_memory, mem)
             except psutil.NoSuchProcess:
                 break
@@ -379,8 +355,8 @@ def benchmark_gdal(input_path: Path, output_path: Path) -> tuple[float, float]:
 # Map converter names to benchmark functions
 BENCHMARK_FUNCTIONS = {
     "duckdb": benchmark_duckdb,
-    "geopandas_fiona": benchmark_geopandas_fiona,
-    "geopandas_pyogrio": benchmark_geopandas_pyogrio,
+    "geopandas_fiona": partial(benchmark_geopandas, engine="fiona"),
+    "geopandas_pyogrio": partial(benchmark_geopandas, engine="pyogrio"),
     "gdal_ogr2ogr": benchmark_gdal,
 }
 
@@ -406,7 +382,7 @@ def run_single_benchmark(
             "elapsed_seconds": round(elapsed, 3),
             "memory_mb": round(memory, 2),
             "output_file": output_path.name,
-            "output_size_mb": round(output_path.stat().st_size / (1024 * 1024), 2),
+            "output_size_mb": round(bytes_to_mb(output_path.stat().st_size), 2),
             "success": True,
         }
     except Exception as e:
@@ -510,7 +486,7 @@ def format_json_output(
         "raw_results": raw_results,
         "config": config,
     }
-    return json.dumps(output, indent=2)
+    return dumps_json(output, indent=2)
 
 
 def _check_invalid_converters(requested: list[str]) -> None:
@@ -872,7 +848,7 @@ def format_explain_output(parsed: dict, output_format: str = "table") -> str:
         Formatted string.
     """
     if output_format == "json":
-        return json.dumps(parsed, indent=2)
+        return dumps_json(parsed, indent=2)
     return _format_explain_table(parsed)
 
 
@@ -894,9 +870,11 @@ def _get_explain_connection(file_path: str) -> duckdb.DuckDBPyConnection:
 def _build_explain_query(file_path: str, query: str | None) -> str:
     """Build the EXPLAIN ANALYZE query string."""
     if query:
-        # The user's own query supplies the quotes around ``{file}``, so the
-        # placeholder takes a bare escaped literal rather than a complete one.
-        sql = query.replace("{file}", _escape_sql_string(file_path))
+        # ``{file}`` is the whole sql_path literal, quotes included. The quoted
+        # spelling ``'{file}'`` the docs used to show is the same literal, so
+        # it is replaced first, as one unit.
+        literal = sql_path(file_path)
+        sql = query.replace("'{file}'", literal).replace("{file}", literal)
     else:
         sql = f"SELECT * FROM read_parquet({sql_path(file_path)})"
     return f"EXPLAIN ANALYZE {sql}"
@@ -914,8 +892,10 @@ def explain_analyze(
 
     Args:
         file_path: Path to the input Parquet file (local path or URL).
-        query: Optional SQL query. Use {file} as placeholder for the file path.
-               Defaults to SELECT * FROM read_parquet('{file}').
+        query: Optional SQL query. ``{file}`` is replaced by the file path as a
+               quoted, escaped SQL string literal, so write
+               ``read_parquet({file})``; ``'{file}'`` means the same. Defaults
+               to SELECT * FROM read_parquet({file}).
 
     Returns:
         Parsed query plan dictionary with operators, timing, and analysis.

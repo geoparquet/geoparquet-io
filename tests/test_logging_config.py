@@ -9,7 +9,6 @@ from geoparquet_io.core.logging_config import (
     COLORS,
     CLIFormatter,
     DynamicStreamHandler,
-    LibraryFormatter,
     configure_verbose,
     debug,
     error,
@@ -18,7 +17,6 @@ from geoparquet_io.core.logging_config import (
     progress,
     setup_cli_logging,
     success,
-    verbose_logging,
     warn,
 )
 
@@ -257,21 +255,6 @@ class TestConfigureVerbose:
         assert get_logger().level == original_level
 
 
-class TestVerboseLoggingContext:
-    """Tests for the verbose_logging context manager."""
-
-    def test_verbose_logging_temporarily_enables_debug(self):
-        """verbose_logging should temporarily enable DEBUG level."""
-        setup_cli_logging(verbose=False)
-        logger = get_logger()
-        assert logger.level == logging.INFO
-
-        with verbose_logging():
-            assert logger.level == logging.DEBUG
-
-        assert logger.level == logging.INFO  # Restored
-
-
 class TestGetLogger:
     """Tests for the get_logger function."""
 
@@ -284,47 +267,6 @@ class TestGetLogger:
         """get_logger(name) should return a child logger."""
         logger = get_logger("geoparquet_io.core.convert")
         assert logger.name == "geoparquet_io.core.convert"
-
-
-class TestLibraryFormatter:
-    """Tests for LibraryFormatter class (lines 115-119)."""
-
-    def test_init(self):
-        """Test LibraryFormatter initialization."""
-        formatter = LibraryFormatter()
-        assert formatter is not None
-        # Verify formatter works by formatting a test record
-        record = logging.LogRecord(
-            name="geoparquet_io.test",
-            level=logging.INFO,
-            pathname="test.py",
-            lineno=1,
-            msg="Init test",
-            args=(),
-            exc_info=None,
-        )
-        result = formatter.format(record)
-        # Verify expected elements are in formatted output
-        assert "geoparquet_io.test" in result
-        assert "INFO" in result
-        assert "Init test" in result
-
-    def test_format(self):
-        """Test LibraryFormatter formats correctly."""
-        formatter = LibraryFormatter()
-        record = logging.LogRecord(
-            name="geoparquet_io.test",
-            level=logging.INFO,
-            pathname="test.py",
-            lineno=1,
-            msg="Test message",
-            args=(),
-            exc_info=None,
-        )
-        result = formatter.format(record)
-        assert "geoparquet_io.test" in result
-        assert "INFO" in result
-        assert "Test message" in result
 
 
 class TestDynamicStreamHandler:

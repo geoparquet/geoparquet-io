@@ -5,11 +5,19 @@ from __future__ import annotations
 
 import math
 import re
-import string
 from dataclasses import dataclass
 
-from geoparquet_io.core.duckdb_utils import fetch_one, fetch_rows, quote_identifier, sql_path
+from geoparquet_io.core.column_selection import find_column, fold, unique_name
+from geoparquet_io.core.duckdb_utils import (
+    describe_query,
+    duckdb_type_is_numeric,
+    fetch_rows,
+    quote_identifier,
+    sql_literal,
+    sql_path,
+)
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.geometry_detection import resolve_geometry_read
 from geoparquet_io.core.logging_config import warn
 
 # Plain SQL aggregates: a metric named this way is `FUNC(column)`, and the
@@ -33,28 +41,6 @@ VALID_OUT_GEOMETRY = {"polygon", "centroid", "both", "none"}
 # Unicode digits, underscores, inf/Infinity -- none of which are valid SQL).
 _NUMERIC_TOKEN_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$", re.ASCII)
 _NAN_TOKEN_RE = re.compile(r"^[+-]?nan$", re.IGNORECASE | re.ASCII)
-
-# DuckDB numeric type names (DESCRIBE output). REAL columns report as FLOAT.
-_NUMERIC_SQL_TYPES = {
-    "TINYINT",
-    "SMALLINT",
-    "INTEGER",
-    "BIGINT",
-    "HUGEINT",
-    "UTINYINT",
-    "USMALLINT",
-    "UINTEGER",
-    "UBIGINT",
-    "UHUGEINT",
-    "FLOAT",
-    "REAL",
-    "DOUBLE",
-}
-
-
-def _is_numeric_sql_type(col_type: str) -> bool:
-    t = col_type.upper()
-    return t in _NUMERIC_SQL_TYPES or t.startswith(("DECIMAL", "NUMERIC"))
 
 
 def aggregate_source_relation(input_url: str) -> str:
@@ -88,15 +74,9 @@ def geometry_to_geom_expr(con, relation: str, geom_col: str) -> str:
     ``relation`` must be usable in a FROM clause (e.g. ``read_parquet('...')`` or a
     registered relation name). ``con`` must have the spatial extension loaded.
     """
-    qcol = quote_identifier(geom_col)
-    rows = con.execute(f"DESCRIBE SELECT {qcol} FROM {relation}").fetchall()
-    col_type = (rows[0][1] if rows else "").upper()
-    if "GEOMETRY" in col_type:
-        return qcol
-    # BLOB/BINARY (and anything unrecognized) is treated as WKB. Wrap in TRY so a
-    # single malformed value becomes NULL (-> unassigned bucket) instead of
-    # aborting the whole aggregation.
-    return f"TRY(ST_GeomFromWKB({qcol}))"
+    # The owner's read: a malformed WKB value is NULL (-> unassigned bucket)
+    # instead of aborting the whole aggregation.
+    return resolve_geometry_read(con, relation, geom_col, relation=True).shape_expr
 
 
 @dataclass(frozen=True)
@@ -177,9 +157,9 @@ def expand_pct_cell_metrics(metrics: list[MetricSpec]) -> list[MetricSpec]:
     column so the two are one read rather than two.
     """
     out: list[MetricSpec] = []
-    have = {(_fold(m.column), m.func) for m in metrics}
+    have = {(fold(m.column), m.func) for m in metrics}
     for spec in metrics:
-        if spec.func == PCT_CELL_FUNC and (_fold(spec.column), "sum") not in have:
+        if spec.func == PCT_CELL_FUNC and (fold(spec.column), "sum") not in have:
             out.append(
                 MetricSpec(
                     func="sum",
@@ -187,7 +167,7 @@ def expand_pct_cell_metrics(metrics: list[MetricSpec]) -> list[MetricSpec]:
                     output_name=metric_output_name("sum", spec.column),
                 )
             )
-            have.add((_fold(spec.column), "sum"))
+            have.add((fold(spec.column), "sum"))
         out.append(spec)
     return out
 
@@ -346,11 +326,11 @@ def resolve_metric_column_types(con, select_sql: str, metrics: list[MetricSpec])
     columns = sorted({m.column for m in metrics})
     col_list = ", ".join(quote_identifier(c) for c in columns)
     try:
-        rows = con.execute(f"DESCRIBE SELECT {col_list} FROM ({select_sql})").fetchall()
+        rows = describe_query(con, f"SELECT {col_list} FROM ({select_sql})")
     except Exception:  # noqa: BLE001 - typing is best-effort; real query reports errors
         return {}
     # One DESCRIBE row per selected column, in SELECT order.
-    return {c: str(row[1]).upper() for c, row in zip(columns, rows, strict=True)}
+    return {c: str(col_type).upper() for c, (_, col_type) in zip(columns, rows, strict=True)}
 
 
 def _nodata_literal(token: str, col_type: str | None) -> str:
@@ -399,7 +379,7 @@ def _aggregated_column_expr(
     if not nodata_values:
         return quote_identifier(column)
     col_type = (column_types or {}).get(column)
-    if col_type is not None and not _is_numeric_sql_type(col_type):
+    if col_type is not None and not duckdb_type_is_numeric(col_type):
         raise InvalidParameterError(
             "metric-nodata",
             f"NoData sentinels apply only to numeric metric columns; "
@@ -447,7 +427,7 @@ def _pct_cell_expr(
     if cell_area_expr is None:
         reject_pct_cell_metrics([m])
     col_type = (column_types or {}).get(m.column)
-    if col_type is not None and not _is_numeric_sql_type(col_type):
+    if col_type is not None and not duckdb_type_is_numeric(col_type):
         raise InvalidParameterError(
             "metric",
             f"'{PCT_CELL_FUNC}:{m.column}' needs a numeric per-feature area column; "
@@ -488,22 +468,6 @@ def build_metric_select(
     return ", ".join(parts)
 
 
-# DuckDB folds identifiers case-insensitively, but only over ASCII: "HEIGHT"
-# binds to a `Height` column while "STRASSE" does not bind to `straße`. Column
-# lookups here follow the same rule so validation accepts exactly what the
-# generated SQL would bind -- no more, no less.
-_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
-
-
-def _fold(name: str) -> str:
-    return name.translate(_ASCII_LOWER)
-
-
-def _has_column(available: set[str], name: str) -> bool:
-    """Whether ``name`` resolves to a column of the input, as DuckDB would resolve it."""
-    return name in available or any(_fold(c) == _fold(name) for c in available)
-
-
 def _format_available(available: set[str]) -> str:
     """Render the column list for an error message.
 
@@ -533,9 +497,9 @@ def validate_agg_columns(
     request against a ``Height`` column.
     """
     for m in metrics:
-        if _has_column(available, m.column):
+        if find_column(m.column, available, option_name="metric") is not None:
             continue
-        if _fold(m.column) == "count":
+        if fold(m.column) == "count":
             raise InvalidParameterError(
                 "metric",
                 "'count' does not need to be requested: every output row "
@@ -548,13 +512,16 @@ def validate_agg_columns(
             f"Metric column '{m.column}' not found in input. "
             f"Available columns: {_format_available(available)}",
         )
-    if breakdown and not _has_column(available, breakdown):
+    if breakdown and find_column(breakdown, available, option_name="breakdown") is None:
         raise InvalidParameterError(
             "breakdown",
             f"Breakdown column '{breakdown}' not found in input. "
             f"Available columns: {_format_available(available)}",
         )
-    if breakdown_metric is not None and not _has_column(available, breakdown_metric.column):
+    if (
+        breakdown_metric is not None
+        and find_column(breakdown_metric.column, available, option_name="breakdown-metric") is None
+    ):
         raise InvalidParameterError(
             "breakdown-metric",
             f"Breakdown metric column '{breakdown_metric.column}' not found in input. "
@@ -578,15 +545,6 @@ def sanitize_value_for_column(value: object) -> str:
 _MAX_VALUE_FRAGMENT = 64
 
 
-def _unique_name(base: str, used: set[str]) -> str:
-    name, suffix = base, 2
-    while name in used:
-        name = f"{base}_{suffix}"
-        suffix += 1
-    used.add(name)
-    return name
-
-
 def build_breakdown_column_names(
     values: list, reserved: set[str] | None = None, prefix: str = "count"
 ) -> list[tuple[object, str]]:
@@ -603,7 +561,8 @@ def build_breakdown_column_names(
     mapping: list[tuple[object, str]] = []
     for value in values:
         base = f"{prefix}_{sanitize_value_for_column(value)}"
-        name = _unique_name(base, used)
+        name = unique_name(base, used, start=2)
+        used.add(name)
         if name != base and base in (reserved or set()):
             warn(
                 f"Breakdown column {base!r} for value {value!r} is written as {name!r}: "
@@ -615,28 +574,7 @@ def build_breakdown_column_names(
 
 def breakdown_other_name(colmap: list[tuple[object, str]], reserved: set[str], prefix: str) -> str:
     """The remainder bucket's column name, clear of the pivots and the metric names."""
-    return _unique_name(f"{prefix}_other", set(reserved) | {name for _, name in colmap})
-
-
-def sql_literal(value: object) -> str:
-    """Render a Python value as a safe DuckDB SQL literal.
-
-    A float is written as an explicit DOUBLE: a bare ``0.699999988079071`` is
-    typed DECIMAL by DuckDB and never equals the REAL column it came from, so
-    the category's rows would land in no pivot at all. ``nan``/``inf`` need the
-    cast to be literals at all. A NUL byte cannot sit inside a quoted string,
-    so it is spliced in as ``chr(0)``.
-    """
-    if isinstance(value, bool):
-        return "TRUE" if value else "FALSE"
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float):
-        return f"CAST('{value!r}' AS DOUBLE)"
-    text = str(value).replace("'", "''")
-    if "\x00" in text:
-        return " || chr(0) || ".join(f"'{piece}'" for piece in text.split("\x00"))
-    return f"'{text}'"
+    return unique_name(f"{prefix}_other", set(reserved) | {name for _, name in colmap}, start=2)
 
 
 def resolve_breakdown_values(con, source_sql: str, column: str, limit: int) -> tuple[list, bool]:
@@ -650,9 +588,7 @@ def resolve_breakdown_values(con, source_sql: str, column: str, limit: int) -> t
     if limit < 1:
         raise InvalidParameterError("breakdown-limit", f"must be at least 1, got {limit}")
     qcol = quote_identifier(column)
-    (_, col_type, *_rest), *_ = con.execute(
-        f"DESCRIBE SELECT {qcol} FROM ({source_sql})"
-    ).fetchall()
+    (_, col_type), *_ = describe_query(con, f"SELECT {qcol} FROM ({source_sql})")
     if not _is_scalar_sql_type(str(col_type)):
         raise InvalidParameterError(
             "breakdown",
@@ -763,65 +699,3 @@ def build_breakdown_pivot(
         nodata_values=nodata_values,
         column_types=column_types,
     )
-
-
-# Grid-cell output and the antimeridian
-# -------------------------------------
-# A cell that straddles the antimeridian is written cut into a MultiPolygon with
-# parts at both -180 and +180 (RFC 7946 3.1.9). Plain min/max over such a
-# dataset reports a bbox of [-180, ..., 180, ...] -- true, but it claims the
-# whole globe for data that only touches the seam. RFC 7946 5.2, which
-# GeoParquet's `bbox` follows, writes the crossing extent as xmin > xmax
-# instead; gpio's own validator already reads it that way (#876).
-_ANTIMERIDIAN_EPS = 1e-6
-
-_PLAIN_EXTENT_SQL = """
-SELECT min(ST_XMin(g)), max(ST_XMax(g)), min(ST_YMin(g)), max(ST_YMax(g))
-FROM (SELECT {geom_expr} AS g FROM {relation} WHERE {qcol} IS NOT NULL)
-"""
-
-# Widest longitude gap between the parts, found with a running max over the
-# sorted part extents -- the standard interval merge. The parts, not the whole
-# geometries: a cut cell's own extent already spans -180 to 180 and would hide
-# the gap that makes the crossing visible.
-_WIDEST_LON_GAP_SQL = """
-WITH parts AS (
-    SELECT ST_XMin(p) AS lo, ST_XMax(p) AS hi
-    FROM (SELECT UNNEST(ST_Dump({geom_expr})).geom AS p FROM {relation} WHERE {qcol} IS NOT NULL)
-), merged AS (
-    SELECT lo, max(hi) OVER (ORDER BY lo ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prev
-    FROM parts
-)
-SELECT lo, prev FROM merged WHERE prev IS NOT NULL AND lo > prev ORDER BY lo - prev DESC LIMIT 1
-"""
-
-
-def antimeridian_aware_bbox(con, relation: str, geometry_column: str) -> list[float] | None:
-    """The ``geo`` bbox for a lon/lat relation, in RFC 7946 wrap form when it crosses.
-
-    Returns ``[xmin, ymin, xmax, ymax]`` with ``xmin > xmax`` when the data
-    leaves a longitude gap wider than the one the plain extent implies -- the
-    shape of a dataset that sits astride the antimeridian rather than spanning
-    the globe. Returns the plain extent otherwise, and None when the relation
-    holds no geometry (the caller then leaves the bbox to the writer).
-
-    ``relation`` must already be a FROM-able expression and ``geometry_column``
-    a column of it holding WKB or GEOMETRY. Longitudes are assumed: the caller
-    establishes a geographic CRS, since ``xmin > xmax`` cannot mean a crossing
-    in a projected one.
-    """
-    qcol = quote_identifier(geometry_column)
-    geom_expr = geometry_to_geom_expr(con, relation, geometry_column)
-    params = {"relation": relation, "qcol": qcol, "geom_expr": geom_expr}
-    xmin, xmax, ymin, ymax = fetch_one(con.execute(_PLAIN_EXTENT_SQL.format(**params)))
-    if xmin is None:
-        return None
-    plain = [xmin, ymin, xmax, ymax]
-    # Only data reaching both edges can be hiding a crossing; anything else is
-    # already reported tightly and must not pay for the part-level scan.
-    if xmin > -180.0 + _ANTIMERIDIAN_EPS or xmax < 180.0 - _ANTIMERIDIAN_EPS:
-        return plain
-    gap = fetch_one(con.execute(_WIDEST_LON_GAP_SQL.format(**params)))
-    if gap is None or (gap[0] - gap[1]) <= (xmin + 360.0) - xmax:
-        return plain
-    return [gap[0], ymin, gap[1], ymax]

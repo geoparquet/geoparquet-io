@@ -104,21 +104,6 @@ class Divergence:
     state_dependent: bool = False
 
 
-AUTO_VERSION_NATIVE_DOWNGRADE = Divergence(
-    reason=(
-        "Auto version mode (geoparquet_version=None) splits four ways on a "
-        "native-geo-only input. write_parquet_with_metadata and "
-        "write_geoparquet_table resolve to 1.1.0 WKB, stripping the native "
-        "GEOMETRY logical type, because extract_version_from_metadata returns "
-        "None when there is no 'geo' key; api.Table.write and gpio convert "
-        "resolve to 2.0.0 and keep it, via resolve_geoparquet_version_from_*. "
-        "gpio #600 tracks the downgrade — note write_geoparquet_table is a "
-        "call site #600 does not list. The facade must resolve auto in one "
-        "place."
-    ),
-    assertion_contains="auto-resolved",
-)
-
 AUTO_2_0_CRS_STATE = Divergence(
     reason=(
         "The validator's crs_valid check on a 2.0 native-geometry file flips "
@@ -607,24 +592,16 @@ def test_a1_auto_version_agrees_across_paths(source_kind, auto_sources, tmp_path
         write(source, str(out), None)
         resolved[path_name] = _auto_resolution(str(out))
 
-    divergence = AUTO_VERSION_NATIVE_DOWNGRADE if source_kind == "native_geo_only" else None
+    # The native-geo-only cell was a recorded divergence (#600; write_geoparquet_table
+    # wrote no geo key) until #1367 put the whole decision in the facade.
     distinct = set(resolved.values())
-    try:
-        assert len(distinct) == 1, (
-            "auto-resolved differently across write paths for the same input: "
-            + ", ".join(
-                f"{name}={version or 'no geo key'}{' native' if native else ' WKB'}"
-                for name, (version, native) in sorted(resolved.items())
-            )
+    assert len(distinct) == 1, (
+        "auto-resolved differently across write paths for the same input: "
+        + ", ".join(
+            f"{name}={version or 'no geo key'}{' native' if native else ' WKB'}"
+            for name, (version, native) in sorted(resolved.items())
         )
-    except AssertionError as exc:
-        _xfail_if_expected(exc, divergence)
-        raise
-    if divergence is not None:
-        pytest.fail(
-            "recorded divergence no longer reproduces — the write paths now agree. "
-            f"Remove the entry so it cannot mask a regression.\nEntry: {divergence.reason}"
-        )
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ value imports ``pytz``. gpio does not depend on pytz, so these tests hide it
 
 import json
 import sys
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import duckdb
 import pytest
@@ -24,8 +24,8 @@ from geoparquet_io.core.inspect_utils import (
 )
 
 # Noon UTC keeps the calendar date stable in any session time zone within +-12h.
-TZ_MIN = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
-TZ_MAX = datetime(2024, 6, 30, 12, 30, tzinfo=timezone.utc)
+TZ_MIN = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+TZ_MAX = datetime(2024, 6, 30, 12, 30, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
@@ -258,10 +258,8 @@ def test_partition_string_preview_timestamptz_without_pytz(temporal_file):
 
 
 def test_aggregate_breakdown_values_timestamptz_without_pytz(temporal_file):
-    from geoparquet_io.core.process.aggregate.common import (
-        resolve_breakdown_values,
-        sql_literal,
-    )
+    from geoparquet_io.core.duckdb_utils import sql_literal
+    from geoparquet_io.core.process.aggregate.common import resolve_breakdown_values
 
     con = get_duckdb_connection(load_spatial=True)
     try:
@@ -426,10 +424,8 @@ def test_aggregate_breakdown_out_of_range_temporal_values(edge_file):
 @pytest.mark.parametrize("column", ["tstz_bc", "tstz_far"])
 def test_breakdown_out_of_range_timestamptz_counts_its_rows_in_any_zone(edge_file, zone, column):
     """The breakdown spells each kept value back as a SQL literal, read in the session zone."""
-    from geoparquet_io.core.process.aggregate.common import (
-        resolve_breakdown_values,
-        sql_literal,
-    )
+    from geoparquet_io.core.duckdb_utils import sql_literal
+    from geoparquet_io.core.process.aggregate.common import resolve_breakdown_values
 
     con = get_duckdb_connection(load_spatial=True)
     try:

@@ -20,26 +20,29 @@ again.
 import json
 from typing import Literal, TypedDict, cast
 
-from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
-from geoparquet_io.core.duckdb_utils import free_column_name
+from geoparquet_io.core.column_selection import matching_columns, unique_name
+from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.geo_metadata import (
-    DEFAULT_GEOPARQUET_VERSION,
     SELF_EVIDENT_BBOX_COLUMN,
     _bbox_claimed_by_another_column,
     _declared_bbox_column,
     bbox_covering_problem,
+    bbox_struct_child_names_match,
+    bounds_of,
     covering_supported,
     is_covering_path,
+    raw_geo_of_file,
 )
-from geoparquet_io.core.logging_config import debug, warn
-from geoparquet_io.core.parquet_schema import root_schema_columns, schema_direct_children
+from geoparquet_io.core.logging_config import configure_verbose, debug, error, info, warn
+from geoparquet_io.core.parquet_schema import (
+    root_schema_columns,
+    root_schema_index,
+    schema_direct_children,
+)
 
-#: Struct fields a bbox covering column must expose.
-_BBOX_REQUIRED_FIELDS = frozenset({"xmin", "ymin", "xmax", "ymax"})
 
-
-def _covering_bbox_refs(col_info) -> dict | None:
+def covering_bbox_refs(col_info) -> dict | None:
     """One column's validated ``covering.bbox`` refs, or ``None``.
 
     All four bounds must be present and every ref must be a well-formed
@@ -51,7 +54,7 @@ def _covering_bbox_refs(col_info) -> dict | None:
     bbox_refs = covering.get("bbox") if isinstance(covering, dict) else None
     if (
         isinstance(bbox_refs, dict)
-        and _BBOX_REQUIRED_FIELDS.issubset(bbox_refs)
+        and bbox_struct_child_names_match(bbox_refs)
         and all(is_covering_path(ref) for ref in bbox_refs.values())
     ):
         return bbox_refs
@@ -76,7 +79,7 @@ def _bbox_column_from_covering(geo_meta) -> str | None:
     # Non-None means the walk above found the primary's entry, its ``covering``
     # and a ``bbox`` inside it, all objects; the shape of the four axis paths is
     # what is still open, and only a complete, well-formed one is a pointer.
-    refs = _covering_bbox_refs(geo_meta["columns"][geo_meta["primary_column"]])
+    refs = covering_bbox_refs(geo_meta["columns"][geo_meta["primary_column"]])
     return cast("str", refs["xmin"][0]) if refs is not None else None
 
 
@@ -92,7 +95,7 @@ def bbox_covering_column_for(geo_meta, geometry_column: str) -> str | None:
     columns = geo_meta.get("columns", {})
     if not isinstance(columns, dict):
         return None
-    refs = _covering_bbox_refs(columns.get(geometry_column))
+    refs = covering_bbox_refs(columns.get(geometry_column))
     return cast("str", refs["xmin"][0]) if refs is not None else None
 
 
@@ -105,14 +108,11 @@ def _schema_struct_children(
     flat ``parquet_schema()`` listing is depth-first, so a nested child's own
     children must not be read as siblings.
     """
-    for index, col in enumerate(schema_info):
-        if col.get("name") != column_name:
-            continue
-        if (col.get("num_children") or 0) < 1:
-            return None
-        children = schema_direct_children(schema_info, index)
-        return [c.get("name", "") for c in children], [str(c.get("type", "")) for c in children]
-    return None
+    index = root_schema_index(schema_info, column_name)
+    if index is None or (schema_info[index].get("num_children") or 0) < 1:
+        return None
+    children = schema_direct_children(schema_info, index)
+    return [c.get("name", "") for c in children], [str(c.get("type", "")) for c in children]
 
 
 def _schema_struct_child_field_names(schema_info, column_name) -> list[str] | None:
@@ -125,7 +125,7 @@ def bbox_shaped_struct_columns(schema_info: list[dict]) -> list[str]:
     """Every root-level struct column that *looks* like a bbox covering column.
 
     Shape alone: a root column whose direct children cover
-    :data:`_BBOX_REQUIRED_FIELDS`, whatever it is called and whatever the ``geo``
+    :func:`~geoparquet_io.core.geo_metadata.bbox_struct_child_names_match`, whatever it is called and whatever the ``geo``
     block says about it. It is deliberately NOT a detector -- answering "which
     column is the primary geometry's bbox" from shape would reopen #1171 the way
     name matching did. It exists so a command can *mention* a struct it is about
@@ -137,7 +137,7 @@ def bbox_shaped_struct_columns(schema_info: list[dict]) -> list[str]:
     for column in root_schema_columns(schema_info):
         name = column.get("name") or ""
         children = _schema_struct_child_field_names(schema_info, name)
-        if children and _BBOX_REQUIRED_FIELDS.issubset(children):
+        if children and bbox_struct_child_names_match(children):
             names.append(name)
     return names
 
@@ -169,7 +169,7 @@ def _find_bbox_column_in_schema(schema_info, verbose, geo_meta=None):
         - Child fields appear as 'xmin', 'ymin', 'xmax', 'ymax' (not 'bbox.xmin')
     """
     children = _schema_struct_child_field_names(schema_info, SELF_EVIDENT_BBOX_COLUMN)
-    if not children or not _BBOX_REQUIRED_FIELDS.issubset(children):
+    if not children or not bbox_struct_child_names_match(children):
         return None
     if _bbox_claimed_by_another_column(geo_meta, SELF_EVIDENT_BBOX_COLUMN):
         if verbose:
@@ -187,7 +187,7 @@ def _check_bbox_metadata_covering(geo_meta, has_bbox_column, verbose, bbox_colum
     """Check if geo metadata contains proper bbox covering.
 
     Args:
-        geo_meta: Parsed geo metadata dict (from get_geo_metadata())
+        geo_meta: Parsed geo metadata dict (``raw_geo_of_file(...).block``)
         has_bbox_column: Whether a bbox column was found in schema
         verbose: Whether to print verbose output
         bbox_column_name: The bbox column actually present in the file. A
@@ -210,32 +210,26 @@ def _check_bbox_metadata_covering(geo_meta, has_bbox_column, verbose, bbox_colum
     # `covering` that is not one, simply declares no covering -- the truthful
     # answer, where iterating it raised an `AttributeError` from someone else's
     # file (#947).
-    columns = geo_meta.get("columns") if isinstance(geo_meta, dict) else None
+    columns = geo_meta.get("columns")
     if isinstance(columns, dict):
         for _col_name, col_info in columns.items():
-            covering = col_info.get("covering") if isinstance(col_info, dict) else None
-            if isinstance(covering, dict) and covering.get("bbox"):
-                bbox_refs = covering["bbox"]
-                # Check if the bbox covering has the required structure
-                if (
-                    isinstance(bbox_refs, dict)
-                    and _BBOX_REQUIRED_FIELDS.issubset(bbox_refs)
-                    and all(is_covering_path(ref) for ref in bbox_refs.values())
-                ):
-                    referenced_bbox_column = bbox_refs["xmin"][0]
-                    if bbox_column_name is not None and referenced_bbox_column != bbox_column_name:
-                        if verbose:
-                            debug(
-                                f"Covering references column '{referenced_bbox_column}', "
-                                f"but the file's bbox column is '{bbox_column_name}' - "
-                                "treating the bbox column as undeclared"
-                            )
-                        continue
-                    if verbose:
-                        debug(
-                            f"Found bbox covering in metadata referencing column: {referenced_bbox_column}"
-                        )
-                    return True
+            bbox_refs = covering_bbox_refs(col_info)
+            if bbox_refs is None:
+                continue
+            referenced_bbox_column = bbox_refs["xmin"][0]
+            if bbox_column_name is not None and referenced_bbox_column != bbox_column_name:
+                if verbose:
+                    debug(
+                        f"Covering references column '{referenced_bbox_column}', "
+                        f"but the file's bbox column is '{bbox_column_name}' - "
+                        "treating the bbox column as undeclared"
+                    )
+                continue
+            if verbose:
+                debug(
+                    f"Found bbox covering in metadata referencing column: {referenced_bbox_column}"
+                )
+            return True
 
     return False
 
@@ -304,12 +298,12 @@ def check_bbox_structure(parquet_file, verbose=False) -> BboxInfo:
     # Find the primary's bbox column: the authoritative covering metadata on its
     # own entry first (spec-valid files may use non-conventional names), then the
     # one self-evident conventional name as the no-provenance fallback (#1171).
-    geo_meta = get_geo_metadata(parquet_file)
+    geo_meta = raw_geo_of_file(parquet_file).block
     bbox_column_name = None
     covering_column = _bbox_column_from_covering(geo_meta)
     if covering_column:
         children = _schema_struct_child_field_names(schema_info, covering_column)
-        if children and _BBOX_REQUIRED_FIELDS.issubset(children):
+        if children and bbox_struct_child_names_match(children):
             bbox_column_name = covering_column
             if verbose:
                 debug(f"Found bbox column from covering metadata: {covering_column}")
@@ -378,11 +372,11 @@ def resolve_bbox_name(column_names, geoparquet_version, requested="bbox", announ
         The free name, which the caller must use for both the SQL alias and the
         covering it declares
     """
-    bbox_name = free_column_name(requested, column_names)
+    bbox_name = unique_name(requested, column_names)
     if bbox_name == requested or not announce:
         return bbox_name
-    taken = next(str(name) for name in column_names if str(name).lower() == requested.lower())
-    if covering_supported(geoparquet_version or DEFAULT_GEOPARQUET_VERSION):
+    taken = matching_columns(requested, column_names)[0]
+    if covering_supported(geoparquet_version):
         outcome = "and declaring the covering over it"
     else:
         outcome = f"(GeoParquet {geoparquet_version} has no covering metadata to declare it)"
@@ -493,3 +487,52 @@ def get_bbox_advice(
             ]
 
     return result
+
+
+def dataset_bounds(parquet_file, geometry_column=None, verbose=False, *, advise=True):
+    """``(xmin, ymin, xmax, ymax)`` of a Parquet file's geometry, or None.
+
+    Reads the primary geometry's bbox covering column when the file has one
+    (:func:`check_bbox_structure`), else measures the geometry; either way
+    through the one bounds owner, :func:`~geoparquet_io.core.geo_metadata.bounds_of`,
+    and its degenerate-geometry policy. None for nothing to measure (no rows,
+    every geometry NULL or EMPTY) or an unreadable file; an infinite coordinate
+    raises :class:`~geoparquet_io.core.exceptions.GeometryError`.
+
+    ``advise=False`` drops the "no bbox column, add one" advice, for a caller
+    whose bounds only feed its own diagnostics.
+    """
+    from geoparquet_io.core.exceptions import GeometryError
+    from geoparquet_io.core.file_utils import resolve_file_url
+    from geoparquet_io.core.geometry_detection import primary_geometry_column
+
+    configure_verbose(verbose)
+    resolve_file_url(parquet_file, verbose)  # a missing file is reported as one, first
+    if not geometry_column:
+        geometry_column = primary_geometry_column(parquet_file, verbose=verbose)
+    bbox_info = check_bbox_structure(parquet_file, verbose)
+    bbox_column = bbox_info["bbox_column_name"] if bbox_info["has_bbox_column"] else None
+    if bbox_column:
+        debug(f"Using bbox column '{bbox_column}' for fast bounds calculation")
+    elif advise:
+        warn(
+            f"⚠️  No bbox column found - calculating bounds from geometry column "
+            f"'{geometry_column}' (this may be slow)"
+        )
+        info("💡 Tip: Add a bbox column for faster operations with 'gpio add bbox'")
+    try:
+        bounds = bounds_of(parquet_file, geometry_column, bbox_column=bbox_column)
+    except GeometryError:
+        raise
+    except Exception as e:
+        if verbose:
+            error(f"Error calculating bounds: {e}")
+        return None
+    if bounds is None:
+        if verbose:
+            warn("Could not calculate bounds (empty dataset or null geometries)")
+        return None
+    xmin, ymin, xmax, ymax = bounds
+    if verbose:
+        debug(f"Dataset bounds: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
+    return (xmin, ymin, xmax, ymax)

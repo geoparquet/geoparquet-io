@@ -207,7 +207,7 @@ class TestGetDuckdbConnection:
     def test_thread_limit(self):
         """Connection respects thread limit."""
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False, threads=1)
-        assert con is not None
+        assert fetch_one(con.execute("SELECT current_setting('threads')")) == (1,)
         con.close()
 
     def test_temp_directory_is_set(self, tmp_path):
@@ -234,15 +234,18 @@ class TestGetDuckdbConnection:
         """No caller named one, so gpio picks one (see tests/test_spill_strategy.py).
 
         DuckDB's own default is the relative path ".tmp", which puts every spill
-        under the working directory. Nothing is created unless a query actually
-        spills, so small inputs behave exactly as before.
+        under the working directory. POSIX creates a locked ownership marker
+        before the first spill; Windows retains lazy directory creation.
         """
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
         try:
             value = fetch_one(con.execute("SELECT current_setting('temp_directory')"))[0]
             assert value != ".tmp"
             assert os.path.isabs(value)
-            assert not os.path.exists(value)
+            if os.name == "nt":
+                assert not os.path.exists(value)
+            else:
+                assert os.path.isfile(os.path.join(value, ".gpio-owner.lock"))
             assert fetch_one(con.execute("SELECT 1")) == (1,)
         finally:
             con.close()
@@ -811,7 +814,9 @@ class TestQueryFarmExtensionInstall:
     """
 
     def _on_duckdb(self, monkeypatch, version: str) -> None:
-        monkeypatch.setattr(duckdb, "__version__", version)
+        # The routing reads the owner (duckdb_capabilities), not duckdb.__version__.
+        caps = duckdb_utils._capabilities_for(version)
+        monkeypatch.setattr(duckdb_utils, "duckdb_capabilities", lambda: caps)
 
     def test_a5_loads_from_query_farm_on_duckdb_2(self, monkeypatch):
         """On 2.0 the community INSTALL (a stub) is never attempted for a5."""
@@ -1032,7 +1037,7 @@ class TestNoCommunityExtensionBypass:
 
         package = Path(__file__).parent.parent / "geoparquet_io"
         offenders = [
-            path.relative_to(package.parent)
+            path.relative_to(package.parent).as_posix()
             for path in package.rglob("*.py")
             # encoding pinned: the default is cp1252 on Windows, and the
             # sources carry em dashes.
@@ -1043,3 +1048,10 @@ class TestNoCommunityExtensionBypass:
             "these modules install a community extension directly instead of "
             f"calling load_community_extension(): {offenders}"
         )
+
+
+def test_integer_predicate_includes_huge_integers():
+    from geoparquet_io.core.duckdb_utils import duckdb_type_is_integer
+
+    assert duckdb_type_is_integer("HUGEINT")
+    assert duckdb_type_is_integer(" uhugeint ")

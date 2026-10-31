@@ -6,7 +6,7 @@ import pytest
 
 from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import FileNotFoundGeoParquetError, InvalidParameterError
-from geoparquet_io.core.file_utils import safe_file_url
+from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.remote import is_remote_url, needs_httpfs, resolve_s3_config
 
 
@@ -68,33 +68,33 @@ class TestRemoteURLDetection:
         assert not needs_httpfs("/local/path/file.parquet")
 
 
-class TestSafeFileURL:
-    """Test safe_file_url function."""
+class TestResolveFileURL:
+    """Test resolve_file_url function."""
 
-    def test_safe_file_url_https(self):
+    def test_resolve_file_url_https(self):
         """Test HTTPS URL handling."""
         url = "https://example.com/path/file.parquet"
-        assert safe_file_url(url) == url
+        assert resolve_file_url(url) == url
 
-    def test_safe_file_url_https_percent_encoded(self):
+    def test_resolve_file_url_https_percent_encoded(self):
         """An already-encoded HTTPS URL is not encoded a second time (#825)."""
         url = "https://example.com/path%20with%20spaces/file.parquet"
-        assert safe_file_url(url) == url
+        assert resolve_file_url(url) == url
 
-    def test_safe_file_url_https_with_raw_spaces_is_not_encoded(self):
+    def test_resolve_file_url_https_with_raw_spaces_is_not_encoded(self):
         """BREAKING (#825): a raw space is passed through, not encoded."""
         url = "https://example.com/path with spaces/file.parquet"
-        assert safe_file_url(url) == url
+        assert resolve_file_url(url) == url
 
-    def test_safe_file_url_s3(self):
+    def test_resolve_file_url_s3(self):
         """Test S3 URL handling."""
         url = "s3://bucket/path/file.parquet"
-        assert safe_file_url(url) == url
+        assert resolve_file_url(url) == url
 
-    def test_safe_file_url_local_nonexistent(self):
+    def test_resolve_file_url_local_nonexistent(self):
         """Test local file that doesn't exist."""
         with pytest.raises(FileNotFoundGeoParquetError, match="(?i)file not found"):
-            safe_file_url("/nonexistent/file.parquet")
+            resolve_file_url("/nonexistent/file.parquet")
 
 
 @pytest.mark.network
@@ -114,9 +114,9 @@ class TestRemoteFileReading:
 
     def test_geometry_column_https(self):
         """Test finding geometry column from HTTPS URL."""
-        from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+        from geoparquet_io.core.geometry_detection import primary_geometry_column
 
-        geom_col = find_primary_geometry_column(self.HTTPS_URL)
+        geom_col = primary_geometry_column(self.HTTPS_URL)
         assert geom_col == "geometry"
 
     def test_bbox_structure_https(self):
@@ -197,7 +197,7 @@ class TestGetDuckDBConnection:
         con = get_duckdb_connection()
         # Should have spatial extension loaded
         result = fetch_one(con.execute("SELECT ST_AsText(ST_Point(0, 0))"))
-        assert result is not None
+        assert result == ("POINT (0 0)",)
         con.close()
 
     def test_get_connection_with_httpfs(self):
@@ -206,6 +206,9 @@ class TestGetDuckDBConnection:
 
         con = get_duckdb_connection(load_httpfs=True)
         # Should have httpfs loaded (can't easily test without actual S3 access)
+        assert fetch_one(
+            con.execute("SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'httpfs'")
+        ) == (True,)
         con.close()
 
     def test_get_connection_no_spatial(self):
@@ -228,7 +231,9 @@ class TestRemoteErrorHints:
         """Test hint for S3 403 Forbidden error."""
         from geoparquet_io.core.remote import get_remote_error_hint
 
-        hint = get_remote_error_hint("403 Forbidden", "s3://bucket/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("403 Forbidden"), "s3://bucket/file.parquet"
+        )
         assert "AWS_ACCESS_KEY_ID" in hint
         assert "AWS_SECRET_ACCESS_KEY" in hint
 
@@ -236,7 +241,9 @@ class TestRemoteErrorHints:
         """Test hint for Azure 403 error."""
         from geoparquet_io.core.remote import get_remote_error_hint
 
-        hint = get_remote_error_hint("Access Denied", "az://container/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("Access Denied"), "az://container/file.parquet"
+        )
         assert "AZURE_STORAGE_ACCOUNT_NAME" in hint
         assert "AZURE_STORAGE_ACCOUNT_KEY" in hint
 
@@ -244,14 +251,18 @@ class TestRemoteErrorHints:
         """Test hint for GCS 403 error."""
         from geoparquet_io.core.remote import get_remote_error_hint
 
-        hint = get_remote_error_hint("Forbidden", "gs://bucket/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("Forbidden"), "gs://bucket/file.parquet"
+        )
         assert "GOOGLE_APPLICATION_CREDENTIALS" in hint
 
     def test_get_remote_error_hint_404(self):
         """Test hint for 404 Not Found error."""
         from geoparquet_io.core.remote import get_remote_error_hint
 
-        hint = get_remote_error_hint("404 Not Found", "https://example.com/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("404 Not Found"), "https://example.com/file.parquet"
+        )
         assert "not found" in hint.lower()
         assert "verify" in hint.lower() or "check" in hint.lower()
 
@@ -259,7 +270,10 @@ class TestRemoteErrorHints:
         """Test hint for timeout error."""
         from geoparquet_io.core.remote import get_remote_error_hint
 
-        hint = get_remote_error_hint("Connection timed out", "https://example.com/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("Connection timed out"),
+            "https://example.com/file.parquet",
+        )
         assert "timed out" in hint.lower()
         assert "network" in hint.lower()
 
@@ -267,7 +281,10 @@ class TestRemoteErrorHints:
         """Test hint for connection error."""
         from geoparquet_io.core.remote import get_remote_error_hint
 
-        hint = get_remote_error_hint("Unable to connect", "https://example.com/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("Unable to connect"),
+            "https://example.com/file.parquet",
+        )
         assert "connect" in hint.lower()
         assert "network" in hint.lower()
 

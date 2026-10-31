@@ -25,7 +25,7 @@ import pytest
 
 import geoparquet_io as gpio
 from geoparquet_io.core.add.kdtree import add_kdtree_table
-from geoparquet_io.core.geo_metadata import parse_geo_metadata
+from geoparquet_io.core.geo_metadata import read_raw_geo
 from tests.conftest import skip_if_geography_unavailable
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
@@ -64,7 +64,7 @@ def projected_pair(tmp_path_factory):
 
 class TestConvertedTableCarriesGeo:
     def test_geo_block_names_the_geometry_column(self, converted):
-        geo = parse_geo_metadata(converted.table.schema.metadata)
+        geo = read_raw_geo(converted.table.schema.metadata).value
 
         assert geo is not None
         assert geo["primary_column"] == converted.geometry_column
@@ -75,7 +75,7 @@ class TestConvertedTableCarriesGeo:
 
     def test_projected_crs_lands_in_the_geo_block(self, projected_pair):
         converted, _ = projected_pair
-        geo = parse_geo_metadata(converted.table.schema.metadata)
+        geo = read_raw_geo(converted.table.schema.metadata).value
 
         crs = geo["columns"][converted.geometry_column]["crs"]
         assert crs["id"] == {"authority": "EPSG", "code": 6933}
@@ -84,7 +84,7 @@ class TestConvertedTableCarriesGeo:
     def test_written_file_is_unchanged_in_shape(self, projected_pair):
         """The carried block is only a description: write() still owns the output's."""
         _, read_back = projected_pair
-        geo = parse_geo_metadata(read_back.table.schema.metadata)
+        geo = read_raw_geo(read_back.table.schema.metadata).value
 
         assert geo["version"] == "1.1.0"
         assert geo["columns"]["geometry"]["crs"]["id"]["code"] == 6933
@@ -118,7 +118,7 @@ def test_every_add_method_runs_on_a_converted_table(converted, method, kwargs):
 def test_add_bbox_metadata_runs_on_a_converted_table(converted):
     result = converted.add_bbox().add_bbox_metadata()
 
-    geo = parse_geo_metadata(result.table.schema.metadata)
+    geo = read_raw_geo(result.table.schema.metadata).value
     assert "covering" in geo["columns"][result.geometry_column]
 
 
@@ -166,23 +166,3 @@ def test_kdtree_table_reads_bare_wkb_without_geo_metadata(converted):
     result = add_kdtree_table(bare, iterations=2, geometry_column="geometry")
 
     assert len(set(result.column("kdtree_cell").to_pylist())) == 4
-
-
-class TestDescribeWkbGeometryLeavesTablesAlone:
-    def test_existing_geo_key_is_kept(self):
-        import pyarrow as pa
-
-        from geoparquet_io.core.arrow_geo_metadata import describe_wkb_geometry
-
-        table = pa.table({"geometry": pa.array([b"\x01"], pa.binary())}).replace_schema_metadata(
-            {b"geo": b'{"keep": true}'}
-        )
-        assert describe_wkb_geometry(table, "geometry") is table
-
-    def test_missing_geometry_column_is_left_alone(self):
-        import pyarrow as pa
-
-        from geoparquet_io.core.arrow_geo_metadata import describe_wkb_geometry
-
-        table = pa.table({"id": [1]})
-        assert describe_wkb_geometry(table, "geometry") is table

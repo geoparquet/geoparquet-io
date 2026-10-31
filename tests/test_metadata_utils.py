@@ -16,7 +16,7 @@ class TestCalculateOverallBbox:
     def test_calculates_bbox_from_single_row_group(self):
         """Test bbox calculation from a single row group."""
         stats = [{"xmin": -122.5, "ymin": 37.5, "xmax": -122.0, "ymax": 38.0}]
-        result = _calculate_overall_bbox(stats)
+        result = _calculate_overall_bbox(stats, geographic=True)
         assert result is not None
         assert result["xmin"] == -122.5
         assert result["ymin"] == 37.5
@@ -29,7 +29,7 @@ class TestCalculateOverallBbox:
             {"xmin": -122.5, "ymin": 37.5, "xmax": -122.0, "ymax": 38.0},
             {"xmin": -123.0, "ymin": 37.0, "xmax": -121.5, "ymax": 38.5},
         ]
-        result = _calculate_overall_bbox(stats)
+        result = _calculate_overall_bbox(stats, geographic=True)
         assert result is not None
         assert result["xmin"] == -123.0  # min of all xmin
         assert result["ymin"] == 37.0  # min of all ymin
@@ -38,7 +38,7 @@ class TestCalculateOverallBbox:
 
     def test_returns_none_for_empty_stats(self):
         """Test returns None for empty stats list."""
-        result = _calculate_overall_bbox([])
+        result = _calculate_overall_bbox([], geographic=True)
         assert result is None
 
     def test_skips_incomplete_row_groups(self):
@@ -47,7 +47,7 @@ class TestCalculateOverallBbox:
             {"xmin": -122.5, "ymin": 37.5},  # Missing xmax, ymax
             {"xmin": -123.0, "ymin": 37.0, "xmax": -121.5, "ymax": 38.5},  # Complete
         ]
-        result = _calculate_overall_bbox(stats)
+        result = _calculate_overall_bbox(stats, geographic=True)
         assert result is not None
         assert result["xmin"] == -123.0
         assert result["ymax"] == 38.5
@@ -165,9 +165,7 @@ class TestFormatParquetMetadataEnhanced:
     """format_parquet_metadata_enhanced: full Parquet file metadata section."""
 
     def test_terminal_output(self, places_test_file, capsys):
-        format_parquet_metadata_enhanced(
-            places_test_file, json_output=False, primary_geom_col="geometry"
-        )
+        format_parquet_metadata_enhanced(places_test_file, json_output=False)
         out = capsys.readouterr().out
         assert "Parquet File Metadata" in out
         assert "Total Rows: 766" in out

@@ -34,6 +34,9 @@ from geoparquet_io.core.source_text import (
     plan_source_text,
 )
 
+pytestmark = pytest.mark.fresh_duckdb
+
+
 DATA = Path(__file__).parent / "data"
 ROWS = struct.unpack("<I", (DATA / "buildings_test.dbf").read_bytes()[4:8])[0]
 
@@ -369,10 +372,16 @@ class TestCrsFromReadTypeFallback:
     @staticmethod
     def _con_with_type(type_string):
         class _Result:
-            description = [("id", "INTEGER"), ("geom", type_string)]
+            # DESCRIBE rows: name, type, null, key, default, extra.
+            @staticmethod
+            def fetchall():
+                return [
+                    ("id", "INTEGER", "YES", None, None, None),
+                    ("geom", type_string, "YES", None, None, None),
+                ]
 
         class _Con:
-            def execute(self, _sql):
+            def execute(self, _sql, _params=None):
                 return _Result()
 
         return _Con()

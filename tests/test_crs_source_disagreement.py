@@ -2,7 +2,7 @@
 
 A GeoParquet 2.0 file says what its coordinates are in twice -- the ``geo``
 block's ``columns.<name>.crs`` and the Parquet ``GEOMETRY``/``GEOGRAPHY``
-logical type. ``crs_utils.extract_crs_from_parquet`` prefers the first and falls
+logical type. ``crs_utils.crs_of`` prefers the first and falls
 back to the second, and since #993 every rewrite answers the output's CRS
 through it (``parquet_writer.resolve_input_crs``).
 
@@ -28,7 +28,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.crs_utils import extract_crs_from_parquet, reset_crs_disagreement_warnings
+from geoparquet_io.core.crs_utils import crs_of, reset_crs_disagreement_warnings
 from tests.native_geo_probes import (
     conus_wkb,
     geo_block_crs_id,
@@ -130,7 +130,7 @@ def test_the_fixture_really_states_two_different_crss(disagreeing):
 
 def test_disagreeing_sources_warn_naming_both_and_the_winner(disagreeing, caplog):
     with caplog.at_level(logging.WARNING):
-        resolved = extract_crs_from_parquet(str(disagreeing))
+        resolved = crs_of(str(disagreeing))
 
     assert (resolved or {}).get("id") == EPSG_3857, "the documented preference must not change"
 
@@ -147,8 +147,8 @@ def test_disagreeing_sources_warn_naming_both_and_the_winner(disagreeing, caplog
 def test_the_warning_is_emitted_once_per_file(disagreeing, caplog):
     """Several commands read the same input through this function in one run."""
     with caplog.at_level(logging.WARNING):
-        extract_crs_from_parquet(str(disagreeing))
-        extract_crs_from_parquet(str(disagreeing))
+        crs_of(str(disagreeing))
+        crs_of(str(disagreeing))
 
     assert len(_disagreement_warnings(caplog.records)) == 1
 
@@ -158,8 +158,8 @@ def test_two_distinct_disagreeing_files_each_warn(disagreeing, tmp_path, _native
     second = _with_geo_block(_native_file(tmp_path, "second.parquet", 5070, _native_rows), 3857)
 
     with caplog.at_level(logging.WARNING):
-        extract_crs_from_parquet(str(disagreeing))
-        extract_crs_from_parquet(str(second))
+        crs_of(str(disagreeing))
+        crs_of(str(second))
 
     assert len(_disagreement_warnings(caplog.records)) == 2
 
@@ -171,7 +171,7 @@ def test_two_distinct_disagreeing_files_each_warn(disagreeing, tmp_path, _native
 
 def test_agreeing_sources_do_not_warn(agreeing, caplog):
     with caplog.at_level(logging.WARNING):
-        resolved = extract_crs_from_parquet(str(agreeing))
+        resolved = crs_of(str(agreeing))
 
     assert (resolved or {}).get("id") == EPSG_5070
     assert caplog.records == []
@@ -179,7 +179,7 @@ def test_agreeing_sources_do_not_warn(agreeing, caplog):
 
 def test_a_logical_type_only_file_does_not_warn(logical_type_only, caplog):
     with caplog.at_level(logging.WARNING):
-        resolved = extract_crs_from_parquet(str(logical_type_only))
+        resolved = crs_of(str(logical_type_only))
 
     assert (resolved or {}).get("id") == EPSG_5070
     assert caplog.records == []
@@ -187,7 +187,7 @@ def test_a_logical_type_only_file_does_not_warn(logical_type_only, caplog):
 
 def test_a_geo_block_only_file_does_not_warn(geo_block_only, caplog):
     with caplog.at_level(logging.WARNING):
-        resolved = extract_crs_from_parquet(str(geo_block_only))
+        resolved = crs_of(str(geo_block_only))
 
     assert (resolved or {}).get("id") == EPSG_5070
     assert caplog.records == []
@@ -202,7 +202,7 @@ def test_a_crs_less_file_does_not_warn(tmp_path, _native_rows, caplog):
     )
 
     with caplog.at_level(logging.WARNING):
-        assert extract_crs_from_parquet(str(path)) is None
+        assert crs_of(str(path)) is None
     assert caplog.records == []
 
 
@@ -267,7 +267,7 @@ def test_a_valid_second_geometry_column_ahead_of_the_primary_does_not_warn(tmp_p
     assert spec_problems(path) == [], "the fixture itself must be a valid file"
 
     with caplog.at_level(logging.WARNING):
-        resolved = extract_crs_from_parquet(str(path))
+        resolved = crs_of(str(path))
 
     assert (resolved or {}).get("id") == EPSG_3857
     assert caplog.records == []
@@ -283,7 +283,7 @@ def test_the_disagreement_is_judged_on_the_primary_column(tmp_path, caplog):
     path = _two_column_file(tmp_path, block_primary_epsg=5070)
 
     with caplog.at_level(logging.WARNING):
-        resolved = extract_crs_from_parquet(str(path))
+        resolved = crs_of(str(path))
 
     assert (resolved or {}).get("id") == EPSG_5070, "the documented preference must not change"
     warnings = _disagreement_warnings(caplog.records)

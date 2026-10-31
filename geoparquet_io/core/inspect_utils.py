@@ -16,39 +16,56 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from geoparquet_io.core.bbox_parse import BBox
 from geoparquet_io.core.crs_utils import (
-    CRS_ABSENT,
     _extract_crs_identifier,
-    _is_crs84_equivalent,
-    is_crs84_identifier,
+    crs_equal,
+    crs_of,
     is_default_crs,
-    is_geographic_crs,
-    merge_longitude_ranges,
+    is_geographic,
 )
 from geoparquet_io.core.duckdb_metadata import (
     detect_geometry_columns,
     get_compression_info,
     get_file_metadata,
-    get_geo_metadata,
     get_row_count,
 )
 from geoparquet_io.core.duckdb_utils import (
+    _type_contains_variant,
+    describe_query,
     fetch_one,
     fetch_row,
+    geom_from_wkb_sql,
     get_duckdb_connection,
-    has_core_geometry,
     is_interrupt,
     load_spatial_extension,
     quote_identifier,
+    resolve_load_spatial,
     sql_path,
 )
+from geoparquet_io.core.edges import (
+    PLANAR,
+    declares_edges,
+    detect_edges,
+    edges_of,
+    logical_type_edges,
+    normalized_edges,
+    state_edges,
+)
 from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geo_metadata import _type_contains_variant
+from geoparquet_io.core.geo_metadata import (
+    GeometryStats,
+    declared_version,
+    merged_geometry_stats,
+    sanitized_carried_geo_of_file,
+)
+from geoparquet_io.core.geometry_detection import GeometryRead, primary_geometry_column
 from geoparquet_io.core.json_output import dumps_json, to_jsonable
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.metadata_utils import (
     extract_bbox_from_row_group_stats,
 )
+from geoparquet_io.core.parquet_schema import root_schema_index
 from geoparquet_io.core.remote import is_remote_url, needs_httpfs
 from geoparquet_io.core.sizing import format_size
 
@@ -155,63 +172,6 @@ def _format_crs_for_display(crs_info: Any, include_default: bool = True) -> str:
 # tests that import from inspect_utils.
 
 
-def _crs_are_equivalent(crs1: Any, crs2: Any) -> bool:
-    """
-    Check if two CRS values are equivalent.
-
-    Compares by extracting authority and code from both values.
-    Falls back to pyproj semantic comparison for PROJJSON without authority ids.
-    Handles PROJJSON dicts, "EPSG:31287" strings, and URN formats.
-
-    Pass :data:`CRS_ABSENT` for a geometry column with no ``crs`` key (the
-    OGC:CRS84 default) and ``None`` for an explicit ``"crs": null`` (unknown
-    CRS). Extract both with
-    :func:`~geoparquet_io.core.crs_utils.crs_from_column_meta`.
-
-    Returns:
-        True if CRS values represent the same coordinate system
-    """
-    # An omitted crs key means the OGC:CRS84 default; an explicit null means the
-    # CRS is unknown and matches only another unknown. ``_is_crs84_equivalent``
-    # is the shared "is this the default?" predicate, called here and by
-    # ``validate._crs_equals`` so the two helpers cannot drift apart again — they
-    # once resolved this branch with different predicates and disagreed on
-    # id-less CRS84 PROJJSON and on the "SRID:4326" spelling. It answers False
-    # for None and for the value-less {} / "" shapes, which is what this branch
-    # needs.
-    if crs1 is CRS_ABSENT or crs2 is CRS_ABSENT:
-        if crs1 is CRS_ABSENT and crs2 is CRS_ABSENT:
-            return True
-        return _is_crs84_equivalent(crs2 if crs1 is CRS_ABSENT else crs1)
-
-    if crs1 is None or crs2 is None:
-        return crs1 is None and crs2 is None
-
-    id1 = _extract_crs_identifier(crs1)
-    id2 = _extract_crs_identifier(crs2)
-
-    if id1 is not None and id2 is not None:
-        # OGC:CRS84 and EPSG:4326 differ only in axis order, and GeoParquet
-        # fixes the stored order to (x, y), so they name the same CRS here.
-        # Checked before the id comparison, which would otherwise report the
-        # most common equivalent pair as a mismatch.
-        if is_crs84_identifier(id1) and is_crs84_identifier(id2):
-            return True
-        return id1 == id2
-
-    if isinstance(crs1, dict) and isinstance(crs2, dict):
-        try:
-            from pyproj import CRS
-
-            # ignore_axis_order for the same reason as above -- GeoParquet
-            # stores (x, y) whatever the CRS's own axis definition says.
-            return CRS.from_json_dict(crs1).equals(CRS.from_json_dict(crs2), ignore_axis_order=True)
-        except Exception:
-            return False
-
-    return False
-
-
 def _detect_metadata_mismatches(
     parquet_geo_info: dict[str, Any],
     geoparquet_info: dict[str, Any],
@@ -229,7 +189,7 @@ def _detect_metadata_mismatches(
     # Compare CRS - only warn if both are set and different
     if parquet_crs and geoparquet_crs:
         # Use semantic comparison (handles PROJJSON vs "EPSG:31287" etc.)
-        if not _crs_are_equivalent(parquet_crs, geoparquet_crs):
+        if not crs_equal(parquet_crs, geoparquet_crs):
             # Extract display strings for the warning message
             parquet_crs_display = _extract_crs_string(parquet_crs) or str(parquet_crs)
             geoparquet_crs_display = _extract_crs_string(geoparquet_crs) or str(geoparquet_crs)
@@ -248,11 +208,11 @@ def _detect_metadata_mismatches(
         pass
 
     # Compare edges (only relevant for Geography type)
-    parquet_edges = parquet_geo_info.get("edges")
-    geoparquet_edges = geoparquet_info.get("edges")
+    parquet_edges = edges_of(parquet_geo_info)
+    geoparquet_edges = edges_of(geoparquet_info)
 
     if parquet_edges and geoparquet_edges:
-        if parquet_edges.lower() != geoparquet_edges.lower():
+        if normalized_edges(parquet_edges) != normalized_edges(geoparquet_edges):
             warnings.append(
                 f"Edges mismatch: Parquet geo type has '{parquet_edges}' "
                 f"but GeoParquet metadata has '{geoparquet_edges}'"
@@ -302,62 +262,55 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
     from geoparquet_io.core.duckdb_metadata import (
         detect_geometry_columns,
         get_aggregated_native_geo_stats,
-        get_geo_metadata,
         get_schema_info,
         parse_geometry_logical_type,
         resolve_crs_reference,
     )
 
     # Get metadata using DuckDB
-    geo_meta = get_geo_metadata(parquet_file, con=con)
+    geo_meta = sanitized_carried_geo_of_file(parquet_file, con=con)
     schema_info = get_schema_info(parquet_file, con=con)
     geo_columns = detect_geometry_columns(parquet_file, con=con)
 
     # Detect Parquet native geo type
     parquet_type = "No Parquet geo logical type"
     parquet_geo_info = {}
-    geometry_column = None
 
-    # Find geometry column and parse its logical type
-    for col in schema_info:
-        col_name = col.get("name", "")
-        if col_name in geo_columns:
-            parquet_type = geo_columns[col_name]
-            geometry_column = col_name
-
-            # Parse additional details from logical type
-            logical_type = col.get("logical_type") or ""
-            if logical_type:
-                geom_details = parse_geometry_logical_type(logical_type)
-                if geom_details:
-                    parquet_geo_info["geometry_type"] = geom_details.get("geometry_type")
-                    parquet_geo_info["coordinate_dimension"] = geom_details.get(
-                        "coordinate_dimension"
-                    )
-                    # Resolve CRS reference if needed (e.g., "projjson:key_name")
-                    raw_crs = geom_details.get("crs")
-                    parquet_geo_info["crs"] = resolve_crs_reference(parquet_file, raw_crs)
-                    parquet_geo_info["edges"] = geom_details.get("algorithm")
-            break
+    # The primary column is the owner's answer (#1367); its logical type, when
+    # it has a native one, is the file's Parquet geo type.
+    geometry_column = primary_geometry_column(parquet_file, geo=geo_meta, con=con)
+    index = root_schema_index(schema_info, geometry_column)
+    if index is not None and geometry_column in geo_columns:
+        col = schema_info[index]
+        parquet_type = geo_columns[geometry_column]
+        logical_type = col.get("logical_type") or ""
+        geom_details = parse_geometry_logical_type(logical_type) if logical_type else None
+        if geom_details:
+            parquet_geo_info["geometry_type"] = geom_details.get("geometry_type")
+            parquet_geo_info["coordinate_dimension"] = geom_details.get("coordinate_dimension")
+            # Resolve CRS reference if needed (e.g., "projjson:key_name")
+            raw_crs = geom_details.get("crs")
+            parquet_geo_info["crs"] = resolve_crs_reference(parquet_file, raw_crs)
+            if geom_details.get("geo_type") == "Geography":
+                state_edges(parquet_geo_info, logical_type_edges(geom_details))
 
     # Extract GeoParquet metadata
     geoparquet_info = {}
     if geo_meta:
-        version = geo_meta.get("version")
-        primary_column = geo_meta.get("primary_column", "geometry")
+        version = declared_version(geo_meta, default=None)
+        primary_column = primary_geometry_column(None, geo=geo_meta)
         columns_meta = geo_meta.get("columns", {})
 
         crs = None
         bbox = None
         geometry_types = None
-        edges = None
+        col_meta = None
 
         if primary_column in columns_meta:
             col_meta = columns_meta[primary_column]
             crs = col_meta.get("crs")  # Keep raw PROJJSON, don't convert to string
             bbox = col_meta.get("bbox")
             geometry_types = col_meta.get("geometry_types")
-            edges = col_meta.get("edges")
 
         # Note: Keep crs as None if not specified - default handling is a display concern
 
@@ -367,19 +320,16 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
             "bbox": bbox,
             "primary_column": primary_column,
             "geometry_types": geometry_types,
-            "edges": edges,
         }
+        if declares_edges(col_meta):
+            state_edges(geoparquet_info, edges_of(col_meta))
 
-        # Use GeoParquet primary_column if we didn't find one from Parquet type
-        if not geometry_column:
-            geometry_column = primary_column
-
-    # Determine the effective primary column
-    primary_column = geometry_column or "geometry"
+    # The effective primary column: the owner's one answer.
+    primary_column = geometry_column
 
     # Determine effective CRS (prefer GeoParquet, fallback to Parquet type)
     # Keep as raw PROJJSON - display functions will handle default formatting
-    effective_crs = geoparquet_info.get("crs") or parquet_geo_info.get("crs")
+    effective_crs = crs_of(parquet_file, geometry_column=primary_column, quiet=True)
 
     # Determine effective bbox and geometry_types
     # Priority: GeoParquet metadata, then native geo stats, then bbox column stats
@@ -388,9 +338,12 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
 
     # Try native Parquet GeospatialStatistics for files with native geo types
     if parquet_type != "No Parquet geo logical type":
-        native_stats = get_aggregated_native_geo_stats(parquet_file, primary_column, con=con)
+        native_stats = get_aggregated_native_geo_stats(
+            parquet_file, primary_column, con=con, geographic=is_geographic(effective_crs)
+        )
 
-        # Use native bbox if GeoParquet bbox not available
+        # Use native bbox if GeoParquet bbox not available (the fold returns
+        # the spec's interleaved layout, as a geo bbox has).
         if not effective_bbox and native_stats.get("bbox"):
             effective_bbox = native_stats["bbox"]
 
@@ -407,41 +360,25 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
     if geo_meta and parquet_type != "No Parquet geo logical type":
         warnings = _detect_metadata_mismatches(parquet_geo_info, geoparquet_info)
 
-    return {
+    geo_info: dict[str, Any] = {
         "parquet_type": parquet_type,
-        "has_geo_metadata": geo_meta is not None,
+        "has_geo_metadata": bool(geo_meta),
         "version": geoparquet_info.get("version"),
         "crs": effective_crs,
         "bbox": effective_bbox,
         "primary_column": primary_column,
         "geometry_types": effective_geometry_types,
-        "edges": geoparquet_info.get("edges") or parquet_geo_info.get("edges"),
         "warnings": warnings,
     }
+    state_edges(geo_info, _effective_edges(parquet_geo_info, geoparquet_info, primary_column))
+    return geo_info
 
 
-def extract_columns_info(schema: pa.Schema, primary_geom_col: str | None) -> list[dict[str, Any]]:
-    """
-    Extract column information from schema.
-
-    Args:
-        schema: PyArrow schema
-        primary_geom_col: Name of primary geometry column (if known)
-
-    Returns:
-        list: Column info dicts with name, type, is_geometry
-    """
-    columns = []
-    for field in schema:
-        is_geometry = field.name == primary_geom_col
-        columns.append(
-            {
-                "name": field.name,
-                "type": str(field.type),
-                "is_geometry": is_geometry,
-            }
-        )
-    return columns
+def _effective_edges(parquet_geo_info: dict, geoparquet_info: dict, column: str) -> str:
+    """The column's edges by the owner's one precedence: the block over the type."""
+    native = {column: edges_of(parquet_geo_info)}
+    block = {column: edges_of(geoparquet_info)} if declares_edges(geoparquet_info) else None
+    return detect_edges(native, block).get(column, PLANAR)
 
 
 def parse_wkb_type(wkb_bytes: bytes) -> str:
@@ -512,7 +449,7 @@ def wkb_to_wkt_preview(wkb_bytes: bytes, max_length: int = 45) -> str:
             else:
                 # Standard ISO WKB format
                 result = fetch_one(
-                    con.execute("SELECT ST_AsText(ST_GeomFromWKB(?::BLOB))", [wkb_bytes])
+                    con.execute(f"SELECT ST_AsText({geom_from_wkb_sql('?::BLOB')})", [wkb_bytes])
                 )
 
         if result and result[0]:
@@ -663,33 +600,35 @@ def get_preview_data(
     raw_url = resolve_file_url(parquet_file, verbose=False)
     total_rows = get_row_count(parquet_file)
 
-    # load_spatial=None: the preview needs nothing beyond DuckDB's core geometry
-    # set (#1353); _preview_table_from_query loads spatial on demand if a file
-    # still turns out to need it.
-    con = get_duckdb_connection(load_spatial=None, load_httpfs=needs_httpfs(parquet_file))
+    # Auto spatial: the preview needs nothing beyond DuckDB's core geometry set
+    # (#1353); _preview_table_from_query loads spatial on demand if a file still
+    # turns out to need it. Resolved once, so the connection and the preview
+    # below act on the same answer.
+    load_spatial = resolve_load_spatial(None)
+    con = get_duckdb_connection(load_spatial=load_spatial, load_httpfs=needs_httpfs(parquet_file))
 
     try:
         # Detect geometry columns from native Parquet types
         geo_columns = set(detect_geometry_columns(parquet_file).keys())
 
         # Also detect geometry columns from GeoParquet metadata
-        geo_meta = get_geo_metadata(parquet_file)
+        geo_meta = sanitized_carried_geo_of_file(parquet_file)
         columns_meta = {}
         if geo_meta:
             columns_meta = geo_meta.get("columns", {})
             geo_columns.update(columns_meta.keys())
 
         # Get all column names and DuckDB types from the parquet file
-        schema_result = con.execute(
-            f"SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_parquet({sql_path(raw_url)}))"
-        ).fetchall()
+        schema_result = describe_query(con, f"SELECT * FROM read_parquet({sql_path(raw_url)})")
         all_columns = [row[0] for row in schema_result]
         col_types = {row[0]: row[1] for row in schema_result}
 
         # Native GeoArrow geometry is exposed by DuckDB as a raw STRUCT/LIST, which
         # ST_AsText cannot consume. Select those columns raw and convert them to WKT
         # via geoarrow after the query. Serialized (WKB/GEOMETRY) columns keep ST_AsText.
-        native_geo_columns = {c for c in geo_columns if "STRUCT" in col_types.get(c, "").upper()}
+        native_geo_columns = {
+            c for c in geo_columns if GeometryRead.for_type(c, col_types.get(c)).kind == "geoarrow"
+        }
 
         # Build column list, converting serialized geometry columns to WKT in SQL
         column_expressions = []
@@ -730,10 +669,9 @@ def get_preview_data(
             )
             mode = "head"
 
-        # Execute query and convert to PyArrow table. has_spatial mirrors what
-        # the auto sentinel above resolved to: spatial is on the connection
-        # exactly where DuckDB's core lacks GEOMETRY.
-        table = _preview_table_from_query(con, query, has_spatial=not has_core_geometry())
+        # Execute query and convert to PyArrow table. has_spatial is what the
+        # connection was opened with.
+        table = _preview_table_from_query(con, query, has_spatial=load_spatial)
 
         # Convert any native GeoArrow geometry columns to WKT strings for display.
         if native_geo_columns:
@@ -872,13 +810,13 @@ def compute_column_stats(
 def _source_column_types(con, source: str) -> dict[str, str]:
     """Each column's DuckDB type from one DESCRIBE of ``source``, empty if that fails."""
     try:
-        rows = con.execute(f"DESCRIBE SELECT * FROM {source}").fetchall()
+        rows = describe_query(con, f"SELECT * FROM {source}")
     except duckdb.Error as e:
         if is_interrupt(e):
             raise
         debug(f"Could not describe {source}, so each stats query is described instead: {e}")
         return {}
-    return {row[0]: row[1] for row in rows}
+    return dict(rows)
 
 
 def get_column_statistics(
@@ -895,7 +833,7 @@ def get_column_statistics(
 
     Args:
         parquet_file: Path to the parquet file
-        columns_info: Column information from extract_columns_info
+        columns_info: Column dictionaries containing name, type, and geometry flags
 
     Returns:
         dict: Statistics per column
@@ -944,7 +882,7 @@ def _print_geo_metadata_section(console: Console, geo_info: dict[str, Any]) -> N
 
     if geo_info["has_geo_metadata"]:
         if geo_info.get("version"):
-            console.print(f"GeoParquet Version: [cyan]{geo_info['version']}[/cyan]")
+            console.print(f"GeoParquet Version: [cyan]{geo_info.get('version')}[/cyan]")
         _print_geo_info(console, geo_info)
     elif parquet_type in ("Geometry", "Geography"):
         console.print("[dim]No GeoParquet metadata (using Parquet geo type)[/dim]")
@@ -1299,11 +1237,11 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
 
     total_rows = 0
     total_size_bytes = 0
-    x_ranges: list[tuple[float, float]] = []
-    # The antimeridian reading of xmin > xmax belongs to geographic CRS only, so
-    # one projected member is enough to disqualify it for the whole partition.
+    # Each file's declared bbox, folded once below by the stats owner. The wrap
+    # reading of xmin > xmax belongs to geographic CRS only, so one projected
+    # member is enough to disqualify it for the whole partition (#886).
+    file_boxes: list[GeometryStats] = []
     all_geographic = True
-    combined_bbox = None  # [xmin, ymin, xmax, ymax]
     compressions = set()
     geoparquet_versions = set()
     per_file_info = []
@@ -1334,21 +1272,15 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
 
         # Track GeoParquet version
         if geo_info.get("version"):
-            geoparquet_versions.add(geo_info["version"])
+            geoparquet_versions.add(geo_info.get("version"))
 
         # Merge bbox. A GeoParquet bbox interleaves its dimensions -- the 6- and
         # 8-element forms read [xmin, ymin, zmin, ...], so indices 2 and 3 are
         # not xmax/ymax; _bbox_xy pulls the X/Y bounds out of any of the three.
         xy = _bbox_xy(geo_info.get("bbox") or [])
         if xy:
-            xmin, ymin, xmax, ymax = xy
-            x_ranges.append((xmin, xmax))
-            all_geographic = all_geographic and is_geographic_crs(geo_info.get("crs"))
-            if combined_bbox is None:
-                combined_bbox = [xmin, ymin, xmax, ymax]
-            else:
-                combined_bbox[1] = min(combined_bbox[1], ymin)
-                combined_bbox[3] = max(combined_bbox[3], ymax)
+            file_boxes.append(GeometryStats(list(xy), []))
+            all_geographic = all_geographic and is_geographic(geo_info.get("crs"))
 
         # Check schema consistency
         from geoparquet_io.core.duckdb_metadata import get_usable_columns
@@ -1374,17 +1306,9 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
             }
         )
 
-    if combined_bbox is not None:
-        if all_geographic:
-            # xmin > xmax in any file means an antimeridian-crossing extent, which
-            # min/max would turn into its complement (RFC 7946, 5.2).
-            combined_bbox[0], combined_bbox[2] = merge_longitude_ranges(x_ranges)
-        else:
-            # merge_longitude_ranges splits a wrapping range at +/-180, which is
-            # meaningless in projected units: for a non-geographic CRS the spec
-            # gives the bbox as plain minima then maxima, so union them plainly.
-            combined_bbox[0] = min(r[0] for r in x_ranges)
-            combined_bbox[2] = max(r[1] for r in x_ranges)
+    # The one fold: in geographic data xmin > xmax is an antimeridian wrap,
+    # merged on the circle (RFC 7946, 5.2); projected data unions plainly.
+    combined_bbox = merged_geometry_stats(file_boxes, geographic=all_geographic).bbox
 
     return {
         "file_count": len(per_file_info),
@@ -1392,6 +1316,9 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
         "total_size_bytes": total_size_bytes if total_size_bytes > 0 else None,
         "total_size_human": format_size(total_size_bytes) if total_size_bytes > 0 else "N/A",
         "combined_bbox": combined_bbox,
+        # Whether combined_bbox's xmin > xmax may be read as the wrap: every
+        # file declared a geographic CRS (the merge above made the same call).
+        "combined_bbox_geographic": all_geographic,
         "schema_consistent": schema_consistent,
         "compressions": sorted(compressions) if compressions else [],
         "geoparquet_versions": sorted(geoparquet_versions) if geoparquet_versions else [],
@@ -1399,14 +1326,15 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
     }
 
 
-def _combined_bbox_wrap_note(bbox: list) -> str:
+def _combined_bbox_wrap_note(bbox: list, geographic: bool | None = None) -> str:
     """Trailing note for a combined bbox whose X range wraps the antimeridian.
 
     ``extract_partition_summary`` can now emit ``xmin > xmax`` (#886). Printed
     bare, that is indistinguishable from corrupt metadata, so every path that
     shows the numbers to a person says how they are meant to be read.
     """
-    return " (antimeridian-crossing, RFC 7946 5.2)" if bbox[0] > bbox[2] else ""
+    wraps = BBox(*bbox[:4]).crosses_antimeridian(geographic)
+    return " (antimeridian-crossing, RFC 7946 5.2)" if wraps else ""
 
 
 def format_partition_terminal_output(
@@ -1436,10 +1364,11 @@ def format_partition_terminal_output(
     # Combined bbox
     if partition_summary["combined_bbox"]:
         bbox = partition_summary["combined_bbox"]
+        note = _combined_bbox_wrap_note(bbox, partition_summary.get("combined_bbox_geographic"))
         console.print(
             f"Combined bounds: [cyan][{bbox[0]:.6f}, {bbox[1]:.6f}, "
             f"{bbox[2]:.6f}, {bbox[3]:.6f}][/cyan]"
-            f"[dim]{_combined_bbox_wrap_note(bbox)}[/dim]"
+            f"[dim]{note}[/dim]"
         )
 
     console.print()
@@ -1578,9 +1507,10 @@ def format_partition_markdown_output(
 
     if partition_summary["combined_bbox"]:
         bbox = partition_summary["combined_bbox"]
+        note = _combined_bbox_wrap_note(bbox, partition_summary.get("combined_bbox_geographic"))
         lines.append(
             f"- **Combined bounds:** [{bbox[0]:.6f}, {bbox[1]:.6f}, "
-            f"{bbox[2]:.6f}, {bbox[3]:.6f}]{_combined_bbox_wrap_note(bbox)}"
+            f"{bbox[2]:.6f}, {bbox[3]:.6f}]{note}"
         )
 
     lines.append("")
@@ -1687,7 +1617,7 @@ def format_markdown_output(
 
     if geo_info["has_geo_metadata"]:
         if geo_info.get("version"):
-            lines.append(f"- **GeoParquet Version:** {geo_info['version']}")
+            lines.append(f"- **GeoParquet Version:** {geo_info.get('version')}")
 
         crs_display = _format_crs_for_display(geo_info["crs"])
         lines.append(f"- **CRS:** {crs_display}")

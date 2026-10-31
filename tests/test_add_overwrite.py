@@ -47,6 +47,12 @@ class TestAddCommandsOverwrite:
 
         # Should succeed with --overwrite
         assert result.exit_code == 0, f"Expected success with --overwrite, got: {result.output}"
+        import pyarrow.parquet as pq
+
+        assert (
+            pq.ParquetFile(output_file).metadata.num_rows
+            == pq.ParquetFile(TEST_PARQUET).metadata.num_rows
+        )
 
     def test_add_bbox_fails_without_overwrite(self, tmp_path):
         """Test that add bbox fails by default if output exists."""
@@ -72,6 +78,12 @@ class TestAddCommandsOverwrite:
 
         # Should succeed with --overwrite
         assert result.exit_code == 0, f"Expected success with --overwrite, got: {result.output}"
+        import pyarrow.parquet as pq
+
+        assert (
+            pq.ParquetFile(output_file).metadata.num_rows
+            == pq.ParquetFile(TEST_PARQUET).metadata.num_rows
+        )
 
     def test_add_h3_fails_without_overwrite(self, tmp_path):
         """Test that add h3 fails by default if output exists."""
@@ -97,6 +109,12 @@ class TestAddCommandsOverwrite:
 
         # Should succeed with --overwrite
         assert result.exit_code == 0, f"Expected success with --overwrite, got: {result.output}"
+        import pyarrow.parquet as pq
+
+        assert (
+            pq.ParquetFile(output_file).metadata.num_rows
+            == pq.ParquetFile(TEST_PARQUET).metadata.num_rows
+        )
 
     def test_add_kdtree_fails_without_overwrite(self, tmp_path):
         """Test that add kdtree fails by default if output exists."""
@@ -122,6 +140,12 @@ class TestAddCommandsOverwrite:
 
         # Should succeed with --overwrite
         assert result.exit_code == 0, f"Expected success with --overwrite, got: {result.output}"
+        import pyarrow.parquet as pq
+
+        assert (
+            pq.ParquetFile(output_file).metadata.num_rows
+            == pq.ParquetFile(TEST_PARQUET).metadata.num_rows
+        )
 
     def test_add_quadkey_fails_without_overwrite(self, tmp_path):
         """Test that add quadkey fails by default if output exists."""
@@ -147,3 +171,9 @@ class TestAddCommandsOverwrite:
 
         # Should succeed with --overwrite
         assert result.exit_code == 0, f"Expected success with --overwrite, got: {result.output}"
+        import pyarrow.parquet as pq
+
+        assert (
+            pq.ParquetFile(output_file).metadata.num_rows
+            == pq.ParquetFile(TEST_PARQUET).metadata.num_rows
+        )

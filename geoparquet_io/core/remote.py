@@ -6,20 +6,108 @@ in cloud object storage (S3, GCS, Azure) and HTTP/HTTPS endpoints.
 """
 
 import os
-import shutil
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
 from geoparquet_io.core.exceptions import (
+    FailureKind,
     InvalidParameterError,
+    classify_failure,
+    fatal_status_message,
     sanitize_url_for_logging,
 )
-from geoparquet_io.core.logging_config import debug, info, progress, success, warn
+from geoparquet_io.core.logging_config import debug, info, progress, success
+from geoparquet_io.core.sizing import bytes_to_mb
 
-# Re-export with underscore prefix for backward compatibility
-# TODO: Migrate all call sites to sanitize_url_for_logging and remove this alias
-_sanitize_url_for_logging = sanitize_url_for_logging
+#: Every URL scheme gpio reads or writes, and the store family it belongs to.
+#: The one scheme table (#1367): :func:`is_remote_url` and every family test
+#: below read it, and nothing outside this module spells a scheme out.
+#: Matching is case-sensitive, as DuckDB's own is.
+REMOTE_SCHEMES = {
+    "http": "http",
+    "https": "http",
+    "s3": "s3",
+    "s3a": "s3",
+    "gs": "gcs",
+    "gcs": "gcs",
+    "az": "azure",
+    "azure": "azure",
+    "abfs": "azure",
+    "abfss": "azure",
+}
+
+
+def url_scheme(path) -> str | None:
+    """The scheme of a remote URL as written (``"s3a"``, ``"https"``), else None.
+
+    None for a local path, ``file://``, an unknown scheme and anything that is
+    not a string.
+    """
+    if not isinstance(path, str):
+        return None
+    scheme, separator, _ = path.partition("://")
+    return scheme if separator and scheme in REMOTE_SCHEMES else None
+
+
+def remote_family(path) -> str | None:
+    """The store family of a remote URL: ``http``, ``s3``, ``gcs`` or ``azure``."""
+    scheme = url_scheme(path)
+    return REMOTE_SCHEMES[scheme] if scheme else None
+
+
+#: The one spelling gpio's object-store code (upload, copy_file) addresses each
+#: family by: ``s3a://`` is ``s3://`` and ``gcs://`` is ``gs://`` everywhere.
+#: Azure is addressed only as ``az://<account>/<container>/<path>`` (#864); the
+#: ``azure://`` and ``abfs[s]://`` spellings put the account and container
+#: elsewhere and are refused by name, never respelled.
+STORE_SCHEME_FOR_FAMILY = {"s3": "s3", "gcs": "gs", "azure": "az"}
+
+
+def is_http_url(path) -> bool:
+    """Whether *path* is an ``http://`` or ``https://`` URL."""
+    return remote_family(path) == "http"
+
+
+def is_account_first_azure_url(path) -> bool:
+    """Whether *path* is an Azure URL in the one form gpio parses, ``az://``."""
+    return is_azure_url(path) and url_scheme(path) == STORE_SCHEME_FOR_FAMILY["azure"]
+
+
+def canonical_store_url(url: str) -> str:
+    """*url* under its family's store spelling: ``s3a://b/k`` -> ``s3://b/k``,
+    ``gcs://b/k`` -> ``gs://b/k``. Azure, HTTP(S) and local paths come back as
+    given."""
+    family = remote_family(url)
+    if family is None or family == "azure":
+        return url
+    store_scheme = STORE_SCHEME_FOR_FAMILY.get(family)
+    if store_scheme is None:
+        return url
+    return f"{store_scheme}://{url.partition('://')[2]}"
+
+
+@contextmanager
+def open_url(path, mode: str = "rb"):
+    """Open a local path or a remote URL as a file object (fsspec underneath).
+
+    The one place gpio hands a URL to fsspec, so a filesystem picked by URL
+    prefix cannot grow up beside the scheme table (#1367 T2e).
+    """
+    import fsspec
+
+    with fsspec.open(path, mode) as handle:
+        yield handle
+
+
+def has_http_scheme(url: str) -> bool:
+    """Whether *url* parses with an ``http``/``https`` scheme, in any case.
+
+    For a service endpoint (CARTO's SQL API) that must be handed to an HTTP
+    client and nothing else: an empty, ``file://`` or object-store scheme fails.
+    """
+    from urllib.parse import urlparse
+
+    return REMOTE_SCHEMES.get(urlparse(url).scheme) == "http"
 
 
 def is_remote_url(path):
@@ -38,21 +126,7 @@ def is_remote_url(path):
     Returns:
         bool: True if path is a remote URL, False otherwise
     """
-    if path is None:
-        return False
-    remote_schemes = [
-        "http://",
-        "https://",
-        "s3://",
-        "s3a://",
-        "gs://",
-        "gcs://",
-        "az://",
-        "azure://",
-        "abfs://",
-        "abfss://",
-    ]
-    return any(path.startswith(scheme) for scheme in remote_schemes)
+    return url_scheme(path) is not None
 
 
 def is_s3_url(path):
@@ -65,7 +139,7 @@ def is_s3_url(path):
     Returns:
         bool: True if path is S3
     """
-    return isinstance(path, str) and path.startswith(("s3://", "s3a://"))
+    return remote_family(path) == "s3"
 
 
 def is_azure_url(path):
@@ -78,7 +152,7 @@ def is_azure_url(path):
     Returns:
         bool: True if path is Azure
     """
-    return isinstance(path, str) and path.startswith(("az://", "azure://", "abfs://", "abfss://"))
+    return remote_family(path) == "azure"
 
 
 def is_gcs_url(path):
@@ -91,7 +165,7 @@ def is_gcs_url(path):
     Returns:
         bool: True if path is GCS
     """
-    return isinstance(path, str) and path.startswith(("gs://", "gcs://"))
+    return remote_family(path) == "gcs"
 
 
 def needs_httpfs(path):
@@ -106,17 +180,17 @@ def needs_httpfs(path):
     Returns:
         bool: True if httpfs extension is needed
     """
-    httpfs_schemes = [
-        "s3://",
-        "s3a://",
-        "gs://",
-        "gcs://",
-        "az://",
-        "azure://",
-        "abfs://",
-        "abfss://",
-    ]
-    return any(path.startswith(scheme) for scheme in httpfs_schemes)
+    return remote_family(path) not in (None, "http")
+
+
+def protocol_label(path, default: str = "HTTP") -> str:
+    """The upper-cased scheme a message names a URL by (``S3``), else *default*."""
+    return path.split("://")[0].upper() if "://" in path else default
+
+
+def display_path(path):
+    """*path* as a message may show it: a remote URL with its secrets stripped."""
+    return sanitize_url_for_logging(path) if is_remote_url(path) else path
 
 
 def resolve_s3_config(
@@ -184,7 +258,7 @@ def validate_profile_for_urls(profile, *urls):
 
     for url in urls:
         if url and is_remote_url(url) and not is_s3_url(url):
-            protocol = url.split("://")[0].upper() if "://" in url else "unknown"
+            protocol = protocol_label(url, "unknown")
             raise InvalidParameterError(
                 "profile",
                 f"only valid for S3 URLs, but got {protocol} URL: {sanitize_url_for_logging(url)}. "
@@ -203,54 +277,77 @@ def show_remote_read_message(file_path, verbose=False):
     if not is_remote_url(file_path):
         return
 
-    protocol = file_path.split("://")[0].upper() if "://" in file_path else "HTTP"
+    protocol = protocol_label(file_path)
     if verbose:
         info(f"Reading from {protocol}: {sanitize_url_for_logging(file_path)}")
     else:
         info(f"Reading from {protocol} (network operations may take time)...")
 
 
-def get_remote_error_hint(error_msg, file_path=""):
-    """
-    Generate helpful error messages for remote file access failures.
+#: The remedy for a 401/403, per object store: a fact about the store, while *which*
+#: store a path is on is `is_s3_url` / `is_azure_url` / `is_gcs_url`'s decision.
+_S3_CREDENTIALS = (
+    "S3: check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or configure ~/.aws/credentials."
+)
+_AZURE_CREDENTIALS = (
+    "Azure: check AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_ACCOUNT_KEY, "
+    "or set AZURE_STORAGE_SAS_TOKEN for SAS token auth."
+)
+_GCS_CREDENTIALS = "GCS: check GOOGLE_APPLICATION_CREDENTIALS points to service account JSON."
+
+#: The guidance for the failures that are not an HTTP status, keyed by the kind
+#: ``classify_failure`` reports -- the same classification everything else uses.
+_REMOTE_HINTS = {
+    FailureKind.TIMEOUT: (
+        "Connection timed out:\n  - Check network connectivity\n"
+        "  - File may be very large - try a smaller file first\n"
+        "  - Remote server may be slow or overloaded"
+    ),
+    FailureKind.UNREACHABLE: (
+        "Cannot connect to remote server:\n  - Check network connectivity\n"
+        "  - Verify the hostname/URL is correct\n  - Server may be down or unreachable"
+    ),
+}
+_GENERIC_REMOTE_HINT = (
+    "Remote file access failed:\n  - Check network connectivity\n"
+    "  - Verify file URL and access permissions"
+)
+
+
+def _store_credentials(file_path: str) -> str:
+    if is_s3_url(file_path):
+        return _S3_CREDENTIALS
+    if is_azure_url(file_path):
+        return _AZURE_CREDENTIALS
+    if is_gcs_url(file_path):
+        return _GCS_CREDENTIALS
+    return "The file may be private or require authentication."
+
+
+def get_remote_error_hint(error: BaseException, file_path: str = "") -> str:
+    """Guidance for a failed remote read, from the one failure classification.
 
     Args:
-        error_msg: Original error message from DuckDB or other library
+        error: The exception DuckDB (or another library) raised.
         file_path: The remote file path/URL that failed
 
     Returns:
-        str: User-friendly error message with troubleshooting hints
+        str: User-friendly message with troubleshooting hints. A 401/403/404 uses
+        the shared status sentence (:func:`~geoparquet_io.core.exceptions.fatal_status_message`)
+        with the object store's own credential remedy.
     """
-    # Simple pattern matching - check error type and return appropriate hint
-    error_lower = error_msg.lower()
-    path_lower = file_path.lower()
-
-    # Check for 403/auth errors
-    auth_error = "403" in error_msg or "forbidden" in error_lower or "access denied" in error_lower
-    if auth_error:
-        if "s3://" in path_lower:
-            return "Authentication required or access denied:\n  - S3: Check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables\n  - Or configure ~/.aws/credentials file"
-        if "az://" in path_lower or "azure" in path_lower or "blob.core" in path_lower:
-            return "Authentication required or access denied:\n  - Azure: Check AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_ACCOUNT_KEY\n  - Or set AZURE_STORAGE_SAS_TOKEN for SAS token auth"
-        if "gs://" in path_lower or "gcs://" in path_lower:
-            return "Authentication required or access denied:\n  - GCS: Check GOOGLE_APPLICATION_CREDENTIALS points to service account JSON"
-        return "Authentication required or access denied:\n  - File may be private or require authentication"
-
-    # Check for 404 errors
-    if "404" in error_msg or "not found" in error_lower or "does not exist" in error_lower:
-        base = "File not found at remote location:\n  - Verify the URL is correct\n  - Check the file exists at the specified path"
-        return f"{base}\n  - URL: {sanitize_url_for_logging(file_path)}" if file_path else base
-
-    # Check for timeout
-    if "timeout" in error_lower or "timed out" in error_lower:
-        return "Connection timed out:\n  - Check network connectivity\n  - File may be very large - try a smaller file first\n  - Remote server may be slow or overloaded"
-
-    # Check for connection issues
-    if "unable to connect" in error_lower or "connection" in error_lower:
-        return "Cannot connect to remote server:\n  - Check network connectivity\n  - Verify the hostname/URL is correct\n  - Server may be down or unreachable"
-
-    # Generic
-    return "Remote file access failed:\n  - Check network connectivity\n  - Verify file URL and access permissions"
+    verdict = classify_failure(error)
+    if verdict.kind is FailureKind.HTTP_STATUS and verdict.status is not None:
+        message = fatal_status_message(
+            verdict.status,
+            subject="the remote file",
+            credentials=_store_credentials(file_path),
+        )
+        if message is not None and verdict.status == 404 and file_path:
+            return f"{message}\n  - URL: {sanitize_url_for_logging(file_path)}"
+        if message is not None:
+            return message
+    return _REMOTE_HINTS.get(verdict.kind, _GENERIC_REMOTE_HINT)
 
 
 def upload_if_remote(local_path, remote_path, profile=None, is_directory=False, verbose=False):
@@ -283,7 +380,7 @@ def upload_if_remote(local_path, remote_path, profile=None, is_directory=False, 
         else:
             total_size = os.path.getsize(local_path)
 
-        size_mb = total_size / (1024 * 1024)
+        size_mb = bytes_to_mb(total_size)
         progress(f"Uploading {size_mb:.1f} MB to {sanitize_url_for_logging(remote_path)}...")
 
     pattern = "*.parquet" if is_directory else None
@@ -326,35 +423,14 @@ def remote_write_context(output_path, is_directory=False, verbose=False):
             # Cleanup and upload handled automatically
     """
     is_remote = is_remote_url(output_path)
+    if not is_remote:
+        yield output_path, False
+        return
+    from geoparquet_io.core.file_utils import scratch_dir, scratch_file
 
-    if is_remote:
-        if is_directory:
-            temp_path = tempfile.mkdtemp(prefix="gpio_")
-        else:
-            temp_fd, temp_path = tempfile.mkstemp(suffix=".parquet")
-            os.close(temp_fd)
-
+    context = scratch_dir() if is_directory else scratch_file()
+    with context as temp_path:
         if verbose:
             debug(f"Remote output detected: {output_path}")
-            debug(f"Writing to temporary {'directory' if is_directory else 'file'}: {temp_path}")
-    else:
-        temp_path = output_path
-
-    try:
-        yield temp_path, is_remote
-    finally:
-        if is_remote and os.path.exists(temp_path):
-            try:
-                if is_directory:
-                    shutil.rmtree(temp_path)
-                else:
-                    os.unlink(temp_path)
-                if verbose:
-                    debug(
-                        f"Cleaned up temporary {'directory' if is_directory else 'file'}: {temp_path}"
-                    )
-            except Exception as e:
-                if verbose:
-                    warn(
-                        f"Could not clean up temp {'directory' if is_directory else 'file'} {temp_path}: {e}"
-                    )
+            debug(f"Writing to temporary path: {temp_path}")
+        yield temp_path, True

@@ -204,54 +204,63 @@ repos:
         pass_filenames: false
         types: [python]
 
-      # Forbid hand-rolling paginated-schema reconciliation in extractors.
-      # WFS and ArcGIS each grew separate, separately-buggy schema-alignment code
-      # (18 + 8 fix commits). The canonical helpers live in core/arrow_types.py:
-      # _compute_unified_schema and _cast_table_to_schema (they were in
-      # core/common.py until #1007 moved them out). New extractors must reuse them.
-      - id: forbid-bespoke-schema-reconciliation
-        name: forbid-bespoke-schema-reconciliation
-        description: Use shared schema helpers from core/arrow_types.py, not hand-rolled ones
-        entry: bash
-        args:
-          - -c
-          - |
-            # Anchored to the path field, for the reason above and for one
-            # more: as a substring, "common.py" also matched
-            # core/partition/common.py, core/process/aggregate/common.py and
-            # core/process/aggregate/grid_common.py, so three modules nobody
-            # meant to exempt were outside the guard (#970). The exempt module
-            # is the helpers' home, which is arrow_types.py since #1007.
-            if grep -rnE 'def _(align|unify|reconcile)[a-zA-Z_]*schema' geoparquet_io/core/ --include="*.py" | grep -v '^geoparquet_io/core/arrow_types.py:'; then
-              echo "ERROR: Reuse _compute_unified_schema / _cast_table_to_schema from core/arrow_types.py"
-              echo "       instead of hand-rolling schema reconciliation. See the WFS/ArcGIS history"
-              echo "       and docs/contributing.md (External extractors)."
-              exit 1
-            fi
+      # Owner-only definitions (guard G2 of #1367). A def whose name says which
+      # concept it answers (is_geographic*, resolve_*version*, parse_size*,
+      # atomic_write, ...) may be defined only in that concept's owner module;
+      # the name-to-owner table and today's copies are in
+      # scripts/owner_exemptions.toml ([G2.owners], [[G2.exemptions]]).
+      #
+      # It grew out of this hook's original rule, which it keeps as three rows
+      # of the table: no def _(align|unify|reconcile)*schema outside
+      # core/arrow_types.py. WFS and ArcGIS each grew separate, separately-buggy
+      # schema-alignment code (18 + 8 fix commits); the canonical helpers are
+      # _compute_unified_schema and _cast_table_to_schema (#1007). It was the
+      # forbid-bespoke-schema-reconciliation hook until #1367.
+      #
+      # An AST walk, not a grep: a comment or a string naming a function is not
+      # a definition of it (the #970 comment bypass cannot happen), and an
+      # exemption is a (path, name) pair, never a path substring (#970's
+      # common.py matching four modules). always_run, because editing the
+      # exemptions file alone must re-run it.
+      - id: owner-only-defs
+        name: owner-only-defs
+        description: Owner-only definitions (G2); table in scripts/owner_exemptions.toml
+        entry: uv run python scripts/check_owner_defs.py
         language: system
         pass_filenames: false
-        types: [python]
+        always_run: true
 
-      # mutmut's stats-phase trampoline resolves the relative source_paths
-      # (geoparquet_io/) against the process CWD on EVERY instrumented call, so
-      # any test that changes the working directory crashes stats collection
-      # with "FileNotFoundError: 'geoparquet_io'" and takes the nightly mutation
-      # job down (silently, until #552 hardened the exit-code handling). Keep the
+      # Guard G3 of #1367: a new near-duplicate function pair (>= 8 statements,
+      # >= 0.90 similar after renaming identifiers) fails; the pairs that exist
+      # are in scripts/duplicate_pairs_baseline.txt, which only falls.
+      - id: check-duplicates
+        name: check-duplicates
+        description: Near-duplicate functions (G3) against scripts/duplicate_pairs_baseline.txt
+        entry: uv run python scripts/check_duplicates.py
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      # The process CWD is shared state: pytest-xdist runs many tests in one
+      # worker process, so a test that changes the working directory (and
+      # fails, or forgets to restore it) moves every later test on that worker
+      # with it, and relative paths in those tests resolve somewhere else. The
+      # result is an order-dependent failure that only shows under -n. Keep the
       # suite CWD-stable: use the tmp_path fixture + absolute paths, or
       # os.path.relpath for relative-path coverage. Justify a rare, deliberate
       # exception with a trailing "# allow-cwd-change" comment.
       - id: no-cwd-change-in-tests
         name: no-cwd-change-in-tests
-        description: Tests must not change the process CWD (breaks mutmut stats phase)
+        description: Tests must not change the process CWD (shared by every test on an xdist worker)
         entry: bash
         args:
           - -c
           - |
             if grep -rnE '(isolated_filesystem\(|os\.chdir\(|monkeypatch\.chdir\()' tests/ --include="*.py" | grep -v 'allow-cwd-change'; then
               echo "ERROR: Tests must not change the process CWD."
-              echo "       isolated_filesystem() / os.chdir() / monkeypatch.chdir() break"
-              echo "       mutmut's stats-phase trampoline (it resolves the relative"
-              echo "       source_paths against CWD) and take the nightly mutation job down."
+              echo "       isolated_filesystem() / os.chdir() / monkeypatch.chdir() move the"
+              echo "       CWD for every later test on the same xdist worker, so relative"
+              echo "       paths there resolve elsewhere and fail in an order-dependent way."
               echo "       Use the tmp_path fixture with absolute paths, or os.path.relpath"
               echo "       for relative-path coverage. Justify a rare exception with a"
               echo "       trailing '# allow-cwd-change' comment."
@@ -342,7 +351,24 @@ repos:
         entry: uv run vulture
         language: system
         pass_filenames: false
-        stages: [pre-push]
+        stages: [pre-commit, pre-push]
+
+      - id: pylint-duplicates
+        name: pylint-duplicates
+        description: pylint R0801 (G3), held to the pairs pinned in owner_exemptions.toml [G3.pylint]
+        entry: uv run python scripts/check_pylint_duplicates.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-push]
+
+      - id: vulture-tests
+        name: vulture (tests)
+        description: Find unused code in tests/ (a test calling a package name is not its use)
+        entry: uv run vulture tests scripts/vulture_whitelist_tests.py --min-confidence 60
+        language: system
+        pass_filenames: false
+        stages: [pre-commit, pre-push]
 
       - id: xenon
         name: xenon
@@ -356,14 +382,6 @@ repos:
         name: import-linter
         description: Enforce architecture (core must not import click, api must not import cli)
         entry: uv run lint-imports
-        language: system
-        pass_filenames: false
-        stages: [pre-push]
-
-      - id: menard-check
-        name: menard-check
-        description: Check if documentation is stale relative to code changes
-        entry: uv run menard check
         language: system
         pass_filenames: false
         stages: [pre-push]

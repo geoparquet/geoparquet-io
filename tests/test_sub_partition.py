@@ -183,10 +183,8 @@ class TestSubPartitionExecution:
         def mock_partition_fail(*args, **kwargs):
             raise ValueError("Simulated partition failure")
 
-        # Patch the h3 partition function to fail - patch where it's imported
-        monkeypatch.setattr(
-            "geoparquet_io.core.partition.by_h3.partition_by_h3", mock_partition_fail
-        )
+        # Patch the shared partition driver where directory mode calls it.
+        monkeypatch.setattr("geoparquet_io.core.sub_partition.partition_index", mock_partition_fail)
 
         result = sub_partition_directory(
             directory=temp_partition_dir,
@@ -430,10 +428,10 @@ class TestQuadkeyDirectoryResolutions:
         _test_file, threshold = self._seed(temp_partition_dir)
         calls = []
 
-        def _record(**kwargs):
+        def _record(spec, **kwargs):
             calls.append(kwargs)
 
-        monkeypatch.setattr("geoparquet_io.core.partition.by_quadkey.partition_by_quadkey", _record)
+        monkeypatch.setattr("geoparquet_io.core.sub_partition.partition_index", _record)
 
         core_sub_partition.sub_partition_directory(
             directory=temp_partition_dir,
@@ -469,11 +467,11 @@ class TestSubPartitionFailuresAreReported:
         said success -- so a run that partitioned nothing looked like a clean one."""
         size = self._seed(temp_partition_dir)
 
-        def _boom(**kwargs):
+        def _boom(spec, **kwargs):
             raise RuntimeError("simulated partition failure")
 
-        # sub_partition_directory imports it inside the function, so patch the source.
-        monkeypatch.setattr("geoparquet_io.core.partition.by_quadkey.partition_by_quadkey", _boom)
+        # Patch the shared partition driver at the directory call site.
+        monkeypatch.setattr("geoparquet_io.core.sub_partition.partition_index", _boom)
 
         result = cli_runner.invoke(
             partition,
@@ -1053,7 +1051,7 @@ class TestApiDirectorySubPartition:
         from pathlib import Path
 
         from geoparquet_io.api import ops
-        from geoparquet_io.core.exceptions import PartitionError
+        from geoparquet_io.core.exceptions import InvalidParameterError, PartitionError
 
         large, small = self._seed(temp_partition_dir)
         originals = {path: Path(path).read_bytes() for path in (large, small)}
@@ -1076,7 +1074,7 @@ class TestApiDirectorySubPartition:
             result = cli_runner.invoke(partition, args)
             assert result.exit_code != 0
         else:
-            with pytest.raises(PartitionError):
+            with pytest.raises(InvalidParameterError if auto else PartitionError):
                 ops.sub_partition_by_quadkey(
                     temp_partition_dir,
                     min_size=threshold,
@@ -1391,4 +1389,42 @@ class TestSubPartitionFrontDoorParity:
             getattr(ops, function)(temp_partition_dir, min_size=threshold, **api_kwargs)
             api_call = fake.call_args.kwargs
 
-        assert api_call == cli_call
+        # The two doors may spell a defaulted argument or leave it out; compare
+        # what core receives once its defaults are applied.
+        import inspect
+
+        signature = inspect.signature(core_sub_partition.sub_partition_directory)
+
+        def received(call):
+            bound = signature.bind(**call)
+            bound.apply_defaults()
+            return bound.arguments
+
+        assert received(api_call) == received(cli_call)
+
+
+@pytest.mark.parametrize("option", ["resolution", "partition_resolution"])
+def test_quadkey_auto_rejects_explicit_resolution_at_both_front_doors(tmp_path, option):
+    """Reject contradictory arguments before planning or touching directory inputs."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.api import ops
+    from geoparquet_io.core.exceptions import InvalidParameterError
+
+    with pytest.raises(InvalidParameterError, match="cannot specify"):
+        ops.sub_partition_by_quadkey(tmp_path, min_size="1B", auto=True, **{option: 6})
+    result = CliRunner().invoke(
+        partition,
+        [
+            "quadkey",
+            str(tmp_path),
+            "--min-size",
+            "1B",
+            "--auto",
+            "--" + option.replace("_", "-"),
+            "6",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "cannot specify" in result.output
+    assert list(tmp_path.iterdir()) == []

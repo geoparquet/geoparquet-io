@@ -35,14 +35,12 @@ from geoparquet_io.core.convert import (
     _detect_spatial_geometry,
     _spatial_source_aliases,
     _st_read_layer_meta,
-    _suffixed_to_unique,
     convert_to_geoparquet,
 )
-from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
-from geoparquet_io.core.geo_metadata import parse_geo_metadata
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
+from geoparquet_io.core.geo_metadata import read_raw_geo
 from geoparquet_io.core.geometry_detection import (
-    detect_parquet_geometry_column,
-    find_primary_geometry_column,
+    primary_geometry_column,
 )
 
 
@@ -266,7 +264,7 @@ class TestConvertCore:
         assert os.path.exists(temp_output_file)
         compression_info = get_compression_info(temp_output_file)
         # Check that geometry column has ZSTD compression
-        geom_col = find_primary_geometry_column(temp_output_file)
+        geom_col = primary_geometry_column(temp_output_file)
         geom_compression = compression_info.get(geom_col)
         assert geom_compression == "ZSTD", (
             f"Expected ZSTD for '{geom_col}', got {geom_compression}. Keys: {list(compression_info.keys())}"
@@ -310,7 +308,7 @@ class TestConvertBestPractices:
     def test_zstd_compression_applied(self, best_practices_file):
         """Verify ZSTD compression is applied by default."""
         compression_info = get_compression_info(best_practices_file)
-        geom_col = find_primary_geometry_column(best_practices_file)
+        geom_col = primary_geometry_column(best_practices_file)
         geom_compression = compression_info.get(geom_col)
         assert geom_compression == "ZSTD", (
             f"Expected ZSTD compression on geometry column '{geom_col}'"
@@ -331,7 +329,7 @@ class TestConvertBestPractices:
     def test_geoparquet_version(self, best_practices_file):
         """Verify GeoParquet 1.1.0+ metadata is created."""
         metadata, _ = get_parquet_metadata(best_practices_file, verbose=False)
-        geo_meta = parse_geo_metadata(metadata, verbose=False)
+        geo_meta = read_raw_geo(metadata).value
 
         assert geo_meta is not None, "Expected GeoParquet metadata to exist"
         version = geo_meta.get("version")
@@ -368,11 +366,19 @@ class TestConvertBestPractices:
         con.execute("LOAD spatial;")
 
         # Get actual geometry column name (DuckDB uses "geom" for shapefile conversion)
-        geom_col = find_primary_geometry_column(best_practices_file)
+        geom_col = primary_geometry_column(best_practices_file)
         result = fetch_one(
             con.execute(f"SELECT ST_AsText(\"{geom_col}\") FROM '{best_practices_file}' LIMIT 1")
         )
-        assert result is not None
+        from tests.conftest import TEST_DATA_DIR
+
+        source_wkts = {
+            row[0]
+            for row in con.execute(
+                f"SELECT ST_AsText(geom) FROM ST_Read({sql_path(str(TEST_DATA_DIR / 'buildings_test.shp'))})"
+            ).fetchall()
+        }
+        assert result[0] in source_wkts
         con.close()
 
     def test_attribute_columns_preserved(self, best_practices_file):
@@ -386,7 +392,7 @@ class TestConvertBestPractices:
         column_names = [row[0] for row in result]
 
         # Should have geometry (detected dynamically) and bbox at minimum
-        geom_col = find_primary_geometry_column(best_practices_file)
+        geom_col = primary_geometry_column(best_practices_file)
         assert geom_col in column_names, f"Expected geometry column '{geom_col}' in {column_names}"
         assert "bbox" in column_names
 
@@ -435,7 +441,7 @@ class TestConvertCLI:
         assert "validation" in result.output.lower()
         # --compression/--compression-level plumbing
         compression_info = get_compression_info(temp_output_file)
-        geom_col = find_primary_geometry_column(temp_output_file)
+        geom_col = primary_geometry_column(temp_output_file)
         assert compression_info.get(geom_col) == "ZSTD", f"Expected ZSTD for '{geom_col}'"
 
     def test_cli_invalid_input(self):
@@ -1235,7 +1241,7 @@ class TestConvertNoGeometry:
 
         # Verify no geo metadata
         metadata, _ = get_parquet_metadata(temp_output_file, verbose=False)
-        geo_meta = parse_geo_metadata(metadata, verbose=False)
+        geo_meta = read_raw_geo(metadata).value
         assert geo_meta is None, "Expected no GeoParquet metadata for plain file"
 
     def test_convert_csv_no_geometry(self, plain_csv_input, temp_output_file):
@@ -1261,7 +1267,7 @@ class TestConvertNoGeometry:
 
         # Verify no geo metadata
         metadata, _ = get_parquet_metadata(temp_output_file, verbose=False)
-        geo_meta = parse_geo_metadata(metadata, verbose=False)
+        geo_meta = read_raw_geo(metadata).value
         assert geo_meta is None
 
     def test_convert_no_geometry_cli_warns(self, plain_parquet_input, temp_output_file):
@@ -1304,7 +1310,7 @@ class TestConvertNoGeometry:
         convert_to_geoparquet(shapefile_input, temp_output_file)
 
         metadata, _ = get_parquet_metadata(temp_output_file, verbose=False)
-        geo_meta = parse_geo_metadata(metadata, verbose=False)
+        geo_meta = read_raw_geo(metadata).value
         assert geo_meta is not None, "Expected GeoParquet metadata for geo file"
 
     def test_build_plain_select_query_uses_correct_reader(self):
@@ -1388,7 +1394,7 @@ class TestCustomGeometryColumnName:
         assert os.path.exists(temp_output_file)
 
         metadata, _ = get_parquet_metadata(temp_output_file, verbose=False)
-        geo_meta = parse_geo_metadata(metadata, verbose=False)
+        geo_meta = read_raw_geo(metadata).value
         assert geo_meta is not None, "Expected GeoParquet metadata in output"
         # Convert preserves original geometry column name (not renamed to 'geometry')
         assert "my_custom_geom" in geo_meta.get("columns", {})
@@ -1404,7 +1410,7 @@ class TestCustomGeometryColumnName:
 
 
 class TestDetectParquetGeometryColumn:
-    """Test the shared detect_parquet_geometry_column function."""
+    """Test the shared primary_geometry_column function."""
 
     def _make_geoparquet(self, tmp_path, geom_col_name, include_metadata=True):
         """Helper to create a GeoParquet file with a given geometry column name."""
@@ -1442,13 +1448,13 @@ class TestDetectParquetGeometryColumn:
     def test_finds_custom_column_from_metadata(self, tmp_path):
         """Should find geometry column from GeoParquet metadata, not just hardcoded names."""
         path = self._make_geoparquet(tmp_path, "my_custom_geom")
-        result = detect_parquet_geometry_column(path)
+        result = primary_geometry_column(path)
         assert result == "my_custom_geom"
 
     def test_finds_standard_column_without_metadata(self, tmp_path):
         """Should fall back to name-based detection when no GeoParquet metadata exists."""
         path = self._make_geoparquet(tmp_path, "geometry", include_metadata=False)
-        result = detect_parquet_geometry_column(path)
+        result = primary_geometry_column(path)
         assert result == "geometry"
 
     def test_returns_none_for_plain_parquet(self, tmp_path):
@@ -1456,7 +1462,7 @@ class TestDetectParquetGeometryColumn:
         table = pa.table({"id": [1], "value": [42.0]})
         path = str(tmp_path / "plain.parquet")
         pq.write_table(table, path)
-        result = detect_parquet_geometry_column(path)
+        result = primary_geometry_column(path)
         assert result is None
 
     def test_metadata_takes_priority_over_column_names(self, tmp_path):
@@ -1485,7 +1491,7 @@ class TestDetectParquetGeometryColumn:
         path = str(tmp_path / "priority.parquet")
         pq.write_table(table, path)
 
-        result = detect_parquet_geometry_column(path)
+        result = primary_geometry_column(path)
         assert result == "the_real_geom"
 
 
@@ -1732,18 +1738,3 @@ class TestCollisionRescueGivesUp:
                 _detect_spatial_geometry(con, colliding_geojson_path, False, None, None)
         finally:
             con.close()
-
-
-class TestSuffixedToUnique:
-    """The naming rule on its own, without the cost of a conversion."""
-
-    def test_first_spelling_wins_and_later_ones_are_suffixed(self):
-        assert _suffixed_to_unique(["id", "Id", "ID"]) == ["id", "Id_1", "ID_2"]
-
-    def test_untouched_when_nothing_collides(self):
-        names = ["OGC_FID", "Id", "name", "geom"]
-        assert _suffixed_to_unique(names) == names
-
-    def test_suffix_that_would_itself_collide_is_skipped(self):
-        """``Id_1`` already taken means the rename has to keep counting."""
-        assert _suffixed_to_unique(["id", "Id_1", "Id"]) == ["id", "Id_1", "Id_2"]

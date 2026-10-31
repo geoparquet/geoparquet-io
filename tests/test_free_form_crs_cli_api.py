@@ -4,6 +4,14 @@ DuckDB ``ST_SetCRS`` writes any string into the native GEOMETRY type. The Table
 API reads such a string through the GeoArrow field, where pyproj turns it into
 PROJJSON. The CLI reads the same string from the Parquet schema. Both must land
 on the same coordinates, so a file that works in one works in the other.
+
+Every string is resolved by the one owner, ``crs_utils.transform_source_crs``
+(``test_the_owner_resolves_every_string``), and every string is read through
+the CLI and the Table API on ``convert reproject`` and compared
+(``test_convert_reproject_cli_matches_the_table_api``). The other transform
+paths read the native CRS through that same owner (the G1 ``crs`` arm in
+``tests/test_owner_guards.py`` fails a second reader), so each is run once, on
+the projected string (#1402).
 """
 
 from __future__ import annotations
@@ -77,13 +85,29 @@ def _cli_output(command, src: Path, tmp_path: Path, suffix: str = ".parquet") ->
     return out
 
 
-@pytest.mark.parametrize("command", COMMANDS.values(), ids=COMMANDS.keys())
+#: The one string every routing test runs: projected, so a path that skipped
+#: the transform would land the cells somewhere else entirely.
+ROUTING = ["utm31"]
+
+
 @pytest.mark.parametrize("name", FREE_FORM)
+def test_the_owner_resolves_every_string(name):
+    """The owner reads each string; none is refused and none reaches SQL raw."""
+    from geoparquet_io.core.crs_utils import transform_source_crs
+
+    crs, _points = FREE_FORM[name]
+    resolved = transform_source_crs(crs)
+    assert resolved != crs
+    assert transform_source_crs(resolved) == resolved
+
+
+@pytest.mark.parametrize("command", COMMANDS.values(), ids=COMMANDS.keys())
+@pytest.mark.parametrize("name", ROUTING)
 def test_every_transform_path_accepts_the_string(name, command, files, tmp_path):
     assert pq.read_table(str(_cli_output(command, files[name], tmp_path))).num_rows > 0
 
 
-@pytest.mark.parametrize("name", FREE_FORM)
+@pytest.mark.parametrize("name", ROUTING)
 def test_convert_geojson_accepts_the_string(name, files, tmp_path):
     _run("convert", "geojson", str(files[name]), str(tmp_path / "out.geojson"))
 
@@ -94,7 +118,7 @@ def _by_id(table, column: str) -> list:
     )
 
 
-@pytest.mark.parametrize("name", FREE_FORM)
+@pytest.mark.parametrize("name", ROUTING)
 def test_add_h3_cli_matches_the_table_api(name, files, tmp_path):
     cli_out = pq.read_table(str(_cli_output(COMMANDS["add-h3"], files[name], tmp_path)))
     api_out = gpio.read(str(files[name])).add_h3(resolution=7).to_arrow()

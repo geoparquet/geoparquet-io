@@ -115,7 +115,7 @@ class TestFileGDBCrsDetection:
         try:
             crs = detect_crs_from_spatial_file(filegdb_path + "/", con, verbose=False)
 
-            assert crs is not None, "CRS should be detected even with trailing slash"
+            assert crs["id"] == {"authority": "EPSG", "code": 4326}
         finally:
             con.close()
 

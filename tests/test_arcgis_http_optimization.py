@@ -17,7 +17,7 @@ class TestConnectionPooling:
         This is a performance optimization to avoid creating new TCP/TLS
         connections for every request.
         """
-        from geoparquet_io.core.arcgis import _make_request
+        from geoparquet_io.core.http_retry import make_request_with_retry as _make_request
         from geoparquet_io.core.http_retry import reset_http_client
 
         # Reset to ensure clean state
@@ -122,7 +122,7 @@ class TestGzipCompression:
         This allows the server to send gzip-compressed responses, which
         reduces bandwidth by 60-80% for typical GeoJSON responses.
         """
-        from geoparquet_io.core.arcgis import _make_request
+        from geoparquet_io.core.http_retry import make_request_with_retry as _make_request
 
         mock_client = MagicMock()
         mock_response = Mock()
@@ -163,7 +163,7 @@ class TestGzipCompression:
             ],
         }
 
-        with patch("geoparquet_io.core.arcgis._make_request") as mock_request:
+        with patch("geoparquet_io.core.arcgis.make_request_with_retry") as mock_request:
             mock_request.return_value = mock_response
 
             result = fetch_features_page(

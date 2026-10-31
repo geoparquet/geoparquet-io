@@ -4,7 +4,7 @@ Two halves of the same blind spot (#1000, #952) — the write path only really
 knew about the PRIMARY geometry column:
 
 * **#1000**: `add *` (and every caller that passes no ``geometry_info``) never
-  told ``build_geo_metadata`` a secondary existed, so a secondary NATIVE
+  told the strategy block builder (now ``compose_geo_block``) a secondary existed, so a secondary NATIVE
   geometry column was left out of ``geo.columns`` entirely — which GeoParquet
   2.0 requires for every geometry column in the file. The funnel now derives
   ``geometry_info`` from the ``input_file`` witness itself
@@ -50,13 +50,16 @@ def _geo(path) -> dict:
 def _scans(monkeypatch) -> Counter:
     """Count duckdb-kv's stats scans per column."""
     seen: Counter = Counter()
-    real = duckdb_kv.compute_geo_stats_via_sql
 
-    def counting(con, query, column, **kwargs):
-        seen[column] += 1
-        return real(con, query, column, **kwargs)
+    def counting(real):
+        def wrapped(source, column, **kwargs):
+            seen[column] += 1
+            return real(source, column, **kwargs)
 
-    monkeypatch.setattr(duckdb_kv, "compute_geo_stats_via_sql", counting)
+        return wrapped
+
+    for name in ("geometry_stats_of", "geometry_types_of"):
+        monkeypatch.setattr(duckdb_kv, name, counting(getattr(duckdb_kv, name)))
     return seen
 
 

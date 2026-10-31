@@ -271,7 +271,9 @@ def test_malformed_geo_block_keeps_known_native_edges(tmp_path, columns, caplog)
     source = tmp_path / "malformed.parquet"
     pq.write_table(table, source)
     assert collect_nonplanar_edges(str(source)) == {"geometry": "spherical"}
-    assert "keeping known non-planar declarations" in caplog.text
+    # The sanitized carried reader drops the malformed `columns` with its own
+    # warning (#1367), so the native type answers without a read failure.
+    assert "Ignoring malformed 'geo' metadata" in caplog.text
 
 
 def test_geo_metadata_read_failure_keeps_known_native_edges(monkeypatch, caplog):
@@ -286,6 +288,6 @@ def test_geo_metadata_read_failure_keeps_known_native_edges(monkeypatch, caplog)
     def unreadable_block(path):
         raise RuntimeError("unreadable block")
 
-    monkeypatch.setattr(write_funnels, "get_geo_metadata", unreadable_block)
+    monkeypatch.setattr(write_funnels, "sanitized_carried_geo_of_file", unreadable_block)
     assert write_funnels.collect_nonplanar_edges("fake.parquet") == {"geometry": "spherical"}
     assert "keeping known non-planar declarations" in caplog.text

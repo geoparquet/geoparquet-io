@@ -148,8 +148,8 @@ def test_convert_geojson_stdin_warns_once_on_an_explicit_null_crs(tmp_path, capl
         patch("geoparquet_io.core.streaming.read_arrow_stream", return_value=table),
         caplog.at_level("WARNING"),
     ):
-        _convert_from_stream(output_path=str(tmp_path / "a.geojson"))
-        _convert_from_stream(output_path=str(tmp_path / "b.geojson"))
+        _convert_from_stream(output_path=str(tmp_path / "a.geojson"), keep_crs=True)
+        _convert_from_stream(output_path=str(tmp_path / "b.geojson"), keep_crs=True)
     warned = [r for r in caplog.records if r.getMessage().startswith("Input has an explicit null")]
     assert len(warned) == 1
 
@@ -225,28 +225,69 @@ def test_convert_reproject_src_crs_works_around_an_unresolvable_crs(tmp_path):
 
 
 def test_stream_transform_reads_the_stream_crs(fixtures):
-    """A streamed input's CRS reaches a CRS-aware query builder through the resolver."""
+    """A streamed input's CRS reaches an input-aware query builder through the resolver."""
+    from geoparquet_io.core.stream_io import _build_transform_query
+
+    metadata = pq.read_schema(str(fixtures["geo-block"])).metadata
+    seen = []
+
+    def builder(source, con, crs, edges, metadata):
+        seen.append(crs)
+        return "SELECT 1"
+
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+
+    with get_duckdb_connection(load_spatial=True) as con:
+        con.register("src", pq.read_table(str(fixtures["geo-block"])))
+        query = _build_transform_query(builder, "src", con, "-", metadata, True, input_aware=True)
+    assert query == "SELECT 1"
+    assert seen[0].startswith("{")
+
+
+def test_an_input_aware_builder_gets_the_edges_and_the_metadata(tmp_path):
+    """The one contract: ``(source, con, source_crs, edges, metadata)``, the edges
+    read from the input file (#1293)."""
+    from geoparquet_io.core.stream_io import execute_transform
+
+    src = tmp_path / "spherical.parquet"
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "geometry_types": [], "edges": "spherical"}},
+    }
+    table = pa.table({"geometry": pa.array([shapely.to_wkb(shapely.Point(1, 2))], pa.binary())})
+    pq.write_table(table.replace_schema_metadata({b"geo": json.dumps(geo).encode()}), src)
+    seen = {}
+
+    def builder(source, con, source_crs, edges, metadata):
+        seen.update(crs=source_crs, edges=edges, geo=json.loads(metadata[b"geo"]))
+        return f"SELECT * FROM {source}"
+
+    execute_transform(
+        str(src), str(tmp_path / "out.parquet"), builder, dry_run=True, input_aware=True
+    )
+    assert seen["edges"] == {"geometry": "spherical"}
+    assert seen["crs"] is None
+    assert seen["geo"]["columns"]["geometry"]["edges"] == "spherical"
+
+
+def test_a_plain_builder_gets_the_source_and_connection_only(fixtures):
+    """No arity inspection: a builder that did not ask for the input gets none of it."""
     from geoparquet_io.core.stream_io import _build_transform_query
 
     metadata = pq.read_schema(str(fixtures["geo-block"])).metadata
     seen = []
     query = _build_transform_query(
-        lambda source, con, crs: seen.append(crs) or "SELECT 1", "src", None, "-", metadata, True
+        lambda source, con, *rest: seen.append(rest) or "SELECT 1", "src", None, "-", metadata, True
     )
     assert query == "SELECT 1"
-    assert seen[0].startswith("{")
-
-
-def test_a_builder_without_a_signature_gets_no_crs():
-    from geoparquet_io.core.stream_io import _wants_source_crs
-
-    assert _wants_source_crs(max) is False
+    assert seen == [()]
 
 
 def test_table_explicit_null_crs_is_not_read_from_the_field():
-    from geoparquet_io.core.crs_utils import extract_crs_from_table
+    from geoparquet_io.core.crs_utils import crs_of
 
-    assert extract_crs_from_table(_explicit_null_crs_table()) is None
+    assert crs_of(_explicit_null_crs_table()) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -352,7 +393,16 @@ def _pmtiles_bounds(path: Path) -> tuple[float, float, float, float]:
 @pytest.mark.parametrize("extra", [[], ["--where", "id >= 0"]], ids=["plain", "where"])
 def test_pmtiles_create_lands_in_tokyo(extra, fixtures, tmp_path):
     out = tmp_path / "out.pmtiles"
-    cmd = ["gpio", "pmtiles", "create", str(fixtures["geo-block"]), str(out), *extra]
+    cmd = [
+        "gpio",
+        "pmtiles",
+        "create",
+        str(fixtures["geo-block"]),
+        str(out),
+        "--max-zoom",
+        "14",
+        *extra,
+    ]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     assert proc.returncode == 0, proc.stderr
     min_lon, min_lat, max_lon, max_lat = _pmtiles_bounds(out)

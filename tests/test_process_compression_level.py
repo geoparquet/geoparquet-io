@@ -11,7 +11,8 @@ So the process group resolves an unset ZSTD level to 9, and every other
 command keeps 15.
 
 The second is that an unset level must reach pyarrow as a number at all.
-``_rewrite_writer_kwargs`` used to omit the key, which is not "the default" --
+A pyarrow writer's kwargs (``resolve_codec(...).pyarrow_kwargs()``, which the
+streaming simplify writer and the funnel's footer rewrite use) used to omit the key, which is not "the default" --
 it is pyarrow's own ZSTD default of 1, 14 levels below what the funnel writes
 from the same data. These tests fail if either default drifts, in either
 direction.
@@ -32,11 +33,9 @@ import pytest
 
 from geoparquet_io.core.compression import (
     PROCESS_ZSTD_LEVEL,
-    resolve_process_compression_level,
-    validate_compression_settings,
+    resolve_codec,
 )
-from geoparquet_io.core.derive_geo_from_file import _rewrite_writer_kwargs
-from geoparquet_io.core.parquet_writer import ParquetWriteSettings
+from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS, ParquetWriteSettings
 
 requires_coarsen = pytest.mark.skipif(
     find_spec("coarsen") is None, reason="requires the simplify extra (coarsen)"
@@ -88,11 +87,15 @@ def levels(monkeypatch):
     return seen
 
 
+def _process_level(codec, level):
+    return resolve_codec(codec, level, context="process").level
+
+
 class TestResolver:
-    """``resolve_process_compression_level`` -- the group's one decision."""
+    """``resolve_codec(..., context="process")`` -- the group's one decision."""
 
     def test_unset_zstd_becomes_the_process_level(self):
-        assert resolve_process_compression_level("ZSTD", None) == PROCESS_ZSTD_LEVEL
+        assert _process_level("ZSTD", None) == PROCESS_ZSTD_LEVEL
 
     def test_the_process_level_is_nine(self):
         # Pinned deliberately: the number is the measurement, and moving it is
@@ -101,30 +104,38 @@ class TestResolver:
 
     @pytest.mark.parametrize("level", [1, 3, 9, 15, 22])
     def test_an_explicit_level_is_never_touched(self, level):
-        assert resolve_process_compression_level("ZSTD", level) == level
+        assert _process_level("ZSTD", level) == level
 
     def test_codec_case_does_not_matter(self):
-        assert resolve_process_compression_level("zstd", None) == PROCESS_ZSTD_LEVEL
+        assert _process_level("zstd", None) == PROCESS_ZSTD_LEVEL
 
-    @pytest.mark.parametrize("codec", ["GZIP", "BROTLI", "SNAPPY", "LZ4", "UNCOMPRESSED", "", None])
-    def test_only_zstd_moves(self, codec):
+    @pytest.mark.parametrize(
+        ("codec", "level"),
+        [("GZIP", 6), ("BROTLI", 11), ("SNAPPY", None), ("LZ4", None), ("UNCOMPRESSED", None)],
+    )
+    def test_only_zstd_moves(self, codec, level):
         # The measurement is ZSTD's. GZIP and BROTLI have their own curves and
-        # their own defaults in validate_compression_settings; nothing here
-        # claims to have measured them.
-        assert resolve_process_compression_level(codec, None) is None
+        # keep their global defaults; nothing here claims to have measured them.
+        assert _process_level(codec, None) == level
+
+    def test_an_unset_codec_is_zstd_at_the_process_level(self):
+        assert _process_level(None, None) == PROCESS_ZSTD_LEVEL
 
 
 class TestGlobalDefaultIsUnchanged:
     """15 stays the answer for every write that is not a process write."""
 
-    def test_validate_still_resolves_an_unset_zstd_level_to_fifteen(self):
-        _, level, desc = validate_compression_settings("ZSTD", None)
-        assert level == 15
-        assert desc == "ZSTD:15"
+    def test_the_owner_still_resolves_an_unset_zstd_level_to_fifteen(self):
+        codec = resolve_codec("ZSTD", None, context="write")
+        assert codec.level == resolve_codec(None, None, context="write").level == 15
+        assert codec.description == "ZSTD:15"
 
-    def test_the_write_facade_still_defaults_to_fifteen(self):
-        assert ParquetWriteSettings.DEFAULT_COMPRESSION_LEVEL == 15
-        assert ParquetWriteSettings().compression_level == 15
+    def test_the_write_facade_leaves_the_default_to_the_owner(self):
+        assert ParquetWriteSettings().compression_level is None
+        assert (
+            ParquetWriteSettings().get_pyarrow_kwargs(DEFAULT_ROW_GROUP_ROWS)["compression_level"]
+            == 15
+        )
 
     def test_a_plain_funnel_write_lands_on_fifteen(self, tmp_path, levels):
         from geoparquet_io.core.write_funnels import write_geoparquet_table
@@ -133,26 +144,27 @@ class TestGlobalDefaultIsUnchanged:
         assert levels == [15]
 
     def test_the_process_level_is_below_the_global_one(self):
-        _, global_level, _ = validate_compression_settings("ZSTD", None)
-        assert PROCESS_ZSTD_LEVEL < global_level
+        assert PROCESS_ZSTD_LEVEL < resolve_codec(None, None, context="write").level
 
     def test_a_levelless_codec_warns_only_about_a_level_the_caller_chose(self, caplog):
-        """The warning compares against the global ZSTD default, from one place.
-
-        Callers that pass a level unconditionally hand SNAPPY the ZSTD default,
-        which is not something to warn about; anything else is.
-        """
+        """No caller hands a default level through any more, so any level is the caller's."""
         import logging
 
         with caplog.at_level(logging.WARNING):
-            _, level, desc = validate_compression_settings("SNAPPY", 9, verbose=True)
-        assert level is None and desc == "SNAPPY"
+            codec = resolve_codec("SNAPPY", 9, context="write", verbose=True)
+        assert codec.level is None and codec.description == "SNAPPY"
         assert "does not support compression levels" in caplog.text
 
         caplog.clear()
         with caplog.at_level(logging.WARNING):
-            validate_compression_settings("SNAPPY", 15, verbose=True)
+            resolve_codec("SNAPPY", None, context="write", verbose=True)
+            resolve_codec("SNAPPY", 15, context="write", verbose=False)
         assert caplog.text == ""
+
+
+def _rewrite_writer_kwargs(codec, level):
+    """The pyarrow writer kwargs the owner hands every pyarrow writer."""
+    return resolve_codec(codec, level, context="write").pyarrow_kwargs()
 
 
 class TestRewriteWriterKwargs:
@@ -170,17 +182,16 @@ class TestRewriteWriterKwargs:
     def test_a_levelless_codec_gets_no_level(self, codec):
         assert "compression_level" not in _rewrite_writer_kwargs(codec, None)
 
-    @pytest.mark.parametrize("codec", ["GZIP", "BROTLI"])
-    def test_unset_gzip_and_brotli_resolve_to_their_codec_default(self, codec):
-        # Deliberate: these now get gpio's documented default of 6 instead of
-        # pyarrow's own implicit default, the same unset-means-the-documented-
-        # number rule as ZSTD. Nothing has measured other levels for them.
-        assert _rewrite_writer_kwargs(codec, None)["compression_level"] == 6
+    @pytest.mark.parametrize(("codec", "level"), [("GZIP", 6), ("BROTLI", 11)])
+    def test_unset_gzip_and_brotli_resolve_to_their_codec_default(self, codec, level):
+        # Deliberate: gpio's documented default instead of pyarrow's implicit
+        # one, and the same level a DuckDB COPY always writes for the codec.
+        assert _rewrite_writer_kwargs(codec, None)["compression_level"] == level
 
     def test_the_codec_still_round_trips(self):
         assert _rewrite_writer_kwargs("SNAPPY", None)["compression"] == "snappy"
         assert _rewrite_writer_kwargs("ZSTD", None)["compression"] == "zstd"
-        assert _rewrite_writer_kwargs("UNCOMPRESSED", None)["compression"] == "none"
+        assert _rewrite_writer_kwargs("UNCOMPRESSED", None)["compression"] is None
 
 
 class TestVecorelSchemaFixLevel:
@@ -222,28 +233,28 @@ class TestVecorelMetadataRewriteCodec:
     """
 
     def test_the_requested_codec_reaches_the_rewrite(self, tmp_path, monkeypatch):
+        """The key is a footer patch; the codec matters on its fallback, the
+        funnel's one rewrite, which must be handed the command's codec."""
         import geoparquet_io.core.add.geometry_metrics as gm
-        import geoparquet_io.core.duckdb_utils as du
+        from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
 
         src = tmp_path / "in.parquet"
         pq.write_table(pa.table({"id": ["a"]}), str(src), compression="GZIP")
         seen: dict = {}
 
-        def fake_write(con, query, out, **kwargs):
+        def refuse(*args, **kwargs):
+            raise FooterPatchUnsupported("forced for the test")
+
+        def fake_rewrite(source, destination, updates, **kwargs):
             seen.update(kwargs)
-            pq.write_table(pa.table({"id": ["a"]}), out, compression="GZIP")
 
-        class FakeCon:
-            def close(self):
-                pass
+        monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
+        monkeypatch.setattr(gm, "rewrite_footer_kv", fake_rewrite)
+        from geoparquet_io.core.parquet_writer import WriteOptions
 
-        monkeypatch.setattr(gm, "write_parquet_with_metadata", fake_write)
-        monkeypatch.setattr(du, "get_duckdb_connection", lambda **k: FakeCon())
-        gm._add_vecorel_metadata_to_file(
-            str(src), False, None, compression="GZIP", compression_level=None
-        )
-        assert seen["compression"] == "GZIP"
-        assert seen["compression_level"] is None
+        gm._add_vecorel_metadata_to_file(str(src), False, WriteOptions(compression="GZIP"))
+        assert seen["write"].compression == "GZIP"
+        assert seen["write"].compression_level is None
 
 
 class TestHelpTextNamesTheRightDefault:
@@ -302,9 +313,6 @@ class TestEveryProcessWriterResolves:
     DOWNSTREAM = {
         ("overview/run.py", "_write_overview"),
         ("overview/run.py", "_build_levels"),
-        ("simplify.py", "_footer_kv_via_funnel"),
-        ("simplify.py", "_simplify_file_streaming"),
-        ("simplify.py", "_simplify_then_refresh_metrics"),
     }
 
     def _writers(self):
@@ -323,8 +331,8 @@ class TestEveryProcessWriterResolves:
                 if "compression_level" not in args:
                     continue
                 body = ast.get_source_segment(source, node) or ""
-                key = (str(path.relative_to(root)).replace("\\", "/"), node.name)
-                found[key] = "resolve_process_compression_level(" in body
+                key = (path.relative_to(root).as_posix(), node.name)
+                found[key] = 'context="process"' in body
         return found
 
     def test_every_writer_is_accounted_for(self):
@@ -339,7 +347,7 @@ class TestEveryProcessWriterResolves:
             else:
                 assert resolves, (
                     f"{key[0]}:{key[1]} takes a compression_level but never calls "
-                    "resolve_process_compression_level. Add the call at its entry, or "
+                    'resolve_codec(..., context="process"). Add the call at its entry, or '
                     "list it in DOWNSTREAM if its caller already resolved."
                 )
 

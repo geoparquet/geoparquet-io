@@ -13,28 +13,19 @@ may import it back -- and ``tests/test_common_split_guards.py`` refuses a new
 re-export shim.
 
 What remains is the stage-C residue, each block with a home already named in
-#1010's plan: the SQL-side geometry-type helpers (``zm_suffix_sql``,
-``split_zm_suffix``, ``compute_geometry_types_via_sql``,
-``compute_geometry_dimensions_via_sql``), auto-version resolution
-(``_resolve_auto_version``, ``resolve_geoparquet_version_from_file``,
-``resolve_geoparquet_version_from_table``), ``get_parquet_metadata``, the
-bounds helpers (``calculate_file_bounds``, ``get_dataset_bounds``),
-``add_computed_column``/``add_bbox`` and ``should_skip_bbox``. Nothing new
-belongs here.
+#1010's plan: ``get_parquet_metadata``, ``add_computed_column``/``add_bbox`` and
+``should_skip_bbox``. The geometry-type, dimension and bounds helpers went to
+their owner, ``geo_metadata`` (#1367 concept 5).
+Nothing new belongs here.
 """
-
-import os
 
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
-from geoparquet_io.core.bbox_structure import check_bbox_structure
-from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadata
+from geoparquet_io.core.column_selection import has_column
+from geoparquet_io.core.duckdb_metadata import get_usable_column_names
 from geoparquet_io.core.duckdb_utils import (
     _DuckDBSchemaWrapper,
-    _get_query_column_type,
-    _get_query_columns,
-    _strip_trailing_order_by,
+    computed_column_query,
     fetch_one,
     get_duckdb_connection,
     load_community_extension,
@@ -45,25 +36,24 @@ from geoparquet_io.core.exceptions import (
     GeoParquetError,
     InvalidParameterError,
 )
-from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import (
+    atomic_write,
     get_first_parquet_file,
     is_partition_path,
     resolve_file_url,
 )
-from geoparquet_io.core.geo_metadata import build_bbox_covering, geoarrow_primary_encoding
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geo_metadata import bbox_struct_sql, build_bbox_covering
+from geoparquet_io.core.geometry_detection import primary_geometry_column, require_geometry_column
 from geoparquet_io.core.logging_config import (
-    configure_verbose,
     debug,
-    error,
     info,
     progress,
     success,
     warn,
 )
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.remote import (
-    _sanitize_url_for_logging,
+    display_path,
     is_remote_url,
     needs_httpfs,
 )
@@ -86,8 +76,7 @@ def should_skip_bbox(geoparquet_version):
 
 
 def get_parquet_metadata(parquet_file, verbose=False):
-    """
-    Get Parquet file metadata using DuckDB for kv_metadata and PyArrow for schema.
+    """Get Parquet file metadata using DuckDB for kv_metadata and PyArrow for schema.
 
     For partitioned datasets (directories or glob patterns), reads metadata
     from the first file.
@@ -137,369 +126,6 @@ def get_parquet_metadata(parquet_file, verbose=False):
     return kv_metadata, schema
 
 
-def calculate_file_bounds(file_path, geom_column=None, verbose=False):
-    """
-    Calculate the bounding box of all geometries in a parquet file.
-
-    Uses DuckDB's spatial extension to compute the extent of all geometries.
-
-    Args:
-        file_path: Path to the parquet file (local or remote URL)
-        geom_column: Name of geometry column (auto-detected if None)
-        verbose: Print verbose output
-
-    Returns:
-        tuple: (xmin, ymin, xmax, ymax) or None if calculation fails
-    """
-    if geom_column is None:
-        geom_column = find_primary_geometry_column(file_path, verbose=False)
-
-    # RAW path: sql_path escapes it at the point of interpolation, so nothing
-    # downstream can escape it a second time (#802).
-    read_url = resolve_file_url(file_path, verbose=False)
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(file_path))
-
-    try:
-        bounds_query = f"""
-            SELECT
-                MIN(ST_XMin({quote_identifier(geom_column)})) as xmin,
-                MIN(ST_YMin({quote_identifier(geom_column)})) as ymin,
-                MAX(ST_XMax({quote_identifier(geom_column)})) as xmax,
-                MAX(ST_YMax({quote_identifier(geom_column)})) as ymax
-            FROM read_parquet({sql_path(read_url)})
-        """
-        result = fetch_one(con.execute(bounds_query))
-
-        if result and all(v is not None for v in result):
-            if verbose:
-                debug(
-                    f"Calculated bounds: ({result[0]:.6f}, {result[1]:.6f}, "
-                    f"{result[2]:.6f}, {result[3]:.6f})"
-                )
-            return result
-        return None
-    except Exception as e:
-        if verbose:
-            debug(f"Failed to calculate bounds: {e}")
-        return None
-    finally:
-        con.close()
-
-
-def zm_suffix_sql(geom_expr: str, sep: str = " ") -> str:
-    """SQL fragment producing the dimension suffix (''/'{sep}Z'/'{sep}M'/'{sep}ZM').
-
-    The GeoParquet spec treats "LineString" and "LineString ZM" as distinct
-    geometry_types entries, so any SQL type scan must append this suffix to
-    ST_GeometryType() output instead of collapsing dimensions.
-    """
-    return (
-        f"CASE WHEN ST_HasZ({geom_expr}) AND ST_HasM({geom_expr}) THEN '{sep}ZM' "
-        f"WHEN ST_HasZ({geom_expr}) THEN '{sep}Z' "
-        f"WHEN ST_HasM({geom_expr}) THEN '{sep}M' "
-        f"ELSE '' END"
-    )
-
-
-def split_zm_suffix(name: str) -> tuple[str, str]:
-    """Split a spec geometry type into (base, suffix): 'Point ZM' -> ('Point', ' ZM').
-
-    Names without a dimension suffix (and non-string inputs) return ('' suffix).
-    """
-    if isinstance(name, str):
-        for suffix in (" ZM", " Z", " M"):
-            if name.endswith(suffix):
-                return name[: -len(suffix)], suffix
-    return name, ""
-
-
-# DuckDB ST_GeometryType names ("POINT") -> GeoParquet spec names ("Point").
-_DUCKDB_TO_SPEC_TYPE = {
-    "POINT": "Point",
-    "LINESTRING": "LineString",
-    "POLYGON": "Polygon",
-    "MULTIPOINT": "MultiPoint",
-    "MULTILINESTRING": "MultiLineString",
-    "MULTIPOLYGON": "MultiPolygon",
-    "GEOMETRYCOLLECTION": "GeometryCollection",
-}
-
-
-def compute_geometry_types_via_sql(
-    con,
-    query: str,
-    geometry_column: str,
-) -> list[str]:
-    """
-    Compute distinct geometry types from query using DuckDB.
-
-    Args:
-        con: DuckDB connection with spatial extension loaded
-        query: SQL query containing geometry column
-        geometry_column: Name of geometry column
-
-    Returns:
-        List of spec geometry type names with dimension suffixes
-        (e.g., ["Point", "LineString ZM"]) or empty list if column not in query
-    """
-    # A SELECT DISTINCT over every row cannot change with the order they arrive
-    # in -- but DuckDB keeps the ORDER_BY operator in the plan of an ordered
-    # subquery, so measuring the types cost a full sort of the input on top of
-    # the sort the COPY already does (#1177). Stripped here, in the canonical
-    # implementation, because `disk-rewrite` calls it directly rather than
-    # through `compute_geo_stats_via_sql`, which strips for its own scan. The
-    # COPY is built from the caller's query and is untouched: the output's row
-    # order does not change.
-    query = _strip_trailing_order_by(query)
-
-    import duckdb
-
-    # Check if geometry column exists in query result
-    try:
-        columns = _get_query_columns(con, query)
-        if geometry_column not in columns:
-            return []
-    except (duckdb.Error, RuntimeError, ValueError, AttributeError):
-        # If we can't determine schema, return empty list rather than failing
-        return []
-
-    # GeoArrow native types (STRUCT(x DOUBLE, y DOUBLE)[N]) can't use ST_GeometryType.
-    # Returning [] is valid — GeoParquet allows omitting geometry_types.
-    col_type = _get_query_column_type(con, query, geometry_column) or ""
-    if "STRUCT" in col_type:
-        return []
-
-    quoted_col = quote_identifier(geometry_column)
-    typed_expr = f"ST_GeometryType({quoted_col}) || {zm_suffix_sql(quoted_col)}"
-    types_query = f"""
-        SELECT DISTINCT {typed_expr} as geom_type
-        FROM ({query})
-        WHERE {quoted_col} IS NOT NULL
-    """
-    results = con.execute(types_query).fetchall()
-
-    types = []
-    for (geom_type,) in results:
-        if geom_type:
-            base, suffix = split_zm_suffix(geom_type)
-            normalized = _DUCKDB_TO_SPEC_TYPE.get(base.upper(), base)
-            types.append(normalized + suffix)
-
-    return sorted(set(types))
-
-
-# DuckDB ST_ZMFlag codes -> geoarrow.types.Dimensions values.
-# DuckDB: 0=XY, 1=XYM, 2=XYZ, 3=XYZM. geoarrow: 1=XY, 2=XYZ, 3=XYM, 4=XYZM.
-_DUCKDB_ZMFLAG_TO_GEOARROW_DIM = {0: 1, 1: 3, 2: 2, 3: 4}
-
-
-def compute_geometry_dimensions_via_sql(
-    con,
-    query: str,
-    geometry_column: str,
-) -> set[int]:
-    """Compute the distinct coordinate dimensions of a geometry column via DuckDB.
-
-    Used by the 1.1-geoarrow native path to pick a Z/M-aware GeoArrow type rather
-    than silently coercing 3D/measured coordinates down to 2D.
-
-    Returns:
-        Set of geoarrow dimension codes (1=XY, 2=XYZ, 3=XYM, 4=XYZM). Empty set when
-        the column is absent, native nested (STRUCT), or the dimension is undetectable.
-    """
-    # Same DISTINCT shape, same reason as the type scan above: the set of
-    # dimensions present cannot change with the order the rows arrive in, and
-    # `arrow-streaming` calls this itself -- its bbox and types go through
-    # `compute_geo_stats_via_sql`, which strips, so this was the last sorted
-    # extra scan on the 1.1-geoarrow path (#1177).
-    query = _strip_trailing_order_by(query)
-
-    import duckdb
-
-    try:
-        columns = _get_query_columns(con, query)
-        if geometry_column not in columns:
-            return set()
-    except (duckdb.Error, RuntimeError, ValueError, AttributeError):
-        return set()
-
-    # Native nested GeoArrow (STRUCT) cannot use ST_ZMFlag; leave dimension unknown.
-    col_type = _get_query_column_type(con, query, geometry_column) or ""
-    if "STRUCT" in col_type:
-        return set()
-
-    quoted_col = quote_identifier(geometry_column)
-    geom_expr = quoted_col
-    if "BLOB" in col_type or "BINARY" in col_type:
-        geom_expr = f"ST_GeomFromWKB({geom_expr})"
-
-    dims_query = f"""
-        SELECT DISTINCT ST_ZMFlag({geom_expr}) AS zm
-        FROM ({query})
-        WHERE {quoted_col} IS NOT NULL
-    """
-    try:
-        results = con.execute(dims_query).fetchall()
-    except (duckdb.Error, RuntimeError, ValueError):
-        return set()
-
-    dims: set[int] = set()
-    for (zm,) in results:
-        if zm is not None and zm in _DUCKDB_ZMFLAG_TO_GEOARROW_DIM:
-            dims.add(_DUCKDB_ZMFLAG_TO_GEOARROW_DIM[zm])
-    return dims
-
-
-def _resolve_auto_version(detected: str | None) -> str | None:
-    """Shared auto-mode decision for CLI and API write paths.
-
-    Preserve a detected 1.x/2.0 version; upgrade native-geo-only inputs to 2.0
-    (the documented --geoparquet-version default contract).
-    """
-    if detected == "parquet-geo-only":
-        return "2.0"
-    return detected
-
-
-def resolve_geoparquet_version_from_file(parquet_file: str, verbose: bool = False) -> str | None:
-    """
-    Resolve the auto-mode GeoParquet write version from a parquet input file.
-
-    Implements the documented --geoparquet-version default: preserve the input
-    version (1.x normalizes to 1.1, matching extract_version_from_metadata),
-    upgrade native-geo-only inputs to 2.0, otherwise None (caller defaults).
-
-    Returns None when the file cannot be inspected (e.g., remote without
-    credentials) so callers fall back to the default.
-    """
-    try:
-        info = detect_geoparquet_file_type(parquet_file, verbose)
-    except Exception as e:
-        debug(f"Version auto-detect failed for {parquet_file}: {e}; falling back to default")
-        return None
-
-    detected = {
-        "geoparquet_v2": "2.0",
-        "parquet_geo_only": "parquet-geo-only",
-        "geoparquet_v1": "1.1",
-    }.get(info.get("file_type"))
-    if detected == "1.1" and _declares_geoarrow_encoding(parquet_file):
-        # A GeoArrow-native 1.1 file declares version 1.1.0 just as a WKB one
-        # does, so "1.1" is the version but not the *encoding*: writing it meant
-        # passing the nested-list geometry through under `encoding: WKB`, a block
-        # contradicting the schema beside it (#1176). "1.1-geoarrow" is the one
-        # version that preserves what the input actually is.
-        return "1.1-geoarrow"
-    return _resolve_auto_version(detected)
-
-
-def _declares_geoarrow_encoding(parquet_file: str) -> bool:
-    """Whether the file's ``geo`` block declares native GeoArrow for its primary column."""
-    try:
-        return geoarrow_primary_encoding(get_geo_metadata(parquet_file)) is not None
-    except Exception as e:  # unreadable footer: the version decision stands as made
-        debug(f"GeoArrow encoding check failed for {parquet_file}: {e}")
-        return False
-
-
-def resolve_geoparquet_version_from_table(table, verbose: bool = False) -> str | None:
-    """
-    Resolve the auto-mode GeoParquet write version from an Arrow table.
-
-    API-side counterpart of resolve_geoparquet_version_from_file, sharing the
-    same decision (_resolve_auto_version) so ``gpio.read(f).write(out)`` picks
-    the same version the CLI would for the same input file (todo 043).
-    """
-    return _resolve_auto_version(_detect_version_from_table(table, verbose))
-
-
-def _build_bounds_query(parquet_path, bbox_info, geometry_column, verbose):
-    """Build query for bounds calculation.
-
-    ``parquet_path`` is RAW: ``sql_path`` quotes and escapes it here, at the one
-    point it becomes SQL (#802).
-    """
-    if bbox_info["has_bbox_column"]:
-        bbox_col = bbox_info["bbox_column_name"]
-        if verbose:
-            debug(f"Using bbox column '{bbox_col}' for fast bounds calculation")
-
-        q_bbox = quote_identifier(bbox_col)
-        return f"""
-        SELECT
-            MIN({q_bbox}.xmin) as xmin,
-            MIN({q_bbox}.ymin) as ymin,
-            MAX({q_bbox}.xmax) as xmax,
-            MAX({q_bbox}.ymax) as ymax
-        FROM {sql_path(parquet_path)}
-        """
-    else:
-        warn(
-            f"⚠️  No bbox column found - calculating bounds from geometry column '{geometry_column}' (this may be slow)"
-        )
-        info("💡 Tip: Add a bbox column for faster operations with 'gpio add bbox'")
-
-        q_geom = quote_identifier(geometry_column)
-        return f"""
-        SELECT
-            MIN(ST_XMin({q_geom})) as xmin,
-            MIN(ST_YMin({q_geom})) as ymin,
-            MAX(ST_XMax({q_geom})) as xmax,
-            MAX(ST_YMax({q_geom})) as ymax
-        FROM {sql_path(parquet_path)}
-        """
-
-
-def get_dataset_bounds(parquet_file, geometry_column=None, verbose=False):
-    """
-    Calculate the bounding box of the entire dataset.
-
-    Uses bbox column if available for fast calculation, otherwise calculates
-    from geometry column (slower).
-
-    Args:
-        parquet_file: Path to the parquet file
-        geometry_column: Geometry column name (if None, will auto-detect)
-        verbose: Whether to print verbose output
-
-    Returns:
-        tuple: (xmin, ymin, xmax, ymax) or None if error
-    """
-    configure_verbose(verbose)
-    read_url = resolve_file_url(parquet_file, verbose)
-
-    # Get geometry column if not specified
-    if not geometry_column:
-        geometry_column = find_primary_geometry_column(parquet_file, verbose)
-
-    # Check for bbox column
-    bbox_info = check_bbox_structure(parquet_file, verbose)
-
-    # Create DuckDB connection with httpfs if needed
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
-
-    try:
-        query = _build_bounds_query(read_url, bbox_info, geometry_column, verbose)
-        result = fetch_one(con.execute(query))
-
-        if result and all(v is not None for v in result):
-            xmin, ymin, xmax, ymax = result
-            if verbose:
-                debug(f"Dataset bounds: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
-            return (xmin, ymin, xmax, ymax)
-        else:
-            if verbose:
-                warn("Could not calculate bounds (empty dataset or null geometries)")
-            return None
-
-    except Exception as e:
-        if verbose:
-            error(f"Error calculating bounds: {e}")
-        return None
-    finally:
-        con.close()
-
-
 def add_computed_column(
     input_parquet,
     output_parquet,
@@ -508,7 +134,7 @@ def add_computed_column(
     extensions=None,
     dry_run=False,
     verbose=False,
-    compression="ZSTD",
+    compression=None,
     compression_level=None,
     row_group_size_mb=None,
     row_group_rows=None,
@@ -518,66 +144,44 @@ def add_computed_column(
     replace_column=None,
     geoparquet_version=None,
     memory_limit: str | None = None,
+    *,
+    from_clause: str | None = None,
+    connection_setup=None,
+    report_count: bool = True,
+    progress_message: str | None = None,
 ):
-    """
-    Add a computed column to a GeoParquet file using SQL expression.
+    """Add a SQL-derived column through the shared file write funnel.
 
-    Handles all boilerplate for adding columns derived from existing data:
-    - Input validation
-    - Schema checking
-    - DuckDB connection and extension loading
-    - Query execution
-    - Metadata preservation
-    - Dry-run support
-    - Remote input/output support
+    Resolves input paths and geometry, checks for existing columns, loads
+    dependencies, reports progress and preserves metadata. Dry runs print the
+    SQL without writing; write settings go to write_parquet_with_metadata.
 
     Args:
-        input_parquet: Path to input file (local or remote URL)
-        output_parquet: Path to output file (local or remote URL)
-        column_name: Name for the new column
-        sql_expression: SQL expression to compute column value
-        extensions: DuckDB extensions to load beyond 'spatial' (e.g., ['h3'])
-        dry_run: Whether to print SQL without executing
-        verbose: Whether to print verbose output
-        compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
-        compression_level: Compression level (varies by format)
-        row_group_size_mb: Target row group size in MB
-        row_group_rows: Exact number of rows per row group
-        dry_run_description: Optional description for dry-run output
-        custom_metadata: Optional dict with custom metadata (e.g., H3 info)
-        profile: AWS profile name (S3 only, optional)
-        replace_column: Name of existing column to replace (uses EXCLUDE in query)
-        memory_limit: DuckDB memory limit for the write (e.g., '2GB', '512MB');
-            None auto-detects based on available system/container memory
-
-    Example:
-        add_computed_column(
-            'input.parquet', 'output.parquet',
-            column_name='h3_cell',
-            sql_expression="h3_latlng_to_cell(ST_Y(ST_Centroid(geometry)), "
-                          "ST_X(ST_Centroid(geometry)), 9)",
-            extensions=['h3'],
-            custom_metadata={'covering': {'h3': {'column': 'h3_cell', 'resolution': 9}}}
-        )
+        sql_expression: SQL expression yielding the new column value
+        extensions: Additional DuckDB extensions beyond spatial
+        dry_run_description: Description shown before the SQL preview
+        custom_metadata: Additional metadata (for example index covering)
+        replace_column: Existing column to exclude from the SELECT
+        from_clause: Optional SQL source, including reader options
+        connection_setup: Optional callable(con) loading computation dependencies
+        report_count: Report the input feature count before writing
+        progress_message: Optional computation-specific progress message
+        memory_limit: DuckDB write limit; None auto-detects available memory
     """
     # RAW path: the dry-run header below shows it to the user, and every SQL
     # interpolation escapes it through sql_path (#802).
     input_path = resolve_file_url(input_parquet, verbose)
 
-    # Get geometry column (for reference)
-    geom_col = find_primary_geometry_column(input_parquet, verbose)
+    # For the dry-run header only (no SQL here reads it), so None stays None.
+    geom_col = primary_geometry_column(input_parquet, verbose=verbose)
+
+    source = from_clause or sql_path(input_path)
 
     # Dry-run mode header
     if dry_run:
         warn("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n")
-        display_input = (
-            _sanitize_url_for_logging(input_path) if is_remote_url(input_path) else input_path
-        )
-        display_output = (
-            _sanitize_url_for_logging(output_parquet)
-            if is_remote_url(output_parquet)
-            else output_parquet
-        )
+        display_input = display_path(input_path)
+        display_output = display_path(output_parquet)
         info(f"-- Input file: {display_input}")
         info(f"-- Output file: {display_output}")
         info(f"-- Geometry column: {geom_col}")
@@ -588,17 +192,10 @@ def add_computed_column(
 
     # Check if column already exists (skip in dry-run or when replacing)
     if not dry_run:
-        from geoparquet_io.core.duckdb_metadata import get_column_names
+        from geoparquet_io.core.index_ops import ensure_index_column
 
-        # Only check for column collision if not replacing
         if not replace_column:
-            column_names = get_column_names(input_parquet)
-            if column_name in column_names:
-                raise InvalidParameterError(
-                    "column_name",
-                    f"Column '{column_name}' already exists in the file. "
-                    f"Please choose a different name.",
-                )
+            ensure_index_column(None, input_parquet, column_name, None, reject_existing=True)
 
         # Get metadata before processing
         metadata, _ = get_parquet_metadata(input_parquet, verbose)
@@ -614,6 +211,9 @@ def add_computed_column(
     # Ensure ST_Transform (used by CRS-aware grid keying) emits lon/lat order.
     con.execute("SET geometry_always_xy = true;")
 
+    if connection_setup is not None:
+        connection_setup(con)
+
     # Load additional extensions if specified
     if extensions:
         for ext in extensions:
@@ -622,51 +222,31 @@ def add_computed_column(
             load_community_extension(con, ext)
 
     # Get total count (skip in dry-run)
-    if not dry_run:
-        total_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM {sql_path(input_path)}"))[0]
+    if not dry_run and report_count:
+        total_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM {source}"))[0]
         progress(f"Processing {total_count:,} features...")
 
-    # Build the query
-    # Quote column name to handle special characters (e.g., colons in "metrics:area")
-    quoted_col = quote_identifier(column_name)
-
-    # Use EXCLUDE to drop existing column when replacing
-    if replace_column:
-        query = f"""
-        SELECT
-            * EXCLUDE ({quote_identifier(replace_column)}),
-            {sql_expression} AS {quoted_col}
-        FROM {sql_path(input_path)}
-    """
-    else:
-        query = f"""
-        SELECT
-            *,
-            {sql_expression} AS {quoted_col}
-        FROM {sql_path(input_path)}
-    """
+    query = computed_column_query(source, column_name, sql_expression, replace_column)
 
     # Handle dry-run display
     if dry_run:
-        # Show formatted query with COPY wrapper
-        compression_desc = compression
-        if compression in ["GZIP", "ZSTD", "BROTLI"] and compression_level:
-            compression_desc = f"{compression}:{compression_level}"
+        from geoparquet_io.core.compression import print_copy_dry_run
+        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_query
 
-        duckdb_compression = (
-            compression.lower() if compression != "UNCOMPRESSED" else "uncompressed"
-        )
-        display_query = f"""COPY ({query.strip()})
-TO {sql_path(output_parquet)}
-(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
-
+        rows = resolve_row_group_rows_for_query(con, query, row_group_rows, row_group_size_mb)
         info("-- Main query:")
-        progress(display_query)
-        info(f"\n-- Note: Using {compression_desc} compression")
+        print_copy_dry_run(query, output_parquet, compression, compression_level, rows)
         info("-- This query creates a new parquet file with the computed column added")
-        info("-- The covering metadata is updated only if the output has a bbox column")
+        covering = (custom_metadata or {}).get("covering")
+        if covering:
+            info(f"-- The covering metadata is set to: {covering}")
+        else:
+            info("-- The covering metadata is updated only if the output has a bbox column")
         con.close()
         return
+
+    if progress_message:
+        progress(progress_message)
 
     # Execute the query using existing write helper
     if verbose:
@@ -675,24 +255,19 @@ TO {sql_path(output_parquet)}
     # Closed deterministically, success or not: the caller may os.replace() the
     # input right after this returns, which Windows refuses while a reader
     # holds it (#1032), and a failed write removes its staging file the same way.
+    write = WriteOptions.pick(locals())
     try:
         write_parquet_with_metadata(
             con,
             query,
             output_parquet,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             custom_metadata=custom_metadata,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
             # The precondition: the query above is `SELECT *` plus one computed
             # column, so the rows this write reads are `input_parquet`'s own.
             input_file=input_parquet,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
     finally:
         con.close()
@@ -703,7 +278,7 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
     Add a bbox struct column to a GeoParquet file in-place.
 
     Internal helper function used by --add-bbox flags in other commands
-    (hilbert_order, add_country_codes). Modifies the file in-place by
+    (hilbert_order). Modifies the file in-place by
     writing to a temporary file and replacing the original.
 
     Raises an error if the bbox column already exists.
@@ -720,36 +295,25 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
         click.ClickException: If column already exists or operation fails
     """
 
-    # Check if column already exists using DuckDB
-    column_names = get_column_names(parquet_file)
-
-    if bbox_column_name in column_names:
+    # Check if column already exists (as a query can name it)
+    if has_column(get_usable_column_names(parquet_file), bbox_column_name):
         raise InvalidParameterError(
             "bbox_column_name",
             f"Column '{bbox_column_name}' already exists in the file. "
             f"Please choose a different name.",
         )
 
-    # Get geometry column for SQL expression
-    geom_col = find_primary_geometry_column(parquet_file, verbose)
+    geom_col = primary_geometry_column(parquet_file, verbose=verbose)
+    geom_col = require_geometry_column(geom_col, parquet_file)  # the SQL needs one
 
     if verbose:
         debug(f"Adding bbox column for geometry column: {geom_col}")
 
     # Define SQL expression
     quoted_geom_col = quote_identifier(geom_col)
-    sql_expression = f"""STRUCT_PACK(
-        xmin := ST_XMin({quoted_geom_col}),
-        ymin := ST_YMin({quoted_geom_col}),
-        xmax := ST_XMax({quoted_geom_col}),
-        ymax := ST_YMax({quoted_geom_col})
-    )"""
-
-    # Create temporary file path
-    temp_file = parquet_file + ".tmp"
+    sql_expression = bbox_struct_sql(quoted_geom_col, geom_col)
 
     try:
-        # Use add_computed_column to write to temp file
         # Declare the covering explicitly rather than leaving a writer to infer
         # it from the column's name. gpio computed this column from the geometry
         # in this same statement, so the assertion "these values bound that
@@ -758,24 +322,23 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
         # version-gated: strip_unsupported_covering drops the key for 1.0 output.
         bbox_covering = {"covering": {"bbox": build_bbox_covering(bbox_column_name)}}
 
-        add_computed_column(
-            input_parquet=parquet_file,
-            output_parquet=temp_file,
-            column_name=bbox_column_name,
-            sql_expression=sql_expression,
-            extensions=None,
-            dry_run=False,
-            verbose=verbose,
-            compression="ZSTD",
-            compression_level=15,
-            row_group_size_mb=None,
-            row_group_rows=None,
-            dry_run_description=None,
-            custom_metadata=bbox_covering,
-        )
-
-        # Replace original file with updated file
-        os.replace(temp_file, parquet_file)
+        # Staged beside the file and moved over it (file_utils.atomic_write).
+        with atomic_write(parquet_file) as staged:
+            add_computed_column(
+                input_parquet=parquet_file,
+                output_parquet=staged,
+                column_name=bbox_column_name,
+                sql_expression=sql_expression,
+                extensions=None,
+                dry_run=False,
+                verbose=verbose,
+                compression=None,
+                compression_level=None,
+                row_group_size_mb=None,
+                row_group_rows=None,
+                dry_run_description=None,
+                custom_metadata=bbox_covering,
+            )
 
         if verbose:
             success(f"Successfully added bbox column '{bbox_column_name}'")
@@ -783,7 +346,4 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
         return True
 
     except Exception as e:
-        # Clean up temporary file if something goes wrong
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
         raise GeoParquetError(f"Failed to add bbox: {str(e)}") from e

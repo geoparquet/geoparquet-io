@@ -283,71 +283,39 @@ class TestMetadataPathAgrees:
 
 
 class TestVersionDetectionAgrees:
-    """core/common.py: auto-mode version detection."""
-
-    @BOTH_SHAPES
-    def test_detect_version_from_table_agrees(self, with_geo):
-        from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
-
-        assert _detect_version_from_table(resolved_extension_table(with_geo)) == (
-            _detect_version_from_table(metadata_only_table(with_geo))
-        )
+    """parquet_writer: the auto-mode version decision, either carrier shape."""
 
     @BOTH_SHAPES
     def test_resolve_version_from_table_agrees(self, with_geo):
-        from geoparquet_io.core.common import resolve_geoparquet_version_from_table
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
-        assert resolve_geoparquet_version_from_table(resolved_extension_table(with_geo)) == (
-            resolve_geoparquet_version_from_table(metadata_only_table(with_geo))
-        )
+        assert resolve_output_geoparquet_version(
+            None, table=resolved_extension_table(with_geo)
+        ) == (resolve_output_geoparquet_version(None, table=metadata_only_table(with_geo)))
 
     def test_declared_geoarrow_without_geo_metadata_is_native(self):
-        """No geo block + a geoarrow column is the in-memory parquet-geo-only shape."""
-        from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
-        from geoparquet_io.core.common import resolve_geoparquet_version_from_table
+        """No geo block + a geoarrow column is the in-memory parquet-geo-only shape: 2.0."""
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         table = metadata_only_table(with_geo=False)
-        assert _detect_version_from_table(table) == "parquet-geo-only"
-        assert resolve_geoparquet_version_from_table(table) == "2.0"
+        assert resolve_output_geoparquet_version(None, table=table) == "2.0"
 
     def test_carried_geo_version_still_wins(self):
         """A declared version in the geo block is unchanged by the wider detection."""
-        from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
-        assert _detect_version_from_table(metadata_only_table(with_geo=True)) == "1.1"
+        table = metadata_only_table(with_geo=True)
+        assert resolve_output_geoparquet_version(None, table=table) == "1.1"
 
 
 class TestStreamingPathAgrees:
     """core/streaming.py: table-level geoarrow detection and stripping."""
 
-    @BOTH_SHAPES
-    def test_has_geoarrow_extension_in_table_agrees(self, with_geo):
-        from geoparquet_io.core.streaming import has_geoarrow_extension_in_table
-
-        assert has_geoarrow_extension_in_table(resolved_extension_table(with_geo)) == (
-            has_geoarrow_extension_in_table(metadata_only_table(with_geo))
-        )
-
-    def test_has_geoarrow_extension_in_table_sees_metadata_shape(self):
-        from geoparquet_io.core.streaming import has_geoarrow_extension_in_table
-
-        assert has_geoarrow_extension_in_table(metadata_only_table()) is True
-
     def test_plain_wkb_table_is_not_geoarrow(self):
-        from geoparquet_io.core.streaming import has_geoarrow_extension_in_table
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         table = pa.table({"id": [1], "geometry": pa.array([WKB_POINT], pa.binary())})
-        assert has_geoarrow_extension_in_table(table) is False
-
-    @BOTH_SHAPES
-    def test_detect_version_for_output_agrees(self, with_geo):
-        from geoparquet_io.core.streaming import detect_version_for_output
-
-        resolved = resolved_extension_table(with_geo)
-        meta_only = metadata_only_table(with_geo)
-        assert detect_version_for_output(resolved.schema.metadata, resolved) == (
-            detect_version_for_output(meta_only.schema.metadata, meta_only)
-        )
+        assert resolve_output_geoparquet_version(None, table=table) == "1.1"
 
 
 class TestWriteRoundTripAgrees:
@@ -473,8 +441,7 @@ class TestNonWkbCarriersSurviveTheStrip:
 
     def test_native_point_still_detects_as_native_geo(self):
         """The version-detection predicate stays broad: any geoarrow name counts."""
-        from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
-        assert _detect_version_from_table(metadata_only_native_point_table(with_geo=False)) == (
-            "parquet-geo-only"
-        )
+        table = metadata_only_native_point_table(with_geo=False)
+        assert resolve_output_geoparquet_version(None, table=table) == "2.0"

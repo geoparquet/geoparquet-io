@@ -283,10 +283,8 @@ class TestCoreExceptions:
         # Query string should be stripped
         assert "AWSAccessKeyId" not in exc.url
         assert "SECRET" not in exc.url
-        # URL is truncated but filename preserved: s3://bucket/path/.../file.parquet
-        assert "..." in exc.url
-        assert "bucket" in exc.url
-        assert exc.url.endswith("file.parquet")
+        # One policy for gpio errors: the destination is named in full, query stripped.
+        assert exc.url == "s3://bucket/path/to/file.parquet"
 
     def test_geometry_error(self):
         with pytest.raises(GeometryError):

@@ -23,7 +23,7 @@ from geoparquet_io.cli.main import sort
 from geoparquet_io.core import sort_by_column as sort_by_column_module
 from geoparquet_io.core import sort_quadkey as sort_quadkey_module
 from geoparquet_io.core.duckdb_utils import fetch_one
-from geoparquet_io.core.exceptions import GeoParquetError
+from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.sort_by_column import sort_by_column, sort_by_column_table
 from geoparquet_io.core.sort_quadkey import sort_by_quadkey
 from tests.conftest import safe_unlink
@@ -312,12 +312,12 @@ class TestSortByColumnTable:
 
     def test_sort_invalid_column(self, sample_table):
         """Test error with invalid column name."""
-        with pytest.raises(ValueError, match="not found in table"):
+        with pytest.raises(InvalidParameterError, match="nonexistent_column"):
             sort_by_column_table(sample_table, columns="nonexistent_column")
 
     def test_sort_empty_columns(self, sample_table):
         """Test error with empty columns."""
-        with pytest.raises(ValueError, match="not found in table"):
+        with pytest.raises(InvalidParameterError, match="empty"):
             sort_by_column_table(sample_table, columns="")
 
     def test_sort_metadata_preserved(self, sample_table):
@@ -492,20 +492,23 @@ class TestSortPartitionInput:
         filename character on Windows.
         """
         parts_dir, _ = places_parts_dir
-        seen = []
-        real_add = sort_quadkey_module.add_quadkey_column
+        from geoparquet_io.core.index_ops import ensure_index_column, get_index_spec
 
-        def spy(**kwargs):
-            seen.append(kwargs["output_parquet"])
-            return real_add(**kwargs)
-
-        with mock.patch.object(sort_quadkey_module, "add_quadkey_column", spy):
-            result = CliRunner().invoke(
-                sort, ["quadkey", str(parts_dir / "*.parquet"), temp_output_file]
-            )
-        assert result.exit_code == 0, result.output
-        assert seen, "expected the quadkey column to be auto-added"
-        assert not any(c in os.path.basename(seen[0]) for c in '*?"<>|'), seen[0]
+        working, column, temp_file = ensure_index_column(
+            get_index_spec("quadkey"), str(parts_dir / "*.parquet"), "quadkey", 13
+        )
+        try:
+            assert temp_file is not None
+            assert not any(c in os.path.basename(temp_file) for c in '*?"<>|'), temp_file
+            assert column in pq.read_schema(working).names
+            result = CliRunner().invoke(sort, ["quadkey", working, temp_output_file])
+            assert result.exit_code == 0, result.output
+            quadkeys = pq.read_table(temp_output_file)[column].to_pylist()
+            assert quadkeys == sorted(quadkeys)
+            assert len(quadkeys) == 766
+        finally:
+            if temp_file:
+                os.unlink(temp_file)
 
     @pytest.mark.parametrize("subcommand", ["hilbert", "str"])
     def test_spatial_sorts_still_reject_a_directory_with_guidance(

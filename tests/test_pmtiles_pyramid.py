@@ -8,7 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.pmtiles_pyramid import (
     TileJoinNotFoundError,
     _band_zoom_args,
@@ -17,6 +17,7 @@ from geoparquet_io.core.pmtiles_pyramid import (
     _layer_name,
     _resolve_feature_zooms,
 )
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 from geoparquet_io.core.process.overview.levels import Band
 
 
@@ -548,7 +549,7 @@ class TestPreflightAndErrors:
 
         out = tmp_path / "pyramid.pmtiles"
         out.write_bytes(b"existing archive")
-        with pytest.raises(InvalidParameterError, match="force"):
+        with pytest.raises(GeoParquetError, match="already exists.*\n.*--force"):
             create_pmtiles_pyramid("in.parquet", str(out))
         assert out.read_bytes() == b"existing archive"
 
@@ -601,10 +602,13 @@ class TestRunTileJoin:
     def test_success_logs_stderr_when_verbose(self, monkeypatch):
         import geoparquet_io.core.tile_join as tj
 
+        messages = []
+        monkeypatch.setattr(tj, "debug", messages.append)
         monkeypatch.setattr(
             tj.subprocess, "run", lambda *a, **k: self._FakeProc(0, "joined 2 tilesets\n")
         )
-        tj._run_tile_join(["tile-join", "-o", "x"], verbose=True)  # must not raise
+        tj._run_tile_join(["tile-join", "-o", "x"], verbose=True)
+        assert "joined 2 tilesets" in messages
 
 
 class TestMergePyramidMetadata:
@@ -854,7 +858,7 @@ def test_pyramid_end_to_end_grouped(tmp_path):
     cells = tmp_path / "cells.parquet"
     out = tmp_path / "cells.pmtiles"
     _write_points(src)
-    aggregate_by_a5(str(src), str(cells), resolution=7, metric="sum:v")
+    aggregate_by_a5(str(src), str(cells), resolution=7, options=AggregateOptions(metric="sum:v"))
 
     # Absurd bytes-per-cell => nothing fits inside the probed range, so the
     # coarse level takes z0..max_zoom-1 and the base starts at max_zoom.
@@ -893,7 +897,7 @@ def test_pyramid_per_level_with_features(tmp_path):
     cells = tmp_path / "cells.parquet"
     out = tmp_path / "pyramid.pmtiles"
     _write_points(src)
-    aggregate_by_a5(str(src), str(cells), resolution=7, metric="sum:v")
+    aggregate_by_a5(str(src), str(cells), resolution=7, options=AggregateOptions(metric="sum:v"))
 
     create_pmtiles_pyramid(
         str(cells),
@@ -915,3 +919,86 @@ def test_pyramid_per_level_with_features(tmp_path):
     assert {"r5", "r7", "features"} <= layers
     assert header["min_zoom"] == 0
     assert header["max_zoom"] >= 4
+
+
+# ---------------------------------------------------------------------------
+# #1191: --write-memory / memory_limit= bounds the pyramid's DuckDB work
+# ---------------------------------------------------------------------------
+
+
+def _duckdb_spelling(limit):
+    import duckdb
+
+    con = duckdb.connect()
+    try:
+        con.execute(f"SET memory_limit = '{limit}'")
+        return con.execute("SELECT current_setting('memory_limit')").fetchall()[0][0]
+    finally:
+        con.close()
+
+
+@pytest.fixture
+def seen_memory_limits(monkeypatch):
+    """The memory_limit every planning and rollup connection actually carries."""
+    from geoparquet_io.core.duckdb_utils import fetch_one
+    from geoparquet_io.core.process.overview import detect, rollup
+
+    seen = []
+    for module in (detect, rollup):
+        real = module.open_bounded_connection
+
+        def spy(*args, _real=real, **kwargs):
+            con = _real(*args, **kwargs)
+            seen.append(fetch_one(con.execute("SELECT current_setting('memory_limit')"))[0])
+            return con
+
+        monkeypatch.setattr(module, "open_bounded_connection", spy)
+    return seen
+
+
+@pytest.mark.usefixtures("fake_country_cache", "fake_tools")
+class TestPyramidMemoryLimit:
+    def test_cli_write_memory_bounds_planning_and_rollups(self, tmp_path, seen_memory_limits):
+        src = tmp_path / "by_region.parquet"
+        _write_admin_region_aggregate(src)
+        result = CliRunner().invoke(
+            cli,
+            [
+                "pmtiles",
+                "pyramid",
+                str(src),
+                str(tmp_path / "out.pmtiles"),
+                "--bytes-per-cell",
+                "200000",
+                "--max-zoom",
+                "6",
+                "--write-memory",
+                "1GB",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        # Band planning plus the on-the-fly country overview rollup.
+        assert len(seen_memory_limits) >= 2
+        assert set(seen_memory_limits) == {_duckdb_spelling("1GB")}
+
+    def test_api_memory_limit_bounds_planning_and_rollups(self, tmp_path, seen_memory_limits):
+        from geoparquet_io.api import ops
+
+        src = tmp_path / "by_region.parquet"
+        _write_admin_region_aggregate(src)
+        ops.create_pmtiles_pyramid(
+            str(src), str(tmp_path / "out.pmtiles"), memory_limit="768MB", **_BAND_FORCING
+        )
+        assert len(seen_memory_limits) >= 2
+        assert set(seen_memory_limits) == {_duckdb_spelling("768MB")}
+
+    def test_bad_write_memory_is_a_usage_error(self, tmp_path):
+        src = tmp_path / "by_region.parquet"
+        _write_admin_region_aggregate(src)
+        result = CliRunner().invoke(
+            cli,
+            ["pmtiles", "pyramid", str(src), str(tmp_path / "o.pmtiles"), "--write-memory", "lots"],
+        )
+        assert result.exit_code == 2
+        assert "No such option" not in result.output
+        assert "--write-memory" in result.output

@@ -1,7 +1,7 @@
 """Auto mode's "1.1-geoarrow" must survive paths that pass no ``geometry_info`` (#1176).
 
-``resolve_geoparquet_version_from_file`` resolves a GeoArrow-native 1.1 input to
-``1.1-geoarrow``, but the write funnel's already-native guard read that fact out
+Auto mode (``parquet_writer.resolve_output_geoparquet_version``) resolves a
+GeoArrow-native 1.1 input to ``1.1-geoarrow``, but the write funnel's already-native guard read that fact out
 of ``geometry_info`` -- and only ``convert`` builds one. On sort, extract,
 partition and the ``add`` family the guard therefore saw nothing, rerouted a
 native input through arrow-streaming as if it were WKB, dropped

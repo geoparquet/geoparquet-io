@@ -216,7 +216,11 @@ class TestFixRowGroups:
 
 
 class TestFixBboxRemoval:
-    """Tests for fix_bbox_removal function."""
+    """Tests for fix_bbox_removal function.
+
+    A removal is a repair, so it keeps the input's own version (the facade's
+    preserve policy): the 1.0 places fixture stays 1.0 (#1367 T2b audit).
+    """
 
     def test_removes_bbox_column(self, places_test_file, temp_output_dir):
         """Test removing bbox column from file."""
@@ -240,7 +244,7 @@ class TestFixBboxRemoval:
         # Verify column removed
         result_table = pq.read_table(output_file)
         assert "bbox" not in result_table.column_names
-        assert_places_output_is_sound(output_file, version="1.1", covering=False)
+        assert_places_output_is_sound(output_file, version="1.0", covering=False)
 
     def test_with_verbose(self, places_test_file, temp_output_dir):
         """Test bbox removal with verbose output."""
@@ -257,7 +261,7 @@ class TestFixBboxRemoval:
         )
 
         assert fix_result["success"] is True
-        assert_places_output_is_sound(output_file, version="1.1", covering=False)
+        assert_places_output_is_sound(output_file, version="1.0", covering=False)
 
 
 class TestFixBboxRemovalSqlInjection:
@@ -315,7 +319,7 @@ class TestFixBboxRemovalSqlInjection:
         assert result_cols == ["geometry", "filler"]
         # Escaping the identifier is only half the requirement: the file the
         # rewrite leaves behind still has to be a valid GeoParquet file.
-        assert_places_output_is_sound(out, version="1.1", covering=False)
+        assert_places_output_is_sound(out, version="1.0", covering=False)
 
     def test_bbox_name_with_embedded_quote_is_escaped(self, places_test_file, temp_output_dir):
         """A payload carrying a literal double quote must have it doubled, not
@@ -346,71 +350,39 @@ class TestFixBboxRemovalSqlInjection:
         assert "pwn2" not in result_cols
         assert payload not in result_cols
         assert result_cols == ["geometry"]
-        assert_places_output_is_sound(out, version="1.1", covering=False)
+        assert_places_output_is_sound(out, version="1.0", covering=False)
 
 
-class TestGetGeoparquetVersionFromCheckResults:
-    """Tests for get_geoparquet_version_from_check_results function."""
+class TestPreservedVersionFromCheckResults:
+    """The repair policy fed from check results: ``resolve_output_geoparquet_version(..., preserve_input=True)``."""
 
-    def test_v2_detection(self):
-        """Test detecting GeoParquet v2."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
-
-        check_results = {"bbox": {"file_type": "geoparquet_v2", "version": "2.0.0"}}
-
-        version = get_geoparquet_version_from_check_results(check_results)
-
-        assert version == "2.0"
-
-    def test_parquet_geo_only_detection(self):
-        """Test detecting parquet-geo-only files."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
-
-        check_results = {"bbox": {"file_type": "parquet_geo_only"}}
-
-        version = get_geoparquet_version_from_check_results(check_results)
-
-        assert version == "parquet-geo-only"
-
-    def test_v1_0_detection(self):
-        """Test detecting GeoParquet v1.0."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
-
-        check_results = {"bbox": {"file_type": "geoparquet_v1", "version": "1.0.0"}}
-
-        version = get_geoparquet_version_from_check_results(check_results)
-
-        assert version == "1.0"
-
-    def test_v1_1_detection(self):
-        """Test detecting GeoParquet v1.1."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
-
-        check_results = {"bbox": {"file_type": "geoparquet_v1", "version": "1.1.0"}}
-
-        version = get_geoparquet_version_from_check_results(check_results)
-
-        assert version == "1.1"
-
-    def test_unknown_defaults_to_none(self):
-        """Test unknown file type defaults to None."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+    def test_unknown_takes_the_default(self):
+        """A file the check could not type has nothing to preserve: the default."""
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {"bbox": {"file_type": "unknown"}}
 
-        version = get_geoparquet_version_from_check_results(check_results)
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
+            preserve_input=True,
+        )
 
-        assert version is None
+        assert version == "1.1"
 
     def test_missing_bbox_result(self):
-        """Test handling missing bbox result."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+        """No bbox result: nothing to preserve, so the default."""
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {}
 
-        version = get_geoparquet_version_from_check_results(check_results)
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
+            preserve_input=True,
+        )
 
-        assert version is None
+        assert version == "1.1"
 
 
 class TestFixSpatialOrdering:
@@ -502,7 +474,11 @@ class TestFixSpatialOrdering:
             fix_spatial_ordering(target, target, verbose=False)
 
         assert seen, "hilbert_order was never called"
-        assert os.path.dirname(os.path.abspath(seen[0])) == os.path.abspath(temp_output_dir)
+        # Staged in a directory beside the target (``atomic_write``), so the
+        # swap is a rename on one filesystem.
+        staging_dir = os.path.dirname(os.path.abspath(seen[0]))
+        assert os.path.realpath(os.path.dirname(staging_dir)) == os.path.realpath(temp_output_dir)
+        assert os.path.basename(staging_dir).startswith(".gpio-stage-")
         assert_places_output_is_sound(target, version="1.0", covering=False)
 
     def test_an_aliased_output_path_is_still_an_in_place_fix(
@@ -531,7 +507,7 @@ class TestFixSpatialOrdering:
         """A move that fails must not take the only good copy of the data with it.
 
         The whole destructive step is the ``os.replace()`` inside
-        ``_staged_output``, so if it raises, the original -- never unlinked --
+        ``file_utils.atomic_write``, so if it raises, the original -- never unlinked --
         is exactly as it was. Under ``--fix --no-backup`` there is no ``.bak``
         to fall back on, and a direct caller of this function has no ``.bak``
         concept at all.
@@ -555,7 +531,7 @@ class TestFixSpatialOrdering:
 
         assert os.path.exists(target), "the in-place fix destroyed the original file"
         assert Path(target).read_bytes() == original_bytes
-        assert list(Path(temp_output_dir).glob(".gpio-fix-*")) == []
+        assert list(Path(temp_output_dir).glob(".gpio-stage-*")) == []
         assert_places_output_is_sound(target, version="1.0", covering=False)
 
 
@@ -614,7 +590,7 @@ class TestHilbertDetectionAndWarnings:
 
     def test_spatial_check_passes_for_hilbert_files(self, temp_output_dir):
         """Test that files with ~100k rows/group are detected as Hilbert-ordered."""
-        from geoparquet_io.core.check_spatial_order import check_spatial_order_bbox_stats
+        from geoparquet_io.core.check_spatial_order import check_spatial_order
         from geoparquet_io.core.hilbert_order import hilbert_order
 
         # Create a test file and apply Hilbert ordering
@@ -630,9 +606,7 @@ class TestHilbertDetectionAndWarnings:
         )
 
         # Check spatial ordering - should pass despite high overlap
-        result = check_spatial_order_bbox_stats(
-            output_file, verbose=False, return_results=True, quiet=True
-        )
+        result = check_spatial_order(output_file, 100, 500, False, return_results=True, quiet=True)
 
         # Should be marked as passed (Hilbert-ordered with large groups)
         assert result["passed"] is True
@@ -644,7 +618,7 @@ class TestHilbertDetectionAndWarnings:
 
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.check_spatial_order import check_spatial_order_bbox_stats
+        from geoparquet_io.core.check_spatial_order import check_spatial_order
 
         output_file = os.path.join(temp_output_dir, "non_hilbert.parquet")
 
@@ -656,9 +630,7 @@ class TestHilbertDetectionAndWarnings:
         table = table.take(indices)
         pq.write_table(table, output_file, compression="ZSTD", row_group_size=50)
 
-        result = check_spatial_order_bbox_stats(
-            output_file, verbose=False, return_results=True, quiet=True
-        )
+        result = check_spatial_order(output_file, 100, 500, False, return_results=True, quiet=True)
 
         assert result["passed"] is False
         assert result["fix_available"] is True
@@ -706,3 +678,9 @@ class TestRowGroupFixIdempotency:
         assert result["row_status"] != "optimal"
         # Should offer fix
         assert result["fix_available"] is True
+
+
+def _detected(check_results):
+    """The bbox check's file-type answer, in ``detect_geoparquet_file_type``'s shape."""
+    bbox = check_results.get("bbox", {})
+    return {"file_type": bbox.get("file_type"), "geo_version": bbox.get("version")}

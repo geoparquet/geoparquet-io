@@ -19,6 +19,7 @@ import pytest
 
 from geoparquet_io.core.add.bbox import add_bbox_column, add_bbox_table
 from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.validate import validate_geoparquet
 
 BBOX_FIELDS = {"xmin", "ymin", "xmax", "ymax"}
@@ -237,14 +238,8 @@ class TestAddBboxStreaming:
             output_path=str(output),
             bbox_column_name="bbox",
             verbose=False,
-            compression="ZSTD",
-            compression_level=None,
-            row_group_size_mb=None,
-            row_group_rows=None,
-            profile=None,
+            write=WriteOptions(compression="ZSTD", geoparquet_version="1.1"),
             force=False,
-            geoparquet_version="1.1",
-            memory_limit=None,
         )
 
         schema = pq.read_schema(str(output))
@@ -264,14 +259,8 @@ class TestAddBboxStreaming:
             output_path=str(output),
             bbox_column_name="bbox",
             verbose=False,
-            compression="ZSTD",
-            compression_level=None,
-            row_group_size_mb=None,
-            row_group_rows=None,
-            profile=None,
+            write=WriteOptions(compression="ZSTD", geoparquet_version="1.1"),
             force=True,
-            geoparquet_version="1.1",
-            memory_limit=None,
         )
 
         names = pq.read_schema(str(output)).names
@@ -338,14 +327,8 @@ class TestThreePathsAgree:
             output_path=str(output),
             bbox_column_name="bbox",
             verbose=False,
-            compression="ZSTD",
-            compression_level=None,
-            row_group_size_mb=None,
-            row_group_rows=None,
-            profile=None,
+            write=WriteOptions(compression="ZSTD", geoparquet_version="1.1"),
             force=False,
-            geoparquet_version="1.1",
-            memory_limit=None,
         )
 
         schema = pq.read_schema(str(output))

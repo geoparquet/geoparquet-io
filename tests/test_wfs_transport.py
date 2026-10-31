@@ -13,15 +13,14 @@ from __future__ import annotations
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.http_retry import MAX_RETRY_AFTER
+from geoparquet_io.core.exceptions import GeoParquetError, RemoteAccessError
+from geoparquet_io.core.http_retry import MAX_RETRY_AFTER, make_request_with_retry
 from geoparquet_io.core.wfs import (
     LayerNotFoundError,
-    WFSAuthenticationError,
     WFSError,
     _fetch_wfs_page,
     _fetch_with_spatial_tiles,
     _get_feature_count,
-    _make_request,
     _probe_startindex_limit,
     convert_wfs_to_geoparquet,
     fetch_all_features_duckdb,
@@ -117,8 +116,21 @@ def stub_service(http, *, total, page_size=100_000, startindex_limit=None):
 
 
 # ---------------------------------------------------------------------------
-# _make_request - 70 lines of retry logic the fast suite never reached
+# the WFS GET through the one HTTP owner (http_retry)
 # ---------------------------------------------------------------------------
+
+
+def _make_request(url, params=None, accept=None, timeout=60.0, retry_delay=1.0):
+    """How wfs issues a GET: the shared owner, raw bytes, optional Accept."""
+    return make_request_with_retry(
+        "GET",
+        url,
+        params=params,
+        headers={"Accept": accept} if accept else None,
+        timeout=timeout,
+        retry_delay=retry_delay,
+        parse_json=False,
+    )
 
 
 def test_a_request_carries_gzip_and_the_accept_header(monkeypatch):
@@ -162,11 +174,11 @@ def test_a_dropped_connection_resets_the_pool_then_succeeds(monkeypatch):
     assert http.sleeps == [1.0]
 
 
-def test_a_timeout_backs_off_linearly_then_gives_up(monkeypatch):
+def test_a_timeout_backs_off_then_gives_up(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, timeout_error())
 
-    with pytest.raises(WFSError, match="Request failed after 3 attempts"):
+    with pytest.raises(RemoteAccessError, match="Request failed after 3 attempts"):
         _make_request(SERVICE, timeout=9.0)
 
     assert len(http.requests) == 3
@@ -180,7 +192,7 @@ def test_a_network_error_is_retried(monkeypatch):
 
     assert _make_request(SERVICE) == b"<ok/>"
     assert http.sleeps == [1.0]
-    assert http.resets == 0
+    assert http.resets == 1  # one policy: a broken connection resets the pool
 
 
 def test_a_custom_retry_delay_scales_the_backoff(monkeypatch):
@@ -233,7 +245,7 @@ def test_an_http_date_retry_after_is_honoured_and_capped(monkeypatch):
     assert http.sleeps == [MAX_RETRY_AFTER]
 
 
-def test_an_unreadable_retry_after_degrades_to_linear_backoff(monkeypatch):
+def test_an_unreadable_retry_after_degrades_to_the_plain_backoff(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, error_reply(503, retry_after="later"), xml_reply(b"<ok/>"))
 
@@ -245,21 +257,20 @@ def test_a_5xx_that_never_clears_reports_the_status(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, error_reply(502))
 
-    with pytest.raises(WFSError, match="HTTP error 502"):
+    with pytest.raises(RemoteAccessError, match="HTTP error 502"):
         _make_request(SERVICE)
     assert len(http.requests) == 3
     assert http.sleeps == [1.0, 2.0]
 
 
 @pytest.mark.parametrize("status", [401, 403])
-def test_an_auth_status_raises_the_typed_error_without_retrying(monkeypatch, status):
+def test_an_auth_status_raises_the_shared_message_without_retrying(monkeypatch, status):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, error_reply(status))
 
-    with pytest.raises(WFSAuthenticationError) as excinfo:
+    with pytest.raises(RemoteAccessError, match="Authentication required|Access denied"):
         _make_request(SERVICE)
 
-    assert excinfo.value.status_code == status
     assert len(http.requests) == 1
     assert http.sleeps == []
 
@@ -268,7 +279,7 @@ def test_a_404_names_the_url(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, error_reply(404))
 
-    with pytest.raises(WFSError, match=r"not found \(404\)"):
+    with pytest.raises(RemoteAccessError, match=r"not found \(404\)"):
         _make_request(SERVICE)
     assert len(http.requests) == 1
 
@@ -277,7 +288,7 @@ def test_an_unclassified_status_is_not_retried(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, error_reply(418))
 
-    with pytest.raises(WFSError, match="HTTP error 418"):
+    with pytest.raises(RemoteAccessError, match="HTTP error 418"):
         _make_request(SERVICE)
     assert len(http.requests) == 1
 
@@ -296,17 +307,22 @@ def test_capabilities_are_parsed_into_layer_contents(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("message", "needle"),
+    ("make_error", "needle"),
     [
-        ("Connection refused by host", "Could not connect to WFS service"),
-        ("timeout while reading", "Could not connect to WFS service"),
-        ("not well-formed xml at line 3", "Invalid WFS response"),
-        ("something else entirely", "Failed to get WFS capabilities"),
+        (lambda: __import__("requests").exceptions.ConnectionError("x"), "Could not connect"),
+        (lambda: __import__("requests").exceptions.ReadTimeout("x"), "Could not connect"),
+        (
+            lambda: __import__("xml.etree.ElementTree").etree.ElementTree.ParseError("x"),
+            "Invalid WFS",
+        ),
+        (lambda: RuntimeError("something else entirely"), "Failed to get WFS capabilities"),
+        # The message never decides: these words on an unclassified type stay generic.
+        (lambda: RuntimeError("connection timeout xml parse"), "Failed to get WFS capabilities"),
     ],
 )
-def test_capability_failures_are_classified(monkeypatch, message, needle):
+def test_capability_failures_are_classified(monkeypatch, make_error, needle):
     def _boom(*_args, **_kwargs):
-        raise RuntimeError(message)
+        raise make_error()
 
     monkeypatch.setattr("owslib.wfs.WebFeatureService", _boom)
 
@@ -586,15 +602,25 @@ def test_another_400_reports_the_body(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, bytes_reply(b"unknown typeName", status=400, content_type="text/plain"))
 
-    with pytest.raises(WFSError, match="HTTP 400: unknown typeName"):
+    with pytest.raises(WFSError, match="HTTP error 400.*unknown typeName"):
         _fetch_wfs_page(SERVICE)
 
 
-def test_a_5xx_page_is_not_retried_by_the_page_fetcher(monkeypatch):
+def test_a_5xx_page_is_retried_by_the_page_fetcher_then_reported(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond(SERVICE, error_reply(503))
 
-    with pytest.raises(WFSError, match="HTTP 503"):
+    with pytest.raises(WFSError, match="HTTP error 503"):
+        _fetch_wfs_page(SERVICE)
+    assert len(http.requests) == 3
+    assert http.sleeps == [1.0, 2.0]
+
+
+def test_a_4xx_page_is_not_retried_by_the_page_fetcher(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(SERVICE, error_reply(404))
+
+    with pytest.raises(WFSError, match=r"not found \(404\)"):
         _fetch_wfs_page(SERVICE)
     assert len(http.requests) == 1
 
@@ -605,7 +631,7 @@ def test_a_transient_page_failure_resets_the_pool_and_retries(monkeypatch):
 
     assert _fetch_wfs_page(SERVICE).num_rows == 3
     assert http.resets == 1
-    assert http.sleeps == [2.0]  # the page fetcher's own retry_delay default
+    assert http.sleeps == [1.0]  # the shared default retry_delay
 
 
 def test_a_page_that_never_arrives_names_the_attempt_count(monkeypatch):
@@ -615,7 +641,7 @@ def test_a_page_that_never_arrives_names_the_attempt_count(monkeypatch):
     with pytest.raises(WFSError, match="after 3 attempts"):
         _fetch_wfs_page(SERVICE)
     assert len(http.requests) == 3
-    assert http.sleeps == [2.0, 4.0]
+    assert http.sleeps == [1.0, 2.0]
 
 
 @pytest.mark.parametrize("content_type", ["text/html", "text/plain", "application/xhtml+xml"])
@@ -840,7 +866,8 @@ def test_an_existing_output_is_refused_without_overwrite(monkeypatch, tmp_path):
     out = tmp_path / "exists.parquet"
     out.write_bytes(b"not parquet")
 
-    with pytest.raises(WFSError, match="Output file exists"):
+    # The owner's refusal, not a WFS-local re-raise (#1367 T2e, after T4b)
+    with pytest.raises(GeoParquetError, match="Output file already exists"):
         convert_wfs_to_geoparquet(SERVICE, TYPENAME, str(out), version="1.1.0")
     assert http.requests == []
 
@@ -1084,3 +1111,114 @@ def test_an_unresolvable_layer_crs_fails_before_any_feature_is_requested(monkeyp
         )
 
     assert not [r for r in http.requests if _is_getfeature(r) or _is_hits(r)]
+
+
+def test_extract_wfs_retries_a_503_through_the_shared_owner(monkeypatch, tmp_path):
+    """`gpio extract wfs` rides out a 503 on a page via ``http_retry.run_with_retry``."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+    from geoparquet_io.core import wfs as wfs_module
+
+    http = FakeTransport.install(monkeypatch)
+    wfs_capabilities(monkeypatch, CAPABILITIES, SCHEMA)
+    http.respond(_is_getfeature, error_reply(503), _pages(6, 100_000))
+    stub_service(http, total=6)
+    seen = []
+    real = wfs_module.run_with_retry
+
+    def recording(*args, **kwargs):
+        seen.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(wfs_module, "run_with_retry", recording)
+    out = tmp_path / "retried.parquet"
+
+    result = CliRunner().invoke(
+        cli,
+        ["extract", "wfs", SERVICE, TYPENAME, str(out), "--wfs-version", "1.1.0", "--skip-hilbert"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert pq.read_metadata(out).num_rows == 6
+    assert seen, "the page was fetched without going through http_retry.run_with_retry"
+    assert http.sleeps == [1.0]  # the shared default retry_delay
+
+
+def test_json_object_limit_is_sized_per_response_not_one_gibibyte(monkeypatch):
+    """#1344: a small response must not ask DuckDB for a 1 GiB object limit.
+
+    The JSON reader allocates a multiple of ``maximum_object_size`` per active
+    reader, so the fixed 1 GiB ran a 3 KB page out of memory on a 7 GiB host.
+    """
+    from geoparquet_io.core import wfs as wfs_module
+
+    seen = []
+    real_probe = wfs_module._probe_properties_type
+    real_query = wfs_module._build_wfs_feature_query
+
+    def probe(con, path, size):
+        seen.append(size)
+        return real_probe(con, path, size)
+
+    def query(path, fid, unnest, size):
+        seen.append(size)
+        return real_query(path, fid, unnest, size)
+
+    monkeypatch.setattr(wfs_module, "_probe_properties_type", probe)
+    monkeypatch.setattr(wfs_module, "_build_wfs_feature_query", query)
+    http = FakeTransport.install(monkeypatch)
+    wfs_capabilities(monkeypatch, CAPABILITIES, SCHEMA)
+    stub_service(http, total=5)
+
+    table = fetch_all_features_duckdb(SERVICE, TYPENAME, "1.1.0", page_size=100)
+
+    assert table.num_rows == 5
+    assert seen, "the JSON reader was never sized"
+    assert all(16 * 1024 * 1024 <= size < 1024**3 for size in seen), seen
+    assert max(seen) <= 16 * 1024 * 1024  # a few KB of GeoJSON gets the floor
+
+
+def test_a_wfs_page_status_uses_the_shared_wording_and_no_arcgis_flags(monkeypatch):
+    """One status sentence for every service; WFS never suggests ArcGIS's --token flags."""
+    http = FakeTransport.install(monkeypatch)
+    http.respond(SERVICE, error_reply(403))
+
+    with pytest.raises(WFSError) as excinfo:
+        _fetch_wfs_page(SERVICE)
+
+    assert "Access denied to the service" in str(excinfo.value)
+    assert "Check the credentials in the URL" in str(excinfo.value)
+    assert "--token" not in str(excinfo.value)
+
+
+def test_the_hits_probe_warning_does_not_suggest_arcgis_flags(monkeypatch, caplog):
+    http = FakeTransport.install(monkeypatch)
+    http.respond(SERVICE, error_reply(401))
+
+    with caplog.at_level("WARNING"):
+        assert _get_feature_count(SERVICE, TYPENAME, "1.1.0") is None
+
+    assert "Authentication required" in caplog.text
+    assert "--token" not in caplog.text
+
+
+def test_properties_probe_only_swallows_the_missing_key_error():
+    import duckdb
+
+    from geoparquet_io.core.wfs import _probe_properties_type
+
+    class _Con:
+        def __init__(self, message):
+            self.message = message
+
+        def execute(self, *_a, **_k):
+            raise duckdb.BinderException(self.message)
+
+        sql = execute
+
+    missing = 'Binder Error: Could not find key "properties" in struct'
+    assert _probe_properties_type(_Con(missing), "/x.json", 1024) == ("MISSING", False)
+    other = "Binder Error: Referenced column x not found\nLINE 3: typeof(feature.properties)"
+    with pytest.raises(duckdb.BinderException):
+        _probe_properties_type(_Con(other), "/x.json", 1024)

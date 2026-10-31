@@ -166,6 +166,12 @@ Checks if data is spatially ordered. Spatially ordered data improves:
 - **Bbox-stats method**: Checks if consecutive row groups have overlapping bounding boxes. Non-overlapping row groups indicate good spatial ordering. Passes if < 30% of row group pairs overlap.
 - **Sampling method**: Compares average distance between consecutive features vs random feature pairs. Lower ratio indicates better spatial clustering. Passes if ratio < 0.5.
 
+`--fix` Hilbert-sorts the file and keeps at least as many row groups as it
+had: it writes 49,152 rows per group when that already keeps the count, and
+otherwise the largest whole 2,048-row vector that does, so a file the check
+could judge is not rewritten into one too coarse to judge
+([#1098](https://github.com/geoparquet/geoparquet-io/issues/1098)).
+
 The sampling method reads WKB, native Parquet GEOMETRY and GeoArrow coordinate
 struct columns. NULL, zero-length and unparsable values are skipped, and the
 spec validation reports them. When the geometry column is missing or has a type
@@ -659,7 +665,12 @@ Validates file structure and metadata against the GeoParquet specification:
   *both* places, so the output passes this check over coordinates that were
   never transformed. gpio warns when it does this, naming both CRSs and which
   one it used, but the warning is the only trace: fix whichever half is wrong
-  on the **input**, before the rewrite.
+  on the **input**, before the rewrite. An explicit `EPSG:4326` or `OGC:CRS84`
+  in the block is a CRS the block named, so it wins over a different logical
+  type like any other. The warning is deliberately conservative: it fires when
+  both sides resolve to an authority id and the ids differ, so a one-sided
+  `id` disagreement (a full PROJJSON of one CRS next to an id-less one of
+  another) is resolved to the block's answer without a warning.
 - **Datum-aware epoch validation** — a coordinate `epoch` on a datum ensemble
   (e.g. EPSG:4326, or the OGC:CRS84 default when `crs` is omitted) fails; on a
   specific static frame (e.g. GDA2020) it warns; on a dynamic frame (e.g. ITRF)
@@ -697,6 +708,11 @@ Validates file structure and metadata against the GeoParquet specification:
   scans read GeoArrow coordinates directly. GeoParquet 1.0 and 2.0 are
   WKB-only per their spec text, so a file claiming a GeoArrow encoding under
   either version fails.
+- **Edges values** — `edges_valid_<column>` accepts `planar` and `spherical`
+  in a 1.x block and adds the four ellipsoidal algorithms (`vincenty`,
+  `thomas`, `andoyer`, `karney`) at 2.0. A block whose `version` is missing or
+  is not a version string is not 1.x, so all five values pass: the same answer
+  the writers give when they map a block's edges to its version.
 - **Spherical edges on a projected CRS** — a column declaring `edges` other
   than `planar` while its CRS is projected **warns**
   (`edges_spherical_on_projected_crs_<column>`). Great-circle edges are only
@@ -841,8 +857,11 @@ gpio check all partitions/ --sample-files 3
     ```
 
     Each rewritten file gets a `.bak` alongside it (unless you pass
-    `--no-backup`, which asks for confirmation once for the whole run), and the
-    run ends with a `Fixed N files:` list naming every one of them. There is no
+    `--no-backup`, which asks for confirmation once for the whole run). A
+    backup never overwrites an earlier one: a second in-place fix of the same
+    file writes `<file>.bak.1`, the next `<file>.bak.2`, so the first `.bak`
+    stays the original. The run ends with a `Fixed N files:` list naming every
+    one of them. There is no
     confirmation prompt otherwise: run the command without `--fix` first and
     read the file count in the `📁 Checking first file (of N total)` notice.
 

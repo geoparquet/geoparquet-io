@@ -13,15 +13,19 @@ import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from geoparquet_io.core.column_selection import fold
 from geoparquet_io.core.duckdb_utils import (
+    describe_query,
+    duckdb_type_is_integer,
     fetch_one,
     fetch_row,
-    load_community_extension,
     quote_identifier,
     sql_path,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
+from geoparquet_io.core.index_ops import get_index_spec, load_index
 from geoparquet_io.core.logging_config import warn
 from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME
@@ -32,31 +36,19 @@ from geoparquet_io.core.process.aggregate.common import (
     VALID_METRIC_FUNCS,
     geometry_to_geom_expr,
 )
+from geoparquet_io.core.process.aggregate.grid_common import GridScheme
 
-VALID_SCHEMES = ("a5", "h3", "admin")
-# Default cell column per scheme, single-sourced from the aggregate engine's
-# GridScheme descriptors so the two stay in lockstep.
+ADMIN_SCHEME = "admin"
+# The grid schemes, keyed by index name: the one list the aggregate engine's
+# GridScheme descriptors define, in the order the CLI offers them.
+GRID_SCHEMES: dict[str, GridScheme] = {s.spec.name: s for s in (A5_SCHEME, H3_SCHEME)}
+VALID_SCHEMES = (*GRID_SCHEMES, ADMIN_SCHEME)
+# Default cell column per scheme, single-sourced from the GridScheme
+# descriptors so the two stay in lockstep.
 DEFAULT_CELL_COLUMNS = {
-    "a5": A5_SCHEME.default_column,
-    "h3": H3_SCHEME.default_column,
-    "admin": "admin_code",
+    **{name: scheme.default_column for name, scheme in GRID_SCHEMES.items()},
+    ADMIN_SCHEME: "admin_code",
 }
-
-_INTEGER_TYPES = {
-    "TINYINT",
-    "SMALLINT",
-    "INTEGER",
-    "BIGINT",
-    "UTINYINT",
-    "USMALLINT",
-    "UINTEGER",
-    "UBIGINT",
-}
-# H3 string cell ids are 15 hex chars (e.g. "85283473fffffff").
-_H3_STRING_RE = re.compile(r"^[0-9a-fA-F]{15}$")
-
-_GRID_EXTENSIONS = {"a5": "a5", "h3": "h3"}
-_RESOLUTION_FUNCS = {"a5": "a5_get_resolution", "h3": "h3_get_resolution"}
 
 
 @dataclass(frozen=True)
@@ -91,13 +83,12 @@ class AggregateInfo:
 
 def ensure_grid_extension(con, scheme: str) -> None:
     """Install/load the community extension backing a grid scheme."""
-    load_community_extension(con, _GRID_EXTENSIONS[scheme], feature=f"{scheme} overviews")
+    load_index(con, get_index_spec(scheme), feature=f"{scheme} overviews")
 
 
 def _describe_columns(con, relation: str) -> list[tuple[str, str]]:
     return [
-        (row[0], row[1].upper())
-        for row in con.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()
+        (name, type_.upper()) for name, type_ in describe_query(con, f"SELECT * FROM {relation}")
     ]
 
 
@@ -126,43 +117,55 @@ def _detect_scheme(
                 "cell_column", f"column '{cell_column}' not found in the input"
             )
         return cell_column, _scheme_for_column(con, relation, cell_column, columns[cell_column])
-    if "a5_cell" in columns and columns["a5_cell"] in _INTEGER_TYPES:
-        return "a5_cell", "a5"
-    if "h3_cell" in columns and columns["h3_cell"] == "VARCHAR":
-        return "h3_cell", "h3"
-    if "admin_code" in columns:
-        return "admin_code", "admin"
+    for name, grid in GRID_SCHEMES.items():
+        dtype = columns.get(grid.default_column)
+        if dtype is not None and _stores_cells(grid.spec, dtype):
+            return grid.default_column, name
+    admin_column = DEFAULT_CELL_COLUMNS[ADMIN_SCHEME]
+    if admin_column in columns:
+        return admin_column, ADMIN_SCHEME
+    expected = ", ".join([*(g.default_column for g in GRID_SCHEMES.values()), admin_column])
+    expected = expected.replace(", " + admin_column, ", or " + admin_column)
     raise InvalidParameterError(
         "input",
-        "no aggregate cell column found (expected a5_cell, h3_cell, or admin_code). "
+        f"no aggregate cell column found (expected {expected}). "
         "Is this a `gpio process aggregate` output? Pass --cell-column to override.",
     )
 
 
+def _stores_cells(spec, dtype: str) -> bool:
+    """Whether a column of ``dtype`` can hold this grid index's cell ids."""
+    return duckdb_type_is_integer(dtype) if spec.cell_integer else dtype == "VARCHAR"
+
+
 def _scheme_for_column(con, relation: str, name: str, dtype: str) -> str:
     """Infer the scheme for an explicitly named cell column."""
-    if dtype in _INTEGER_TYPES:
-        if "a5" in name.lower():
-            return "a5"
+    if duckdb_type_is_integer(dtype):
+        for scheme_name, grid in GRID_SCHEMES.items():
+            if grid.spec.cell_integer and scheme_name in fold(name):
+                return scheme_name
         # a5 ids and packed H3 ids are both integers; guessing a5 here would
         # silently roll H3 data up the wrong hierarchy.
+        flags = " or ".join(f"--scheme {n}" for n in GRID_SCHEMES)
         raise InvalidParameterError(
             "cell_column",
             f"cannot infer a grid scheme for integer column '{name}' "
             "(a5 and packed H3 ids are both stored as integers). "
-            "Pass --scheme a5 or --scheme h3 to disambiguate.",
+            f"Pass {flags} to disambiguate.",
         )
     qcol = quote_identifier(name)
     row = fetch_row(con, f"SELECT {qcol} FROM {relation} WHERE {qcol} IS NOT NULL LIMIT 1")
-    if row and isinstance(row[0], str) and _H3_STRING_RE.match(row[0]):
-        return "h3"
-    return "admin"
+    if row and isinstance(row[0], str):
+        for scheme_name, grid in GRID_SCHEMES.items():
+            if grid.spec.cell_pattern and re.match(grid.spec.cell_pattern, row[0]):
+                return scheme_name
+    return ADMIN_SCHEME
 
 
 def _classify_columns(columns: list[tuple[str, str]], cell_column: str, scheme: str):
     """Split attribute columns into rollup roles; return (rollups, dropped)."""
-    special = {cell_column, "count", "geometry", "centroid"}
-    if scheme == "admin":
+    special = {cell_column, "count", BUILT_GEOMETRY_COLUMN, "centroid"}
+    if scheme == ADMIN_SCHEME:
         special.add("admin_name")
     # Single-sourced from the aggregate engine's metric functions so adding a
     # metric func there cannot silently drop its columns here; breakdown
@@ -193,7 +196,14 @@ def _classify_columns(columns: list[tuple[str, str]], cell_column: str, scheme: 
             rollups.append(RollupColumn(name, func, source_column=source))
             continue
         rollups.append(
-            RollupColumn(name, func, cast_to_bigint=(func == "sum" and dtype in _INTEGER_TYPES))
+            RollupColumn(
+                name,
+                func,
+                # HUGEINT sums must retain their width rather than narrow to BIGINT.
+                cast_to_bigint=(
+                    func == "sum" and duckdb_type_is_integer(dtype) and "HUGE" not in dtype
+                ),
+            )
         )
     return tuple(rollups), tuple(dropped)
 
@@ -208,18 +218,18 @@ def _pct_cell_source(name: str, names: set[str], scheme: str) -> str | None:
     hand-built or pre-#1181 file), and for admin rollups, where a country is
     not a cell and has no cell area at all.
     """
-    if scheme == "admin":
+    if scheme == ADMIN_SCHEME:
         return None
     source = f"sum_{name[len(PCT_CELL_PREFIX) :]}"
     return source if source in names else None
 
 
 def _infer_out_geometry(con, relation: str, columns: dict[str, str]) -> str:
-    if "geometry" not in columns:
+    if BUILT_GEOMETRY_COLUMN not in columns:
         return "none"
     if "centroid" in columns:
         return "both"
-    geom_expr = geometry_to_geom_expr(con, relation, "geometry")
+    geom_expr = geometry_to_geom_expr(con, relation, BUILT_GEOMETRY_COLUMN)
     row = fetch_one(
         con.execute(
             f"SELECT ST_GeometryType({geom_expr}) FROM {relation} WHERE geometry IS NOT NULL LIMIT 1"
@@ -233,7 +243,7 @@ def _infer_out_geometry(con, relation: str, columns: dict[str, str]) -> str:
 def _detect_grid_base_level(con, relation: str, scheme: str, cell_column: str) -> int:
     ensure_grid_extension(con, scheme)
     qcol = quote_identifier(cell_column)
-    res_func = _RESOLUTION_FUNCS[scheme]
+    res_func = get_index_spec(scheme).resolution_function
     rows = con.execute(
         f"SELECT DISTINCT {res_func}({qcol}) FROM {relation} WHERE {qcol} IS NOT NULL"
     ).fetchall()
@@ -297,7 +307,7 @@ def detect_aggregate_info(
     if dropped:
         warn(f"Ignoring columns that cannot be rolled up: {', '.join(dropped)}")
 
-    if scheme == "admin":
+    if scheme == ADMIN_SCHEME:
         base_level: int | str = _detect_admin_base_level(con, relation, cell_col)
     else:
         base_level = _detect_grid_base_level(con, relation, scheme, cell_col)
@@ -311,14 +321,6 @@ def detect_aggregate_info(
         out_geometry=out_geometry,
         dropped_columns=dropped,
     )
-
-
-def detect_aggregate_file(
-    input_parquet: str, cell_column: str | None = None, scheme: str | None = None
-) -> AggregateInfo:
-    """File-path convenience wrapper around :func:`detect_aggregate_info`."""
-    with aggregate_connection(input_parquet) as (con, relation):
-        return detect_aggregate_info(con, relation, cell_column, scheme)
 
 
 @contextmanager

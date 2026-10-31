@@ -10,10 +10,11 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.admin_datasets import OvertureAdminDataset
-from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 from geoparquet_io.core.process.overview import create_overviews
 from geoparquet_io.core.process.overview.detect import (
-    detect_aggregate_file,
+    aggregate_connection,
     detect_aggregate_info,
 )
 from geoparquet_io.core.process.overview.run import overview_output_path
@@ -21,6 +22,12 @@ from geoparquet_io.core.process.overview.run import overview_output_path
 # ---------------------------------------------------------------------------
 # Fixture builders
 # ---------------------------------------------------------------------------
+
+
+# Exercise the connection and detector directly after retiring the convenience wrapper.
+def _detect_file(path):
+    with aggregate_connection(path) as (con, relation):
+        return detect_aggregate_info(con, relation)
 
 
 def _write_admin_region_aggregate(path, with_geometry=True, extra_column=False):
@@ -98,18 +105,18 @@ class TestDetection:
         path = tmp_path / "plain.parquet"
         pq.write_table(pa.table({"id": [1, 2], "count": [3, 4]}), path)
         with pytest.raises(InvalidParameterError, match="cell-column"):
-            detect_aggregate_file(str(path))
+            _detect_file(str(path))
 
     def test_missing_count_column_errors(self, tmp_path):
         path = tmp_path / "no_count.parquet"
         pq.write_table(pa.table({"admin_code": ["US-CA"], "sum_area": [1.0]}), path)
         with pytest.raises(InvalidParameterError, match="count"):
-            detect_aggregate_file(str(path))
+            _detect_file(str(path))
 
     def test_admin_region_aggregate_detected(self, tmp_path):
         path = tmp_path / "by_region.parquet"
         _write_admin_region_aggregate(path)
-        info = detect_aggregate_file(str(path))
+        info = _detect_file(str(path))
         assert info.scheme == "admin"
         assert info.cell_column == "admin_code"
         assert info.base_level == "region"
@@ -131,7 +138,7 @@ class TestDetection:
             path,
         )
         with pytest.raises(InvalidParameterError, match="country level"):
-            detect_aggregate_file(str(path))
+            _detect_file(str(path))
 
     def test_admin_empty_input_distinct_error(self, tmp_path):
         """0 usable rows is not 'already at country level' -- say so."""
@@ -141,19 +148,19 @@ class TestDetection:
             path,
         )
         with pytest.raises(InvalidParameterError, match="no admin codes"):
-            detect_aggregate_file(str(path))
+            _detect_file(str(path))
 
     def test_unclassifiable_columns_are_dropped(self, tmp_path):
         path = tmp_path / "by_region.parquet"
         _write_admin_region_aggregate(path, extra_column=True)
-        info = detect_aggregate_file(str(path))
+        info = _detect_file(str(path))
         assert "notes" in info.dropped_columns
         assert "notes" not in {c.name for c in info.rollup_columns}
 
     def test_no_geometry_infers_none(self, tmp_path):
         path = tmp_path / "by_region.parquet"
         _write_admin_region_aggregate(path, with_geometry=False)
-        info = detect_aggregate_file(str(path))
+        info = _detect_file(str(path))
         assert info.out_geometry == "none"
 
 
@@ -396,7 +403,7 @@ class TestOutGeometryInference:
             """
         )
         con.close()
-        assert detect_aggregate_file(str(src)).out_geometry == "both"
+        assert _detect_file(str(src)).out_geometry == "both"
 
     def test_centroid_when_geometry_is_points(self, tmp_path):
         src = tmp_path / "by_region.parquet"
@@ -410,7 +417,7 @@ class TestOutGeometryInference:
             """
         )
         con.close()
-        assert detect_aggregate_file(str(src)).out_geometry == "centroid"
+        assert _detect_file(str(src)).out_geometry == "centroid"
 
 
 class TestGridRollupStubbed:
@@ -565,11 +572,11 @@ class TestGridRollupStubbed:
 
 class TestProbeWorstTileCounts:
     def test_counts_shrink_with_zoom(self):
-        from geoparquet_io.core.partition.auto_resolution import _register_quadkey_udf
+        from geoparquet_io.core.index_ops import get_index_spec, load_index
         from geoparquet_io.core.process.overview.levels import probe_worst_tile_counts
 
         con = duckdb.connect()
-        _register_quadkey_udf(con)
+        load_index(con, get_index_spec("quadkey"))
         # Two nearby points, one far away, one beyond the WebMercator lat
         # domain (exercises the clamp).
         cells_sql = (
@@ -584,11 +591,11 @@ class TestProbeWorstTileCounts:
         con.close()
 
     def test_empty_input(self):
-        from geoparquet_io.core.partition.auto_resolution import _register_quadkey_udf
+        from geoparquet_io.core.index_ops import get_index_spec, load_index
         from geoparquet_io.core.process.overview.levels import probe_worst_tile_counts
 
         con = duckdb.connect()
-        _register_quadkey_udf(con)
+        load_index(con, get_index_spec("quadkey"))
         counts = probe_worst_tile_counts(
             con, "SELECT NULL::DOUBLE AS lon, NULL::DOUBLE AS lat WHERE false", max_zoom=2
         )
@@ -1013,7 +1020,8 @@ class TestAdminRollup:
         with pytest.raises(InvalidParameterError, match="country"):
             create_overviews(str(src), levels="province")
 
-    def test_country_cache_path_with_single_quote(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("as_url", [False, True])
+    def test_country_cache_path_with_single_quote(self, tmp_path, monkeypatch, as_url):
         """The country cache path must be SQL-escaped like every other path
         (home dirs can contain apostrophes)."""
         import shutil
@@ -1026,8 +1034,22 @@ class TestAdminRollup:
         monkeypatch.setattr(
             OvertureAdminDataset,
             "get_source_for_level",
-            lambda self, level, no_cache=False: str(quoted_cache),
+            lambda self, level, no_cache=False: (
+                "file:///" + quoted_cache.as_posix().lstrip("/") if as_url else str(quoted_cache)
+            ),
         )
+
+        if as_url:
+            from geoparquet_io.core.admin_datasets import CurrentAdminDataset
+            from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+
+            # The no-options owner form is a bare quoted URL; DuckDB reads it directly.
+            ref = CurrentAdminDataset().table_reference(
+                "file:///" + quoted_cache.as_posix().lstrip("/")
+            )
+            with get_duckdb_connection() as con:
+                countries = con.execute(f"SELECT DISTINCT country FROM {ref}").fetchall()
+            assert {row[0] for row in countries} == {"US", "FR"}
 
         src = tmp_path / "by_region.parquet"
         _write_admin_region_aggregate(src)
@@ -1043,7 +1065,7 @@ class TestAdminRollup:
         (result,) = create_overviews(str(src), levels="country")
         first_bytes = Path(result[1]).read_bytes()
 
-        with pytest.raises(InvalidParameterError, match="force"):
+        with pytest.raises(GeoParquetError, match="already exists.*\n.*--force"):
             create_overviews(str(src), levels="country")
         assert Path(result[1]).read_bytes() == first_bytes  # untouched
 
@@ -1162,7 +1184,9 @@ def test_gold_rollup_a5(tmp_path):
     base = tmp_path / "cells.parquet"
     direct = tmp_path / "direct_r5.parquet"
     _write_points_geoparquet(src, _GOLD_POINTS)
-    kwargs = {"metric": _GOLD_METRIC, "breakdown": "crop", "out_geometry": "both"}
+    kwargs = {
+        "options": AggregateOptions(metric=_GOLD_METRIC, breakdown="crop", out_geometry="both")
+    }
     aggregate_by_a5(str(src), str(base), resolution=7, **kwargs)
     aggregate_by_a5(str(src), str(direct), resolution=5, **kwargs)
 
@@ -1186,7 +1210,9 @@ def test_gold_rollup_h3(tmp_path):
     src = tmp_path / "points.parquet"
     base = tmp_path / "cells.parquet"
     _write_points_geoparquet(src, _GOLD_POINTS)
-    kwargs = {"metric": _GOLD_METRIC, "breakdown": "crop", "out_geometry": "both"}
+    kwargs = {
+        "options": AggregateOptions(metric=_GOLD_METRIC, breakdown="crop", out_geometry="both")
+    }
     aggregate_by_h3(str(src), str(base), resolution=7, **kwargs)
 
     results = create_overviews(str(base), levels="5")
@@ -1297,7 +1323,7 @@ def test_table_overview_api(tmp_path):
     src = tmp_path / "points.parquet"
     base = tmp_path / "cells.parquet"
     _write_points_geoparquet(src, _GOLD_POINTS)
-    aggregate_by_a5(str(src), str(base), resolution=7, metric="sum:area")
+    aggregate_by_a5(str(src), str(base), resolution=7, options=AggregateOptions(metric="sum:area"))
 
     result = Table(pq.read_table(base)).overview(5)
     assert "a5_cell" in result.column_names
@@ -1305,3 +1331,56 @@ def test_table_overview_api(tmp_path):
     assert "sum_area" in result.column_names
     base_count = sum(pq.read_table(base).column("count").to_pylist())
     assert sum(result.to_arrow().column("count").to_pylist()) == base_count
+
+
+class TestGridDetectionThroughSpec:
+    """Auto-detection reads each grid scheme's column and storage from its spec (#1367)."""
+
+    def _renamed(self, monkeypatch):
+        import dataclasses
+
+        from geoparquet_io.core.process.overview import detect
+
+        renamed = {
+            name: dataclasses.replace(scheme, default_column=f"my_{name}_ids")
+            for name, scheme in detect.GRID_SCHEMES.items()
+        }
+        monkeypatch.setattr(detect, "GRID_SCHEMES", renamed)
+        monkeypatch.setattr(
+            detect,
+            "DEFAULT_CELL_COLUMNS",
+            {**detect.DEFAULT_CELL_COLUMNS} | {n: s.default_column for n, s in renamed.items()},
+        )
+
+    def test_h3_string_column_with_renamed_default(self, monkeypatch):
+        import duckdb as _duckdb
+
+        from geoparquet_io.core.process.overview.detect import _detect_scheme
+
+        self._renamed(monkeypatch)
+        con = _duckdb.connect()
+        columns = {"my_h3_ids": "VARCHAR", "count": "BIGINT"}
+        assert _detect_scheme(con, "t", columns, None) == ("my_h3_ids", "h3")
+        con.close()
+
+    def test_a5_integer_column_with_renamed_default(self, monkeypatch):
+        import duckdb as _duckdb
+
+        from geoparquet_io.core.process.overview.detect import _detect_scheme
+
+        self._renamed(monkeypatch)
+        con = _duckdb.connect()
+        columns = {"my_a5_ids": "UBIGINT", "count": "BIGINT"}
+        assert _detect_scheme(con, "t", columns, None) == ("my_a5_ids", "a5")
+        con.close()
+
+    def test_wrong_storage_is_not_detected(self, monkeypatch):
+        import duckdb as _duckdb
+
+        from geoparquet_io.core.process.overview.detect import _detect_scheme
+
+        self._renamed(monkeypatch)
+        con = _duckdb.connect()
+        with pytest.raises(InvalidParameterError, match="no aggregate cell column"):
+            _detect_scheme(con, "t", {"my_a5_ids": "VARCHAR", "my_h3_ids": "UBIGINT"}, None)
+        con.close()

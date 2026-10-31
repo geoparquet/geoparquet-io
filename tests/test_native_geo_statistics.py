@@ -37,7 +37,6 @@ import shapely
 from geoparquet_io.core import duckdb_metadata
 from geoparquet_io.core.duckdb_metadata import (
     get_aggregated_native_geo_stats,
-    get_native_geo_statistics,
     get_per_row_group_native_geo_stats,
 )
 from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
@@ -309,10 +308,11 @@ def test_validator_reads_its_bbox_from_the_shared_reader(native_geo_file, monkey
     """Pin the validator to the shared reader, so it cannot grow its own read."""
     from geoparquet_io.core.validate import CheckStatus
 
+    chunk = {"row_group_id": 0, "xmin": 0.0, "ymin": 0.0, "xmax": 0.0, "ymax": 0.0}
     monkeypatch.setattr(
         duckdb_metadata,
-        "get_aggregated_native_geo_stats",
-        lambda *args, **kwargs: {"bbox": [0.0, 0.0, 0.0, 0.0], "geometry_types": ["Point"]},
+        "get_native_geo_stats_by_row_group",
+        lambda *args, **kwargs: [{**chunk, "geometry_types": ["Point"]}],
     )
 
     checks = _native_geo_checks(native_geo_file)
@@ -361,50 +361,4 @@ def test_validator_reports_the_read_failure_not_a_missing_column(native_geo_file
     assert check.status == CheckStatus.SKIPPED
 
 
-def test_the_getters_still_absorb_a_read_failure(native_geo_file, monkeypatch):
-    """Their callers treat empty as "nothing to report"; that contract is unchanged."""
-    monkeypatch.setattr(duckdb_metadata, "_get_connection_for_file", _explode)
-
-    assert get_native_geo_statistics(native_geo_file, "geometry") is None
-    assert get_aggregated_native_geo_stats(native_geo_file, "geometry") == {}
-    assert get_per_row_group_native_geo_stats(native_geo_file, "geometry") == []
-
-
 # --- One dict describes one row group (#770) ---------------------------------
-
-
-def test_single_statistics_take_bbox_and_types_from_the_same_row_group(monkeypatch):
-    """A bbox from one chunk beside another chunk's types matches no row group."""
-    chunks = [
-        # Row group 0: types recorded, bounds not.
-        {
-            "row_group_id": 0,
-            "xmin": None,
-            "ymin": None,
-            "xmax": None,
-            "ymax": None,
-            "zmin": None,
-            "zmax": None,
-            "geometry_types": [1],  # Point
-        },
-        {
-            "row_group_id": 1,
-            "xmin": -1.0,
-            "ymin": -2.0,
-            "xmax": 3.0,
-            "ymax": 4.0,
-            "zmin": None,
-            "zmax": None,
-            "geometry_types": [3],  # Polygon
-        },
-    ]
-    monkeypatch.setattr(
-        duckdb_metadata, "get_native_geo_stats_by_row_group", lambda *a, **k: chunks
-    )
-
-    stats = get_native_geo_statistics("ignored.parquet", "geometry")
-
-    assert stats["bbox"] == pytest.approx([-1.0, -2.0, 3.0, 4.0])
-    assert stats["geometry_types"] == ["Polygon"], (
-        "the types describe row group 0 while the bbox describes row group 1"
-    )

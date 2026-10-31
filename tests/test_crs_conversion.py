@@ -29,13 +29,14 @@ from geoparquet_io.cli.main import cli
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.crs_utils import (
     _extract_crs_identifier,
-    extract_crs_from_parquet,
+    crs_of,
     is_default_crs,
 )
 from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.geometry_detection import primary_geometry_column
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.reproject import (
     _detect_crs_from_table,
-    _detect_geometry_column_from_table,
     _detect_source_crs,
 )
 from tests.geo_schema_helpers import parse_geometry_type_from_schema
@@ -178,17 +179,17 @@ def temp_output_file(temp_output_dir):
 class TestCRSExtraction:
     """Test CRS extraction from various file types."""
 
-    def test_extract_crs_from_parquet_5070(self, fields_5070_file):
+    def test_crs_of_5070(self, fields_5070_file):
         """Test extracting EPSG:5070 from parquet-geo-only file."""
-        crs = extract_crs_from_parquet(fields_5070_file)
+        crs = crs_of(fields_5070_file)
 
         assert crs is not None
         identifier = _extract_crs_identifier(crs)
         assert identifier == ("EPSG", 5070)
 
-    def test_extract_crs_from_parquet_default(self, fields_geom_type_only_file):
+    def test_crs_of_default(self, fields_geom_type_only_file):
         """Test extracting default CRS returns None (or default CRS)."""
-        crs = extract_crs_from_parquet(fields_geom_type_only_file)
+        crs = crs_of(fields_geom_type_only_file)
 
         # Default CRS should be filtered out (returns None)
         # or if returned, should be recognized as default
@@ -630,15 +631,6 @@ class TestAdditionalCRSEdgeCases:
                 if os.path.exists(output):
                     os.unlink(output)
 
-    def test_custom_projjson_crs(self, runner, temp_output_file):
-        """
-        Test that custom PROJJSON CRS is preserved.
-
-        This tests CRS beyond simple EPSG codes.
-        """
-        # For now, skip this test - would require custom PROJJSON input
-        pytest.skip("Custom PROJJSON test requires specialized test data")
-
     def test_crs_consistency_between_schema_and_metadata(self, fields_5070_file, temp_output_file):
         """
         Test that CRS is identical in both schema and metadata for v2.0.
@@ -672,7 +664,7 @@ class TestAdditionalCRSEdgeCases:
 class TestCRSDetectionHelpers:
     """Tests for CRS detection helper functions from reproject module."""
 
-    def test_detect_geometry_column_from_table_with_primary_column(self):
+    def test_primary_geometry_column_of_a_table_with_primary_column(self):
         """Test geometry column detection when primary_column is specified."""
         import pyarrow as pa
 
@@ -687,20 +679,20 @@ class TestCRSDetectionHelpers:
         )
         table = pa.table({"geom": [b""]}, schema=schema)
 
-        geom_col = _detect_geometry_column_from_table(table)
+        geom_col = primary_geometry_column(table)
         assert geom_col == "geom"
 
-    def test_detect_geometry_column_from_table_defaults_to_geometry(self):
-        """Test geometry column detection defaults to 'geometry' when no metadata."""
+    def test_primary_geometry_column_of_a_table_never_guesses_the_literal(self):
+        """No metadata and no standard name: no column (#1367), not a guessed 'geometry'."""
         import pyarrow as pa
 
         schema = pa.schema([pa.field("some_geom", pa.binary())])
         table = pa.table({"some_geom": [b""]}, schema=schema)
 
-        geom_col = _detect_geometry_column_from_table(table)
-        assert geom_col == "geometry"
+        geom_col = primary_geometry_column(table)
+        assert geom_col is None
 
-    def test_detect_geometry_column_from_table_handles_invalid_json(self):
+    def test_primary_geometry_column_of_a_table_handles_invalid_json(self):
         """Undecodable metadata falls back to the schema, not to the literal 'geometry'.
 
         This asserted ``"geometry"`` until #887's review: the table's only
@@ -713,7 +705,7 @@ class TestCRSDetectionHelpers:
         schema = pa.schema([pa.field("geom", pa.binary())]).with_metadata({b"geo": b"invalid json"})
         table = pa.table({"geom": [b""]}, schema=schema)
 
-        geom_col = _detect_geometry_column_from_table(table)
+        geom_col = primary_geometry_column(table)
         assert geom_col == "geom"
 
     def test_detect_crs_from_table_with_epsg_code(self):
@@ -918,11 +910,8 @@ class TestReprojectBboxPreservation:
             output_path=output_file,
             target_crs="EPSG:3857",
             source_crs=None,
-            compression="ZSTD",
-            compression_level=None,
+            write=WriteOptions(compression="ZSTD"),
             verbose=False,
-            profile=None,
-            geoparquet_version=None,
         )
 
         # Verify bbox column exists in output

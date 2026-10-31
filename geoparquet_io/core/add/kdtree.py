@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import tempfile
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -16,9 +15,20 @@ from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
     sql_path,
 )
+from geoparquet_io.core.edges import PLANAR, representative_point_sql
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.file_utils import (
+    handle_output_overwrite,
+    resolve_file_url,
+    scratch_file,
+    unlink_released_file,
+)
+from geoparquet_io.core.geometry_detection import (
+    primary_geometry_column,
+    require_geometry_column,
+    resolve_geometry_column,
+    resolve_geometry_read,
+)
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -28,15 +38,15 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
-    _sanitize_url_for_logging,
-    is_remote_url,
+    display_path,
     needs_httpfs,
 )
+from geoparquet_io.core.sizing import bytes_to_mb
 from geoparquet_io.core.stream_io import write_output
 from geoparquet_io.core.streaming import (
-    find_geometry_column_from_table,
     is_stdin,
     read_stdin_to_temp_file,
     should_stream_output,
@@ -57,7 +67,7 @@ ITERATIONS_MISSING = "must specify either iterations or auto"
 def _file_size_mb(path: str) -> float:
     """Size of ``path`` in MB, or 0.0 when it cannot be stat'd (e.g. a URL)."""
     try:
-        return os.path.getsize(path) / (1024 * 1024)
+        return bytes_to_mb(os.path.getsize(path))
     except OSError:
         return 0.0
 
@@ -186,15 +196,8 @@ def _centroid_sql(con, input_path, geom_col) -> str:
     by ``add_kdtree_table``) reads back as ``BLOB``, and ``ST_Centroid(BLOB)``
     does not bind (#1222). ``input_path`` is RAW, escaped here by ``sql_path``.
     """
-    quoted = quote_identifier(geom_col)
-    (column_type,) = fetch_one(
-        con.execute(
-            f"SELECT column_type FROM (DESCRIBE SELECT {quoted} FROM {sql_path(input_path)})"
-        )
-    )
-    if column_type.upper().startswith("GEOMETRY"):
-        return f"ST_Centroid({quoted})"
-    return f"ST_Centroid(ST_GeomFromWKB({quoted}))"
+    read = resolve_geometry_read(con, sql_path(input_path), geom_col, relation=True)
+    return representative_point_sql(read.shape_expr, PLANAR)
 
 
 def _build_sampling_query(
@@ -396,15 +399,10 @@ def add_kdtree_table(
         raise InvalidParameterError("iterations", f"must be between 1 and 20, got {iterations}")
 
     # Find geometry column
-    geom_col = geometry_column or find_geometry_column_from_table(table)
-    if not geom_col:
-        geom_col = "geometry"
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table")
 
-    # Write table to temp file for processing (kdtree needs file access)
-    temp_fd, temp_path = tempfile.mkstemp(suffix=".parquet")
-    os.close(temp_fd)
-
-    try:
+    # Write table to a scratch copy for processing (kdtree needs file access)
+    with scratch_file() as temp_path:
         # DuckDB reads a GEOGRAPHY column back as planar GEOMETRY, so the temp
         # copy is the planar view and the result gets the input's edges back (#1253).
         warn_planar_math("add_kdtree", table, geom_col)
@@ -438,9 +436,6 @@ def add_kdtree_table(
             return registered.restore_edges(result)
         finally:
             con.close()
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
 
 
 def add_kdtree_column(
@@ -450,7 +445,7 @@ def add_kdtree_column(
     iterations: int | None = None,
     dry_run: bool = False,
     verbose: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
@@ -506,6 +501,7 @@ def add_kdtree_column(
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
+    write = WriteOptions.pick(locals())
     if is_streaming and not dry_run:
         _add_kdtree_streaming(
             input_parquet,
@@ -513,21 +509,15 @@ def add_kdtree_column(
             kdtree_column_name,
             iterations,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
+            write,
             sample_size,
-            profile,
-            geoparquet_version,
-            memory_limit=memory_limit,
             auto_target_rows=auto_target_rows,
         )
         return
 
     # File-based mode
     # Check if output file exists and handle overwrite (fixes issue #278)
-    handle_output_overwrite(output_parquet, overwrite, input_parquet)
+    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
 
     # Check for partition input (not supported)
     require_single_file(input_parquet, "add kdtree")
@@ -556,7 +546,9 @@ def add_kdtree_column(
         raise InvalidParameterError("iterations", f"must be between 1 and 20, got {iterations}")
 
     # Get geometry column for the SQL expression
-    geom_col = find_primary_geometry_column(input_parquet, verbose)
+    geom_col = require_geometry_column(
+        primary_geometry_column(input_parquet, verbose=verbose), input_parquet
+    )
 
     con.close()
 
@@ -654,14 +646,8 @@ def add_kdtree_column(
 
     if dry_run:
         warn("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n")
-        display_input = (
-            _sanitize_url_for_logging(input_path) if is_remote_url(input_path) else input_path
-        )
-        display_output = (
-            _sanitize_url_for_logging(output_parquet)
-            if is_remote_url(output_parquet)
-            else output_parquet
-        )
+        display_input = display_path(input_path)
+        display_output = display_path(output_parquet)
         info(f"-- Input: {display_input}")
         info(f"-- Output: {display_output}")
         info(f"-- Column: {kdtree_column_name}")
@@ -682,19 +668,13 @@ def add_kdtree_column(
         query,
         output_parquet,
         original_metadata=metadata,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
         custom_metadata=kdtree_metadata,
         verbose=verbose,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
         # The rows this write reads are the input's, so auto mode resolves the
         # output version from the input file rather than from a `geo` key a
         # native-geo-only input does not have (#993).
         input_file=input_parquet,
-        memory_limit=memory_limit,
+        **write.funnel_kwargs(),
     )
 
     con.close()
@@ -711,14 +691,8 @@ def _add_kdtree_streaming(
     kdtree_column_name: str,
     iterations: int | None,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
+    write: WriteOptions,
     sample_size: int,
-    profile: str | None,
-    geoparquet_version: str | None,
-    memory_limit: str | None,
     auto_target_rows: int | tuple | None = None,
 ) -> None:
     """Handle streaming input/output for add_kdtree."""
@@ -741,7 +715,9 @@ def _add_kdtree_streaming(
 
         try:
             # Find geometry column
-            geom_col = find_primary_geometry_column(working_file, verbose)
+            geom_col = require_geometry_column(
+                primary_geometry_column(working_file, verbose=verbose), working_file
+            )
 
             if iterations is None:
                 # Auto mode: size the tree from the row count, as the file path
@@ -784,14 +760,8 @@ def _add_kdtree_streaming(
                 output_path,
                 original_metadata=metadata,
                 geometry_column=geom_col,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
                 verbose=verbose,
-                profile=profile,
-                geoparquet_version=geoparquet_version,
-                memory_limit=memory_limit,
+                **write.funnel_kwargs(),
             )
         finally:
             con.close()
@@ -803,8 +773,7 @@ def _add_kdtree_streaming(
             )
     finally:
         # Clean up temp file
-        if temp_input_file and os.path.exists(temp_input_file):
-            os.remove(temp_input_file)
+        unlink_released_file(temp_input_file)
 
 
 if __name__ == "__main__":

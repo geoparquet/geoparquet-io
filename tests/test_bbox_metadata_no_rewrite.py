@@ -17,14 +17,11 @@ import json
 import struct
 from pathlib import Path
 
-import duckdb
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.add import bbox_metadata
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata
 from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
-from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
 
 GEO_NO_COVERING = json.dumps(
@@ -157,16 +154,18 @@ def test_a_footer_it_cannot_patch_falls_back_to_the_rewrite(zstd15_file, monkeyp
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("planted")
 
-    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
-    before = zstd15_file.stat().st_size
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
+    before = _data_section(zstd15_file)
 
     add_bbox_metadata(str(zstd15_file))
 
     geo = json.loads(pq.read_metadata(str(zstd15_file)).metadata[b"geo"])
     assert "covering" in geo["columns"]["geometry"], "the fallback did not write the key"
-    assert zstd15_file.stat().st_size > before, (
-        "the fallback is the rewrite, so this file is expected to come back inflated"
-    )
+    assert _data_section(zstd15_file) != before, "the fallback is the rewrite: pages re-encoded"
+    # The rewrite writes the facade's row groups, not the input's four of 5,000
+    # (approved change 3; it used the input's average rows per group).
+    md = pq.read_metadata(str(zstd15_file))
+    assert [md.row_group(i).num_rows for i in range(md.num_row_groups)] == [20_000]
 
 
 def test_the_fallback_on_a_native_file_writes_one_geo_entry(tmp_path, monkeypatch):
@@ -190,7 +189,7 @@ def test_the_fallback_on_a_native_file_writes_one_geo_entry(tmp_path, monkeypatc
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("planted")
 
-    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
 
     add_bbox_metadata(str(path))
 
@@ -215,26 +214,15 @@ def test_the_fallback_on_a_native_file_writes_one_geo_entry(tmp_path, monkeypatc
     assert logical.startswith("GeometryType"), "the native GEOMETRY type was lost"
 
 
-def _is_closed(conn) -> bool:
-    try:
-        conn.execute("SELECT 1")
-    except duckdb.ConnectionException:
-        return True
-    return False
+def test_a_failed_rewrite_leaves_the_input_and_no_staging_debris(zstd15_file, monkeypatch):
+    """#1244's other half: a failed fallback leaves the input as it was.
 
-
-@pytest.mark.parametrize(
-    "failing_step",
-    ["_detect_native_geometry", "_get_existing_kv_metadata", "_wrap_query_with_blob_conversion"],
-)
-def test_a_failed_rewrite_closes_its_connection(zstd15_file, monkeypatch, failing_step):
-    """#1244: the fallback closed its DuckDB connection only after a successful COPY."""
-    opened = []
-
-    def spy(*args, **kwargs):
-        conn = get_duckdb_connection(*args, **kwargs)
-        opened.append(conn)
-        return conn
+    The rewrite writes into ``atomic_write``'s staging directory beside the
+    file and only a finished one is swapped in, so a write that dies part-way
+    leaves nothing next to the input. (#1244's leaked connection has no
+    successor: the fallback, ``write_funnels.rewrite_footer_kv``, streams with
+    pyarrow and opens none.)
+    """
 
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("planted")
@@ -242,29 +230,88 @@ def test_a_failed_rewrite_closes_its_connection(zstd15_file, monkeypatch, failin
     def boom(*args, **kwargs):
         raise RuntimeError("planted failure")
 
-    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
-    monkeypatch.setattr(bbox_metadata, "get_duckdb_connection", spy)
-    monkeypatch.setattr(bbox_metadata, failing_step, boom)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
+    monkeypatch.setattr("geoparquet_io.core.write_funnels.sized_stream", boom)
+    before = zstd15_file.read_bytes()
 
-    with pytest.raises(GeoParquetError, match="planted failure"):
+    # The funnel's own error, unwrapped: the fallback is the funnel's rewrite
+    # (`write_funnels.rewrite_footer_kv`), not this command's (#1367 T2d).
+    with pytest.raises(RuntimeError, match="planted failure"):
         add_bbox_metadata(str(zstd15_file))
 
-    assert len(opened) == 1
-    assert _is_closed(opened[0]), "the rewrite leaked its DuckDB connection"
+    assert zstd15_file.read_bytes() == before
+    assert sorted(p.name for p in zstd15_file.parent.iterdir()) == [zstd15_file.name]
 
 
-def test_a_verbose_fallback_reports_what_it_preserves(zstd15_file, monkeypatch, caplog):
-    """The verbose rewrite logs the properties it carries and the COPY it runs."""
+def test_a_verbose_fallback_reports_the_keys_it_writes(zstd15_file, monkeypatch, caplog):
+    """The verbose rewrite logs the footer keys it writes."""
 
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("planted")
 
-    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
 
     with caplog.at_level("DEBUG", logger="geoparquet_io"):
         add_bbox_metadata(str(zstd15_file), verbose=True)
 
-    assert "Preserving file properties" in caplog.text
-    assert "DuckDB COPY SQL" in caplog.text
+    assert "Rewriting with footer keys: ['geo']" in caplog.text, caplog.text
     geo = json.loads(pq.read_metadata(str(zstd15_file)).metadata[b"geo"])
     assert "covering" in geo["columns"]["geometry"]
+
+
+def test_the_fallback_keeps_sidecar_keys_but_not_the_inputs_arrow_and_pandas_blocks(
+    tmp_path, monkeypatch
+):
+    """The fallback is a write like any other: its footer keys are the facade's.
+
+    It used to carry every input key verbatim, the input's ``pandas`` block and
+    ``ARROW:schema`` included (pyarrow writes the output's own ``ARROW:schema``), which describe the input's rows and are dropped
+    by every other gpio write (``output_schema_metadata``, #710, #1268). A
+    sidecar key such as ``stac:collection`` still survives (#690, #756), and a
+    1.1 file's geometry stays plain WKB rather than turning native (#712).
+    """
+    import pandas as pd
+    import pyarrow as pa
+    import shapely
+
+    path = tmp_path / "pandas.parquet"
+    frame = pd.DataFrame(
+        {
+            "id": range(50),
+            "bbox": [
+                {"xmin": float(i), "ymin": float(i), "xmax": float(i), "ymax": float(i)}
+                for i in range(50)
+            ],
+            "geometry": [shapely.to_wkb(shapely.Point(i, i)) for i in range(50)],
+        }
+    )
+    table = pa.Table.from_pandas(frame, preserve_index=False)
+    geo = json.loads(GEO_NO_COVERING)
+    geo["columns"]["geometry"]["bbox"] = [0, 0, 49, 49]
+    table = table.replace_schema_metadata(
+        {
+            **table.schema.metadata,
+            b"geo": json.dumps(geo).encode(),
+            b"stac:collection": b'{"id": "c"}',
+        }
+    )
+    pq.write_table(table, path)
+    assert b"pandas" in pq.read_metadata(path).metadata
+    input_arrow_schema = pq.read_metadata(path).metadata[b"ARROW:schema"]
+
+    def refuse(*args, **kwargs):
+        raise FooterPatchUnsupported("planted")
+
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
+
+    add_bbox_metadata(str(path))
+
+    keys = pq.read_metadata(path).metadata
+    assert b"pandas" not in keys, "the input's pandas block was carried verbatim"
+    # pyarrow writes the output's own ARROW:schema; the input's is not carried.
+    assert keys.get(b"ARROW:schema") != input_arrow_schema, "the input's ARROW:schema was carried"
+    assert json.loads(keys[b"stac:collection"]) == {"id": "c"}
+    written = json.loads(keys[b"geo"])
+    assert written["columns"]["geometry"]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
+    assert written["version"] == "1.1.0"
+    assert pq.read_schema(path).field("geometry").type == pa.binary()

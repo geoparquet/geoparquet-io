@@ -16,12 +16,11 @@ from typing import TYPE_CHECKING
 from geoparquet_io.core.arrow_geo_metadata import (
     _apply_geoparquet_metadata,
     _normalize_arrow_large_types,
-    _write_table_with_settings,
 )
-from geoparquet_io.core.compression import validate_compression_settings
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import _get_query_columns, _wrap_query_with_wkb_conversion
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
-from geoparquet_io.core.parquet_writer import apply_output_kv_metadata
+from geoparquet_io.core.parquet_writer import apply_output_kv_metadata, write_arrow_table
 from geoparquet_io.core.write_strategies.base import BaseWriteStrategy
 
 if TYPE_CHECKING:
@@ -50,8 +49,8 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
         geometry_column: str,
         original_metadata: dict | None,
         geoparquet_version: str,
-        compression: str,
-        compression_level: int,
+        compression: str | None,
+        compression_level: int | None,
         row_group_size_mb: int | None,
         row_group_rows: int | None,
         input_crs: dict | None,
@@ -68,8 +67,11 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
         query_columns = _get_query_columns(con, query)
         has_geometry = geometry_column in query_columns
 
-        compression, compression_level, compression_desc = validate_compression_settings(
-            compression, compression_level, verbose
+        codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
+        compression, compression_level, compression_desc = (
+            codec.name,
+            codec.level,
+            codec.description,
         )
 
         if verbose:
@@ -77,7 +79,7 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
             debug(f"Using GeoParquet version: {geoparquet_version}")
 
         if has_geometry:
-            final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
+            final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
         else:
             final_query = query
             if verbose:
@@ -110,7 +112,7 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
 
         table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
 
-        _write_table_with_settings(
+        write_arrow_table(
             table,
             output_path,
             compression=compression,
@@ -129,22 +131,26 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
         output_path: str,
         geometry_column: str,
         geoparquet_version: str,
-        compression: str,
-        compression_level: int,
+        compression: str | None,
+        compression_level: int | None,
         row_group_size_mb: int | None,
         row_group_rows: int | None,
         verbose: bool,
         input_crs: dict | None = None,
         custom_metadata: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        original_metadata: dict | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet file."""
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)
 
-        compression, compression_level, compression_desc = validate_compression_settings(
-            compression, compression_level, verbose
+        codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
+        compression, compression_level, compression_desc = (
+            codec.name,
+            codec.level,
+            codec.description,
         )
 
         if verbose:
@@ -158,7 +164,7 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
                 table,
                 geometry_column=geometry_column,
                 geoparquet_version=geoparquet_version,
-                original_metadata=None,
+                original_metadata=original_metadata,
                 input_crs=input_crs,
                 custom_metadata=custom_metadata,
                 verbose=verbose,
@@ -170,7 +176,7 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
         # under an explicit parquet-geo-only request (#773).
         table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
 
-        _write_table_with_settings(
+        write_arrow_table(
             table,
             output_path,
             compression=compression,

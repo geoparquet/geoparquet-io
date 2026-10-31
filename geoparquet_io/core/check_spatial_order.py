@@ -16,9 +16,12 @@ from geoparquet_io.core.check_verdict import (
     result_verdict,
     worst,
 )
+from geoparquet_io.core.crs_utils import column_is_geographic
 from geoparquet_io.core.duckdb_metadata import (
+    get_file_metadata,
     get_per_row_group_bbox_stats,
     get_per_row_group_native_geo_stats,
+    get_row_group_bbox_stats,
 )
 from geoparquet_io.core.duckdb_utils import (
     disable_geoparquet_conversion,
@@ -29,7 +32,8 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import (
-    find_primary_geometry_column,
+    GeometryColumnNotFoundError,
+    primary_geometry_column,
     resolve_geometry_read,
 )
 from geoparquet_io.core.logging_config import debug, progress, warn
@@ -194,48 +198,6 @@ def _print_bbox_stats_results(ratio, overlap_count, total_pairs, passed):
         progress("=> Data may benefit from spatial ordering (high row group overlap).")
 
 
-def check_spatial_order_bbox_stats(
-    parquet_file: str,
-    verbose: bool = False,
-    return_results: bool = False,
-    quiet: bool = False,
-) -> float | dict:
-    """Check spatial ordering using row group bbox statistics.
-
-    This method is faster than sampling because it only reads row group metadata
-    instead of actual geometry data. It checks if consecutive row groups have
-    overlapping bounding boxes, which indicates poor spatial ordering.
-
-    Args:
-        parquet_file: Path to parquet file
-        verbose: Print additional information
-        return_results: If True, return structured results dict
-        quiet: If True, suppress all output
-
-    Returns:
-        ratio (float) if return_results=False, or dict if return_results=True
-    """
-
-    bbox_col_name = check_bbox_structure(parquet_file, verbose).get("bbox_column_name")
-    if not bbox_col_name:
-        raise ValueError(
-            f"File {parquet_file} does not have a bbox column. "
-            "Use the sampling-based method instead."
-        )
-
-    if verbose:
-        debug(f"Using bbox column: {bbox_col_name}")
-
-    row_group_bboxes = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
-
-    if verbose:
-        debug(f"Analyzing {len(row_group_bboxes)} row groups")
-
-    return _check_spatial_order_from_row_group_bboxes(
-        row_group_bboxes, parquet_file, verbose, return_results, quiet, method="bbox_stats"
-    )
-
-
 def _check_spatial_order_from_row_group_bboxes(
     row_group_bboxes: list[dict],
     parquet_file: str,
@@ -292,7 +254,9 @@ def _check_spatial_order_from_row_group_bboxes(
     # Hilbert-sorted data often has overlapping consecutive row group bboxes
     # but each bbox covers only a small fraction of the total extent.
     if not passed and len(row_group_bboxes) >= 3:
-        avg_area_ratio, avg_skip_rate = _compute_locality_metrics(row_group_bboxes)
+        avg_area_ratio, avg_skip_rate = _compute_locality_metrics(
+            row_group_bboxes, geographic=column_is_geographic(parquet_file)
+        )
 
         if verbose:
             debug(
@@ -358,36 +322,35 @@ def check_spatial_order(
 
     raw_url = resolve_file_url(parquet_file, verbose)
 
-    # Try bbox-stats method first (faster)
-    bbox_col_name = check_bbox_structure(parquet_file, verbose).get("bbox_column_name")
-    if bbox_col_name:
-        if verbose:
-            debug(f"Using bbox-stats method (bbox column: {bbox_col_name})")
-        try:
-            return check_spatial_order_bbox_stats(
-                parquet_file, verbose=verbose, return_results=return_results, quiet=quiet
-            )
-        except (ValueError, KeyError, IndexError) as e:
-            # ValueError: Invalid bbox column structure
-            # KeyError: Missing expected bbox fields (xmin, ymin, xmax, ymax)
-            # IndexError: Empty or malformed row group stats
-            if verbose:
-                warn(f"Bbox-stats method failed: {e}, falling back to sampling")
-            # Fall through to try native geo_bbox stats
+    # Row-group statistics first (no data read), from the one reader: native
+    # geo_bbox stats, then the bbox column's chunk statistics.
+    bbox_names: list[str | None] = []
 
-    # Try native geo_bbox stats (GeoParquet 2.0 / parquet-geo-only)
-    geometry_column = find_primary_geometry_column(parquet_file, verbose)
-    native_geo_stats = get_per_row_group_native_geo_stats(parquet_file, geometry_column)
-    if native_geo_stats:
+    def bbox_column():
+        bbox_names.append(check_bbox_structure(parquet_file, verbose).get("bbox_column_name"))
+        return bbox_names[-1]
+
+    row_group_bboxes, source = get_row_group_bbox_stats(
+        parquet_file,
+        native=lambda: get_per_row_group_native_geo_stats(
+            parquet_file, primary_geometry_column(parquet_file, verbose=verbose)
+        ),
+        bbox_column=bbox_column,
+    )
+    if row_group_bboxes:
+        method = "bbox_stats" if source == "bbox_struct" else "native_geo_bbox"
         if verbose:
-            debug(f"Using native geo_bbox stats ({len(native_geo_stats)} row groups)")
+            if source == "bbox_struct":
+                debug(f"Using bbox-stats method (bbox column: {bbox_names[-1]})")
+            else:
+                debug(f"Using native geo_bbox stats ({len(row_group_bboxes)} row groups)")
         try:
             return _check_spatial_order_from_row_group_bboxes(
-                native_geo_stats, parquet_file, verbose, return_results, quiet
+                row_group_bboxes, parquet_file, verbose, return_results, quiet, method=method
             )
         except (ValueError, KeyError, IndexError) as e:
             if verbose:
-                warn(f"Native geo_bbox method failed: {e}, falling back to sampling")
+                warn(f"Row-group stats method failed: {e}, falling back to sampling")
             # Fall through to sampling method
 
     # Fall back to sampling method
@@ -397,24 +360,14 @@ def check_spatial_order(
             "For faster checks, add bbox column with 'gpio add bbox' or use GeoParquet 2.0."
         )
 
-    geometry_column = find_primary_geometry_column(parquet_file, verbose)
-    if verbose:
-        debug(f"Using geometry column: {geometry_column}")
-        debug("Using sampling method")
-
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
-    try:
-        disable_geoparquet_conversion(con)
-        averages = _sample_distances(
-            con, raw_url, geometry_column, limit_rows, random_sample_size, verbose
+    geometry_column = primary_geometry_column(parquet_file, verbose=verbose)
+    if geometry_column is None:
+        # Not a crash: the check could not run, and says why (the owner's words).
+        averages: tuple | str = str(GeometryColumnNotFoundError(parquet_file))
+    else:
+        averages = _sample_file(
+            parquet_file, raw_url, geometry_column, limit_rows, random_sample_size, verbose
         )
-    except duckdb.Error as e:
-        if is_interrupt(e):
-            # The user stopping the run (Ctrl-C), not a verdict on the file.
-            raise
-        averages = f"could not read geometry column {geometry_column!r} ({e})"
-    finally:
-        con.close()
 
     if isinstance(averages, str):
         # A caller asking for results presents the verdict itself.
@@ -435,6 +388,26 @@ def check_spatial_order(
     return ratio
 
 
+def _sample_file(parquet_file, raw_url, geometry_column, limit_rows, random_sample_size, verbose):
+    """:func:`_sample_distances` on its own connection; a read error becomes the reason."""
+    if verbose:
+        debug(f"Using geometry column: {geometry_column}")
+        debug("Using sampling method")
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
+    try:
+        disable_geoparquet_conversion(con)
+        return _sample_distances(
+            con, raw_url, geometry_column, limit_rows, random_sample_size, verbose
+        )
+    except duckdb.Error as e:
+        if is_interrupt(e):
+            # The user stopping the run (Ctrl-C), not a verdict on the file.
+            raise
+        return f"could not read geometry column {geometry_column!r} ({e})"
+    finally:
+        con.close()
+
+
 def _sample_distances(con, raw_url, geometry_column, limit_rows, random_sample_size, verbose):
     """(consecutive avg, random avg), or a sentence saying why the column cannot be read."""
     read = resolve_geometry_read(con, raw_url, geometry_column)
@@ -446,11 +419,12 @@ def _sample_distances(con, raw_url, geometry_column, limit_rows, random_sample_s
     return consecutive_avg, random_avg
 
 
-def _compute_data_extent(row_group_bboxes: list[dict]) -> dict:
+def _compute_data_extent(row_group_bboxes: list[dict], *, geographic: bool) -> dict:
     """Compute the total spatial extent across all row group bboxes.
 
     Args:
         row_group_bboxes: List of dicts with xmin, ymin, xmax, ymax keys.
+        geographic: Whether the file's CRS is geographic (how X folds).
 
     Returns:
         Dict with xmin, ymin, xmax, ymax for the full extent.
@@ -458,14 +432,12 @@ def _compute_data_extent(row_group_bboxes: list[dict]) -> dict:
     Raises:
         ValueError: If row_group_bboxes is empty.
     """
+    from geoparquet_io.core.geo_metadata import bbox_xy, row_group_geometry_stats
+
     if not row_group_bboxes:
         raise ValueError("No row group bboxes provided")
-    return {
-        "xmin": min(b["xmin"] for b in row_group_bboxes),
-        "ymin": min(b["ymin"] for b in row_group_bboxes),
-        "xmax": max(b["xmax"] for b in row_group_bboxes),
-        "ymax": max(b["ymax"] for b in row_group_bboxes),
-    }
+    bbox = row_group_geometry_stats(row_group_bboxes, geographic=geographic).bbox
+    return dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox_xy(bbox), strict=True))
 
 
 def _generate_sample_query_bboxes(
@@ -542,6 +514,8 @@ def _compute_locality_metrics(
     num_samples: int = _DEFAULT_NUM_SAMPLES,
     query_fraction: float = _DEFAULT_QUERY_FRACTION,
     seed: int = _DEFAULT_SEED,
+    *,
+    geographic: bool,
 ) -> tuple[float, float]:
     """Compute spatial locality metrics for a set of row group bboxes.
 
@@ -551,7 +525,7 @@ def _compute_locality_metrics(
     Returns:
         Tuple of (avg bbox area ratio, avg skip rate across sample queries).
     """
-    extent = _compute_data_extent(row_group_bboxes)
+    extent = _compute_data_extent(row_group_bboxes, geographic=geographic)
     avg_area_ratio = _compute_avg_bbox_area_ratio(row_group_bboxes, extent)
     samples = _generate_sample_query_bboxes(
         extent, num_samples=num_samples, query_fraction=query_fraction, seed=seed
@@ -640,10 +614,10 @@ def check_spatial_pushdown_readiness(
         debug(f"Using bbox column: {bbox_col_name}")
 
     row_group_bboxes = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
-    num_rgs = len(row_group_bboxes)
+    num_rgs = get_file_metadata(parquet_file)["num_row_groups"]
 
     if verbose:
-        debug(f"Found {num_rgs} row groups with bbox stats")
+        debug(f"Found {len(row_group_bboxes)} row groups with bbox stats out of {num_rgs}")
 
     if num_rgs <= 1:
         if verbose:
@@ -658,9 +632,18 @@ def check_spatial_pushdown_readiness(
             "recommendations": ["Consider using smaller row groups for spatial queries"],
         }
 
-    avg_area_ratio, avg_skip_rate = _compute_locality_metrics(
-        row_group_bboxes, num_samples=num_samples, query_fraction=query_fraction, seed=seed
-    )
+    if row_group_bboxes:
+        avg_area_ratio, avg_skip_rate = _compute_locality_metrics(
+            row_group_bboxes,
+            num_samples=num_samples,
+            query_fraction=query_fraction,
+            seed=seed,
+            geographic=column_is_geographic(parquet_file),
+        )
+        # Missing statistics cannot prove a row group is skippable.
+        avg_skip_rate *= len(row_group_bboxes) / num_rgs
+    else:
+        avg_area_ratio, avg_skip_rate = 0.0, 0.0
 
     if verbose:
         debug(f"Average bbox area ratio: {avg_area_ratio:.4f}")

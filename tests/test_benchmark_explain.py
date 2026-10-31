@@ -386,6 +386,7 @@ class TestExplainCLI:
         )
 
         assert result.exit_code == 0
+        assert "LIMIT" in result.output
 
     def test_explain_save_output(self, temp_output_dir):
         """Test explain saving output to file."""
@@ -422,3 +423,37 @@ class TestExplainCLI:
         )
 
         assert result.exit_code != 0
+        assert "does not exist" in result.output
+
+
+class TestExplainFilePlaceholder:
+    """``{file}`` is replaced by the whole ``sql_path`` literal (#1367 T1e audit 2, finding 4).
+
+    It used to take ``sql_path(...)[1:-1]`` -- the escape with its quotes cut
+    off -- and rely on the user's template to put them back. The quoted
+    spelling ``'{file}'`` that the docs used keeps working: it is the same
+    literal.
+    """
+
+    def test_bare_placeholder_takes_the_quoted_literal(self):
+        from geoparquet_io.core.benchmark import _build_explain_query
+
+        sql = _build_explain_query("o'brien.parquet", "SELECT * FROM read_parquet({file})")
+        assert sql == "EXPLAIN ANALYZE SELECT * FROM read_parquet('o''brien.parquet')"
+
+    def test_quoted_placeholder_is_the_same_literal(self):
+        from geoparquet_io.core.benchmark import _build_explain_query
+
+        quoted = _build_explain_query("o'brien.parquet", "SELECT * FROM read_parquet('{file}')")
+        bare = _build_explain_query("o'brien.parquet", "SELECT * FROM read_parquet({file})")
+        assert quoted == bare
+
+    def test_a_nul_byte_stays_one_expression(self):
+        from geoparquet_io.core.benchmark import _build_explain_query
+        from geoparquet_io.core.duckdb_utils import sql_path
+
+        sql = _build_explain_query("a\x00b.parquet", "SELECT * FROM read_parquet('{file}')")
+        assert (
+            sql
+            == f"EXPLAIN ANALYZE SELECT * FROM read_parquet({sql_path('a' + chr(0) + 'b.parquet')})"
+        )

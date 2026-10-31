@@ -236,7 +236,7 @@ class TestFilterSemantics:
 
     def test_reversed_bbox_is_rejected(self, tmp_path):
         with pytest.raises(InvalidParameterError, match="reversed"):
-            write_geopackage(PLACES, str(tmp_path / "out.gpkg"), bbox="0.5,10.0,-0.5,11.0")
+            write_geopackage(PLACES, str(tmp_path / "out.gpkg"), bbox="500000,10.0,400000,11.0")
 
     def test_non_numeric_bbox_sequence_is_rejected(self, tmp_path):
         with pytest.raises(InvalidParameterError, match="numeric"):
@@ -330,7 +330,7 @@ class TestDonorRegressions:
         out = tmp_path / "tags.gpkg"
         write_geopackage(str(source), str(out), bbox=BBOX)
         columns = _gpkg_columns(out)
-        assert "tags" not in columns  # GDAL cannot hold it; dropped as before
+        assert "tags" in columns  # GDAL cannot hold it natively; JSON text since #1333
         assert "name" in columns  # the columns after it still arrive
         assert len(_gpkg_values(out)) == BBOX_ROWS
 
@@ -521,7 +521,7 @@ class TestFiltersOnUnsupportedFormats:
 class TestWriteFormatRouter:
     def test_the_csv_branch_forwards_the_filters(self, tmp_path):
         out = tmp_path / "routed.csv"
-        format_writers.write_format(PLACES, str(out), "csv", bbox=BBOX)
+        format_writers.write_csv(PLACES, str(out), bbox=BBOX)
         assert len(Path(out).read_text(encoding="utf-8").strip().splitlines()) == BBOX_ROWS + 1
 
 

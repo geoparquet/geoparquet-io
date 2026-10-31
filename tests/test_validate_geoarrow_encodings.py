@@ -19,7 +19,7 @@ from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.validate import (
     CheckStatus,
-    _check_covering_bbox_field_types,
+    _check_cover_bbox_field_types,
     _check_encoding_valid,
     _check_geometry_byte_array,
     _check_geometry_not_grouped,
@@ -383,7 +383,7 @@ class TestDuckDBSchemaPath:
                 }
             }
         }
-        check = _check_covering_bbox_field_types(col_meta, "geometry", schema_info)
+        check = _check_cover_bbox_field_types(col_meta, "geometry", schema_info)
         assert check.status == CheckStatus.FAILED, check.message
 
     def test_covering_bbox_field_types_still_accepts_a_real_bbox_column(self):
@@ -404,7 +404,7 @@ class TestDuckDBSchemaPath:
                 }
             }
         }
-        check = _check_covering_bbox_field_types(col_meta, "geometry", schema_info)
+        check = _check_cover_bbox_field_types(col_meta, "geometry", schema_info)
         assert check.status == CheckStatus.PASSED, check.message
 
     @pytest.mark.parametrize("encoding", sorted(GEOARROW_CASES))

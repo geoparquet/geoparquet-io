@@ -175,7 +175,14 @@ class TestCheckOptimizationQuietMode:
         result = check_optimization(places_test_file, return_results=True, quiet=True)
 
         assert result is not None
-        assert isinstance(result, dict)
+        assert result["total_checks"] == 5
+        assert set(result["checks"]) == {
+            "native_geo_types",
+            "geo_bbox_stats",
+            "spatial_sorting",
+            "row_group_size",
+            "compression",
+        }
 
     def test_non_quiet_mode_returns_none_without_return_results(self, places_test_file):
         """Without return_results, function returns None (just prints)."""

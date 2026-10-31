@@ -25,6 +25,7 @@ from geoparquet_io.cli.decorators import (
     show_sql_option,
     verbose_option,
 )
+from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.add.a5 import add_a5_column as add_a5_column_impl
 from geoparquet_io.core.add.bbox import add_bbox_column as add_bbox_column_impl
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata as add_bbox_metadata_impl
@@ -38,9 +39,11 @@ from geoparquet_io.core.add.stac_metadata import (
 )
 from geoparquet_io.core.add.stac_metadata import add_stac_metadata as add_stac_metadata_impl
 from geoparquet_io.core.file_utils import validate_parquet_extension
+from geoparquet_io.core.index_ops import get_index_spec
+from geoparquet_io.core.sizing import BYTES_PER_MB
 from geoparquet_io.core.streaming import StreamingError
 
-ONE_MB = 1024 * 1024
+ONE_MB = BYTES_PER_MB
 
 
 def _clear_admin_cache_interactively(cache_dir, clear_admin_cache):
@@ -146,7 +149,7 @@ def add(ctx):
 @verbose_option
 @any_extension_option
 @show_sql_option
-def add_country_codes(
+def add_admin_divisions(
     input_parquet,
     output_parquet,
     dataset,
@@ -300,7 +303,7 @@ def add_country_codes(
         add_bbox_flag=add_bbox,
         dry_run=dry_run,
         verbose=verbose,
-        compression=compression.upper(),
+        compression=compression,
         compression_level=compression_level,
         row_group_size_mb=row_group_mb,
         row_group_rows=row_group_size,
@@ -389,7 +392,7 @@ def add_geometry_metrics_cmd(
         vecorel=not no_vecorel,
         dry_run=dry_run,
         verbose=verbose,
-        compression=compression.upper(),
+        compression=compression,
         compression_level=compression_level,
         row_group_size_mb=row_group_mb,
         row_group_rows=row_group_size,
@@ -491,7 +494,7 @@ def add_bbox(
                 bbox_column_name=bbox_name,
                 dry_run=dry_run,
                 verbose=verbose,
-                compression=compression.upper() if compression_requested else None,
+                compression=compression if compression_requested else None,
                 compression_level=compression_level,
                 row_group_size_mb=row_group_mb,
                 row_group_rows=row_group_size,
@@ -502,7 +505,7 @@ def add_bbox(
                 memory_limit=write_memory,
             )
         except StreamingError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None
 
 
 @add.command(name="bbox-metadata", cls=SingleFileCommand)
@@ -578,7 +581,9 @@ def add_stac_metadata_cmd(
 
     With no OUTPUT the file is modified in place. Either way only the footer is
     rewritten: every page below it is copied verbatim, so the compression level,
-    the encodings, the bloom filters and the row order are all preserved.
+    the encodings, the bloom filters and the row order are all preserved. A
+    footer that cannot be patched falls back, with a warning, to a rewrite at
+    gpio's default codec and row groups.
     """
     with _activate_s3(ctx):
         add_stac_metadata_impl(
@@ -599,9 +604,9 @@ def add_stac_metadata_cmd(
 )
 @click.option(
     "--resolution",
-    default=9,
-    type=click.IntRange(0, 15),
-    help="H3 resolution level (0-15). Res 7: ~5km², Res 9: ~105m², Res 11: ~2m², Res 13: ~0.04m². Default: 9",
+    default=get_index_spec("h3").default_resolution,
+    type=click.IntRange(get_index_spec("h3").min_resolution, get_index_spec("h3").max_resolution),
+    help=f"H3 resolution level ({get_index_spec('h3').bounds_text}). Res 7: ~5km², Res 9: ~105m², Res 11: ~2m², Res 13: ~0.04m². Default: {get_index_spec('h3').default_resolution}",
 )
 @output_format_options
 @geoparquet_version_option
@@ -653,7 +658,7 @@ def add_h3(
                 h3_resolution=resolution,
                 dry_run=dry_run,
                 verbose=verbose,
-                compression=compression.upper(),
+                compression=compression,
                 compression_level=compression_level,
                 row_group_size_mb=row_group_mb,
                 row_group_rows=row_group_size,
@@ -663,7 +668,7 @@ def add_h3(
                 memory_limit=write_memory,
             )
         except StreamingError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None
 
 
 @add.command(name="a5", cls=SingleFileCommand)
@@ -674,9 +679,9 @@ def add_h3(
 )
 @click.option(
     "--resolution",
-    default=15,
-    type=click.IntRange(0, 30),
-    help="A5 resolution level (0-30). Res 10: ~41km², Res 15: ~39m², Res 20: ~39mm², Res 25: ~38μm². Default: 15",
+    default=get_index_spec("a5").default_resolution,
+    type=click.IntRange(get_index_spec("a5").min_resolution, get_index_spec("a5").max_resolution),
+    help=f"A5 resolution level ({get_index_spec('a5').bounds_text}). Res 10: ~41km², Res 15: ~39m², Res 20: ~39mm², Res 25: ~38μm². Default: {get_index_spec('a5').default_resolution}",
 )
 @output_format_options
 @geoparquet_version_option
@@ -728,7 +733,7 @@ def add_a5(
                 a5_resolution=resolution,
                 dry_run=dry_run,
                 verbose=verbose,
-                compression=compression.upper(),
+                compression=compression,
                 compression_level=compression_level,
                 row_group_size_mb=row_group_mb,
                 row_group_rows=row_group_size,
@@ -738,7 +743,7 @@ def add_a5(
                 memory_limit=write_memory,
             )
         except StreamingError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None
 
 
 @add.command(name="s2", cls=SingleFileCommand)
@@ -749,9 +754,9 @@ def add_a5(
 )
 @click.option(
     "--level",
-    default=13,
-    type=click.IntRange(0, 30),
-    help="S2 level (0-30). Level 8: ~1,250km², Level 13: ~1.2km², Level 18: ~1,200m². Default: 13",
+    default=get_index_spec("s2").default_resolution,
+    type=click.IntRange(get_index_spec("s2").min_resolution, get_index_spec("s2").max_resolution),
+    help=f"S2 level ({get_index_spec('s2').bounds_text}). Level 8: ~1,250km², Level 13: ~1.2km², Level 18: ~1,200m². Default: {get_index_spec('s2').default_resolution}",
 )
 @output_format_options
 @geoparquet_version_option
@@ -803,7 +808,7 @@ def add_s2(
                 s2_level=level,
                 dry_run=dry_run,
                 verbose=verbose,
-                compression=compression.upper(),
+                compression=compression,
                 compression_level=compression_level,
                 row_group_size_mb=row_group_mb,
                 row_group_rows=row_group_size,
@@ -813,7 +818,7 @@ def add_s2(
                 memory_limit=write_memory,
             )
         except StreamingError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None
 
 
 @add.command(name="kdtree", cls=SingleFileCommand)
@@ -915,7 +920,7 @@ def add_kdtree(
             iterations=iterations,
             dry_run=dry_run,
             verbose=verbose,
-            compression=compression.upper(),
+            compression=compression,
             compression_level=compression_level,
             row_group_size_mb=row_group_mb,
             row_group_rows=row_group_size,
@@ -939,9 +944,11 @@ def add_kdtree(
 )
 @click.option(
     "--resolution",
-    default=13,
-    type=click.IntRange(0, 23),
-    help="Quadkey zoom level (0-23). Higher = more precision. Default: 13",
+    default=get_index_spec("quadkey").default_resolution,
+    type=click.IntRange(
+        get_index_spec("quadkey").min_resolution, get_index_spec("quadkey").max_resolution
+    ),
+    help=f"Quadkey zoom level ({get_index_spec('quadkey').bounds_text}). Higher = more precision. Default: {get_index_spec('quadkey').default_resolution}",
 )
 @click.option(
     "--use-centroid",
@@ -1000,7 +1007,7 @@ def add_quadkey(
                 use_centroid=use_centroid,
                 dry_run=dry_run,
                 verbose=verbose,
-                compression=compression.upper(),
+                compression=compression,
                 compression_level=compression_level,
                 row_group_size_mb=row_group_mb,
                 row_group_rows=row_group_size,
@@ -1009,4 +1016,4 @@ def add_quadkey(
                 memory_limit=write_memory,
             )
         except StreamingError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None

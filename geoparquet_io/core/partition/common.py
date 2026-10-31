@@ -11,14 +11,15 @@ from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     fetch_rows,
     get_duckdb_connection,
+    query_schema,
     quote_identifier,
     sql_path,
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import PartitionError
-from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.file_utils import get_all_parquet_files, resolve_file_url
 from geoparquet_io.core.logging_config import debug, error, info, progress, warn
-from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+from geoparquet_io.core.parquet_writer import WriteOptions, resolve_output_geoparquet_version
 from geoparquet_io.core.partition.staging import (
     PartitionWriteOptions,
     check_output_collision,
@@ -34,6 +35,7 @@ from geoparquet_io.core.remote import (
     show_remote_read_message,
     upload_if_remote,
 )
+from geoparquet_io.core.sizing import bytes_to_mb
 
 
 class PartitionAnalysisError(PartitionError):
@@ -69,7 +71,7 @@ def readable_geoparquet(input_parquet: str):
     propagates untouched.
 
     Not every read of the input goes through here: ``preview_partition`` and the
-    index-adding pre-steps (``_ensure_h3_column`` and its siblings) open the file
+    index-adding pre-steps (``index_ops.ensure_index_column``) open the file
     themselves, so a non-conformant input reaching those still surfaces DuckDB's
     own wording. Widen the wrapper rather than restating the claim if that
     changes.
@@ -123,13 +125,8 @@ def calculate_partition_stats(output_folder: str, num_partitions: int) -> tuple[
     Returns:
         Tuple of (total_size_mb, avg_size_mb).
     """
-    total_size_bytes = sum(
-        os.path.getsize(os.path.join(root, f))
-        for root, _, files in os.walk(output_folder)
-        for f in files
-        if f.endswith(".parquet")
-    )
-    total_size_mb = total_size_bytes / (1024 * 1024)
+    total_size_bytes = sum(os.path.getsize(f) for f in get_all_parquet_files(output_folder))
+    total_size_mb = bytes_to_mb(total_size_bytes)
     avg_size_mb = total_size_mb / num_partitions if num_partitions > 0 else 0
     return total_size_mb, avg_size_mb
 
@@ -385,8 +382,8 @@ def analyze_partition_strategy(
     # Calculate derived metrics
     imbalance_ratio = max_rows / median_rows if median_rows > 0 else 0
     largest_partition_pct = (max_rows / total_rows * 100) if total_rows > 0 else 0
-    avg_size_mb = avg_size_bytes / (1024 * 1024)
-    max_size_mb = max_size_bytes / (1024 * 1024)
+    avg_size_mb = bytes_to_mb(avg_size_bytes)
+    max_size_mb = bytes_to_mb(max_size_bytes)
 
     # Check for errors and warnings
     errors = _check_partition_errors(
@@ -435,7 +432,7 @@ def analyze_partition_strategy(
             "avg": avg_rows,
         },
         "size_stats": {
-            "min_mb": min_size_bytes / (1024 * 1024),
+            "min_mb": bytes_to_mb(min_size_bytes),
             "max_mb": max_size_mb,
             "avg_mb": avg_size_mb,
         },
@@ -774,13 +771,7 @@ def partition_by_column(
     force: bool = False,
     skip_analysis: bool = False,
     filename_prefix: str | None = None,
-    profile: str | None = None,
-    geoparquet_version: str | None = None,
-    compression: str = "ZSTD",
-    compression_level: int = 15,
-    row_group_size_mb: int | None = None,
-    row_group_rows: int | None = None,
-    memory_limit: str | None = None,
+    write: WriteOptions | None = None,
 ) -> int:
     """
     Common function to partition a GeoParquet file by column values.
@@ -800,13 +791,7 @@ def partition_by_column(
         force: Force partitioning even if analysis detects issues
         skip_analysis: Skip partition strategy analysis (for performance)
         filename_prefix: Optional prefix for partition filenames (e.g., 'fields' → fields_USA.parquet)
-        profile: AWS profile name (S3 only, optional)
-        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
-        compression: Compression codec (default: ZSTD)
-        compression_level: Compression level (default: 15)
-        row_group_size_mb: Row group size in MB (mutually exclusive with row_group_rows)
-        row_group_rows: Row group size in number of rows (mutually exclusive with row_group_size_mb)
-        memory_limit: DuckDB memory limit for write operations (e.g., "2GB")
+        write: The write options (codec, level, row groups, profile, version, memory)
 
     Returns:
         Number of partitions actually written this run. With overwrite=False,
@@ -822,6 +807,7 @@ def partition_by_column(
         Distinct partition values that sanitize to the same filename raise a
         ``PartitionError`` rather than silently dropping rows.
     """
+    write = write or WriteOptions()
     # Stop before touching the output: nothing to partition means nothing to
     # write, and --skip-analysis/--force must not get past this either (#823).
     raise_if_no_rows(input_parquet)
@@ -855,8 +841,7 @@ def partition_by_column(
             # so it is the other place a non-conformant input surfaces -- probed
             # before the output directory exists, so a refusal leaves nothing behind.
             with readable_geoparquet(input_parquet):
-                describe = con.execute(f"SELECT * FROM {sql_path(input_url)} LIMIT 0").description
-            input_cols = [d[0] for d in describe]
+                input_cols = query_schema(con, f"SELECT * FROM {sql_path(input_url)}").names
             alias = make_partition_aliases(1, input_cols)[0]
 
             # Create output directory
@@ -871,15 +856,10 @@ def partition_by_column(
             # their scratch file, which is lossless with respect to it (#993).
             write_options = PartitionWriteOptions(
                 geoparquet_version=resolve_output_geoparquet_version(
-                    geoparquet_version, input_file=input_parquet, verbose=verbose
+                    write.geoparquet_version, input_file=input_parquet, verbose=verbose
                 ),
                 input_file=input_parquet,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
-                memory_limit=memory_limit,
-                profile=profile,
+                write=write,
             )
 
             # Single pass: COPY ... PARTITION_BY routes every row in one input scan
@@ -892,7 +872,9 @@ def partition_by_column(
                 select_sql = _build_staging_select(
                     input_url, column_name, column_prefix_length, keep_partition_column, alias
                 )
-                run_partitioned_copy(con, select_sql, [alias], staging_dir, verbose, memory_limit)
+                run_partitioned_copy(
+                    con, select_sql, [alias], staging_dir, verbose, write.memory_limit
+                )
 
                 if not os.path.isdir(staging_dir) or not any(
                     "=" in d for d in os.listdir(staging_dir)
@@ -932,7 +914,11 @@ def partition_by_column(
                 debug(f"\nUploading {partition_count} partition files to {output_folder}...")
 
             upload_if_remote(
-                actual_output, output_folder, profile=profile, is_directory=True, verbose=verbose
+                actual_output,
+                output_folder,
+                profile=write.profile,
+                is_directory=True,
+                verbose=verbose,
             )
 
         return partition_count

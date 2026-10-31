@@ -116,10 +116,11 @@ gpio convert input.shp output.parquet
 | Fast decompression | LZ4 | - | Analytics workloads |
 | Wide compatibility | GZIP | 6 | Older tools |
 
-gpio's write funnel defaults to **ZSTD level 15**, except for the `gpio
-process` commands, which default to **level 9**. Commands that write through
-a plain DuckDB `COPY` (most others, when no `--compression-level` is given)
-currently fall to DuckDB's own default of 3 — #1335 tracks unifying that.
+gpio writes **ZSTD level 15** by default on every write path, the plain
+DuckDB `COPY` paths included, except for the `gpio process` commands, which
+default to **level 9**. One owner (`core/compression.resolve_codec`) resolves
+the codec and level for every writer, so an unset level is never an encoder's
+own default (DuckDB's is 3, pyarrow's is 1).
 
 ### Why the process commands differ
 
@@ -192,9 +193,9 @@ delete.
 
     `ops.simplify`, `ops.polygonize`, `ops.contour`, `ops.aggregate_*` and
     `Table.simplify` hand you a table instead. Writing that table with
-    `.write()` is an ordinary write at `.write()`'s own default (see #1335 for
-    what an unset level means there today) — pass `compression_level=9`
-    explicitly to match the process CLI's level from the Python API.
+    `.write()` is an ordinary write at gpio's global default (ZSTD 15) — pass
+    `compression_level=9` explicitly to match the process CLI's level from the
+    Python API.
 
 ## Row Group Sizing
 

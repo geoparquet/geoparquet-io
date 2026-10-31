@@ -12,6 +12,8 @@ import pyarrow as pa
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
+    as_wkb_sql,
+    describe_query,
     fetch_one,
     get_duckdb_connection,
     quote_identifier,
@@ -20,27 +22,31 @@ from geoparquet_io.core.duckdb_utils import (
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
-from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
-from geoparquet_io.core.geo_metadata import parse_geo_metadata
+from geoparquet_io.core.file_utils import (
+    handle_output_overwrite,
+    resolve_file_url,
+    unlink_released_file,
+)
+from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
-    STANDARD_GEOMETRY_NAMES,
-    find_primary_geometry_column,
+    create_geometry_view,
+    resolve_geometry_column,
 )
 
-# These three helpers are private to hilbert_order.py but are shared by convention
-# between the two spatial-sort commands: both run the same prepare/write/cleanup
-# pipeline. Extracting them (with the rest of the duplicated pipeline) into a
+# These helpers are private to hilbert_order.py but are shared by convention
+# between the two spatial-sort commands: both run the same prepare/write
+# pipeline, and the scratch copy is removed by its owner (file_utils). Extracting them (with the rest of the duplicated pipeline) into a
 # core/sort_common.py is tracked in #776, because it also rewrites the sibling
 # `sort hilbert` command and this project keeps cross-cutting refactors in their
 # own PR.
 from geoparquet_io.core.hilbert_order import (
-    _cleanup_temp_file,
+    _advised_output_version,
     _prepare_working_file,
-    _resolve_output_version,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success, warn
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
+    WriteOptions,
     resolve_row_group_rows,
 )
 from geoparquet_io.core.partition.reader import require_single_file
@@ -53,7 +59,6 @@ from geoparquet_io.core.remote import (
 )
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
-    find_geometry_column_from_table,
     is_stdin,
     should_stream_output,
 )
@@ -165,29 +170,6 @@ def _count_spatial_rows(con: duckdb.DuckDBPyConnection, source: str, geometry_co
     return int(result[0]) if result else 0
 
 
-def _geometry_source(
-    con: duckdb.DuckDBPyConnection,
-    source: str,
-    geometry_column: str,
-) -> str:
-    """Return a queryable source whose geometry column has DuckDB GEOMETRY type."""
-    columns = con.execute(f"DESCRIBE SELECT * FROM {source}").fetchall()
-    geometry_type = next(
-        (column[1] for column in columns if column[0] == geometry_column),
-        None,
-    )
-    if geometry_type is None or "BLOB" not in geometry_type.upper():
-        return source
-
-    geom = quote_identifier(geometry_column)
-    view_name = quote_identifier(f"__gpio_str_geometry_{uuid.uuid4().hex}")
-    con.execute(
-        f"CREATE TEMP VIEW {view_name} AS "
-        f"SELECT * REPLACE (ST_GeomFromWKB({geom}) AS {geom}) FROM {source}"
-    )
-    return view_name
-
-
 def str_order_table(
     table: pa.Table,
     geometry_column: str | None = None,
@@ -206,13 +188,13 @@ def str_order_table(
     group", not as an exact tile capacity.
     """
     _validate_tile_size(tile_size)
-    geom_col = geometry_column or find_geometry_column_from_table(table) or "geometry"
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table")
     geom = quote_identifier(geom_col)
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         registered = register_arrow(con, "__input_table", table)
-        source = _geometry_source(con, "__input_table", geom_col)
+        source = create_geometry_view(con, "__input_table", geom_col)
 
         row_count = _count_spatial_rows(con, source, geom_col)
         if row_count == 0:
@@ -227,7 +209,7 @@ def str_order_table(
             )
 
         output_expressions = [
-            f"ST_AsWKB({geom}) AS {geom}" if column == geom_col else quote_identifier(column)
+            f"{as_wkb_sql(geom)} AS {geom}" if column == geom_col else quote_identifier(column)
             for column in table.column_names
         ]
         query = _str_order_query(
@@ -237,11 +219,7 @@ def str_order_table(
             tile_size,
             output_expressions=output_expressions,
         )
-        result = con.sql(query).arrow().read_all()
-        if table.schema.metadata:
-            result = result.replace_schema_metadata(table.schema.metadata)
-        result = registered.restore_edges(result)
-        return result
+        return registered.read_back(con, query, table.schema.metadata)
     finally:
         con.close()
 
@@ -249,10 +227,10 @@ def str_order_table(
 def str_order(
     input_parquet: str,
     output_parquet: str | None = None,
-    geometry_column: str = "geometry",
+    geometry_column: str | None = None,
     add_bbox_flag: bool = False,
     verbose: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
@@ -270,7 +248,7 @@ def str_order(
     row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
     tile_size = DEFAULT_STR_TILE_SIZE if row_group_rows is None else row_group_rows
     _validate_tile_size(tile_size)
-    effective_version = _resolve_output_version(input_parquet, geoparquet_version, verbose, profile)
+    effective_version = _advised_output_version(input_parquet, geoparquet_version, verbose, profile)
     if effective_version == "1.1":
         warn(
             "STR sorting to GeoParquet v1.1 provides no spatial filter pushdown benefit. "
@@ -284,6 +262,7 @@ def str_order(
             "Set --row-group-size to choose the strip count yourself."
         )
 
+    write = WriteOptions.pick(locals())
     if is_stdin(input_parquet) or should_stream_output(output_parquet):
         if add_bbox_flag:
             # Same pre-existing gap as `sort hilbert`: the streaming path has no
@@ -295,13 +274,7 @@ def str_order(
             geometry_column,
             tile_size,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
-            memory_limit,
+            write,
         )
         return
 
@@ -312,54 +285,34 @@ def str_order(
         tile_size,
         add_bbox_flag,
         verbose,
-        compression,
-        compression_level,
-        row_group_size_mb,
-        row_group_rows,
-        profile,
-        geoparquet_version,
+        write,
         overwrite,
-        memory_limit,
     )
 
 
 def _str_order_streaming(
     input_path: str,
     output_path: str | None,
-    geometry_column: str,
+    geometry_column: str | None,
     tile_size: int,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
-    memory_limit: str | None,
+    write: WriteOptions,
 ) -> None:
     if should_stream_output(output_path):
         verbose = False
 
     with open_input(input_path, verbose=verbose) as (source, metadata, _is_stream, con):
-        column_names = [
-            column[0] for column in con.execute(f"SELECT * FROM {source} LIMIT 0").description
-        ]
-        geom_col = geometry_column
-        if geom_col == "geometry" or geom_col not in column_names:
-            # The stream carries its own `geo` metadata, so prefer the file's
-            # declared primary column over the conventional-name guess. Without
-            # this a file whose primary column is e.g. `footprint` binder-errors
-            # in stream mode while working in file mode.
-            geo_meta = parse_geo_metadata(metadata) or {}
-            primary_column = geo_meta.get("primary_column")
-            if primary_column in column_names:
-                geom_col = primary_column
-            else:
-                geom_col = next(
-                    (name for name in STANDARD_GEOMETRY_NAMES if name in column_names), geom_col
-                )
+        described = describe_query(con, f"SELECT * FROM {source}")
+        # The stream carries its own `geo` metadata, so prefer the file's
+        # declared primary column over the conventional-name guess. Without
+        # this a file whose primary column is e.g. `footprint` binder-errors
+        # in stream mode while working in file mode. A named column is the
+        # answer or an error (#1367).
+        geom_col = resolve_geometry_column(
+            described, geometry_column, geo=sanitized_carried_geo(metadata), where=input_path
+        )
 
-        source = _geometry_source(con, source, geom_col)
+        source = create_geometry_view(con, source, geom_col)
         row_count = _count_spatial_rows(con, source, geom_col)
         reordered = row_count > 0
         if not reordered:
@@ -380,14 +333,8 @@ def _str_order_streaming(
             output_path,
             original_metadata=metadata,
             geometry_column=geom_col,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
         if not should_stream_output(output_path):
             if reordered:
@@ -400,35 +347,28 @@ def _str_order_streaming(
 def _str_order_file_based(
     input_parquet: str,
     output_parquet: str | None,
-    geometry_column: str,
+    geometry_column: str | None,
     tile_size: int,
     add_bbox_flag: bool,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
+    write: WriteOptions,
     overwrite: bool,
-    memory_limit: str | None,
 ) -> None:
-    handle_output_overwrite(output_parquet, overwrite, input_parquet)
+    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
     require_single_file(input_parquet, "sort str")
     working_parquet, temp_file_created, temp_file = _prepare_working_file(
         input_parquet, add_bbox_flag, verbose
     )
-    validate_profile_for_urls(profile, input_parquet, output_parquet)
+    validate_profile_for_urls(write.profile, input_parquet, output_parquet)
     show_remote_read_message(working_parquet, verbose)
 
     source = sql_path(resolve_file_url(working_parquet, verbose))
     metadata, _ = get_parquet_metadata(working_parquet, verbose)
-    if geometry_column == "geometry":
-        geometry_column = find_primary_geometry_column(working_parquet, verbose)
+    geometry_column = resolve_geometry_column(working_parquet, geometry_column, verbose=verbose)
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working_parquet))
     try:
-        geometry_source = _geometry_source(con, source, geometry_column)
+        geometry_source = create_geometry_view(con, source, geometry_column)
         row_count = _count_spatial_rows(con, geometry_source, geometry_column)
         reordered = row_count > 0
         if not reordered:
@@ -448,15 +388,9 @@ def _str_order_file_based(
             query,
             output_parquet,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
             input_file=input_parquet,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
         if add_bbox_flag and temp_file_created:
             success("Output includes bbox column and metadata for optimal performance")
@@ -466,9 +400,9 @@ def _str_order_file_based(
             success(f"Wrote data without STR ordering to: {output_parquet}")
     except duckdb.IOException as exc:
         if is_remote_url(input_parquet):
-            hints = get_remote_error_hint(str(exc), input_parquet)
+            hints = get_remote_error_hint(exc, input_parquet)
             raise RemoteAccessError(input_parquet, f"{hints}\n\nOriginal error: {exc}") from exc
         raise
     finally:
         con.close()
-        _cleanup_temp_file(temp_file, verbose)
+        unlink_released_file(temp_file)

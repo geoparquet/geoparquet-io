@@ -192,32 +192,6 @@ class TestMultipleConversions:
         print(f"Min/Max: {min(times):.3f}s / {max(times):.3f}s")
 
 
-class TestLargeFilePerformance:
-    """Test performance with larger files to see more significant differences."""
-
-    @pytest.mark.slow
-    def test_large_file_v2_with_crs(self, temp_output_dir):
-        """
-        Test v2.0 conversion with CRS on a larger file.
-
-        Larger files will show more significant dual-write overhead.
-        """
-        pytest.skip("Large file test - run manually with larger test data")
-
-        # Example for manual testing:
-        # large_input = "/path/to/large/file.parquet"
-        # output = os.path.join(temp_output_dir, "large_output.parquet")
-        #
-        # elapsed = measure_conversion_time(
-        #     large_input,
-        #     output,
-        #     skip_hilbert=True,
-        #     geoparquet_version="2.0",
-        # )
-        #
-        # print(f"\nLarge file v2.0 with CRS: {elapsed:.3f}s")
-
-
 class TestFileSize:
     """Test that file sizes are consistent across write paths."""
 
@@ -299,24 +273,3 @@ class TestFileSize:
                 assert group_variance < 0.15, (
                     f"{label} same-encoding variance {group_variance:.1%} exceeds 15%"
                 )
-
-
-@pytest.mark.skip(reason="File I/O monitoring requires platform-specific tools")
-class TestFileIOCount:
-    """
-    Test file I/O operation counts.
-
-    This would require platform-specific monitoring (strace on Linux, dtrace on macOS, etc.)
-    to count actual file writes. Skipped for portability, but useful for detailed analysis.
-    """
-
-    def test_v2_crs_io_count(self):
-        """
-        Count file I/O operations for v2.0 with CRS.
-
-        Expected: 2 writes (dual-write path)
-        After consolidation: 1 write
-
-        Requires platform-specific I/O monitoring tools.
-        """
-        pass

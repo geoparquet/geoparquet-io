@@ -356,19 +356,25 @@ class TestTheCoreModule:
             add_stac_metadata(str(parquet), {"type": "Collection"})
         assert parquet.read_bytes() == before
 
-    def test_a_footer_it_cannot_patch_is_reported_not_silently_rewritten(
-        self, parquet, monkeypatch
+    def test_a_footer_it_cannot_patch_is_rewritten_with_a_warning(
+        self, parquet, monkeypatch, caplog
     ):
+        """The one footer-write policy: a refusal warns and re-encodes through
+        the funnel, as ``add bbox-metadata`` does (approved change 3). It used
+        to stop here instead."""
         from geoparquet_io.core.add import stac_metadata as module
-        from geoparquet_io.core.exceptions import GeoParquetError
         from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
 
         def refuse(*args, **kwargs):
             raise FooterPatchUnsupported("encrypted footer")
 
-        monkeypatch.setattr(module, "patch_footer_kv", refuse)
-        with pytest.raises(GeoParquetError, match="encrypted footer"):
-            module.add_stac_metadata(str(parquet), COLLECTION)
+        monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
+        module.add_stac_metadata(str(parquet), COLLECTION)
+
+        assert "encrypted footer. Falling back to a rewrite" in caplog.text, caplog.text
+        written = json.loads(pq.read_metadata(str(parquet)).metadata[b"stac-geoparquet"])
+        assert list(written["collections"]) == ["PSScene"]
+        assert pq.read_metadata(str(parquet)).row_group(0).column(0).compression == "ZSTD"
 
     def test_the_payload_builder_keys_by_id_and_names_the_version(self):
         from geoparquet_io.core.add.stac_metadata import stac_geoparquet_metadata
@@ -606,7 +612,7 @@ class TestReviewFixes:
         # A Parquet-level patch can leave the plain entry and pyarrow's
         # ARROW:schema copy disagreeing; both copies' Collections survive.
         from geoparquet_io.core.add.stac_metadata import add_stac_metadata
-        from geoparquet_io.core.parquet_footer import patch_footer_kv
+        from geoparquet_io.core.parquet_footer import _patch_footer_file
 
         path = tmp_path / "split.parquet"
         arrow_side = {"version": "1.1.0", "collections": {"A": {"id": "A"}}}
@@ -617,7 +623,7 @@ class TestReviewFixes:
         blob = pq.read_metadata(path).metadata[b"ARROW:schema"]
         plain_side = {"version": "1.1.0", "collections": {"P": {"id": "P"}}}
         # Naming ARROW:schema keeps the blob as-is, so only the plain entry moves.
-        patch_footer_kv(
+        _patch_footer_file(
             str(path), {"stac-geoparquet": json.dumps(plain_side), "ARROW:schema": blob}
         )
 
@@ -677,13 +683,13 @@ class TestReviewFixes:
     def test_a_value_only_the_plain_entry_carries_is_kept(self, tmp_path):
         # The ARROW:schema copy has no stac-geoparquet key at all.
         from geoparquet_io.core.add.stac_metadata import add_stac_metadata
-        from geoparquet_io.core.parquet_footer import patch_footer_kv
+        from geoparquet_io.core.parquet_footer import _patch_footer_file
 
         path = tmp_path / "plain-only.parquet"
         pq.write_table(pa.table({"id": ["a"]}), path)
         blob = pq.read_metadata(path).metadata[b"ARROW:schema"]
         plain_side = {"version": "1.1.0", "collections": {"P": {"id": "P"}}}
-        patch_footer_kv(
+        _patch_footer_file(
             str(path), {"stac-geoparquet": json.dumps(plain_side), "ARROW:schema": blob}
         )
 

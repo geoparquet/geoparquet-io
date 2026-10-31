@@ -293,11 +293,10 @@ This generates `.prof` files in the specified directory (default: `./profiles/`)
 === "Python"
     <!-- doctest: skip="passes a str where the benchmark API expects a Path" -->
     ```python
-    from geoparquet_io.benchmarks.profile_report import format_profile_stats
+    import pstats
 
     # Show top 20 slowest functions
-    summary = format_profile_stats('profiles/add-bbox_large_1.prof', top_n=20)
-    print(summary)
+    pstats.Stats('profiles/add-bbox_large_1.prof').sort_stats('cumulative').print_stats(20)
     ```
 
 **Sample profile output:**

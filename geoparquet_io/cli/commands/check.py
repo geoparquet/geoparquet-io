@@ -28,14 +28,15 @@ from click.core import ParameterSource
 
 from geoparquet_io.cli._shared import _activate_s3, create_default_group, init_group_context
 from geoparquet_io.cli.decorators import (
-    GlobAwareCommand,
+    ParquetInputCommand,
     check_partition_options,
     enable_verbose_logging,
-    handle_geoparquet_errors,
     overwrite_option,
+    refuse_together,
     strict_option,
     verbose_option,
 )
+from geoparquet_io.cli.exception_handler import error_text
 from geoparquet_io.cli.fix_helpers import NoBackupConfirmation, handle_fix_common
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 from geoparquet_io.core.check_parquet_structure import CheckProfile
@@ -63,6 +64,7 @@ from geoparquet_io.core.duckdb_utils import is_interrupt
 from geoparquet_io.core.file_utils import is_same_file_path
 from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT
 from geoparquet_io.core.logging_config import configure_verbose
+from geoparquet_io.core.remote import is_remote_url
 
 # CheckDefaultGroup: defaults to 'all' when no subcommand is provided
 CheckDefaultGroup = create_default_group(
@@ -144,6 +146,10 @@ class _VerifyCapture:
         return all_checks_result(self.structure, self.spatial, spec)
 
 
+#: Width the progress line is blanked to before an issue or the summary prints.
+_PROGRESS_LINE_WIDTH = 80
+
+
 class MultiFileCheckRunner:
     """Helper for running checks on multiple files with progress tracking and summary."""
 
@@ -197,6 +203,16 @@ class MultiFileCheckRunner:
             msg += f", {self.failed} failed"
         click.echo(f"\r{msg}", nl=False)
 
+    @staticmethod
+    def _clear_progress_line() -> None:
+        """Blank the ``Checking files...`` line so the next message starts clean."""
+        click.echo("\r" + " " * _PROGRESS_LINE_WIDTH + "\r", nl=False)
+
+    @property
+    def show_output(self) -> bool:
+        """Whether each check prints its own detail: verbose, or a single file."""
+        return self.verbose or not self.is_multi_file
+
     def _record_issue(self, file_path: str, verdict: Verdict, message: str, *, always=False):
         """Record an issue and print it if under the limit, labelled by its own verdict.
 
@@ -206,8 +222,7 @@ class MultiFileCheckRunner:
         level = "error" if verdict is Verdict.FAILURE else "warning"
         self.issues.append((file_path, level, message))
         if always or (not self.verbose and len(self.issues) <= self.max_issues_shown):
-            # Clear progress line and print issue
-            click.echo("\r" + " " * 80 + "\r", nl=False)
+            self._clear_progress_line()
             glyph, color = _CHECK_GLYPHS[max(verdict, Verdict.WARNING)]
             filename = Path(file_path).name
             click.echo(click.style(f"  {glyph} {level.upper()}: {filename} - {message}", fg=color))
@@ -337,11 +352,12 @@ class MultiFileCheckRunner:
             self._raise_if_interrupt(e)
             if not self.is_multi_file:
                 raise
-            self.fix_failures.append((file_path, str(e)))
-            click.echo("\r" + " " * 80 + "\r", nl=False)
+            self.fix_failures.append((file_path, error_text(e)))
+            self._clear_progress_line()
             click.echo(
                 click.style(
-                    f"  {FAILURE_GLYPH} {stage} failed: {Path(file_path).name} - {e}", fg="red"
+                    f"  {FAILURE_GLYPH} {stage} failed: {Path(file_path).name} - {error_text(e)}",
+                    fg="red",
                 )
             )
             return None
@@ -400,7 +416,7 @@ class MultiFileCheckRunner:
                 raise
             if self.verbose:
                 click.echo(traceback.format_exc(), err=True)
-            return could_not_run(stage, str(e))
+            return could_not_run(stage, error_text(e))
 
     def _raise_if_interrupt(self, error: Exception) -> None:
         """Turn ``error`` into ``KeyboardInterrupt`` when it is Ctrl-C.
@@ -422,7 +438,7 @@ class MultiFileCheckRunner:
             self._print_fix_summary()
 
     def _echo_could_not_run(self, file_path: str, line: str) -> None:
-        click.echo("\r" + " " * 80 + "\r", nl=False)
+        self._clear_progress_line()
         click.echo(click.style(f"  {FAILURE_GLYPH} {Path(file_path).name} - {line}", fg="red"))
 
     def errored(self, file_path: str) -> bool:
@@ -529,9 +545,8 @@ class MultiFileCheckRunner:
         if not self.is_multi_file:
             return
 
-        # Clear progress line
         if not self.verbose:
-            click.echo("\r" + " " * 80 + "\r", nl=False)
+            self._clear_progress_line()
 
         # Show remaining issues hint
         extra_issues = len(self.issues) - self.max_issues_shown
@@ -559,9 +574,8 @@ class MultiFileCheckRunner:
 def _boundary_renders(error: Exception) -> bool:
     """Whether the root group turns ``error`` into an ``Error:`` line of its own."""
     from geoparquet_io.cli.exception_handler import cli_error_for
-    from geoparquet_io.core.exceptions import GeoParquetError
 
-    return isinstance(error, GeoParquetError) or cli_error_for(error) is not None
+    return cli_error_for(error) is not None
 
 
 def _echo_no_fix(verdict: Verdict, result: dict, already_fine: str) -> None:
@@ -582,7 +596,7 @@ def _echo_no_fix(verdict: Verdict, result: dict, already_fine: str) -> None:
 def _copy_to_fix_output(file_path: str, output: str, overwrite: bool) -> str:
     from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
 
-    handle_output_overwrite(output, overwrite, file_path)
+    handle_output_overwrite(output, overwrite, file_path, remove=False)
     copy_file(file_path, output)
     return output
 
@@ -631,10 +645,10 @@ def refuse_no_parquet_match(path: str) -> None:
     refuse an empty match in :func:`begin_check_run`. A plain path is left to
     the check, which reports a file it cannot read.
     """
+    from geoparquet_io.core.file_utils import is_partition_path
     from geoparquet_io.core.partition.reader import select_files_to_check
-    from geoparquet_io.core.remote import is_remote_url
 
-    if is_remote_url(path) or not (any(c in path for c in "*?[") or Path(path).is_dir()):
+    if is_remote_url(path) or not is_partition_path(path):
         return
     try:
         files, _, _ = select_files_to_check(path, check_all=True)
@@ -733,7 +747,7 @@ def _echo_spec_result(spec_result, spec_details: bool) -> None:
         )
 
 
-@check.command(name="all", cls=GlobAwareCommand)
+@check.command(name="all", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--verbose",
@@ -851,7 +865,7 @@ def check_all(
 
             # Run all checks and collect results
             # In non-verbose multi-file mode, suppress detailed output
-            show_output = runner.verbose or not runner.is_multi_file
+            show_output = runner.show_output
             quiet = not show_output
 
             def run_all_checks(file_path=file_path, show_output=show_output, quiet=quiet):
@@ -954,8 +968,8 @@ def check_all(
                 # Generate PMTiles
                 # Use fixed output path if available, otherwise original
                 source_file = per_file_output if fix and per_file_output else file_path
-                # Handle S3 URIs: Path().with_suffix() mangles s3:// schemes
-                if source_file.startswith("s3://"):
+                # Path().with_suffix() mangles a URL's scheme separator
+                if is_remote_url(source_file):
                     output_pmtiles = source_file.rsplit(".", 1)[0] + ".pmtiles"
                 else:
                     output_pmtiles = str(Path(source_file).with_suffix(".pmtiles"))
@@ -970,7 +984,8 @@ def check_all(
                 except Exception as e:
                     click.echo(
                         click.style(
-                            f"{FAILURE_GLYPH} PMTiles failed for {file_path}: {e}", fg="red"
+                            f"{FAILURE_GLYPH} PMTiles failed for {file_path}: {error_text(e)}",
+                            fg="red",
                         )
                     )
 
@@ -1034,7 +1049,7 @@ def _echo_pushdown(pushdown: dict | None) -> None:
         click.echo("  ℹ️  A single row group: nothing for a spatial filter to skip")
 
 
-@check.command(name="spatial", cls=GlobAwareCommand)
+@check.command(name="spatial", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--random-sample-size",
@@ -1105,7 +1120,7 @@ def check_spatial(
         for file_path in runner.files:
             runner.start_file(file_path)
 
-            show_output = runner.verbose or not runner.is_multi_file
+            show_output = runner.show_output
             quiet = not show_output
             result = runner.run_check(
                 file_path,
@@ -1156,7 +1171,7 @@ def check_spatial(
         runner.finish()
 
 
-@check.command(name="compression", cls=GlobAwareCommand)
+@check.command(name="compression", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--verbose",
@@ -1214,7 +1229,7 @@ def check_compression_cmd(
         for file_path in runner.files:
             runner.start_file(file_path)
 
-            show_output = runner.verbose or not runner.is_multi_file
+            show_output = runner.show_output
             quiet = not show_output
             result = runner.run_check(
                 file_path,
@@ -1266,7 +1281,7 @@ def _bbox_fix_action(needs_column: bool, needs_metadata: bool) -> str:
     return "Rewrote the bbox column"
 
 
-@check.command(name="bbox", cls=GlobAwareCommand)
+@check.command(name="bbox", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--verbose",
@@ -1340,10 +1355,11 @@ def check_bbox_cmd(
     from geoparquet_io.core.check_parquet_structure import check_bbox
 
     configure_verbose(verbose)
-    if all_rows and ctx.get_parameter_source("sample_rows") is not ParameterSource.DEFAULT:
-        raise click.UsageError(
-            "--all-rows compares every row; it cannot be combined with --sample-rows"
-        )
+    refuse_together(
+        ("--all-rows", all_rows),
+        ("--sample-rows", ctx.get_parameter_source("sample_rows") is not ParameterSource.DEFAULT),
+        end=": --all-rows compares every row.",
+    )
     bbox_recheck = quiet_recheck(check_bbox, False, verify_rows=sample_rows, all_rows=all_rows)
 
     with _activate_s3(ctx):
@@ -1362,7 +1378,7 @@ def check_bbox_cmd(
         for file_path in runner.files:
             runner.start_file(file_path)
 
-            show_output = runner.verbose or not runner.is_multi_file
+            show_output = runner.show_output
             quiet = not show_output
             result = runner.run_check(
                 file_path,
@@ -1448,7 +1464,7 @@ def check_bbox_cmd(
         runner.finish()
 
 
-@check.command(name="row-group", cls=GlobAwareCommand)
+@check.command(name="row-group", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--verbose",
@@ -1514,7 +1530,7 @@ def check_row_group_cmd(
         for file_path in runner.files:
             runner.start_file(file_path)
 
-            show_output = runner.verbose or not runner.is_multi_file
+            show_output = runner.show_output
             quiet = not show_output
             result = runner.run_check(
                 file_path,
@@ -1559,7 +1575,6 @@ def check_row_group_cmd(
 
 
 @check.command(name="stac")
-@handle_geoparquet_errors
 @click.argument("stac_file")
 @verbose_option
 @strict_option
@@ -1595,7 +1610,7 @@ def check_stac_cmd(ctx, stac_file, verbose, strict):
         exit_for_verdict(check_stac(stac_file, verbose), strict=strict)
 
 
-@check.command(name="spec", cls=GlobAwareCommand)
+@check.command(name="spec", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--geoparquet-version",
@@ -1700,7 +1715,7 @@ def check_spec(
         exit_for_verdict(verdict, strict=strict)
 
 
-@check.command(name="optimization", cls=GlobAwareCommand)
+@check.command(name="optimization", cls=ParquetInputCommand)
 @click.argument("parquet_file")
 @click.option(
     "--verbose",
@@ -1764,7 +1779,7 @@ def check_optimization_cmd(
         for file_path in runner.files:
             runner.start_file(file_path)
 
-            show_output = runner.verbose or not runner.is_multi_file
+            show_output = runner.show_output
             quiet = not show_output
 
             result = runner.run_check(

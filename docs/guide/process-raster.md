@@ -34,7 +34,7 @@ uv tool install geoparquet-io --with contourrs --with rasterio
 
 !!! warning "Python 3.12+"
     contourrs ships wheels for **CPython 3.12–3.14** only. On Python
-    3.10/3.11 the extra installs rasterio but skips contourrs, and the
+    3.11 the extra installs rasterio but skips contourrs, and the
     commands explain the floor at runtime. contourrs is Apache-2.0;
     rasterio reads the GeoTIFF input and supplies the transform, nodata and
     CRS, which land in the output's `geo` metadata as PROJJSON.

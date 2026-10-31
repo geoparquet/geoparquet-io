@@ -27,7 +27,6 @@ from geoparquet_io.core.file_utils import (
     is_partition_path,
     is_same_file_path,
     resolve_partition_path,
-    safe_file_url,
     validate_output_path,
     validate_parquet_extension,
 )
@@ -791,7 +790,7 @@ class TestCopyFile:
         base_url, _served, _seen = recording_http_server
         dest = tmp_path / "dest.parquet"
 
-        with pytest.raises(Exception, match="404"):
+        with pytest.raises(GeoParquetError, match="not found"):
             copy_file(f"{base_url}/missing.parquet", str(dest))
 
         assert not dest.exists()
@@ -991,84 +990,6 @@ class _FailingMidStreamReader:
         pass
 
 
-# =============================================================================
-# Tests for safe_file_url()
-# =============================================================================
-
-
-class TestSafeFileUrl:
-    """Test SQL-safe file URL preparation."""
-
-    def test_local_path_escapes_quotes(self, tmp_path):
-        """Local paths have single quotes escaped."""
-        # Create a file with a quote in its name
-        test_file = tmp_path / "test.parquet"
-        test_file.write_bytes(b"test")
-
-        result = safe_file_url(str(test_file))
-
-        assert "'" not in result or "''" in result
-
-    def test_local_path_single_quote_escaped(self, tmp_path):
-        """Single quotes in path are doubled for SQL."""
-        # We can't easily create a file with a quote, so test the escaping logic
-        # by using a mock path
-        test_dir = tmp_path / "test"
-        test_dir.mkdir()
-        test_file = test_dir / "file.parquet"
-        test_file.write_bytes(b"test")
-
-        # Test with a path that has quotes
-        path_with_quote = str(test_file).replace("file", "file'name")
-        # Since file doesn't exist, this will raise
-        with pytest.raises(FileNotFoundGeoParquetError):
-            safe_file_url(path_with_quote)
-
-    def test_glob_pattern_allowed_without_existence_check(self, tmp_path):
-        """Glob patterns don't require existence check."""
-        pattern = str(tmp_path / "*.parquet")
-        result = safe_file_url(pattern)
-        assert result == pattern
-
-    def test_nonexistent_file_raises(self, tmp_path):
-        """Non-existent file raises FileNotFoundGeoParquetError."""
-        with pytest.raises(FileNotFoundGeoParquetError):
-            safe_file_url(str(tmp_path / "nonexistent.parquet"))
-
-    def test_remote_url_passes_through(self):
-        """Remote URLs are resolved without being altered."""
-        url = "https://example.com/path/to/file.parquet"
-        assert safe_file_url(url) == url
-
-    def test_s3_url_passes_through(self):
-        """S3 URLs pass through unchanged (except quote escaping)."""
-        url = "s3://bucket/file.parquet"
-        result = safe_file_url(url)
-        assert result == url
-
-    def test_http_url_with_special_chars_is_taken_as_given(self):
-        """HTTP URLs are taken as already percent-encoded (#825).
-
-        Both a valid encoded URL and one with a raw space reach the reader
-        unchanged; see tests/test_remote_url_encoding.py for the contract.
-        """
-        encoded = "https://example.com/path%20with%20spaces/file.parquet"
-        assert safe_file_url(encoded) == encoded
-
-        raw = "https://example.com/path with spaces/file.parquet"
-        assert safe_file_url(raw) == raw
-
-    def test_sql_injection_prevention(self, tmp_path):
-        """SQL injection via single quotes is prevented."""
-        test_file = tmp_path / "safe.parquet"
-        test_file.write_bytes(b"test")
-
-        # If the path had a quote, it would be doubled
-        result = safe_file_url(str(test_file))
-        # Result should be usable in SQL without injection risk
-        assert result.count("'") % 2 == 0 or "'" not in result
-
-
 class TestAzureReadsAreRefusedByName:
     """Azure-scheme inputs are refused at the read boundary, not deep in DuckDB.
 
@@ -1093,11 +1014,6 @@ class TestAzureReadsAreRefusedByName:
 
         with pytest.raises(InvalidParameterError, match="write destination"):
             resolve_file_url(url)
-
-    def test_safe_file_url_refuses_azure_reads_too(self):
-        """The SQL-facing wrapper shares the same boundary."""
-        with pytest.raises(InvalidParameterError, match="write destination"):
-            safe_file_url("az://myaccount/mycontainer/in.parquet")
 
 
 # =============================================================================

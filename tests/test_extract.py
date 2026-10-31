@@ -15,6 +15,7 @@ import duckdb
 import pyarrow as pa
 import pytest
 
+from geoparquet_io.core.bbox_parse import parse_bbox
 from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.extract import (
@@ -25,11 +26,8 @@ from geoparquet_io.core.extract import (
     extract,
     extract_table,
     get_schema_columns,
-    is_geographic_crs,
     looks_like_latlong_bbox,
-    parse_bbox,
     parse_geometry_input,
-    validate_columns,
     validate_where_clause,
 )
 from tests.conftest import safe_unlink
@@ -58,42 +56,29 @@ class TestLooksLikeLatLongBbox:
         assert looks_like_latlong_bbox((-200, 0, 200, 50)) is False
 
 
-class TestIsGeographicCrs:
-    """Tests for is_geographic_crs function."""
+class TestBboxCrsMismatchOnlyForProjected:
+    """The --bbox warning fires for a CRS pyproj reads as projected, and only then."""
 
-    def test_none_returns_none(self):
-        """Test None CRS returns None."""
-        assert is_geographic_crs(None) is None
+    @pytest.mark.parametrize(
+        ("crs", "warns"),
+        [
+            (None, False),
+            ("EPSG:4326", False),
+            ("EPSG:3857", True),
+            ({"name": "Unknown"}, False),  # nothing can read it: unknown is not projected
+            ("not a crs", False),
+        ],
+    )
+    def test_warns_only_for_a_definitely_projected_crs(self, crs, warns, monkeypatch, caplog):
+        import logging
 
-    def test_string_geographic_crs(self):
-        """Test string CRS codes for geographic."""
-        assert is_geographic_crs("EPSG:4326") is True
-        assert is_geographic_crs("OGC:CRS84") is True
-        assert is_geographic_crs("crs84") is True
+        from geoparquet_io.core import extract as extract_module
 
-    def test_string_unknown_crs(self):
-        """Test unknown string CRS returns None."""
-        assert is_geographic_crs("EPSG:3857") is None
-
-    def test_dict_geographic_crs(self):
-        """Test dict CRS for geographic type."""
-        geo_crs = {"type": "GeographicCRS", "name": "WGS 84"}
-        assert is_geographic_crs(geo_crs) is True
-
-    def test_dict_projected_crs(self):
-        """Test dict CRS for projected type."""
-        proj_crs = {"type": "ProjectedCRS", "name": "Web Mercator"}
-        assert is_geographic_crs(proj_crs) is False
-
-    def test_dict_with_epsg_code(self):
-        """Test dict CRS with EPSG code."""
-        crs_with_code = {"id": {"code": 4326, "authority": "EPSG"}}
-        assert is_geographic_crs(crs_with_code) is True
-
-    def test_dict_without_type(self):
-        """Test dict CRS without type returns None."""
-        unknown_crs = {"name": "Unknown"}
-        assert is_geographic_crs(unknown_crs) is None
+        monkeypatch.setattr(extract_module, "crs_of", lambda *a, **k: crs)
+        monkeypatch.setattr(extract_module, "_get_data_bounds", lambda *a: None)
+        with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+            extract_module._warn_if_crs_mismatch((0.0, 0.0, 1.0, 1.0), "f.parquet", "geometry")
+        assert ("projected CRS" in caplog.text) is warns
 
 
 class TestParseBbox:
@@ -138,9 +123,9 @@ class TestParseBbox:
         assert "numeric" in str(exc_info.value).lower()
 
     def test_bbox_reversed_x_coordinates(self):
-        """Test bbox with reversed x coordinates (xmax < xmin)."""
+        """Reversed x beyond longitudes (xmax < xmin, not an antimeridian wrap)."""
         with pytest.raises(GeoParquetError) as exc_info:
-            parse_bbox("10,0,5,10")  # xmin=10, xmax=5 is invalid
+            parse_bbox("500000,0,400000,10")
         assert "reversed" in str(exc_info.value).lower()
         assert "xmin" in str(exc_info.value).lower()
 
@@ -458,24 +443,33 @@ class TestBuildColumnSelection:
         assert len(result) == 2
 
 
-class TestValidateColumns:
-    """Tests for validate_columns function."""
+class TestColumnSelectionResolvesNames:
+    """``build_column_selection`` checks the names it is given against the schema."""
+
+    COLS = ["id", "name", "geometry"]
 
     def test_valid_columns(self):
-        """Test with valid columns."""
-        # Should not raise
-        validate_columns(["id", "name"], ["id", "name", "geometry"], "--include-cols")
+        assert build_column_selection(self.COLS, ["id", "name"], None, "geometry", None) == [
+            "id",
+            "name",
+            "geometry",
+        ]
 
     def test_missing_columns(self):
-        """Test with missing columns."""
         with pytest.raises(GeoParquetError) as exc_info:
-            validate_columns(["id", "nonexistent"], ["id", "name", "geometry"], "--include-cols")
+            build_column_selection(
+                self.COLS,
+                ["id", "nonexistent"],
+                None,
+                "geometry",
+                None,
+                include_option="--include-cols",
+            )
         assert "nonexistent" in str(exc_info.value)
         assert "--include-cols" in str(exc_info.value)
 
     def test_none_columns(self):
-        """Test with None columns (should not raise)."""
-        validate_columns(None, ["id", "name"], "--include-cols")
+        assert build_column_selection(self.COLS, None, None, "geometry", None) == self.COLS
 
 
 class TestBuildSpatialFilter:
@@ -1052,7 +1046,7 @@ class TestExtractTable:
         with pytest.raises(InvalidParameterError) as exc_info:
             extract_table(table, geometry_column="nonexistent")
 
-        assert "geometry_column 'nonexistent' not found" in str(exc_info.value)
+        assert "geometry column 'nonexistent' not found" in str(exc_info.value)
         assert "id" in str(exc_info.value)
         assert "name" in str(exc_info.value)
 

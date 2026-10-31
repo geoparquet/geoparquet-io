@@ -18,7 +18,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.duckdb_utils import fetch_one, sql_literal
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.process.aggregate import by_admin
 from geoparquet_io.core.process.aggregate.common import (
@@ -27,7 +27,6 @@ from geoparquet_io.core.process.aggregate.common import (
     build_breakdown_pivot,
     parse_breakdown_metric,
     parse_metrics,
-    sql_literal,
     validate_agg_columns,
     validate_breakdown_metric,
     validate_metric_nodata,
@@ -339,8 +338,13 @@ class _SquareAdmin:
     def supports_per_level_sources(self):
         return True
 
-    def get_source_for_level(self, level):
+    def source_for_level(self, level, no_cache=False):
         return str(self._path)
+
+    def table_reference(self, source=None):
+        from geoparquet_io.core.duckdb_utils import sql_path
+
+        return sql_path(source or str(self._path))
 
 
 def test_admin_engine_pivots_and_keeps_off_a_metric_name(tmp_path, monkeypatch):
@@ -358,10 +362,10 @@ def test_admin_engine_pivots_and_keeps_off_a_metric_name(tmp_path, monkeypatch):
     con.close()
     monkeypatch.setattr(
         by_admin,
-        "_setup_admin_dataset",
-        lambda *a, **k: (_SquareAdmin(tmp_path / "admin.parquet"), []),
+        "resolve_admin_dataset",
+        lambda *a, **k: (_SquareAdmin(tmp_path / "admin.parquet"), [], None),
     )
-    monkeypatch.setattr(by_admin, "extract_crs_from_parquet", lambda *a, **k: None)
+    monkeypatch.setattr(by_admin, "crs_of", lambda *a, **k: None)
 
     out = tmp_path / "out.parquet"
     by_admin.aggregate_by_admin(

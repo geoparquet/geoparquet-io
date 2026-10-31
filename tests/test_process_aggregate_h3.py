@@ -6,6 +6,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
 
 def _write_points_geoparquet(path, rows):
@@ -63,7 +64,12 @@ def test_aggregate_h3_count_metric_breakdown(tmp_path):
             (-120.0, 40.0, "wheat", 1.0),
         ],
     )
-    aggregate_by_h3(str(src), str(out), resolution=6, metric="sum:area", breakdown="crop")
+    aggregate_by_h3(
+        str(src),
+        str(out),
+        resolution=6,
+        options=AggregateOptions(metric="sum:area", breakdown="crop"),
+    )
     table = pq.read_table(out)
     cols = table.column_names
     assert {"h3_cell", "count", "sum_area", "count_wheat", "count_corn", "geometry"} <= set(cols)
@@ -84,7 +90,7 @@ def test_aggregate_h3_out_geometry_none_is_plain_table(tmp_path):
     src = tmp_path / "fields.parquet"
     out = tmp_path / "agg_none.parquet"
     _write_points_geoparquet(src, [(10.0, 50.0, "wheat", 4.0)])
-    aggregate_by_h3(str(src), str(out), resolution=6, out_geometry="none")
+    aggregate_by_h3(str(src), str(out), resolution=6, options=AggregateOptions(out_geometry="none"))
     table = pq.read_table(out)
     assert "h3_cell" in table.column_names
     assert "count" in table.column_names

@@ -35,9 +35,9 @@ file that contradicts itself: native 2.0 with EPSG:5070 in the Parquet
 GeoParquet resolves as ``OGC:CRS84`` (#993). Splitting the two answers between
 two owners is what made that possible, so they are answered together.
 
-It deliberately does **not** own the rest of the write. Compression validation
-(``common.validate_compression_settings``), the contents of the ``geo`` block
-(``write_strategies.base.build_geo_metadata``), the null-vs-default CRS rule
+It deliberately does **not** own the rest of the write. The codec and level
+(``compression.resolve_codec``), the contents of the ``geo`` block
+(``geo_metadata.compose_geo_block``), the null-vs-default CRS rule
 (``crs_utils.apply_output_crs``), bbox coverings and geometry-type computation
 all already have a single owner each, and pulling them in here would turn a
 facade into a rewrite. The line is: this module decides what the paths were
@@ -62,22 +62,34 @@ from __future__ import annotations
 
 import math
 from collections.abc import Collection, Iterator, Mapping
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, fields, replace
+from typing import TYPE_CHECKING, Any, cast, overload
 
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
     PARQUET_UNKNOWN_CRS,
-    extract_crs_from_parquet,
+    crs_of,
     source_crs_is_unknown,
 )
 from geoparquet_io.core.duckdb_utils import build_kv_metadata_clause
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.geo_metadata import OVERVIEWS_KEY, sanitized_carried_geo
+from geoparquet_io.core.file_type import detect_geoparquet_file_type
+from geoparquet_io.core.geo_metadata import (
+    DEFAULT_GEOPARQUET_VERSION,
+    GEOPARQUET_VERSIONS,
+    OVERVIEWS_KEY,
+    carried_version,
+    geoarrow_primary_encoding,
+    is_geoparquet_1x,
+    sanitized_carried_geo,
+    sanitized_carried_geo_of_file,
+)
 from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
-from geoparquet_io.core.logging_config import debug, info
-from geoparquet_io.core.streaming import extract_version_from_metadata
+from geoparquet_io.core.logging_config import debug, info, success
+from geoparquet_io.core.sizing import mb_to_bytes
 
 if TYPE_CHECKING:
+    import duckdb
     import pyarrow as pa
 
 # The unit DuckDB's Parquet writer emits row groups in.
@@ -168,6 +180,24 @@ def align_to_writer_vector(rows: int, band_top: int = SPATIAL_BAND_TOP_ROWS) -> 
 DEFAULT_ROW_GROUP_ROWS = align_to_writer_vector(SPATIAL_BAND_TOP_ROWS)  # 49,152
 
 
+@overload
+def resolve_row_group_rows(
+    row_group_rows: None,
+    row_group_size_mb: None,
+    param_name: str = ...,
+    mb_param_name: str = ...,
+) -> int: ...
+
+
+@overload
+def resolve_row_group_rows(
+    row_group_rows: int | None,
+    row_group_size_mb: float | None,
+    param_name: str = ...,
+    mb_param_name: str = ...,
+) -> int | None: ...
+
+
 def resolve_row_group_rows(
     row_group_rows: int | None,
     row_group_size_mb: float | None,
@@ -175,6 +205,13 @@ def resolve_row_group_rows(
     mb_param_name: str = "--row-group-size-mb",
 ) -> int | None:
     """Decide how many rows a row group gets. The facade's first decision.
+
+    This is the one place a row-group count is decided: an explicit row count,
+    else an explicit MB target (measured from the data by
+    :func:`resolve_row_group_rows_for_table` or
+    :func:`resolve_row_group_rows_for_query`, which call this first), else
+    :data:`DEFAULT_ROW_GROUP_ROWS`. A write path never picks a number of its
+    own, and never leaves the choice to whichever writer it reaches.
 
     An explicit row count wins, and an explicit ``--row-group-size-mb`` target
     is left alone (it sizes groups by bytes, and forcing a row count here would
@@ -249,6 +286,13 @@ def estimate_row_size(table) -> int:
     ``nbytes``, then 100 bytes for a table-like object that answers neither.
     The floor is 1: a zero would make the division below a ``ZeroDivisionError``
     rather than a big row group.
+
+    A top-level ``large_string``/``large_binary``/``large_list`` column is
+    counted at 32-bit offsets. DuckDB hands its results back in the large
+    types and pyarrow reads a file in the small ones, so the same rows weighed
+    12 bytes more per row through ``gpio convert`` (a DuckDB sample) than
+    through ``Table.write`` (a pyarrow table) with three variable-width
+    columns, and one ``--row-group-size-mb`` landed on different groups (#1215).
     """
     default_row_size = 100
     num_rows = max(1, table.num_rows)
@@ -258,11 +302,60 @@ def estimate_row_size(table) -> int:
             value = getattr(table, accessor)
             total_bytes = value() if callable(value) else value
             if total_bytes > 0:
-                return max(1, total_bytes // num_rows)
+                return max(1, total_bytes // num_rows - _large_offset_surplus(table))
         except Exception:
             continue
 
     return default_row_size
+
+
+def _large_offset_surplus(table) -> int:
+    """Bytes per row a table's 64-bit offsets add over the 32-bit ones."""
+    import pyarrow as pa
+
+    schema = getattr(table, "schema", None)
+    if not isinstance(schema, pa.Schema):
+        return 0
+    large = 0
+    for field in schema:
+        arrow_type = field.type
+        while isinstance(arrow_type, pa.BaseExtensionType):
+            arrow_type = arrow_type.storage_type
+        if (
+            pa.types.is_large_string(arrow_type)
+            or pa.types.is_large_binary(arrow_type)
+            or pa.types.is_large_list(arrow_type)
+        ):
+            large += 1
+    return 4 * large
+
+
+#: Rows sampled from a query to measure bytes per row for an MB target. Large
+#: enough to be representative, small enough to stay cheap.
+_MB_ESTIMATE_SAMPLE_ROWS = 20_000
+
+
+def _rows_for_byte_target(sample, row_group_size_mb: float, verbose: bool = False) -> int:
+    """Turn an MB target into a row count from ``sample``'s bytes per row.
+
+    The count is snapped to a whole writer vector the way an explicit row count
+    is (:func:`align_to_writer_vector`), so every writer lands on the same
+    groups: DuckDB's ``COPY`` rounds a request up to a whole vector by itself,
+    and pyarrow honours one exactly, and they used to answer one MB target with
+    two different files (#1215). It floors at one vector: a target below what
+    one vector of these rows weighs (``1KB`` against 110-byte rows) would size
+    groups of a handful of rows -- 8,572 seven-row groups from 60,000 rows --
+    which no reader wants and DuckDB's ``COPY`` would not write anyway.
+    """
+    bytes_per_row = estimate_row_size(sample)
+    rows = max(WRITER_VECTOR_ROWS, int(mb_to_bytes(row_group_size_mb) // bytes_per_row))
+    rows = align_to_writer_vector(rows)
+    if verbose:
+        debug(
+            f"Resolved --row-group-size-mb {row_group_size_mb} to {rows:,} rows/group "
+            f"(~{bytes_per_row} bytes/row)"
+        )
+    return rows
 
 
 def resolve_row_group_rows_for_table(
@@ -270,7 +363,9 @@ def resolve_row_group_rows_for_table(
     row_group_rows: int | None,
     row_group_size_mb: float | None,
     param_name: str = "--row-group-size",
-) -> int | None:
+    mb_param_name: str = "--row-group-size-mb",
+    verbose: bool = False,
+) -> int:
     """:func:`resolve_row_group_rows`, with an MB target turned into rows.
 
     ``resolve_row_group_rows`` deliberately answers ``None`` for an explicit
@@ -282,23 +377,221 @@ def resolve_row_group_rows_for_table(
     where a row count goes, asking for 134,217,728 rows per group and writing
     one row group for the whole file (#1021).
 
-    ``None`` still comes back for an MB target against an empty table: there is
-    nothing to measure and no rows to group.
+    All three data resolvers measure a compact copy of the first 20,000
+    rows. A bounded prefix lets streaming and query writes use the same rows
+    without materializing the whole input; copying removes retained buffers
+    and chunk-boundary overhead from the byte measurement.
 
-    The row count floors at one writer vector. A target below what one vector
-    of this table weighs (``1KB`` against 110-byte rows) would otherwise size
-    groups of a handful of rows -- 8,572 seven-row groups from 60,000 rows --
-    which no reader wants and DuckDB's ``COPY`` would not write anyway (it
-    quantises every sub-vector request up to 2,048; see
-    :func:`resolve_row_group_rows`). The table's own row count still caps it.
+    The answer is always a whole writer vector (or the caller's own count). An
+    MB target against an empty table has nothing to measure and no rows to
+    group, so it gets the default. It is not capped at the table's row count:
+    a bigger group is still one group, and a capped count that is not a whole
+    vector would make the next resolve along the write announce a rounding
+    nobody asked for.
     """
-    resolved = resolve_row_group_rows(row_group_rows, row_group_size_mb, param_name)
-    if resolved is not None or not row_group_size_mb or table.num_rows <= 0:
+    resolved = resolve_row_group_rows(row_group_rows, row_group_size_mb, param_name, mb_param_name)
+    if resolved is not None:
         return resolved
+    if table.num_rows <= 0:
+        return DEFAULT_ROW_GROUP_ROWS
+    # resolve answers None only for an MB target, so there is one here.
+    # A compact prefix makes chunking and retained slice buffers irrelevant.
+    import pyarrow as pa
+    import pyarrow.compute as pc
 
-    target_bytes = row_group_size_mb * 1024 * 1024
-    rows = max(WRITER_VECTOR_ROWS, int(target_bytes // estimate_row_size(table)))
-    return min(rows, table.num_rows)
+    if not isinstance(table, (pa.Table, pa.RecordBatch)):
+        # Table-like measurement adapters expose bytes directly, without Arrow buffers.
+        return _rows_for_byte_target(table, cast(float, row_group_size_mb), verbose)
+    sample = pc.take(table, pa.array(range(min(table.num_rows, _MB_ESTIMATE_SAMPLE_ROWS))))
+    return _rows_for_byte_target(sample, cast(float, row_group_size_mb), verbose)
+
+
+def regroup(chunks, rows):
+    """Yield groups of ``rows`` (one count or successive counts); the last takes the remainder.
+
+    The one regrouper: every streamed write cuts its row groups here, after a
+    resolver above has decided ``rows``. ``chunks`` are Arrow record batches or
+    tables, and each group comes back as the same kind (``concat_batches`` /
+    ``concat_tables`` of zero-copy slices), so it holds at most one target group.
+    A source in small or uneven groups (DuckDB 2.0's ``to_arrow_reader`` only
+    caps a batch at ``n``; a file's own row groups; batches shrunk by a
+    filter) comes out in whole groups.
+    """
+    import itertools
+
+    import pyarrow as pa
+
+    targets = itertools.repeat(rows) if isinstance(rows, int) else iter(rows)
+    target = next(targets, None)
+    pending: list = []
+    held = 0
+
+    def joined():
+        if isinstance(pending[0], pa.Table):
+            return pa.concat_tables(pending)
+        return pa.concat_batches(pending)
+
+    for chunk in chunks:
+        while chunk.num_rows:
+            take = min(target - held, chunk.num_rows)
+            pending.append(chunk.slice(0, take))
+            held += take
+            chunk = chunk.slice(take)
+            if held == target:
+                yield joined()
+                pending, held = [], 0
+                target = next(targets, None)
+    if held:
+        yield joined()
+
+
+def located_row_group_layout(parquet_file, geometry_column: str) -> list[int] | None:
+    """Merge unlocated groups into their nearest preceding located group (#1146).
+
+    Leading unlocated groups join the first located group. Row order is
+    preserved; the requested size is a target, enlarged to avoid groups with
+    no spatial statistics. Location is decided by the geometry-stats owner,
+    including its NULL/EMPTY/non-finite policy, not by WKB null counts.
+
+    If the entire file is unlocated, no layout can supply a located geometry:
+    leave its groups alone. Return None when no rewrite is necessary.
+    """
+    from geoparquet_io.core.geo_metadata import geometry_stats_of
+
+    original = [
+        parquet_file.metadata.row_group(i).num_rows for i in range(parquet_file.num_row_groups)
+    ]
+    layout: list[int] = []
+    leading = 0
+    for index, rows in enumerate(original):
+        group = parquet_file.read_row_group(index, columns=[geometry_column])
+        if geometry_stats_of(group, geometry_column).bbox is not None:
+            layout.append(leading + rows)
+            leading = 0
+        elif layout:
+            layout[-1] += rows
+        else:
+            leading += rows
+    return layout if layout and layout != original else None
+
+
+def resolve_row_group_rows_for_sample(
+    table,
+    row_group_rows: int | None,
+    row_group_size_mb: float | None,
+    *,
+    final: bool = True,
+    verbose: bool = False,
+) -> int | None:
+    """:func:`resolve_row_group_rows_for_table` on a bounded sample of ``table``.
+
+    For a writer that streams: ``table`` is the leading rows it is about to
+    write, and at most :data:`_MB_ESTIMATE_SAMPLE_ROWS` of them are measured
+    -- the bound :func:`resolve_row_group_rows_for_query` samples a query with
+    -- so no driver picks a sample size of its own. A table within the bound
+    is measured whole, which is exactly what the table funnel measures.
+
+    ``final=False`` says more rows are coming: below the bound the answer is
+    ``None`` (keep buffering) for a byte target, so the sample is the same one
+    whichever batch size the rows arrived in.
+    """
+    resolved = resolve_row_group_rows(row_group_rows, row_group_size_mb)
+    if resolved is not None:
+        return resolved
+    if not final and table.num_rows < _MB_ESTIMATE_SAMPLE_ROWS:
+        return None
+    return resolve_row_group_rows_for_table(
+        table, row_group_rows, row_group_size_mb, verbose=verbose
+    )
+
+
+def sized_stream(chunks, row_group_rows: int | None, row_group_size_mb: float | None, schema):
+    """``(chunks, rows)`` for :func:`regroup`: a stream and its row-group count.
+
+    The one buffering loop for a streamed write. An explicit count (or none at
+    all) resolves at once and the stream passes through untouched. A byte
+    target is measured on the stream's leading rows: chunks are buffered until
+    :func:`resolve_row_group_rows_for_sample` answers (``final=False``), or the
+    stream ends (``final=True`` on what was buffered, or on an empty table of
+    ``schema``), and the buffered chunks go back in front of the rest, in
+    order. ``chunks`` are record batches or tables, as :func:`regroup` takes.
+    """
+    import itertools
+
+    import pyarrow as pa
+
+    rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
+    if rows is not None:
+        return chunks, rows
+
+    def joined(head):
+        if isinstance(head[0], pa.Table):
+            return pa.concat_tables(head)
+        return pa.Table.from_batches(head)
+
+    chunks = iter(chunks)
+    head: list = []
+    for chunk in chunks:
+        head.append(chunk)
+        rows = resolve_row_group_rows_for_sample(joined(head), None, row_group_size_mb, final=False)
+        if rows is not None:
+            return itertools.chain(head, chunks), rows
+    sample = joined(head) if head else schema.empty_table()
+    rows = resolve_row_group_rows_for_sample(sample, None, row_group_size_mb)
+    return itertools.chain(head, chunks), rows
+
+
+def resolve_row_group_rows_for_query(
+    con: duckdb.DuckDBPyConnection,
+    query: str,
+    row_group_rows: int | None,
+    row_group_size_mb: float | None,
+    verbose: bool = False,
+) -> int:
+    """:func:`resolve_row_group_rows_for_table` for a write that has a query, not a table.
+
+    DuckDB's ``ROW_GROUP_SIZE`` is a row count (``ROW_GROUP_SIZE_BYTES`` needs
+    insertion order off, which would undo a spatial sort), so an MB target is
+    measured on the query's first output rows, preserving ORDER BY. Dropping
+    the order would measure different rows from the table and stream resolvers
+    when row widths vary, so the same output bytes would get different counts.
+
+    Every DuckDB write path asks here: the plain-``COPY`` fast path a 2.0 input
+    takes used to skip the measurement and write DuckDB's own 122,880-row
+    default for any MB target (#1215). A query that cannot be sampled, or that
+    returns no rows, gets the default.
+    """
+    resolved = resolve_row_group_rows(row_group_rows, row_group_size_mb)
+    if resolved is not None:
+        return resolved
+    try:
+        sample = (
+            con.sql(f"SELECT * FROM ({query}) LIMIT {_MB_ESTIMATE_SAMPLE_ROWS}").arrow().read_all()
+        )
+    except Exception as exc:  # pragma: no cover - defensive, fall back to the default
+        debug(f"Could not sample rows for the --row-group-size-mb estimate: {exc}")
+        return DEFAULT_ROW_GROUP_ROWS
+    if sample.num_rows == 0:
+        return DEFAULT_ROW_GROUP_ROWS
+    # resolve answers None only for an MB target, so there is one here.
+    return resolve_row_group_rows_for_table(sample, None, row_group_size_mb, verbose=verbose)
+
+
+def resolve_row_group_rows_for_rewrite(num_rows: int, input_row_groups: int) -> int:
+    """Rows per group for a rewrite that must not lose the input's row groups.
+
+    ``check --fix`` rewrites a file so gpio's own checks pass it next, and the
+    spatial-order check only judges a file with at least eight row groups. The
+    default alone turned a 12-group file of 60,000 rows into two groups, and a
+    file the check could fail into one it could not judge (#1098). So the
+    default applies whenever it already keeps the input's count; otherwise the
+    groups shrink to the largest whole writer vector that keeps it, never below
+    one vector (DuckDB's ``COPY`` writes no smaller group).
+    """
+    if input_row_groups <= 1 or math.ceil(num_rows / DEFAULT_ROW_GROUP_ROWS) >= input_row_groups:
+        return DEFAULT_ROW_GROUP_ROWS
+    per_group = num_rows // input_row_groups
+    return max(WRITER_VECTOR_ROWS, per_group // WRITER_VECTOR_ROWS * WRITER_VECTOR_ROWS)
 
 
 def _rounding_note(requested: int, landed: int) -> str:
@@ -352,29 +645,60 @@ def resolve_output_geoparquet_version(
     requested: str | None,
     *,
     input_file: str | None = None,
-    original_metadata: dict | None = None,
+    original_metadata: Mapping | None = None,
+    table: pa.Table | None = None,
+    source_version: str | None = None,
+    file_type: Mapping | None = None,
+    preserve_input: bool = False,
     verbose: bool = False,
-) -> str | None:
+) -> str:
     """Decide which GeoParquet version the output declares. The second decision.
 
-    An explicit request always wins. Otherwise this is auto mode, which the
+    This is the only place an output version is decided (#1367 concept 1). An
+    explicit request always wins. Otherwise this is auto mode, which the
     shared ``--geoparquet-version`` help documents as "preserves 2.0; 1.x
-    inputs write 1.1; bare native geo types upgrade to 2.0" -- and for a
-    *native-geo-only* input (a Parquet GEOMETRY logical type and no ``geo``
-    key) that means writing native 2.0, which is what ``convert`` and
-    ``reproject`` already did via ``resolve_geoparquet_version_from_file``.
+    inputs write 1.1; bare native geo types upgrade to 2.0", asked of the
+    witnesses in this order:
+
+    1. ``input_file`` -- the file itself (:func:`_version_of_file`), or
+       ``file_type``, that file already detected (a
+       ``file_type.detect_geoparquet_file_type`` answer: ``file_type`` and
+       ``geo_version``), when the caller holds it and need not read it again;
+    2. ``original_metadata`` -- the carried ``geo`` key
+       (:func:`carried_geoparquet_version`);
+    3. ``table`` -- an Arrow table's own schema: its carried key, else a
+       GeoArrow column with no ``geo`` key is native data and writes 2.0, the
+       same answer the file path gives a native-geo-only file (approved
+       change 10; the table path used to say parquet-geo-only);
+    4. ``source_version`` -- an answer already reached for the file the data
+       was read from (``Table.write`` remembers it from ``gpio.read``);
+    5. ``DEFAULT_GEOPARQUET_VERSION``.
+
+    An explicit version must be one this writer can write (a key of
+    ``GEOPARQUET_VERSIONS``); anything else raises ``InvalidParameterError``
+    rather than reaching a writer that would quietly write 1.1 in its place.
+    Every answer is therefore a key the callers index directly.
+
+    ``preserve_input=True`` is the repair policy (``check --fix``,
+    ``check spec``'s label): every witness keeps the input's own version
+    exactly -- a 1.0 file or carried key stays 1.0 and a native-geo-only file
+    writes no ``geo`` key -- instead of auto mode's upgrades. Same steps, same
+    map (:func:`_version_for_file_type`), one option.
+
+    The default is part of the decision, so no caller adds an ``or "1.1"`` of
+    its own: before #1367 ``extract``, ``sort hilbert``, ``Table.write`` and
+    the query funnel each did, and the strategies each re-detected a table's
+    version with a copy of step 3 that disagreed with the file path.
+
     Whether the output may declare a bbox ``covering`` is a separate decision,
     gated on the struct's shape by ``geo_metadata.bbox_column_to_declare``,
     never on the version chosen here.
 
-    Every other entry point resolved auto mode from the carried KV metadata
-    alone, and a native-geo-only input has no ``geo`` key for that to read: it
-    returned ``None``, the write defaulted to 1.1, and the geometry column was
-    rewritten as plain WKB with its native logical type stripped (#600). The
-    file is the better witness than its ``geo`` key precisely because the
-    interesting case is the one with no ``geo`` key, so the file is consulted
-    first and the metadata is the fallback for callers that have no path to
-    offer (an in-memory query, a remote input that cannot be inspected).
+    The file is the better witness than its ``geo`` key because the
+    interesting case is the one with no ``geo`` key: a native-geo-only input
+    resolved from its metadata alone returned nothing, the write defaulted to
+    1.1, and the geometry was rewritten as plain WKB with its native logical
+    type stripped (#600).
 
     ``input_file`` must be the file whose *rows* the write will read, or a file
     that is lossless with respect to it. Handing this the user's input while
@@ -389,24 +713,172 @@ def resolve_output_geoparquet_version(
     The same witness answers :func:`resolve_input_crs`, and it has to: this
     function is what makes the output native, and a native output states its
     CRS in two places that must agree.
-
-    Returns ``None`` when nothing can be detected, leaving the caller's own
-    default in charge.
     """
     if requested is not None:
+        if requested not in GEOPARQUET_VERSIONS:
+            raise InvalidParameterError(
+                "geoparquet_version",
+                f"Unknown GeoParquet version {requested!r}; expected one of "
+                f"{', '.join(GEOPARQUET_VERSIONS)}",
+            )
         return requested
 
-    from geoparquet_io.core.common import (
-        _resolve_auto_version,
-        resolve_geoparquet_version_from_file,
+    if file_type is not None:
+        from_file = _version_of_file_type(file_type, preserve_input)
+    elif input_file:
+        from_file = _version_of_file(input_file, verbose, preserve_input)
+    else:
+        from_file = None
+    detected = (
+        from_file
+        or carried_geoparquet_version(original_metadata, preserve_input=preserve_input)
+        or (_version_of_table(table, verbose, preserve_input) if table is not None else None)
+        or source_version
+    )
+    if detected:
+        if verbose:
+            debug(f"Auto-detected GeoParquet version from input: {detected}")
+        return detected
+    return DEFAULT_GEOPARQUET_VERSION
+
+
+def carried_geoparquet_version(
+    metadata: Mapping | None, *, preserve_input: bool = False
+) -> str | None:
+    """The version a carried ``geo`` key resolves to: ``"1.1"``, ``"2.0"`` or None.
+
+    Every 1.x reads as 1.1 (backwards compatible, and the version the writer
+    knows) and every 2.x as 2.0, the highest 2.x this writer knows -- the same
+    two answers :func:`_version_of_file` gives a file. Anything else -- no
+    ``geo`` key, no ``version``, a version that is not a string (``2``,
+    ``["2.0"]``: guarded by ``carried_version`` rather than crashing
+    ``.split``, #979), or a major this writer cannot write -- is None, so the
+    caller's next witness answers. (The metadata path used to hand a ``3.x``
+    through as ``"3.0"``, a version no writer table knows; the file and table
+    paths already read it as no version.)
+    """
+    return writable_geoparquet_version(
+        carried_version(sanitized_carried_geo(metadata).get("version")),
+        preserve_input=preserve_input,
     )
 
-    if input_file:
-        detected = resolve_geoparquet_version_from_file(input_file, verbose)
-        if detected:
-            return detected
 
-    return _resolve_auto_version(extract_version_from_metadata(original_metadata))
+def writable_geoparquet_version(
+    declared: str | None, *, preserve_input: bool = False
+) -> str | None:
+    """A declared ``geo.version`` as the version this writer writes for it (1.x -> 1.1, 2.x -> 2.0).
+
+    ``preserve_input`` keeps a 1.0.x as 1.0. None for anything else (no
+    version, no minor, a major this writer does not know).
+    """
+    if is_geoparquet_1x(declared):
+        return _declared_1x(declared) if preserve_input else "1.1"
+    parts = declared.split(".") if declared else []
+    return "2.0" if len(parts) >= 2 and parts[0] == "2" else None
+
+
+def _version_of_file_type(info: Mapping, preserve_input: bool = False) -> str | None:
+    """Step 1 from an already-detected file (``file_type`` and ``geo_version``)."""
+    return _version_for_file_type(
+        info.get("file_type"), info.get("geo_version"), preserve_input=preserve_input
+    )
+
+
+def _version_for_file_type(
+    file_type: str | None, declared: str | None = None, *, preserve_input: bool = False
+) -> str | None:
+    """The version a file of this kind writes: the one map both policies share.
+
+    ``file_type`` is ``file_type.detect_geoparquet_file_type``'s answer and
+    ``declared`` the file's declared ``geo.version``. Auto mode upgrades a 1.x
+    file to 1.1 and a native-geo-only file to 2.0; ``preserve_input`` (the
+    repair policy) keeps both as they are -- 1.0 stays 1.0, native-geo-only
+    writes no ``geo`` key. None for a file that is not GeoParquet.
+    """
+    if file_type == "geoparquet_v2":
+        return "2.0"
+    if file_type == "parquet_geo_only":
+        return "parquet-geo-only" if preserve_input else "2.0"
+    if file_type == "geoparquet_v1":
+        return _declared_1x(declared) if preserve_input else "1.1"
+    return None
+
+
+def _declared_1x(declared: str | None) -> str:
+    """A 1.x file's own minor version as a writable key: "1.0" for 1.0.x, else "1.1"."""
+    return "1.0" if (declared or "").split(".")[:2] == ["1", "0"] else "1.1"
+
+
+def _version_of_file(
+    parquet_file: str, verbose: bool = False, preserve_input: bool = False
+) -> str | None:
+    """What a parquet file says about its version: ``2.0``, ``1.1``, ``1.1-geoarrow`` or None.
+
+    1.x normalizes to 1.1, matching :func:`carried_geoparquet_version`, and a
+    native-geo-only file upgrades to 2.0. None when the file cannot be
+    inspected (a remote without credentials) or says nothing, so the next
+    witness answers.
+    """
+    try:
+        info = detect_geoparquet_file_type(parquet_file, verbose)
+    except Exception as e:
+        debug(f"Version auto-detect failed for {parquet_file}: {e}; falling back to default")
+        return None
+
+    file_type = info.get("file_type")
+    # The repair policy keeps the declared 1.x as is (``_version_for_file_type``),
+    # the answer ``check --fix`` gets from its check results, so both agree.
+    auto_v1 = file_type == "geoparquet_v1" and not preserve_input
+    if auto_v1 and _declares_geoarrow_encoding(parquet_file):
+        # A GeoArrow-native 1.1 file declares version 1.1.0 just as a WKB one
+        # does, so "1.1" is the version but not the *encoding*: writing it meant
+        # passing the nested-list geometry through under `encoding: WKB`, a block
+        # contradicting the schema beside it (#1176). "1.1-geoarrow" is the one
+        # version that preserves what the input actually is.
+        return "1.1-geoarrow"
+    return _version_of_file_type(info, preserve_input)
+
+
+def _declares_geoarrow_encoding(parquet_file: str) -> bool:
+    """Whether the file's ``geo`` block declares native GeoArrow for its primary column."""
+    try:
+        return geoarrow_primary_encoding(sanitized_carried_geo_of_file(parquet_file)) is not None
+    except Exception as e:  # unreadable footer: the version decision stands as made
+        debug(f"GeoArrow encoding check failed for {parquet_file}: {e}")
+        return False
+
+
+def _version_of_table(
+    table: pa.Table, verbose: bool = False, preserve_input: bool = False
+) -> str | None:
+    """What an Arrow table's own schema says about its version.
+
+    A carried ``geo`` key answers through :func:`carried_geoparquet_version`.
+    With no key, a GeoArrow column -- read off the field, not just the type,
+    so a metadata-declared one counts whether or not ``geoarrow.pyarrow`` was
+    imported (#792) -- is native data: a native-geo-only table, which writes
+    2.0 (or stays keyless under ``preserve_input``, as the file map says).
+    """
+    metadata = table.schema.metadata
+    if metadata and b"geo" in metadata:
+        return carried_geoparquet_version(metadata, preserve_input=preserve_input)
+    if any(is_geoarrow_extension_field(field) for field in table.schema):
+        if verbose:
+            debug("Native geo types with no geo key: native-geo-only data")
+        return _version_for_file_type("parquet_geo_only", preserve_input=preserve_input)
+    return None
+
+
+def version_to_describe(schema: pa.Schema) -> str:
+    """The ``version=`` an in-memory description of ``schema`` composes with.
+
+    Auto mode's answer for a table with this schema: the carried block's,
+    else 2.0 for a GeoArrow column with no block (native data), else the
+    default. A description keeps what a carried block declares; this is the
+    answer for one that declares none, since the composer decides no version
+    itself (#1367 concept 4).
+    """
+    return resolve_output_geoparquet_version(None, table=schema.empty_table())
 
 
 def resolve_input_crs(
@@ -448,7 +920,7 @@ def resolve_input_crs(
     so before this the 1.1 rewrite of a native-geo-only file declared no CRS
     anywhere.
 
-    ``extract_crs_from_parquet`` returns ``None`` for the default CRS and for an
+    ``crs_of`` returns ``None`` for the default CRS and for an
     unknown one. The two are told apart here: an input whose CRS is unknown
     (``crs: null``, an empty value, or a ``srid:0`` type with no block) answers
     :data:`crs_utils.PARQUET_UNKNOWN_CRS`, so the output says "unknown" in the
@@ -466,11 +938,11 @@ def resolve_input_crs(
         return None
 
     try:
-        # RAW path: extract_crs_from_parquet escapes its own argument (#718).
+        # RAW path: crs_of escapes its own argument (#718).
         # The geometry column says which native column's CRS a block-less
         # (native-geo-only) input means: in schema order the first CRS can be
         # a secondary's.
-        crs = extract_crs_from_parquet(input_file, verbose=verbose, geometry_column=geometry_column)
+        crs = crs_of(input_file, verbose=verbose, geometry_column=geometry_column)
         if crs is None and source_crs_is_unknown(input_file, geometry_column):
             # An unknown CRS is a fact about the output too (#1276).
             return PARQUET_UNKNOWN_CRS
@@ -570,7 +1042,7 @@ def apply_output_kv_metadata(
 
     Applied at the top of each strategy's ``write_from_table``, before any
     early return can skip it, and again, with the same extras, by
-    ``_write_table_with_settings`` just before ``pq.write_table``, so the
+    ``write_arrow_table`` just before ``pq.write_table``, so the
     Arrow-table funnel and every helper that writes through it get the same
     answer.
     """
@@ -697,42 +1169,37 @@ class ParquetWriteSettings:
     Single source of truth for compression, row groups, and other settings.
     """
 
-    compression: str = "ZSTD"
-    compression_level: int = 15
-    row_group_rows: int | None = None
-    row_group_size_mb: int | None = None
+    #: ``None`` means the owner's default (``compression.resolve_codec``):
+    #: ZSTD, at the codec's documented level.
+    compression: str | None = None
+    compression_level: int | None = None
 
-    # Best practice constants
-    DEFAULT_COMPRESSION = "ZSTD"
-    DEFAULT_COMPRESSION_LEVEL = 15
     DEFAULT_PARQUET_VERSION = "2.6"
 
     def get_pyarrow_kwargs(
         self,
-        calculated_row_group_size: int | None = None,
+        row_group_rows: int,
         schema: pa.Schema | None = None,
         geometry_columns: Collection[str] = (),
     ) -> dict:
         """Get kwargs dict for PyArrow write_table().
 
-        With ``schema``, dictionary encoding is limited to the non-geometry
+        ``row_group_rows`` is the count :func:`resolve_row_group_rows_for_table`
+        (or one of its siblings) already decided; these settings decide none of
+        their own, so there is no fallback here that could skip the
+        validation, the vector snap or an MB target. With ``schema``, dictionary encoding is limited to the non-geometry
         columns (:func:`dictionary_columns`). Without it, pyarrow's default
         applies to every column.
         """
-        pa_compression = self.compression if self.compression != "UNCOMPRESSED" else None
-        pa_compression_level = (
-            self.compression_level if self.compression in ["GZIP", "ZSTD", "BROTLI"] else None
-        )
-
-        # Last resort, not a second policy: a caller that reached here without
-        # going through resolve_row_group_rows still lands on the one number
-        # rather than the 100,000 this used to carry -- which was neither
-        # DuckDB's 122,880 nor the band gpio's own check scores (#981).
-        row_group_size = calculated_row_group_size or self.row_group_rows or DEFAULT_ROW_GROUP_ROWS
+        # The owner validates the codec and level and drops a level the codec
+        # does not take; it is the only codec list in the package.
+        codec_kwargs = resolve_codec(
+            self.compression, self.compression_level, context="write"
+        ).pyarrow_kwargs()
 
         kwargs = {
-            "row_group_size": row_group_size,
-            "compression": pa_compression,
+            "row_group_size": row_group_rows,
+            **codec_kwargs,
             "write_statistics": True,
             "use_dictionary": (
                 True if schema is None else dictionary_columns(schema, geometry_columns)
@@ -740,7 +1207,131 @@ class ParquetWriteSettings:
             "version": self.DEFAULT_PARQUET_VERSION,
         }
 
-        if pa_compression_level is not None:
-            kwargs["compression_level"] = pa_compression_level
-
         return kwargs
+
+
+def write_arrow_table(
+    table: pa.Table,
+    output_path: str,
+    compression: str | None,
+    compression_level: int | None,
+    row_group_rows: int | None,
+    row_group_size_mb: float | None,
+    geoparquet_version: str | None,
+    geometry_column: str | None,
+    verbose: bool = False,
+    extra_kv_metadata: dict[str, str] | None = None,
+) -> None:
+    """Write an Arrow table as the facade says: the one final pyarrow table write.
+
+    Every Arrow-table write ends here -- ``write_funnels.write_geoparquet_table``
+    and its geometry-free sibling, and the ``in-memory`` strategy -- so the
+    row-group count (:func:`resolve_row_group_rows_for_table`), the codec and
+    level (``compression.resolve_codec``), the dictionary policy
+    (:func:`dictionary_columns`) and the file-level keys
+    (:func:`apply_output_kv_metadata`) are decided once. It moved here from
+    ``arrow_geo_metadata._write_table_with_settings``: a module that builds
+    ``geo`` blocks had become a second writer beside the funnels.
+
+    The table's ``geo`` block, when it has one, is the caller's: this writes
+    what it is given rather than letting geoarrow regenerate it.
+
+    Args:
+        table: PyArrow Table to write
+        output_path: Output file path
+        compression: Compression type (ZSTD, GZIP, etc.)
+        compression_level: Compression level
+        row_group_rows: Exact number of rows per row group
+        row_group_size_mb: Target row group size in MB
+        geoparquet_version: GeoParquet version
+        geometry_column: Name of the geometry column, or None for a table
+            with no geometry
+        verbose: Whether to print verbose output
+        extra_kv_metadata: The caller's file-level keys. Passed again here so
+            this last pass does not drop a caller key named like a carried one
+    """
+    # The facade's row-group decision, including the MB -> rows sizing. Calling
+    # it again after write_geoparquet_table already resolved is harmless and
+    # silent; the paths that reach here without resolving still land on the one
+    # number rather than pyarrow's own default (#1021).
+    rows_per_group = resolve_row_group_rows_for_table(table, row_group_rows, row_group_size_mb)
+
+    # Use central configuration for write settings
+    settings = ParquetWriteSettings(compression=compression, compression_level=compression_level)
+    write_kwargs = settings.get_pyarrow_kwargs(
+        rows_per_group,
+        schema=table.schema,
+        geometry_columns=[geometry_column] if geometry_column else (),
+    )
+
+    if verbose:
+        codec = resolve_codec(compression, compression_level, context="write")
+        debug(f"Writing with {codec.description} compression")
+        debug(f"Row group size: {rows_per_group:,} rows")
+
+    # The facade has the last word on the file-level keys, here at the one
+    # place every Arrow-table write reaches: the table funnel and the helpers
+    # that call this directly never pass through a strategy (#1268).
+    table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
+
+    import pyarrow.parquet as pq
+
+    pq.write_table(table, output_path, **write_kwargs)
+
+    if verbose:
+        success(f"Wrote {table.num_rows:,} rows to {output_path}")
+
+
+# ---------------------------------------------------------------------------
+# The write-options object (#1367, T5c)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WriteOptions:
+    """The write facts a command hands the funnel, as one value.
+
+    Every write path used to forward the same seven keywords from its public
+    entry point through each private driver to ``write_parquet_with_metadata``
+    / ``stream_io.write_output`` / ``stream_io.execute_transform``, and the
+    lists drifted into 18 copies (pylint R0801). A public core entry point keeps
+    its keyword signature (the CLI and the Python API call it) and builds this
+    once with :meth:`pick` from its own parameters; the drivers pass it along,
+    and the funnel call expands it once (:meth:`funnel_kwargs`).
+
+    Each field means what leaving the funnel's keyword out means when unset:
+    ``None`` everywhere, which the facade resolves (codec ZSTD, the default
+    row-group count, the auto output version, gpio's memory default).
+    """
+
+    compression: str | None = None
+    compression_level: int | None = None
+    row_group_size_mb: float | None = None
+    row_group_rows: int | None = None
+    profile: str | None = None
+    geoparquet_version: str | None = None
+    memory_limit: str | None = None
+
+    @classmethod
+    def pick(cls, values: Mapping[str, Any]) -> WriteOptions:
+        """The options named in *values*; other keys are ignored, absent fields stay unset."""
+        return cls(**{f.name: values[f.name] for f in fields(cls) if f.name in values})
+
+    def sets_output_layout(self) -> bool:
+        """Whether any option that decides the written bytes was set.
+
+        Codec, level, row-group size and output version shape the file; the
+        AWS profile and the memory limit do not. A writer that could copy its
+        input verbatim (``add bbox`` over a file that already has the column)
+        may do so only when this is False, since a copy reproduces whatever the
+        input was written with.
+        """
+        return replace(self, profile=None, memory_limit=None) != WriteOptions()
+
+    def funnel_kwargs(self) -> dict[str, Any]:
+        """The keywords every funnel takes, for ``funnel(..., **options.funnel_kwargs())``.
+
+        Every funnel accepts all seven, including the Arrow-table ones, which
+        accept and ignore the fields that do not apply to them.
+        """
+        return {f.name: getattr(self, f.name) for f in fields(self)}

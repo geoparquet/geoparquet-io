@@ -17,12 +17,15 @@ children's percentages.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import duckdb
 import pyarrow as pa
 import pytest
 
 from geoparquet_io.core.duckdb_utils import fetch_one, load_community_extension
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME
 from geoparquet_io.core.process.aggregate.by_h3 import H3_SCHEME
@@ -41,6 +44,7 @@ from geoparquet_io.core.process.aggregate.grid_common import (
     needed_source_columns,
     read_grid_source_sql,
 )
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 from geoparquet_io.core.process.overview.detect import RollupColumn, _classify_columns
 from geoparquet_io.core.process.overview.rollup import build_rollup_agg_parts
 
@@ -151,9 +155,7 @@ def test_the_h3_cell_area_is_measured_per_cell():
 def test_a_scheme_with_no_area_function_has_no_cell_area():
     bare = A5_SCHEME.__class__(
         name="bare",
-        extension="",
-        min_resolution=0,
-        max_resolution=0,
+        spec=replace(get_index_spec("h3"), extension=None, min_resolution=0, max_resolution=0),
         default_column="cell",
         key_template="{pt}",
         boundary_template="{cell}",
@@ -410,7 +412,12 @@ def test_overview_parents_recompute_the_percentage_from_the_total(con, patch_par
     from geoparquet_io.core.process.overview.run import create_overviews
 
     base = tmp_path / "base.parquet"
-    aggregate_by_a5(str(patch_parquet), str(base), resolution=7, metric="pct_cell:area_m2")
+    aggregate_by_a5(
+        str(patch_parquet),
+        str(base),
+        resolution=7,
+        options=AggregateOptions(metric="pct_cell:area_m2"),
+    )
     written = create_overviews(str(base), levels=[5])
     assert len(written) == 1
     _level, parent_path = written[0]
