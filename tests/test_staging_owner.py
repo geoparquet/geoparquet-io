@@ -17,6 +17,7 @@ what that owner promises, through the real CLI:
 
 from __future__ import annotations
 
+import gc
 import os
 import shutil
 import stat
@@ -127,6 +128,10 @@ def test_a_failed_publish_leaves_the_destination_and_no_temp(name, failure, tmp_
     monkeypatch.undo()
 
     assert result.exit_code != 0, result.output
+    # The captured exception retains closed connection frames. End that
+    # lifetime before checking connection-owned spill marker cleanup.
+    del result
+    gc.collect()
     assert destination.read_bytes() == before, "the destination was written although the run failed"
     assert sorted(p.name for p in work.iterdir()) == listing
     assert not list(scratch.rglob("*")), "a temp file outlived the failed run"

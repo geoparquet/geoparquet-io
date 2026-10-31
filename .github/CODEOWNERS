@@ -5,8 +5,7 @@
 # (scripts/apply_branch_protection.sh keeps require_code_owner_review: false).
 #
 # One file per line, no globs. tests/test_ci_wiring.py checks that every path
-# exists, or is on its PENDING_CODEOWNERS_PATHS list of files a later #1367
-# track creates.
+# exists; PENDING_CODEOWNERS_PATHS is empty after close-out.
 
 /geoparquet_io/core/parquet_writer.py @nlebovits
 /geoparquet_io/core/write_funnels.py @nlebovits
@@ -30,6 +29,14 @@
 /geoparquet_io/core/index_ops.py @nlebovits
 /geoparquet_io/cli/decorators.py @nlebovits
 /geoparquet_io/cli/exception_handler.py @nlebovits
+
+/geoparquet_io/core/admin_datasets.py @nlebovits
+/geoparquet_io/core/bbox_parse.py @nlebovits
+/geoparquet_io/core/bbox_structure.py @nlebovits
+/geoparquet_io/core/arrow_types.py @nlebovits
+/geoparquet_io/core/parquet_schema.py @nlebovits
+/geoparquet_io/core/process/aggregate/options.py @nlebovits
+/geoparquet_io/cli/commands/check.py @nlebovits
 
 # The one exemptions file for every owner guard: an entry here weakens a gate.
 /scripts/owner_exemptions.toml @nlebovits

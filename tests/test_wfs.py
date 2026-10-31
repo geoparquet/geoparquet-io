@@ -701,40 +701,6 @@ class TestWFSExceptionHierarchy:
 # =============================================================================
 
 
-class MockLayerInfo:
-    """Mock WFSLayerInfo for unit testing pure logic functions."""
-
-    def __init__(
-        self,
-        typename: str = "test:cities",
-        title: str | None = "Cities",
-        crs_list: list[str] | None = None,
-        default_crs: str | None = "urn:ogc:def:crs:EPSG::4326",
-        bbox: tuple[float, float, float, float] | None = (-180.0, -90.0, 180.0, 90.0),
-        geometry_column: str = "geometry",
-    ):
-        self.typename = typename
-        self.title = title
-        self.crs_list = crs_list or ["urn:ogc:def:crs:EPSG::4326", "urn:ogc:def:crs:EPSG::3857"]
-        self.default_crs = default_crs
-        self.bbox = bbox
-        self.geometry_column = geometry_column
-
-
-class MockCapabilities:
-    """Mock WFS capabilities for unit testing."""
-
-    def __init__(
-        self,
-        supports_bbox: bool = True,
-        version: str = "1.1.0",
-        max_features: int | None = None,
-    ):
-        self.supports_bbox = supports_bbox
-        self.version = version
-        self.max_features = max_features
-
-
 # =============================================================================
 # Unit Tests - Bbox Strategy
 # =============================================================================

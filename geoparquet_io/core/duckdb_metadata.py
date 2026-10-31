@@ -20,6 +20,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.crs_utils import (
+    _GEOARROW_EXTENSION_NAMES,
     AUTHORITY_CODE_CRS,
     UnresolvableCRSError,
     column_is_geographic,
@@ -247,22 +248,11 @@ def _get_pyarrow_logical_type(field) -> str | None:
     1. geoarrow-pyarrow imported: CRS is in field.type.crs attribute
     2. geoarrow-pyarrow not imported: CRS is in field.metadata['ARROW:extension:metadata']
     """
-    geoarrow_extensions = (
-        "geoarrow.wkb",
-        "ogc.wkb",
-        "geoarrow.point",
-        "geoarrow.linestring",
-        "geoarrow.polygon",
-        "geoarrow.multipoint",
-        "geoarrow.multilinestring",
-        "geoarrow.multipolygon",
-        "geoarrow.geometry",
-    )
 
     # Check for extension type registered with PyArrow
     if hasattr(field.type, "extension_name"):
         ext_name = field.type.extension_name
-        if ext_name in geoarrow_extensions:
+        if ext_name in _GEOARROW_EXTENSION_NAMES:
             # Case 1: geoarrow-pyarrow is imported - CRS is in field.type.crs
             # This takes priority because geoarrow-pyarrow consumes the metadata.
             # `geoarrow_crs_to_projjson` is the one reader for that attribute
@@ -289,17 +279,7 @@ def _get_pyarrow_logical_type(field) -> str | None:
         ext_name = field.metadata.get(b"ARROW:extension:name")
         if ext_name:
             ext_name_str = ext_name.decode("utf-8") if isinstance(ext_name, bytes) else ext_name
-            if ext_name_str in (
-                "geoarrow.wkb",
-                "ogc.wkb",
-                "geoarrow.point",
-                "geoarrow.linestring",
-                "geoarrow.polygon",
-                "geoarrow.multipoint",
-                "geoarrow.multilinestring",
-                "geoarrow.multipolygon",
-                "geoarrow.geometry",
-            ):
+            if ext_name_str in _GEOARROW_EXTENSION_NAMES:
                 # Get extension metadata
                 ext_meta_raw = field.metadata.get(b"ARROW:extension:metadata")
                 if ext_meta_raw:

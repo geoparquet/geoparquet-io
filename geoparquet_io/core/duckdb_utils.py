@@ -13,7 +13,9 @@ only when a connection is actually asked for.
 
 from __future__ import annotations
 
+import atexit
 import datetime
+import errno
 import functools
 import inspect
 import itertools
@@ -24,11 +26,12 @@ import shutil
 import tempfile
 import threading
 import uuid
+import weakref
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, BinaryIO, TypeVar
 
 if TYPE_CHECKING:
     import duckdb
@@ -1141,6 +1144,65 @@ _SPILL_DIR_PREFIX = "gpio-spill-"
 _SPILL_DIR_RE = re.compile(rf"^{re.escape(_SPILL_DIR_PREFIX)}(\d+)-[0-9a-f]{{12}}$")
 
 
+# Keep the marker open for the owning process's lifetime. A lock is independent
+# of the pid namespace from which a sibling sweeps the shared volume.
+_SPILL_LOCK_NAME = ".gpio-owner.lock"
+_spill_locks: dict[str, BinaryIO] = {}
+_spill_locks_guard = threading.Lock()
+
+
+def _spill_lock(path: str) -> BinaryIO | None:
+    """Take a nonblocking ownership lock; None means Windows (no fcntl)."""
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    marker = open(os.path.join(path, _SPILL_LOCK_NAME), "a+b")
+    try:
+        fcntl.flock(marker, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BaseException:
+        marker.close()
+        raise
+    return marker
+
+
+@contextmanager
+def _spill_base_lock(base: str | os.PathLike):
+    """Serialize publishing a marker and sweeping on a shared spill volume."""
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    # Lock the base directory itself: a sidecar lock would outlive every spill
+    # and violate callers' scratch cleanup guarantees. This also works when
+    # the base is read-only (scanning it still must be best effort).
+    descriptor = os.open(base, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _release_spill_lock(path: str) -> None:
+    with _spill_locks_guard:
+        marker = _spill_locks.pop(path, None)
+        if marker is not None:
+            match = _SPILL_DIR_RE.match(os.path.basename(path))
+            if match is not None and int(match[1]) == os.getpid():
+                shutil.rmtree(path, ignore_errors=True)
+            marker.close()
+
+
+def _release_spill_locks() -> None:
+    for path in list(_spill_locks):
+        _release_spill_lock(path)
+
+
+atexit.register(_release_spill_locks)
+
+
 def _process_is_alive(pid: int) -> bool:
     """Whether ``pid`` is still running. Answers True whenever it cannot tell.
 
@@ -1160,15 +1222,9 @@ def _process_is_alive(pid: int) -> bool:
 def orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
     """Spill directories under ``base_dir`` whose owning process has exited.
 
-    Ownership is decided by the pid in the name, never by age: a gpio run that
-    takes six hours must not have its scratch space swept out from under it.
-    Pid reuse can only make this *more* conservative -- a recycled pid reads as
-    alive, so the leftover simply survives another round.
-
-    The one case pids cannot decide is two *pid namespaces* sharing one spill
-    volume: point ``TMPDIR`` at the same bind-mounted directory from two
-    containers and each sees the other's pids as absent. Give each container its
-    own ``TMPDIR`` (the default already does) if you share a volume between them.
+    On POSIX, a held marker lock protects a live owner across pid namespaces.
+    Legacy leaves without a marker retain the conservative pid check. Windows
+    has no fcntl and always uses that check.
     """
     found: list[str] = []
     try:
@@ -1184,9 +1240,17 @@ def orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
                 continue
         except OSError:  # pragma: no cover - raced with another sweeper
             continue
-        if _process_is_alive(int(match.group(1))):
-            continue
-        found.append(entry.path)
+        if os.path.isfile(os.path.join(entry.path, _SPILL_LOCK_NAME)):
+            try:
+                marker = _spill_lock(entry.path)
+            except OSError:
+                continue
+            if marker is not None:
+                marker.close()
+                found.append(entry.path)
+                continue
+        if not _process_is_alive(int(match.group(1))):
+            found.append(entry.path)
     return found
 
 
@@ -1210,25 +1274,35 @@ def sweep_orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
         The paths actually removed, for callers that report what they freed.
     """
     removed: list[str] = []
-    for path in orphaned_spill_dirs(base_dir):
-        try:
-            shutil.rmtree(path)
-        except OSError:
-            continue
-        removed.append(path)
+    try:
+        with _spill_base_lock(base_dir):
+            for path in orphaned_spill_dirs(base_dir):
+                marker = None
+                try:
+                    # Reacquire and hold through removal: listing is a snapshot.
+                    marker = _spill_lock(path)
+                    match = _SPILL_DIR_RE.match(os.path.basename(path))
+                    if marker is None and (match is None or _process_is_alive(int(match[1]))):
+                        continue
+                    shutil.rmtree(path)
+                except OSError:
+                    continue
+                finally:
+                    if marker is not None:
+                        marker.close()
+                removed.append(path)
+    except OSError:
+        pass  # Missing/read-only base: sweeping must never fail the caller.
     return removed
 
 
 def spill_directory(base_dir: str | os.PathLike | None = None) -> str:
     """Path to a private directory DuckDB may spill intermediate results into.
 
-    The path is *not* created. DuckDB creates its temp directory the first time
-    a query exceeds ``memory_limit``, and removes it again once the query
-    completes -- so a connection that never spills leaves nothing behind, and an
-    ordinary run, error or not, cleans up after itself. A run *killed* mid-spill
-    does not, which is why every call first sweeps ``base_dir`` for the leavings
-    of processes that are gone (see :func:`sweep_orphaned_spill_dirs`). The
-    sweep is best effort and never raises.
+    On POSIX the directory is created with a locked ownership marker before
+    returning. DuckDB may spill later; the lock already protects it from sibling
+    sweepers, including those in a different pid namespace. Empty directories
+    are removed at process exit. Windows keeps lazy creation and pid checks.
 
     Every call returns a fresh path, and that uniqueness is a correctness
     requirement rather than tidiness. DuckDB names its spill files after the
@@ -1243,18 +1317,44 @@ def spill_directory(base_dir: str | os.PathLike | None = None) -> str:
     Args:
         base_dir: Volume to spill onto. Defaults to the OS temp directory, which
             follows ``TMPDIR``: that is the knob for a machine whose root volume
-            is too small to hold a large sort's spill. Not validated here --
-            DuckDB creates the leaf lazily, so a base that is missing, read-only
-            or not a directory surfaces as an ``IO Error`` naming the path at
-            the first spill rather than at this call. Callers that name a base
-            create it first.
+            is too small to hold a large sort's spill. On POSIX a missing base
+            is created. When permissions prevent creation, the uncreated path
+            is returned; DuckDB reports the unusable volume if it needs to spill.
+            Windows always creates its directory lazily.
 
     Returns:
         An absolute path, safe to hand to ``SET temp_directory``.
     """
     base = os.fspath(base_dir) if base_dir is not None else tempfile.gettempdir()
     sweep_orphaned_spill_dirs(base)
-    return os.path.join(base, f"{_SPILL_DIR_PREFIX}{os.getpid()}-{uuid.uuid4().hex[:12]}")
+    path = os.path.join(base, f"{_SPILL_DIR_PREFIX}{os.getpid()}-{uuid.uuid4().hex[:12]}")
+    try:
+        import fcntl  # noqa: F401 -- availability selects the Windows fallback
+    except ImportError:
+        return path
+    try:
+        os.makedirs(base, exist_ok=True)
+        with _spill_locks_guard, _spill_base_lock(base):
+            # DuckDB can remove a completed spill's directory. Close its obsolete
+            # descriptor before retaining another, so repeated connections stay bounded.
+            for old_path in list(_spill_locks):
+                if not os.path.exists(old_path):
+                    _spill_locks.pop(old_path).close()
+            os.makedirs(path, mode=0o700, exist_ok=False)
+            try:
+                marker = _spill_lock(path)
+            except BaseException:
+                shutil.rmtree(path, ignore_errors=True)
+                raise
+            if marker is not None:
+                _spill_locks[path] = marker
+    except OSError as exc:
+        if exc.errno not in (errno.EACCES, errno.EROFS) or os.path.exists(path):
+            raise
+        # No directory could be created, hence no spill can be swept. Preserve
+        # the lazy factory contract: reads that never spill can still succeed;
+        # DuckDB reports the unusable volume only if it actually needs to spill.
+    return path
 
 
 #: The DuckDB failures whose cause is the *input*, not gpio.
@@ -1740,6 +1840,8 @@ def get_duckdb_connection(
     # so a per-write override cannot be applied to the connections gpio shares
     # across writes (a partition loop finalizes N files on one connection).
     effective_temp_dir = temp_directory if temp_directory is not None else spill_directory()
+    if temp_directory is None and effective_temp_dir in _spill_locks:
+        weakref.finalize(con, _release_spill_lock, effective_temp_dir)
     con.execute(f"SET temp_directory = {sql_path(effective_temp_dir)};")
     _apply_connection_limits(con, memory_limit, threads)
 

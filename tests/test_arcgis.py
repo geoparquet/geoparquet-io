@@ -36,7 +36,6 @@ MOCK_LAYER_INFO = {
     "maxRecordCount": 1000,
 }
 
-MOCK_FEATURE_COUNT = {"count": 3}
 
 MOCK_FEATURES_PAGE = {
     "type": "FeatureCollection",

@@ -2,6 +2,13 @@
 
 gpio provides a fluent Python API for GeoParquet transformations. This API offers the best performance by keeping data in memory as Arrow tables, avoiding file I/O entirely.
 
+## Core helper migration
+
+The #1367 refactor removes duplicate core names without compatibility shims.
+The [one-owner migration reference](../guide/one-owner-migration.md) lists every
+moved/deleted public definition, its owner, and changed signatures. Application
+code should use `geoparquet_io.read`, `Table` or `geoparquet_io.api.ops`.
+
 ## Installation
 
 === "CLI"

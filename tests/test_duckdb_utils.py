@@ -233,15 +233,18 @@ class TestGetDuckdbConnection:
         """No caller named one, so gpio picks one (see tests/test_spill_strategy.py).
 
         DuckDB's own default is the relative path ".tmp", which puts every spill
-        under the working directory. Nothing is created unless a query actually
-        spills, so small inputs behave exactly as before.
+        under the working directory. POSIX creates a locked ownership marker
+        before the first spill; Windows retains lazy directory creation.
         """
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
         try:
             value = fetch_one(con.execute("SELECT current_setting('temp_directory')"))[0]
             assert value != ".tmp"
             assert os.path.isabs(value)
-            assert not os.path.exists(value)
+            if os.name == "nt":
+                assert not os.path.exists(value)
+            else:
+                assert os.path.isfile(os.path.join(value, ".gpio-owner.lock"))
             assert fetch_one(con.execute("SELECT 1")) == (1,)
         finally:
             con.close()
