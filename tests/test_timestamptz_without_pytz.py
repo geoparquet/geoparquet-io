@@ -7,7 +7,7 @@ value imports ``pytz``. gpio does not depend on pytz, so these tests hide it
 
 import json
 import sys
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import duckdb
 import pytest
@@ -24,8 +24,8 @@ from geoparquet_io.core.inspect_utils import (
 )
 
 # Noon UTC keeps the calendar date stable in any session time zone within +-12h.
-TZ_MIN = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
-TZ_MAX = datetime(2024, 6, 30, 12, 30, tzinfo=timezone.utc)
+TZ_MIN = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+TZ_MAX = datetime(2024, 6, 30, 12, 30, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)

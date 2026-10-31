@@ -12,7 +12,7 @@ import json
 import os
 import re
 from abc import ABC, abstractmethod
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -179,7 +179,7 @@ def written_block_encoding(geoparquet_version: str) -> str | None:
     return None if geoparquet_version == "1.1-geoarrow" else "WKB"
 
 
-class WriteStrategy(str, Enum):
+class WriteStrategy(StrEnum):
     """Available write strategies for GeoParquet metadata writes."""
 
     ARROW_MEMORY = "in-memory"

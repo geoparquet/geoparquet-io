@@ -73,11 +73,9 @@ print("imports stayed lazy")
 
 ## What a host must supply
 
-**Python 3.10 or newer, to import.** Modules in the surface's closure —
-`logging_config` and `remote` among them — write `X | None` in signatures without
-`from __future__ import annotations`, so an older interpreter fails at import
-with a `TypeError`. This is gpio's own floor (`requires-python` in
-pyproject.toml), so it matters only to a host whose embedded Python is older.
+**Python 3.11 or newer, to import.** This is gpio's supported floor
+(`requires-python` in pyproject.toml). Maintenance tooling uses the standard
+library's `tomllib`, available starting in Python 3.11.
 
 **More than pyarrow, to call.** Each of these is imported inside the function
 that needs it, so its absence surfaces as `ModuleNotFoundError` at that call,

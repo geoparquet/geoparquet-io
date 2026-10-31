@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 
-from enum import Enum
+from enum import StrEnum
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.check_verdict import (
@@ -82,7 +82,7 @@ GENERAL_ROW_COUNT_RANGE = (10_000, 200_000)
 SPATIAL_ROW_COUNT_RANGE = (10_000, 50_000)
 
 
-class CheckProfile(str, Enum):
+class CheckProfile(StrEnum):
     """
     Profiles for checking parquet file structure
     based on specific use cases

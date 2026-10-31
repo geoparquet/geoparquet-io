@@ -13,6 +13,7 @@ Before this, six of the eight subcommands printed a failure and exited 0, so
 """
 
 import json
+from datetime import UTC
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -550,7 +551,7 @@ class TestZeroMatches:
 class TestStac:
     @pytest.fixture
     def item(self, tmp_path):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         import pystac
 
@@ -559,7 +560,7 @@ class TestStac:
                 id="t",
                 geometry={"type": "Point", "coordinates": [0, 0]},
                 bbox=[0, 0, 0, 0],
-                datetime=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                datetime=datetime(2024, 1, 1, tzinfo=UTC),
                 properties={},
             )
             if self_link:

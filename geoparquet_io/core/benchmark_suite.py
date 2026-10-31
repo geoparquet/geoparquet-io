@@ -7,7 +7,7 @@ import gc
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -287,7 +287,7 @@ def run_benchmark_suite(
 
     return SuiteResult(
         version=_get_version(),
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         environment=get_environment_info(),
         results=results,
         config={

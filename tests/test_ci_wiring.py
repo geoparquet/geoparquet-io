@@ -297,3 +297,13 @@ def test_every_documented_concept_owner_has_codeowners():
     listed = {path.lstrip("/") for path, _ in _codeowners_entries()}
     assert not PENDING_CODEOWNERS_PATHS, "all owners must exist at close-out"
     assert documented <= listed, f"concept owners missing CODEOWNERS: {documented - listed}"
+
+
+def test_supported_python_matrix():
+    """Python 3.10 reached EOL on 2026-10-04; CI starts at the 3.11 floor."""
+    workflow = yaml.safe_load((PROJECT_ROOT / ".github/workflows/tests.yml").read_text())
+    assert workflow["jobs"]["test"]["strategy"]["matrix"]["python-version"] == [
+        "3.11",
+        "3.12",
+        "3.13",
+    ]

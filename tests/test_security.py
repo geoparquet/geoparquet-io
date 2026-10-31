@@ -1,14 +1,10 @@
 """Tests for security scanning configuration."""
 
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
-
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib  # type: ignore[no-redef]
 
 # Timeout for security tool subprocess calls (seconds).
 _SUBPROCESS_TIMEOUT = 120

@@ -1508,7 +1508,7 @@ def test_stac_projection_properties_survive_a_malformed_block(col, case, block, 
         id="x",
         geometry=None,
         bbox=None,
-        datetime=dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+        datetime=dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
         properties={},
     )
     _add_projection_properties(item, block, path)
@@ -1539,7 +1539,7 @@ def test_stac_projection_properties_still_read_a_real_crs(tmp_path):
         id="x",
         geometry=None,
         bbox=None,
-        datetime=dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+        datetime=dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
         properties={},
     )
     _add_projection_properties(item, block, path)

@@ -43,14 +43,10 @@ from __future__ import annotations
 import argparse
 import ast
 import sys
+import tomllib
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
-
-if __name__ == "__main__" and not __package__:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from scripts.toml_utils import load_toml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_EXEMPTIONS = Path("scripts") / "owner_exemptions.toml"
@@ -66,7 +62,7 @@ class Definition:
 
 
 def load_table(exemptions_file: Path) -> dict:
-    return load_toml(exemptions_file).get("G2", {})
+    return tomllib.loads(exemptions_file.read_text(encoding="utf-8")).get("G2", {})
 
 
 def _owners(table: dict) -> dict[str, tuple[str, ...]]:

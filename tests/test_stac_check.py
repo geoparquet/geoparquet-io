@@ -2,6 +2,7 @@
 
 import json
 import os
+from datetime import UTC
 
 import click
 import pystac
@@ -13,7 +14,7 @@ from geoparquet_io.core.stac_check import check_stac, validate_stac_file
 @pytest.fixture
 def valid_stac_item(temp_output_dir):
     """Create a valid STAC Item JSON file for testing."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     # Use pystac to create item with correct version for installed pystac
     item = pystac.Item(
@@ -23,7 +24,7 @@ def valid_stac_item(temp_output_dir):
             "coordinates": [[[-180, -90], [180, -90], [180, 90], [-180, 90], [-180, -90]]],
         },
         bbox=[-180, -90, 180, 90],
-        datetime=datetime(2024, 11, 8, 0, 0, 0, tzinfo=timezone.utc),
+        datetime=datetime(2024, 11, 8, 0, 0, 0, tzinfo=UTC),
         properties={},
     )
     item.add_link(pystac.Link("self", "./test-item.json", "application/json"))
