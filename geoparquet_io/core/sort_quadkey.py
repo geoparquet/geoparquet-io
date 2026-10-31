@@ -25,7 +25,7 @@ from geoparquet_io.core.file_utils import (
 )
 from geoparquet_io.core.index_ops import ensure_index_column, get_index_spec
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
-from geoparquet_io.core.parquet_writer import resolve_row_group_rows
+from geoparquet_io.core.parquet_writer import WriteOptions, resolve_row_group_rows
 from geoparquet_io.core.partition.reader import (
     build_read_parquet_expr,
     raise_for_schema_mismatch,
@@ -154,6 +154,7 @@ def sort_by_quadkey(
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
+    write = WriteOptions.pick(locals())
     if is_streaming:
         _sort_by_quadkey_streaming(
             input_parquet,
@@ -163,13 +164,7 @@ def sort_by_quadkey(
             use_centroid,
             remove_quadkey_column,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
-            memory_limit=memory_limit,
+            write,
         )
         return
 
@@ -265,20 +260,14 @@ def sort_by_quadkey(
             query,
             output_parquet,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
             input_file=input_parquet,
-            memory_limit=memory_limit,
             # `metadata` describes only the first file of a multi-file input
             # (and the auto-add step carried that footer forward), so its
             # bbox/geometry_types under-cover the merged output. Recompute
             # rather than carry (#793).
             invalidate_derived_stats=is_partition_path(input_parquet),
+            **write.funnel_kwargs(),
         )
 
         if remove_quadkey_column:
@@ -309,13 +298,7 @@ def _sort_by_quadkey_streaming(
     use_centroid: bool,
     remove_quadkey_column: bool,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
-    memory_limit: str | None,
+    write: WriteOptions,
 ) -> None:
     """Handle streaming input/output for sort_by_quadkey."""
     # Suppress verbose when streaming to stdout
@@ -348,7 +331,7 @@ def _sort_by_quadkey_streaming(
             resolution,
             verbose,
             use_centroid,
-            profile,
+            write.profile,
             missing_error=missing_error,
         )
 
@@ -384,14 +367,8 @@ def _sort_by_quadkey_streaming(
             query,
             output_path,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
 
         con.close()

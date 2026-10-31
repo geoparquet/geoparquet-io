@@ -679,13 +679,7 @@ class TestIndexStreamingForwardMemoryLimit:
                 column_list=["name"],
                 descending=False,
                 verbose=False,
-                compression="ZSTD",
-                compression_level=None,
-                row_group_size_mb=None,
-                row_group_rows=None,
-                profile=None,
-                geoparquet_version=None,
-                memory_limit="604MB",
+                write=WriteOptions(compression="ZSTD", memory_limit="604MB"),
             )
         mocked.assert_called_once()
         assert mocked.call_args.kwargs.get("memory_limit") == "604MB"
@@ -743,13 +737,7 @@ class TestIndexStreamingForwardMemoryLimit:
                 use_centroid=False,
                 remove_quadkey_column=False,
                 verbose=False,
-                compression="ZSTD",
-                compression_level=None,
-                row_group_size_mb=None,
-                row_group_rows=None,
-                profile=None,
-                geoparquet_version=None,
-                memory_limit="607MB",
+                write=WriteOptions(compression="ZSTD", memory_limit="607MB"),
             )
         mocked.assert_called_once()
         assert mocked.call_args.kwargs.get("memory_limit") == "607MB"

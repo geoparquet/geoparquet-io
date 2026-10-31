@@ -500,9 +500,6 @@ reason = "aggregation options (metric, breakdown, bucket-point, ...) forwarded t
 block = "core.process.raster.contour:contour_file|core.process.raster.polygonize:polygonize_file"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
-block = "core.sort_by_column:sort_by_column|core.sort_quadkey:sort_by_quadkey"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
 block = "core.sort_quadkey:sort_by_quadkey_table|core.str_order:str_order_table"
 reason = "sort result read back with the input's schema metadata carried verbatim (replace_schema_metadata), copied per sort; the version and geo handling of a sorted table is T2b/T3e's, not a row-group or raw-write question"
 

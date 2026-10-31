@@ -17,7 +17,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
 from geoparquet_io.core.file_utils import handle_output_overwrite, is_partition_path
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
-from geoparquet_io.core.parquet_writer import resolve_row_group_rows
+from geoparquet_io.core.parquet_writer import WriteOptions, resolve_row_group_rows
 from geoparquet_io.core.partition.reader import build_read_parquet_expr, raise_for_schema_mismatch
 from geoparquet_io.core.remote import (
     get_remote_error_hint,
@@ -169,6 +169,7 @@ def sort_by_column(
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
+    write = WriteOptions.pick(locals())
     if is_streaming:
         _sort_by_column_streaming(
             input_parquet,
@@ -176,13 +177,7 @@ def sort_by_column(
             column_list,
             descending,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
-            memory_limit=memory_limit,
+            write,
         )
         return
 
@@ -245,20 +240,14 @@ def sort_by_column(
             order_query,
             output_parquet,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
             input_file=input_parquet,
-            memory_limit=memory_limit,
             # `metadata` is the FIRST file's footer. Over a merged multi-file
             # input its bbox/geometry_types under-cover the output, and a
             # conformant reader would skip the rows they leave out, so the
             # write recomputes them instead of carrying them (#793).
             invalidate_derived_stats=is_partition_path(input_parquet),
+            **write.funnel_kwargs(),
         )
 
         success(f"Sorted by {', '.join(column_list)} to: {output_parquet}")
@@ -283,13 +272,7 @@ def _sort_by_column_streaming(
     column_list: list[str],
     descending: bool,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
-    memory_limit: str | None,
+    write: WriteOptions,
 ) -> None:
     """Handle streaming input/output for sort_by_column."""
     # Suppress verbose when streaming to stdout
@@ -323,13 +306,7 @@ def _sort_by_column_streaming(
         output_path,
         make_query,
         verbose=verbose,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
-        memory_limit=memory_limit,
+        **write.funnel_kwargs(),
     )
 
     if not should_stream_output(output_path):
