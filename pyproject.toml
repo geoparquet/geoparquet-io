@@ -164,6 +164,9 @@ pythonpath = ["."]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
+# Name hung tests and dump worker stacks on every platform, including Windows.
+timeout = 600
+timeout_method = "thread"
 # Coverage flags deliberately absent: a plain `uv run pytest` should be fast and
 # green. Instrumenting every run (including every spawned subprocess) cost 39-49%
 # on single-file dev runs, and a partial run can never clear the whole-suite floor,
