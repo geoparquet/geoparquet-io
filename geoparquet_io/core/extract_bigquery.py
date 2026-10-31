@@ -16,9 +16,9 @@ import pyarrow as pa
 
 from geoparquet_io.core.bbox_parse import any_piece, parse_bbox
 from geoparquet_io.core.column_selection import (
+    exclude_columns,
     find_column,
     has_column,
-    matching_columns,
     resolve_columns_against_schema,
     same_column,
     split_column_list,
@@ -377,58 +377,6 @@ def _detect_geometry_column(table: pa.Table) -> str | None:
     return primary_geometry_column(table, extra_names=GEOGRAPHY_SOURCE_NAMES)
 
 
-def extract_bigquery_table(
-    table: pa.Table,
-    limit: int | None = None,
-    columns: list[str] | None = None,
-    exclude_columns: list[str] | None = None,
-) -> pa.Table:
-    """
-    Apply column selection and row limits to an in-memory PyArrow Table.
-
-    This function processes tables that have already been loaded from BigQuery.
-    For filtering with WHERE clauses or bbox, use extract_bigquery() which
-    pushes filters to BigQuery for better performance.
-
-    Args:
-        table: Input PyArrow Table (already loaded from BigQuery)
-        limit: Maximum rows to return (0 returns empty table)
-        columns: Columns to include (None = all)
-        exclude_columns: Columns to exclude
-
-    Returns:
-        Filtered PyArrow Table
-
-    Raises:
-        ValueError: If limit is negative
-    """
-    # Validate limit
-    if limit is not None and limit < 0:
-        raise ValueError(f"limit must be non-negative, got {limit}")
-
-    result = table
-
-    # Apply column selection
-    if columns:
-        # Ensure geometry column is included
-        geom_col = _detect_geometry_column(result)
-        if geom_col and geom_col not in columns:
-            columns = list(columns) + [geom_col]
-        available = [c for c in columns if c in result.column_names]
-        result = result.select(available)
-
-    # Apply column exclusion
-    if exclude_columns:
-        keep_cols = [c for c in result.column_names if c not in exclude_columns]
-        result = result.select(keep_cols)
-
-    # Apply limit (limit=0 returns empty table)
-    if limit is not None and result.num_rows > limit:
-        result = result.slice(0, limit)
-
-    return result
-
-
 # The Storage Read API backs bigquery_scan, and it serves physical tables
 # only. BigQuery refuses a view, a materialized view or an external table in
 # these words. Matched lowercased, against the message of the raised error.
@@ -782,10 +730,10 @@ def _get_column_type(
     """
     if schema_rows is None:
         schema_rows = _schema_rows(con, table_id)
-    found = matching_columns(column_name, [name for name, _ in schema_rows])
-    if not found:
+    found = find_column(column_name, [name for name, _ in schema_rows])
+    if found is None:
         return "VARCHAR"
-    return next(col_type for name, col_type in schema_rows if name == found[0]).upper()
+    return next(col_type for name, col_type in schema_rows if name == found).upper()
 
 
 def _resolve_column_name(
@@ -809,7 +757,7 @@ def _resolve_column_name(
         The actual column name from the schema, or the input if not found
     """
     names = _schema_column_names(con, table_id, table_source, schema_rows)
-    return next(iter(matching_columns(column_name, names)), column_name)
+    return find_column(column_name, names) or column_name
 
 
 def _build_geometry_select_expr(
@@ -1005,7 +953,7 @@ def _build_column_list(
         all_schema_cols = (
             schema_columns if schema_columns is not None else _schema_column_names(con, table_id)
         )
-        return [c for c in all_schema_cols if c not in exclude_list]
+        return exclude_columns(all_schema_cols, exclude_list)
 
     return None  # All columns
 

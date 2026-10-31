@@ -1984,18 +1984,7 @@ class Table:
         result = aggregate_a5_table(
             self._table,
             resolution=resolution,
-            options=AggregateOptions(
-                bbox_column=bbox_column,
-                breakdown=breakdown,
-                breakdown_limit=breakdown_limit,
-                breakdown_metric=breakdown_metric,
-                bucket_point=bucket_point,
-                memory_limit=memory_limit,
-                metric=metric,
-                metric_nodata=metric_nodata,
-                out_geometry=out_geometry,
-                where=where,
-            ),
+            options=AggregateOptions.pick(locals()),
             geometry_column=self._geometry_column,
         )
         return self._wrap_geographic(
@@ -2047,18 +2036,7 @@ class Table:
         result = aggregate_h3_table(
             self._table,
             resolution=resolution,
-            options=AggregateOptions(
-                bbox_column=bbox_column,
-                breakdown=breakdown,
-                breakdown_limit=breakdown_limit,
-                breakdown_metric=breakdown_metric,
-                bucket_point=bucket_point,
-                memory_limit=memory_limit,
-                metric=metric,
-                metric_nodata=metric_nodata,
-                out_geometry=out_geometry,
-                where=where,
-            ),
+            options=AggregateOptions.pick(locals()),
             geometry_column=self._geometry_column,
         )
         return self._wrap_geographic(

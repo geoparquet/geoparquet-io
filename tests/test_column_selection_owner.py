@@ -46,9 +46,9 @@ MATCH_CASES = [
     # (name, columns, matches)
     ("id", ["id", "name"], ["id"]),
     ("ID", ["id", "name"], ["id"]),  # a unique folded match
-    ("id", ["id", "ID"], ["id"]),  # exact first
-    ("ID", ["id", "ID"], ["ID"]),
-    ("Id", ["id", "ID"], ["id", "ID"]),  # ambiguous: every candidate, schema order
+    ("id", ["id", "ID"], ["id", "ID"]),  # an exact spelling still has its case twin
+    ("ID", ["id", "ID"], ["id", "ID"]),
+    ("Id", ["id", "ID"], ["id", "ID"]),  # every candidate, schema order
     ("nope", ["id", "name"], []),
     ("É", ["é"], []),  # not an ASCII fold
     ("É", ["É"], ["É"]),
@@ -71,13 +71,11 @@ def test_find_column_raises_naming_the_candidates_when_ambiguous():
         cs.find_column("Id", ["id", "ID"], option_name="--column")
 
 
-def test_bound_column_refuses_what_a_sql_binder_cannot_tell_apart():
-    # An exact hit is not enough once a second spelling folds to it: DuckDB
-    # binds "HEIGHT" to the first of the two.
-    with pytest.raises(InvalidParameterError, match=r"HEIGHT matches HEIGHT, height"):
-        cs.bound_column("HEIGHT", ["height", "HEIGHT"], option_name="metric")
-    assert cs.bound_column("HEIGHT", ["id", "Height"], option_name="metric") == "Height"
-    assert cs.bound_column("x", ["id"], option_name="metric") is None
+@pytest.mark.parametrize("name", ["HEIGHT", "height", "Height"])
+def test_find_column_does_not_let_an_exact_spelling_rescue_a_case_twin(name):
+    # DuckDB binds "HEIGHT" to the first of ``height`` and ``HEIGHT``.
+    with pytest.raises(InvalidParameterError, match=r"matches HEIGHT, height"):
+        cs.find_column(name, ["height", "HEIGHT"], option_name="metric")
 
 
 def test_same_column_is_the_fold_rule():
@@ -96,10 +94,9 @@ GEOMETRY_FOLD_CASES = [
 
 @pytest.mark.parametrize(("name", "schema", "answer"), GEOMETRY_FOLD_CASES)
 def test_geometry_resolver_folds_like_the_owner(name, schema, answer):
-    from geoparquet_io.core.geometry_detection import _in_schema
+    from geoparquet_io.core.geometry_detection import _resolve_primary
 
-    assert _in_schema(name, schema) == answer
-    assert (cs.find_column(name, schema) == answer) or answer is None
+    assert _resolve_primary(name, [], [(col, False) for col in schema]) == answer
 
 
 def test_geometry_name_match_folds_like_the_owner():
@@ -354,3 +351,24 @@ def test_963_the_reader_names_a_hive_column(hive_dataset):
 
     assert "yr" not in get_column_names(hive_dataset)
     assert "yr" in get_usable_column_names(hive_dataset)
+
+
+# ---------------------------------------------------------------------------
+# unique_name folds where three old suffixers compared exactly (PR record)
+# ---------------------------------------------------------------------------
+
+
+def test_breakdown_names_that_differ_only_in_case_from_a_metric_column_are_suffixed():
+    """The one output-name move: two columns that differed only in case used to be written.
+
+    Before, the breakdown's ``sum_height_a`` and a metric's ``sum_Height_a`` were
+    distinct strings and both landed in the file, where DuckDB's binder reads
+    them as one name. Every other collision gives the same names as before.
+    """
+    from geoparquet_io.core.process.aggregate.common import build_breakdown_column_names
+
+    named = build_breakdown_column_names(["a"], reserved={"sum_Height_a"}, prefix="sum_height")
+    assert named == [("a", "sum_height_a_2")]
+    assert build_breakdown_column_names(["a"], reserved={"sum_x_a"}, prefix="sum_height") == [
+        ("a", "sum_height_a")
+    ]

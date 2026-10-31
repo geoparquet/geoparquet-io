@@ -11,7 +11,13 @@ import duckdb
 
 from geoparquet_io.core.arrow_geo_metadata import describe_wkb_geometry
 from geoparquet_io.core.bbox_structure import check_bbox_structure, resolve_bbox_name
-from geoparquet_io.core.column_selection import fold, matching_columns, same_column, unique_name
+from geoparquet_io.core.column_selection import (
+    find_column,
+    fold,
+    matching_columns,
+    same_column,
+    unique_name,
+)
 from geoparquet_io.core.common import should_skip_bbox
 from geoparquet_io.core.crs_utils import (
     _format_crs_display,
@@ -843,7 +849,7 @@ def _column_suggestions(name, actual_cols):
     close = difflib.get_close_matches(name, actual_cols, n=3, cutoff=0.7)
     # difflib compares case-sensitively, so a pure case slip scores 0 and has
     # to be looked for separately -- it is the likeliest intent of all.
-    exact_fold = [c for c in actual_cols if same_column(c, name)]
+    exact_fold = matching_columns(name, actual_cols)
     return exact_fold + [c for c in close if c not in exact_fold]
 
 
@@ -876,13 +882,13 @@ def _validate_explicit_latlon_columns(lat_column, lon_column, columns):
     _require_column("lon_column", lon_column, columns)
 
 
-def _try_detect_wkt_column(con, csv_read, col_names_lower):
+def _try_detect_wkt_column(con, csv_read, column_names):
     """Try to auto-detect WKT column. Returns column name or None."""
     # "wkt" first: a CSV's own name for a text column, then the geometry names.
     wkt_candidates = ["wkt", *STANDARD_GEOMETRY_NAMES]
     for candidate in wkt_candidates:
-        if candidate in col_names_lower:
-            actual_col = col_names_lower[candidate]
+        actual_col = find_column(candidate, column_names)
+        if actual_col is not None:
             q_col = quote_identifier(actual_col)
             try:
                 # Validate by trying to parse sample row
@@ -949,15 +955,19 @@ def _exact_latlon_pair(columns, allow_xy=True):
     invent one and consume both columns where the file previously converted as
     non-spatial.
     """
-    by_lower = {}
-    for col in columns:
-        by_lower.setdefault(fold(col[0]), col)
+    by_name = {col[0]: col for col in columns}
+    names = list(by_name)
+
+    def named(tokens):
+        """The first column called one of ``tokens``, as the schema spells it."""
+        return next((by_name[n] for t in tokens if (n := find_column(t, names))), None)
+
     candidates = [(_LAT_TOKENS, _LON_TOKENS)]
     if allow_xy:
         candidates.append((("y",), ("x",)))
     for lat_names, lon_names in candidates:
-        lat = next((by_lower[n] for n in lat_names if n in by_lower), None)
-        lon = next((by_lower[n] for n in lon_names if n in by_lower), None)
+        lat = named(lat_names)
+        lon = named(lon_names)
         if lat and lon and _coordinate_castable(lat[1]) and _coordinate_castable(lon[1]):
             return lat[0], lon[0]
     return None, None
@@ -1079,9 +1089,8 @@ def _handle_explicit_columns(wkt_column, lat_column, lon_column, columns, csv_re
 
 def _auto_detect_geometry(con, csv_read, columns, verbose, allow_xy=True):
     """Auto-detect geometry columns. Returns geom_info dict or None."""
-    col_names_lower = {fold(col[0]): col[0] for col in columns}
     # Try WKT first
-    wkt_col = _try_detect_wkt_column(con, csv_read, col_names_lower)
+    wkt_col = _try_detect_wkt_column(con, csv_read, [col[0] for col in columns])
     if wkt_col:
         if verbose:
             debug(f"Auto-detected WKT column: {wkt_col}")

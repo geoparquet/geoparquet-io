@@ -160,7 +160,7 @@ class TestSplitColumnList:
 
     @pytest.mark.parametrize("requested", [None, []])
     def test_nothing_requested_is_nothing_to_reject(self, requested):
-        """``core.extract.validate_columns`` calls the checker on an unset list."""
+        """``core.extract.build_column_selection`` calls the checker on an unset list."""
         assert reject_blank_column_entries(requested, "--include-cols") is None
 
 

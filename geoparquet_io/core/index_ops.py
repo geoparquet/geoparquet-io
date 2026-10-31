@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from geoparquet_io.core.bbox_parse import crosses_antimeridian_sql
 from geoparquet_io.core.bbox_structure import get_bbox_advice
-from geoparquet_io.core.column_selection import matching_columns
+from geoparquet_io.core.column_selection import find_column, has_column
 from geoparquet_io.core.crs_utils import (
     crs_string_from_table,
     is_geographic_crs,
@@ -58,7 +58,6 @@ from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.common import preview_partition
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
-    needs_httpfs,
     validate_profile_for_urls,
 )
 from geoparquet_io.core.streaming import (
@@ -416,25 +415,6 @@ def _index_from_clause(path: str, allow_schema_diff: bool, hive_input: bool | No
     return f"read_parquet({sql_path(path)}, {', '.join(options)})"
 
 
-def _readable_columns(path: str, allow_schema_diff: bool, hive_input: bool | None) -> list[str]:
-    """The names the add will be able to say: what a read of ``path`` exposes.
-
-    Hive partition columns are in it, and under ``--allow-schema-diff`` the union
-    of every file's columns, because the add reads through the same clause
-    (:func:`_index_from_clause`).
-    """
-    if not (allow_schema_diff or hive_input):
-        return get_usable_column_names(path)
-    con = get_duckdb_connection(load_spatial=False, load_httpfs=needs_httpfs(path))
-    try:
-        source = _index_from_clause(
-            resolve_file_url(path, verbose=False), allow_schema_diff, hive_input
-        )
-        return [name for name, _ in describe_query(con, f"SELECT * FROM {source}")]
-    finally:
-        con.close()
-
-
 def ensure_index_column(
     spec,
     input_parquet,
@@ -454,16 +434,25 @@ def ensure_index_column(
     columns = (
         input_parquet.column_names
         if is_table
-        else _readable_columns(input_parquet, allow_schema_diff, hive_input)
+        else get_usable_column_names(
+            input_parquet,
+            read_expr=(
+                _index_from_clause(
+                    resolve_file_url(input_parquet, verbose=False), allow_schema_diff, hive_input
+                )
+                if allow_schema_diff or hive_input
+                else None
+            ),
+        )
     )
-    resolved = next(iter(matching_columns(column_name, columns)), None)
     if reject_existing:
-        if resolved:
+        if has_column(columns, column_name):
             raise InvalidParameterError(
                 "column_name",
                 f"Column '{column_name}' already exists in the file. Please choose a different name.",
             )
         return None
+    resolved = find_column(column_name, columns, option_name="column_name")
     if resolved:
         if verbose:
             debug(f"Using existing {spec.label} column '{resolved}'")

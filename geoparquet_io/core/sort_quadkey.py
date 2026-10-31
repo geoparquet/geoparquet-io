@@ -9,7 +9,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.constants import DEFAULT_QUADKEY_COLUMN_NAME
-from geoparquet_io.core.duckdb_metadata import get_usable_columns
+from geoparquet_io.core.duckdb_metadata import get_usable_column_names
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
@@ -35,7 +35,6 @@ from geoparquet_io.core.remote import (
     needs_httpfs,
     validate_profile_for_urls,
 )
-from geoparquet_io.core.sort_by_column import _sortable_columns
 from geoparquet_io.core.stream_io import write_output
 from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file, should_stream_output
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
@@ -224,7 +223,9 @@ def sort_by_quadkey(
     # the read expression carries union_by_name, so the list must describe the
     # read itself rather than the first file -- or the remove-column branch
     # silently drops the very columns the flag was turned on to keep.
-    existing_columns = _sortable_columns(actual_input, read_expr, allow_schema_diff)
+    existing_columns = get_usable_column_names(
+        actual_input, read_expr=read_expr if allow_schema_diff else None
+    )
 
     # Bound before the try: the `finally` below closes it, and a constructor
     # that throws would otherwise be masked by an UnboundLocalError (#867).
@@ -341,8 +342,7 @@ def _sort_by_quadkey_streaming(
 
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(actual_input))
 
-        usable_cols = get_usable_columns(actual_input)
-        existing_columns = [c["name"] for c in usable_cols]
+        existing_columns = get_usable_column_names(actual_input)
 
         if remove_quadkey_column:
             select_cols = [

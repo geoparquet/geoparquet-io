@@ -23,7 +23,7 @@ from geoparquet_io.cli.main import sort
 from geoparquet_io.core import sort_by_column as sort_by_column_module
 from geoparquet_io.core import sort_quadkey as sort_quadkey_module
 from geoparquet_io.core.duckdb_utils import fetch_one
-from geoparquet_io.core.exceptions import GeoParquetError
+from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.sort_by_column import sort_by_column, sort_by_column_table
 from geoparquet_io.core.sort_quadkey import sort_by_quadkey
 from tests.conftest import safe_unlink
@@ -312,12 +312,12 @@ class TestSortByColumnTable:
 
     def test_sort_invalid_column(self, sample_table):
         """Test error with invalid column name."""
-        with pytest.raises(ValueError, match="not found in table"):
+        with pytest.raises(InvalidParameterError, match="nonexistent_column"):
             sort_by_column_table(sample_table, columns="nonexistent_column")
 
     def test_sort_empty_columns(self, sample_table):
         """Test error with empty columns."""
-        with pytest.raises(ValueError, match="not found in table"):
+        with pytest.raises(InvalidParameterError, match="empty"):
             sort_by_column_table(sample_table, columns="")
 
     def test_sort_metadata_preserved(self, sample_table):

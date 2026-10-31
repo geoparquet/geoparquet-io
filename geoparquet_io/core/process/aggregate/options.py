@@ -14,7 +14,9 @@ and the resolution choice (``--resolution`` / ``--auto``) is per scheme.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, fields
+from typing import Any
 
 __all__ = ["BUCKET_POINT_GEOMETRY", "AggregateOptions"]
 
@@ -51,3 +53,13 @@ class AggregateOptions:
     bucket_point: str = BUCKET_POINT_GEOMETRY
     bbox_column: str | None = None
     memory_limit: str | None = None
+
+    @classmethod
+    def pick(cls, values: Mapping[str, Any]) -> AggregateOptions:
+        """The options named in *values* (``pick(locals())`` in a function that takes them).
+
+        Other keys are ignored and absent fields keep their defaults, so the ten
+        names are spelled out once, here, and not in every function that
+        receives them as keywords.
+        """
+        return cls(**{f.name: values[f.name] for f in fields(cls) if f.name in values})

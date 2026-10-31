@@ -13,6 +13,7 @@ import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from geoparquet_io.core.column_selection import fold
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     fetch_one,
@@ -151,7 +152,7 @@ def _scheme_for_column(con, relation: str, name: str, dtype: str) -> str:
     """Infer the scheme for an explicitly named cell column."""
     if dtype in _INTEGER_TYPES:
         for scheme_name, grid in GRID_SCHEMES.items():
-            if grid.spec.cell_integer and scheme_name in name.lower():
+            if grid.spec.cell_integer and scheme_name in fold(name):
                 return scheme_name
         # a5 ids and packed H3 ids are both integers; guessing a5 here would
         # silently roll H3 data up the wrong hierarchy.

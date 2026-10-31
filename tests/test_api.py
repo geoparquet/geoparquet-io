@@ -1146,6 +1146,7 @@ PUBLIC_API_MODULES = (
     "geoparquet_io.core.extract",
     "geoparquet_io.core.edges",
     "geoparquet_io.core.index_ops",
+    "geoparquet_io.core.process.aggregate.options",
 )
 PUBLIC_API_SNAPSHOT = Path(__file__).parent / "data" / "snapshots" / "public_api.json"
 

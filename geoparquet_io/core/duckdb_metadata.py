@@ -561,15 +561,31 @@ def get_usable_columns(parquet_file: str, con=None) -> list[dict]:
             connection.close()
 
 
-def get_usable_column_names(parquet_file: str, con=None) -> list[str]:
-    """The names :func:`get_usable_columns` lists: what a query over the file can name.
+def get_usable_column_names(
+    parquet_file: str, con=None, *, read_expr: str | None = None
+) -> list[str]:
+    """The column names a query over the input can name (#963).
 
-    The answer for "can the SQL I am about to write name this column?" (#963).
-    The physical schema (:func:`get_column_names`) cannot say yes to a hive
+    The one answer to "can the SQL I am about to write name this column?". The
+    physical schema (:func:`get_column_names`) cannot say yes to a hive
     partition column, which ``read_parquet`` synthesizes from the directory
     names and no file carries.
+
+    By default this is :func:`get_usable_columns`: the first file's
+    ``SELECT * FROM read_parquet()``, which exposes a hive column because DuckDB
+    detects ``key=value`` directories from that file's path. A caller that reads
+    more than that -- the union of every file under ``--allow-schema-diff``, an
+    explicit ``hive_partitioning`` -- passes the read expression it will use as
+    ``read_expr``, and the names are those of ``SELECT * FROM <read_expr>``.
     """
-    return [col["name"] for col in get_usable_columns(parquet_file, con)]
+    if read_expr is None:
+        return [col["name"] for col in get_usable_columns(parquet_file, con)]
+    connection, should_close = _get_connection_for_file(parquet_file, con)
+    try:
+        return [name for name, _ in describe_query(connection, f"SELECT * FROM {read_expr}")]
+    finally:
+        if should_close:
+            connection.close()
 
 
 def get_row_group_metadata(parquet_file: str, con=None) -> list[dict]:

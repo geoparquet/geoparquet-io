@@ -164,7 +164,11 @@ def test_site_opens_a_bounded_connection_and_forwards_the_limit(module, func, he
     source = inspect.getsource(inspect.unwrap(getattr(module, func)))
     assert f"{helper}(" in source, f"{func} does not use the bounded helper"
     assert "get_duckdb_connection(" not in source, f"{func} still opens a raw connection"
-    assert "memory_limit=memory_limit" in source, f"{func} drops its memory_limit argument"
+    # The limit is an argument, or a field of the AggregateOptions the engine reads.
+    forwards = (
+        "memory_limit=memory_limit" in source or "memory_limit=options.memory_limit" in source
+    )
+    assert forwards, f"{func} drops its memory_limit argument"
 
 
 # ---------------------------------------------------------------------------

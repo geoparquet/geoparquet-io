@@ -21,7 +21,7 @@ from geoparquet_io.core import bbox_parse
 from geoparquet_io.core.bbox_structure import check_bbox_structure, dataset_bounds
 from geoparquet_io.core.column_selection import (
     exclude_columns,
-    reject_blank_column_entries,
+    resolve_columns_against_schema,
     split_column_list,
 )
 from geoparquet_io.core.common import get_parquet_metadata, should_skip_bbox
@@ -438,6 +438,9 @@ def build_column_selection(
     exclude_cols: list[str] | None,
     geometry_col: str | None,
     bbox_col: str | None,
+    *,
+    include_option: str = "columns",
+    exclude_option: str = "exclude_cols",
 ) -> list[str]:
     """
     Build list of columns to select.
@@ -448,83 +451,41 @@ def build_column_selection(
     - If both: select include_cols, but exclude_cols can remove geometry/bbox
     - geometry and bbox always included unless in exclude_cols
 
+    Names are resolved against the schema (:mod:`core.column_selection`), so an
+    unknown or ambiguous one is reported here by name rather than surfacing later
+    as a writer error about a different column (#731).
+
     Args:
         all_columns: All columns in schema
         include_cols: Columns to include (or None)
         exclude_cols: Columns to exclude (or None)
         geometry_col: Name of geometry column (or None for a table that has none)
         bbox_col: Name of bbox column (or None if not present)
+        include_option: Option to name in an error about ``include_cols``
+        exclude_option: Option to name in an error about ``exclude_cols``
 
     Returns:
         list: Columns to select (preserving original order)
 
     Raises:
-        InvalidParameterError: If the selection leaves no columns at all. The
-            empty list used to reach the three SQL builders below it and come
-            back as a raw ``ParserException: SELECT clause without selection
-            list`` -- on the file-based path, the streaming path and
-            ``extract_table`` alike. This is the guard ``extract arcgis``
-            already makes, in the one place all three share (#1176).
+        InvalidParameterError: If a name is blank, absent or ambiguous, or if the
+            exclusion leaves no columns at all (``exclude_columns``' refusal;
+            the empty list used to reach the SQL builders and come back as a raw
+            ``ParserException``, #1176)
     """
-    exclude_set = set(exclude_cols) if exclude_cols else set()
+    include = resolve_columns_against_schema(include_cols, all_columns, include_option)
+    if not include:
+        if exclude_cols:
+            return exclude_columns(all_columns, exclude_cols, option_name=exclude_option)
+        return list(all_columns)
 
-    if include_cols:
-        selected = set(include_cols)
-        # Always add geometry unless explicitly excluded
-        if geometry_col and geometry_col not in exclude_set:
-            selected.add(geometry_col)
-        # Always add bbox unless explicitly excluded
-        if bbox_col and bbox_col not in exclude_set:
-            selected.add(bbox_col)
-    elif exclude_cols:
-        return exclude_columns(all_columns, exclude_cols, option_name="exclude_cols")
-    else:
-        selected = set(all_columns)
-
-    # Preserve original column order
-    result = [c for c in all_columns if c in selected]
-    if all_columns and not result:
-        raise InvalidParameterError(
-            "columns",
-            f"this selection leaves no columns to extract (available: {', '.join(all_columns)})",
-        )
-    return result
-
-
-def validate_columns(
-    requested_cols: list[str] | None, all_columns: list[str], option_name: str
-) -> None:
-    """
-    Validate that requested columns exist in schema.
-
-    Matching is exact, because the caller selects from an Arrow schema, where
-    a column name is case-sensitive. Contrast
-    ``column_selection.resolve_columns_against_schema``, which the backends that
-    build SQL or a service request use to *resolve* the spelling.
-
-    Args:
-        requested_cols: Columns requested by user
-        all_columns: All columns in schema
-        option_name: Name of the option for error message
-
-    Raises:
-        InvalidParameterError: If any entry is blank, or any column not found
-    """
-    if not requested_cols:
-        return
-
-    # A blank entry is not a missing column, and saying so beat reporting
-    # "Columns not found in schema: ." at a caller who passed columns=["id", ""]
-    # from the Python API (#980).
-    reject_blank_column_entries(requested_cols, option_name)
-
-    missing = set(requested_cols) - set(all_columns)
-    if missing:
-        raise InvalidParameterError(
-            option_name,
-            f"Columns not found in schema: {', '.join(sorted(missing))}. "
-            f"Available columns: {', '.join(all_columns)}",
-        )
+    excluded = set(resolve_columns_against_schema(exclude_cols, all_columns, exclude_option) or [])
+    selected = set(include)
+    # Geometry and bbox ride along unless explicitly excluded
+    for implied in (geometry_col, bbox_col):
+        if implied and implied not in excluded:
+            selected.add(implied)
+    return [c for c in all_columns if c in selected]
 
 
 def build_spatial_filter(
@@ -744,11 +705,13 @@ def extract_table(
     _validate_column_overlap(
         columns, exclude_columns, geom_col, bbox_col, param_name="columns/exclude_columns"
     )
-    validate_columns(columns, list(all_columns), "columns")
-    validate_columns(exclude_columns, list(all_columns), "exclude_columns")
-
     selected_columns = build_column_selection(
-        all_columns, columns, exclude_columns, geom_col, bbox_col
+        all_columns,
+        columns,
+        exclude_columns,
+        geom_col,
+        bbox_col,
+        exclude_option="exclude_columns",
     )
     spatial_filter = build_spatial_filter(bbox, None, bbox_info, geom_col) if bbox else None
 
@@ -1376,13 +1339,17 @@ def _extract_impl(
     bbox_col = bbox_info.get("bbox_column_name")
 
     _validate_column_overlap(include_list, exclude_list, geometry_col, bbox_col)
-    validate_columns(include_list, all_columns, "--include-cols")
-    validate_columns(exclude_list, all_columns, "--exclude-cols")
     if where:
         validate_where_clause(where)
 
     selected_columns = build_column_selection(
-        all_columns, include_list, exclude_list, geometry_col, bbox_col
+        all_columns,
+        include_list,
+        exclude_list,
+        geometry_col,
+        bbox_col,
+        include_option="--include-cols",
+        exclude_option="--exclude-cols",
     )
     bbox_tuple = bbox_parse.parse_bbox(bbox) if bbox else None
     if bbox_tuple and not dry_run:

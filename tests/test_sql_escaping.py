@@ -106,7 +106,7 @@ def test_wkt_probe_quotes_the_column_it_found():
             seen.append(sql)
             return con.execute(sql, *args)
 
-    assert _try_detect_wkt_column(Recording(), "t", {"wkt": "Wkt"}) == "Wkt"
+    assert _try_detect_wkt_column(Recording(), "t", ["Wkt"]) == "Wkt"
     assert 'SELECT "Wkt" FROM t WHERE "Wkt" IS NOT NULL' in seen[0]
 
 

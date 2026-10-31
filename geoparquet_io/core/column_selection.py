@@ -28,9 +28,10 @@ This module is also the one place that answers three further questions about
 column names (#1367, concept 12), so no caller carries a private copy:
 
 - **Does this name mean that column?** :func:`fold` is the one case-folding
-  rule, :func:`matching_columns` the one lookup (an exact spelling first, then
-  every folded one), :func:`find_column` / :func:`has_column` /
-  :func:`same_column` its three shapes. Nothing else applies ``.lower()`` to a
+  rule, :func:`find_column` the one lookup (exactly one column folds to the
+  name, or the request is refused), :func:`matching_columns` /
+  :func:`has_column` / :func:`same_column` its candidates, existence and
+  pair forms. Nothing else applies ``.lower()`` to a
   column name (the ``G1.column_fold`` guard).
 - **What may a computed column be called?** :func:`unique_name`, the one
   suffixer. Column names are output bytes, so each caller passes the ``start``
@@ -48,7 +49,6 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import warn
 
 __all__ = [
-    "bound_column",
     "exclude_columns",
     "find_column",
     "fold",
@@ -75,60 +75,44 @@ def fold(name: str) -> str:
 
 
 def matching_columns(name: str, columns: Iterable[str]) -> list[str]:
-    """Every column ``name`` could mean: its exact spelling, else each folded match.
+    """Every column that is ``name`` to DuckDB's binder, in ``columns`` order.
 
-    Exact first because folding is not injective -- a table may carry both
-    ``id`` and ``ID`` -- so a name that is a column is never second-guessed.
-    Order and duplicates follow ``columns``.
+    The exact spelling and every case twin of it: ``id`` against ``id`` and
+    ``ID`` is both. This is the candidates list; :func:`find_column` is the rule
+    that turns it into one column, and :func:`has_column` asks only whether it
+    is empty.
     """
-    columns = [str(col) for col in columns]
-    if name in columns:
-        return [name]
     folded = fold(name)
-    return [col for col in columns if fold(col) == folded]
+    return [col for col in (str(c) for c in columns) if fold(col) == folded]
 
 
 def find_column(name: str, columns: Iterable[str], *, option_name: str = "column") -> str | None:
     """The column ``name`` means, in the schema's spelling, or None when there is none.
 
+    The one lookup rule for a user-supplied name. DuckDB binds identifiers
+    case-insensitively, so a name that two columns differ from only by case
+    (``id`` and ``ID``) cannot be told apart by the SQL it ends up in -- an
+    exact spelling does not rescue it, the binder takes the first -- and a
+    service such as Postgres or ArcGIS gets the same name. The rule is
+    therefore: exactly one column folds to ``name`` and that is the answer, or
+    none does and the answer is None, or several do and the request is refused,
+    naming them (#1109).
+
     Raises:
-        InvalidParameterError: ``name`` is not a column, matches several
-            differently-cased ones, and so cannot be told apart
+        InvalidParameterError: more than one column folds to ``name``
     """
     found = matching_columns(name, columns)
     if len(found) > 1:
         raise InvalidParameterError(
             option_name,
-            f"Ambiguous column name: {name} matches {', '.join(sorted(found))}. "
-            "Use the exact spelling.",
-        )
-    return found[0] if found else None
-
-
-def bound_column(name: str, columns: Iterable[str], *, option_name: str) -> str | None:
-    """The column a SQL binder would resolve ``name`` to, or None when there is none.
-
-    Stricter than :func:`find_column` where the name goes into generated SQL:
-    DuckDB binds ``"HEIGHT"`` to the first of ``height`` and ``HEIGHT``, so an
-    exact hit does not make the request unambiguous. Two columns that fold
-    together are refused (naming both), instead of reading the wrong one with no
-    warning (#1109).
-
-    Raises:
-        InvalidParameterError: more than one column folds to ``name``
-    """
-    found = [col for col in (str(c) for c in columns) if same_column(col, name)]
-    if len(found) > 1:
-        raise InvalidParameterError(
-            option_name,
-            f"Ambiguous column name: {name} matches {', '.join(sorted(found))}; "
-            "DuckDB cannot tell them apart. Rename one of the columns.",
+            f"Ambiguous column name: {name} matches {', '.join(sorted(found))}; names that "
+            "differ only in case cannot be told apart. Rename one of the columns.",
         )
     return found[0] if found else None
 
 
 def has_column(columns: Iterable[str], name: str) -> bool:
-    """Whether ``name`` resolves to a column, as DuckDB would resolve it."""
+    """Whether ``name`` is a column, as DuckDB would resolve it (a case twin counts)."""
     return bool(matching_columns(name, columns))
 
 
@@ -305,7 +289,7 @@ def resolve_columns_against_schema(
 ) -> list[str] | None:
     """Check requested column names against a schema and return its spellings.
 
-    The resolving sibling of ``core.extract.validate_columns``, which the
+    The resolving sibling of ``core.extract.build_column_selection``, which the
     parquet backend has run since #731. Without it a name the source does not
     carry is passed straight through -- quoted into a SELECT (BigQuery, Carto)
     or sent as ``outFields`` (ArcGIS) -- and fails as a backend error, or
@@ -320,14 +304,9 @@ def resolve_columns_against_schema(
     ``_build_column_list`` filters ``--exclude-cols`` by string comparison, so
     ``--exclude-cols ID`` against a column ``id`` silently excluded nothing.
 
-    An **exact** match is preferred to a folded one, because folding is not
-    injective: DuckDB permits a local table carrying both ``id`` and ``ID``.
-
-    Where folding is genuinely ambiguous -- a third spelling like ``Id`` against
-    a schema holding both ``id`` and ``ID`` -- this **raises** rather than
-    picking one. A ``{col.lower(): col}`` map silently kept the last, which is
-    an arbitrary choice; on ``--exclude-cols`` that arbitrary choice deletes a
-    column, so the caller is asked to disambiguate instead.
+    The lookup rule is :func:`find_column`'s: one column folds to the name, or
+    none does, or the request is refused naming every twin. All ambiguous names
+    are reported in one error, so a caller fixes them together.
 
     Args:
         requested_cols: Column names the caller asked for (or None)
@@ -354,7 +333,8 @@ def resolve_columns_against_schema(
         )
         raise InvalidParameterError(
             option_name,
-            f"Ambiguous column names: {detail}. Use the exact spelling.",
+            f"Ambiguous column names: {detail}; names that differ only in case "
+            "cannot be told apart. Rename one of the columns.",
         )
 
     missing = [col for col, cands in matches if not cands]

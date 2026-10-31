@@ -93,7 +93,7 @@ EXPECTED_COUNTS = {
     "G3.pylint": 18,
     "G13.options": 11,
     "G13.bbox_parsers": 0,
-    "G4.whitelist": 176,
+    "G4.whitelist": 175,
     "G4.tests_whitelist": 95,
 }
 
@@ -2253,7 +2253,18 @@ _FOLD_METHODS = frozenset({"lower", "upper", "casefold"})
 _COLUMNISH = re.compile(r"(col|field)", re.IGNORECASE)
 _NOT_COLUMNISH = re.compile(r"(type|colo|collect|collis|colon|encod)", re.IGNORECASE)
 #: A loop over these hands its target a column name.
-_COLUMN_SOURCE = re.compile(r"(col|field|schema)", re.IGNORECASE)
+_COLUMN_SOURCE = re.compile(r"(col|field|schema|names)", re.IGNORECASE)
+#: A bare name that is a column name when the function around it deals in columns.
+_BARE_NAMES = frozenset({"name", "requested", "candidate", "base"})
+#: ``schema.names`` / ``table.column_names``: the case-sensitive Arrow lists.
+_ARROW_NAME_LISTS = frozenset({"names", "column_names"})
+#: A parameter that carries a column name the user typed. Geometry names are
+#: resolved by ``geometry_detection`` before they are tested, so they are not here.
+_USER_COLUMN_NAME = re.compile(
+    r"(column_name|bbox_column|bbox_column_name|requested|requested_col)"
+)
+#: SQL that folds a column: ``lower(name)``, ``UPPER(column_name)``.
+_SQL_FOLD = re.compile(r"\b(lower|upper)\(\s*\"?\w*(col|field|name)", re.IGNORECASE)
 
 
 def _ident(node: ast.AST) -> str:
@@ -2265,6 +2276,23 @@ def _ident(node: ast.AST) -> str:
     if isinstance(node, ast.Subscript):
         return _ident(node.value)
     return ""
+
+
+def _root(node: ast.AST) -> ast.AST:
+    """The value a chain of calls, attributes and subscripts is made from:
+    ``str(col).strip()`` and ``field.strip().split(" ")[0]`` both come from a name."""
+    while True:
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute):
+                node = node.func.value
+            elif node.args:
+                node = node.args[0]
+            else:
+                return node
+        elif isinstance(node, (ast.Attribute, ast.Subscript)):
+            node = node.value
+        else:
+            return node
 
 
 def _says_column(name: str) -> bool:
@@ -2294,17 +2322,34 @@ def _enclosing_loops(m: _Module, node: ast.AST) -> Iterator[ast.AST]:
         up = m.parents.get(id(up))
 
 
-def _is_suffix_fstring(node: ast.AST) -> bool:
-    """``f"{base}_{n}"``: two names around a literal underscore."""
-    if not isinstance(node, ast.JoinedStr) or len(node.values) != 3:
+def _enclosing_function(m: _Module, node: ast.AST) -> ast.AST | None:
+    up = m.parents.get(id(node))
+    while up is not None and not isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        up = m.parents.get(id(up))
+    return up
+
+
+def _function_deals_in_columns(m: _Module, node: ast.AST) -> bool:
+    """Whether the function around *node* names a column (a parameter or a local)."""
+    func = _enclosing_function(m, node)
+    if func is None:
         return False
-    first, mid, last = node.values
-    return (
-        isinstance(first, ast.FormattedValue)
-        and isinstance(mid, ast.Constant)
-        and mid.value == "_"
-        and isinstance(last, ast.FormattedValue)
-    )
+    names = {n.id for n in ast.walk(func) if isinstance(n, ast.Name)}
+    names |= {a.arg for a in ast.walk(func) if isinstance(a, ast.arg)}
+    return any(_says_column(n) for n in names)
+
+
+def _builds_suffix(value: ast.AST) -> bool:
+    """``f"{base}_{n}"`` (any f-string joining two values), ``base + "_" + str(n)``
+    and the right side of ``name += "_"``."""
+    if isinstance(value, ast.JoinedStr):
+        return sum(isinstance(v, ast.FormattedValue) for v in value.values) >= 2
+    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+        return any(
+            isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value.startswith("_")
+            for n in ast.walk(value)
+        )
+    return isinstance(value, ast.Constant) and isinstance(value.value, str) and value.value == "_"
 
 
 def _suffix_loop(m: _Module, node: ast.AST) -> bool:
@@ -2317,8 +2362,8 @@ def _suffix_loop(m: _Module, node: ast.AST) -> bool:
     suffixed = {
         t.id
         for a in inner
-        if isinstance(a, ast.Assign) and _is_suffix_fstring(a.value)
-        for t in a.targets
+        if isinstance(a, (ast.Assign, ast.AugAssign)) and _builds_suffix(a.value)
+        for t in (a.targets if isinstance(a, ast.Assign) else [a.target])
         if isinstance(t, ast.Name)
     }
     if not suffixed:
@@ -2339,47 +2384,147 @@ def _mentions(node: ast.AST, names: set[str]) -> bool:
     return any(isinstance(n, ast.Name) and n.id in names for n in ast.walk(node))
 
 
-def _find_column_fold(m: _Module) -> Iterator[Hit]:
-    """A case fold applied to a column name, or a hand-written name suffixer,
-    outside ``core/column_selection.py`` (#1367 concept 12): ``col.lower()`` /
-    ``.upper()`` / ``.casefold()`` on a name that says it is a column (or a
-    field), or on the target of a loop over columns, names or a schema; and a
-    ``while``/``for`` that rebuilds ``f"{base}_{n}"`` until a membership test
-    says the name is free.
+def _is_fold_call(node: ast.AST) -> bool:
+    return isinstance(node, ast.Call) and _ident(node.func) == "fold"
 
-    ``column_selection.fold`` is the one rule (DuckDB's: ASCII only, exact
-    spelling first), ``matching_columns`` / ``find_column`` / ``bound_column``
-    / ``has_column`` / ``same_column`` its lookups and ``unique_name`` the one
-    suffixer. Would have caught the eleven folding sites (some ``.lower()``,
-    some ASCII, one exact-only) that disagreed about whether ``--bucket-point
-    PT`` meant ``pt`` (#1109), and the three suffixers that started at ``_1``,
-    ``_2`` and ``_1`` with three notions of "taken". The geometry column's own
-    name folds through the same ``fold`` (``geometry_detection`` calls it).
+
+def _fold_keyed(node: ast.AST) -> bool:
+    """A lookup map keyed by ``fold(...)``: ``{fold(c): c ...}``, ``d[fold(c)] = c``,
+    ``d.setdefault(fold(c), c)`` -- the owner's lookup, re-made."""
+    if isinstance(node, ast.DictComp):
+        return _is_fold_call(node.key)
+    if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
+        return _is_fold_call(node.slice)
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "setdefault"
+        and bool(node.args)
+        and _is_fold_call(node.args[0])
+    )
+
+
+def _exact_arrow_membership(node: ast.AST) -> bool:
+    """``bbox_column_name in schema.names`` / ``column not in table.column_names``:
+    a case-sensitive test of a name a user typed. A literal on the left is the
+    code's own name, not the user's."""
+    if not isinstance(node, ast.Compare) or isinstance(node.left, ast.Constant):
+        return False
+    return any(
+        isinstance(op, (ast.In, ast.NotIn))  # codespell:ignore
+        and isinstance(right, ast.Attribute)
+        and right.attr in _ARROW_NAME_LISTS
+        for op, right in zip(node.ops, node.comparators, strict=True)
+    ) and bool(_USER_COLUMN_NAME.fullmatch(_ident(node.left)))
+
+
+def _str_method_fold(node: ast.AST) -> bool:
+    """``str.lower(col)`` and ``map(str.lower, columns)``."""
+
+    def is_str_fold(n: ast.AST) -> bool:
+        return (
+            isinstance(n, ast.Attribute)
+            and n.attr in _FOLD_METHODS
+            and isinstance(n.value, ast.Name)
+            and n.value.id == "str"
+        )
+
+    if not isinstance(node, ast.Call):
+        return False
+    if is_str_fold(node.func):
+        return bool(node.args) and _says_column(_ident(_root(node.args[0])))
+    return (
+        isinstance(node.func, ast.Name)
+        and node.func.id == "map"
+        and len(node.args) >= 2
+        and is_str_fold(node.args[0])
+        and bool(_COLUMN_SOURCE.search(ast.unparse(node.args[1])))
+    )
+
+
+def _ascii_fold_table(node: ast.AST) -> bool:
+    """``str.maketrans(string.ascii_uppercase, string.ascii_lowercase)``: a fold table."""
+    return (
+        isinstance(node, ast.Call)
+        and _ident(node.func) == "maketrans"
+        and any(
+            isinstance(n, ast.Attribute) and n.attr in {"ascii_uppercase", "ascii_lowercase"}
+            for n in ast.walk(node)
+        )
+    )
+
+
+def _names_a_type(chain: ast.AST) -> bool:
+    """A chain that reads a ``"type"`` / ``"repetition_type"`` entry: a type string, not a name."""
+    return any(
+        isinstance(n, ast.Constant) and isinstance(n.value, str) and "type" in n.value
+        for n in ast.walk(chain)
+    )
+
+
+def _fold_method_on_column(m: _Module, node: ast.AST, targets) -> bool:
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in _FOLD_METHODS
+    ):
+        return False
+    root = _root(node.func.value)
+    if _names_a_type(node.func.value):
+        return False
+    if _says_column(_ident(node.func.value)) or _says_column(_ident(root)):
+        return True
+    if not isinstance(root, ast.Name) or _NOT_COLUMNISH.search(root.id):
+        return False
+    if any((id(loop), root.id) in targets for loop in _enclosing_loops(m, node)):
+        return True
+    return root.id in _BARE_NAMES and _function_deals_in_columns(m, node)
+
+
+def _find_column_fold(m: _Module) -> Iterator[Hit]:
+    """A case fold applied to a column name, or a hand-written name suffixer or
+    lookup map, outside ``core/column_selection.py`` (#1367 concept 12).
+
+    ``column_selection.fold`` is the one rule (DuckDB's: ASCII only),
+    ``find_column`` the one lookup (a name that two columns fold to is refused),
+    ``matching_columns`` / ``has_column`` / ``same_column`` its other forms and
+    ``unique_name`` the one suffixer. Would have caught the eleven folding sites
+    (some ``.lower()``, some ASCII, one exact-only) that disagreed about whether
+    ``--bucket-point PT`` meant ``pt`` (#1109), and the three suffixers that
+    started at ``_1``, ``_2`` and ``_1`` with three notions of "taken".
+
+    What it sees: ``.lower()`` / ``.upper()`` / ``.casefold()`` on a name that
+    says it is a column or field, on the root of a call chain (``str(col)
+    .strip().lower()``), on the target of a loop or comprehension over columns,
+    names, fields or a schema, and on ``name`` / ``requested`` / ``base`` /
+    ``candidate`` inside a function that deals in columns; ``str.lower(col)`` and
+    ``map(str.lower, columns)``; a ``maketrans`` fold table; SQL ``lower(name)``
+    in a query string; a ``while``/``for`` that rebuilds ``f"{base}_{n}"``,
+    ``f"{base}{n}"``, ``base + "_" + str(n)`` or ``name += "_"`` until a
+    membership test says the name is free; a lookup map keyed by ``fold(...)``
+    (``{fold(c): c}``, ``d[fold(c)] = c``, ``d.setdefault(fold(c), c)``); and a
+    case-sensitive ``column in schema.names`` / ``table.column_names``.
 
     Not seen (named so a reviewer looks for them): a fold of a name held in a
-    variable that does not say column (``n = names[0]; n.lower()``), a
-    ``translate`` table, and a suffix built by ``%`` or ``.format``.
+    variable that says nothing and is not a loop target, a suffix built with
+    ``%`` or ``.format``, and a lookup keyed by a fold held in a variable first.
     """
     targets = _column_targets(m)
     for node in ast.walk(m.tree):
-        if _suffix_loop(m, node):
-            yield m.hit(node)
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr in _FOLD_METHODS
+        if (
+            _suffix_loop(m, node)
+            or _fold_method_on_column(m, node, targets)
+            or _str_method_fold(node)
+            or _ascii_fold_table(node)
+            or _fold_keyed(node)
+            or _exact_arrow_membership(node)
         ):
-            continue
-        receiver = node.func.value
-        if isinstance(receiver, ast.Call) and _ident(receiver.func) == "str" and receiver.args:
-            receiver = receiver.args[0]
-        name = _ident(receiver)
-        if _says_column(name):
             yield m.hit(node)
         elif (
-            isinstance(receiver, ast.Name)
-            and not _NOT_COLUMNISH.search(receiver.id)
-            and any((id(loop), receiver.id) in targets for loop in _enclosing_loops(m, node))
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in m.docstrings
+            and _SQL_FOLD.search(node.value)
         ):
             yield m.hit(node)
 
@@ -4385,6 +4530,61 @@ COLUMN_FOLD_SHAPES = {
         "def f(base, taken):\n    for i in range(1, 100):\n"
         '        cand = f"{base}_{i}"\n        if cand not in taken:\n            return cand\n'
     ),
+    # The first audit's blind spots (#1395): each passed the arm at 0.
+    "loop over names": "def f(names, want):\n    return [n for n in names if n.lower() == want]\n",
+    "for over names": (
+        "def f(names, want):\n    for n in names:\n        if n.lower() == want:\n"
+        "            return n\n"
+    ),
+    "lower map": "def f(names):\n    return {n.lower(): n for n in names}\n",
+    "str.lower call": "def f(col):\n    return str.lower(col)\n",
+    "map str.lower": "def f(columns):\n    return list(map(str.lower, columns))\n",
+    "maketrans table": (
+        "import string\n\nTABLE = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)\n"
+    ),
+    "sql lower": (
+        'def f(path):\n    return f"SELECT name FROM parquet_schema({path}) WHERE lower(name) = 1"\n'
+    ),
+    "sql upper of a column": 'Q = "SELECT UPPER(column_name) FROM t"\n',
+    "three-part f-string suffix": (
+        "def f(base, taken):\n    n = 0\n    name = base\n    while name in taken:\n"
+        '        n += 1\n        name = f"{base}_{n}_{n}"\n    return name\n'
+    ),
+    "joined f-string suffix": (
+        "def f(base, taken):\n    n = 0\n    name = base\n    while name in taken:\n"
+        '        n += 1\n        name = f"{base}{n}"\n    return name\n'
+    ),
+    "concatenated suffix": (
+        "def f(base, taken):\n    n = 0\n    name = base\n    while name in taken:\n"
+        '        n += 1\n        name = base + "_" + str(n)\n    return name\n'
+    ),
+    "underscore padding": (
+        'def f(idx, geom):\n    while idx.lower() == geom.lower():\n        idx += "_"\n'
+        "    return idx\n"
+    ),
+    "name receiver in a column function": (
+        "def f(name, column_names):\n    return [c for c in column_names if c == name.lower()]\n"
+    ),
+    "requested receiver": ("def f(requested, columns):\n    return requested.lower() in columns\n"),
+    "chained receiver": (
+        "def f(field):\n    return field.strip().split(' ')[0].strip('\"').lower()\n"
+    ),
+    "str() chain": "def f(col):\n    return str(col).strip().lower()\n",
+    "fold map": "from m import fold\n\ndef f(names):\n    return {fold(n): n for n in names}\n",
+    "fold subscript map": (
+        "from m import fold\n\ndef f(names):\n    out = {}\n    for n in names:\n"
+        "        out[fold(n)] = n\n    return out\n"
+    ),
+    "fold setdefault map": (
+        "from m import fold\n\ndef f(names):\n    out = {}\n    for n in names:\n"
+        "        out.setdefault(fold(n), n)\n    return out\n"
+    ),
+    "exact schema membership": (
+        "def f(schema, bbox_column_name):\n    return bbox_column_name in schema.names\n"
+    ),
+    "exact table membership": (
+        "def f(table, column_name):\n    return column_name not in table.column_names\n"
+    ),
 }
 
 COLUMN_FOLD_NEAR_MISSES = {
@@ -4394,6 +4594,10 @@ COLUMN_FOLD_NEAR_MISSES = {
     "a name that says nothing": "def f(name):\n    return name.lower()\n",
     "a one-shot suffix": 'def f(prefix, v):\n    base = f"{prefix}_{v}"\n    return base in {"a"}\n',
     "a loop over plain names": "def f(items):\n    return [i.lower() for i in items]\n",
+    "an exact membership on a literal": ("def f(schema):\n    return 'id' in schema.names\n"),
+    "a table's own name": "def f(table):\n    return table.name.lower()\n",
+    "sql lower of a path": 'Q = "SELECT lower(path) FROM t"\n',
+    "a fold of a constant": "from m import fold\n\nKNOWN = {fold('A'): 1}\n",
     "the owner's lookups": (
         "from geoparquet_io.core.column_selection import matching_columns, unique_name\n\n"
         "def f(c, cols, taken):\n    return matching_columns(c, cols), unique_name(c, taken)\n"

@@ -19,6 +19,7 @@ from rich.markup import escape
 
 from geoparquet_io.core.bbox_parse import BBox, within_wrapped_x_sql
 from geoparquet_io.core.check_verdict import validation_verdict
+from geoparquet_io.core.column_selection import fold
 from geoparquet_io.core.crs_utils import (
     CRS_ABSENT,
     NULL_CRS_HINT,
@@ -979,7 +980,7 @@ _GEOARROW_FIELDS_ENCODING = {v: k for k, v in _GEOARROW_LIST_FIELDS.items()}
 # this set came from a source that does not use geoarrow's names (the generic
 # list<element: ...>, or DuckDB's typeless group node), and is not evidence of a
 # wrong encoding either way.
-_KNOWN_LIST_FIELDS = {name.upper() for names in _GEOARROW_LIST_FIELDS.values() for name in names}
+_KNOWN_LIST_FIELDS = {fold(name) for names in _GEOARROW_LIST_FIELDS.values() for name in names}
 
 
 def _list_field_names(physical_type: str) -> frozenset[str] | None:
@@ -989,9 +990,9 @@ def _list_field_names(physical_type: str) -> frozenset[str] | None:
     must not be read as a mismatch.
     """
     found = re.findall(r"LIST<\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", physical_type)
-    if not found or any(name.upper() not in _KNOWN_LIST_FIELDS for name in found):
+    if not found or any(fold(name) not in _KNOWN_LIST_FIELDS for name in found):
         return None
-    return frozenset(name.lower() for name in found)
+    return frozenset(fold(name) for name in found)
 
 
 def _check_geoarrow_layout(physical_type: str, geom_col: str, encoding: str) -> ValidationCheck:
@@ -1131,7 +1132,7 @@ def _geoarrow_zm_suffix(col_type: str) -> str:
     match = re.search(r"STRUCT\(([^)]*)\)", col_type or "", re.IGNORECASE)
     if not match:
         return ""
-    fields = {field.strip().split(" ")[0].strip('"').lower() for field in match.group(1).split(",")}
+    fields = {fold(field.strip().split(" ")[0].strip('"')) for field in match.group(1).split(",")}
     has_z, has_m = "z" in fields, "m" in fields
     if has_z and has_m:
         return " ZM"

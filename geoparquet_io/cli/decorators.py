@@ -533,7 +533,7 @@ def _validate_column_list(ctx, param, value):
 
     This layer owns blank entries only. Whether a non-blank name exists is a
     schema question, so it stays with whichever backend can see the schema
-    (``core.extract.validate_columns`` for parquet,
+    (``core.extract.build_column_selection`` for parquet,
     ``core.column_selection.resolve_columns_against_schema`` for BigQuery,
     Carto and ArcGIS), which reports it as ``InvalidParameterError`` -- also
     exit 2. Catching blanks here matters even so: ``--dry-run`` builds the same

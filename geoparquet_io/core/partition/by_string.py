@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from geoparquet_io.core.column_selection import bound_column
+from geoparquet_io.core.column_selection import find_column
 from geoparquet_io.core.duckdb_metadata import get_schema_info, get_usable_column_names
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
@@ -34,7 +34,8 @@ def validate_column_exists(parquet_file: str, column_name: str, verbose: bool = 
     with readable_geoparquet(parquet_file):
         column_names = get_usable_column_names(parquet_file)
 
-    if bound_column(column_name, column_names, option_name="column") is None:
+    resolved = find_column(column_name, column_names, option_name="column")
+    if resolved is None:
         available_columns = ", ".join(column_names)
         raise InvalidParameterError(
             "column",
@@ -44,9 +45,9 @@ def validate_column_exists(parquet_file: str, column_name: str, verbose: bool = 
     if verbose:
         schema_info = get_schema_info(parquet_file)
         for col in schema_info:
-            if col.get("name") == column_name:
+            if col.get("name") == resolved:
                 column_type = col.get("type", "unknown")
-                debug(f"Found column '{column_name}' with type: {column_type}")
+                debug(f"Found column '{resolved}' with type: {column_type}")
                 break
 
 

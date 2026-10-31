@@ -7,7 +7,7 @@ import math
 import re
 from dataclasses import dataclass
 
-from geoparquet_io.core.column_selection import bound_column, fold, unique_name
+from geoparquet_io.core.column_selection import find_column, fold, unique_name
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     duckdb_type_is_numeric,
@@ -330,7 +330,7 @@ def resolve_metric_column_types(con, select_sql: str, metrics: list[MetricSpec])
     except Exception:  # noqa: BLE001 - typing is best-effort; real query reports errors
         return {}
     # One DESCRIBE row per selected column, in SELECT order.
-    return {c: str(row[1]).upper() for c, row in zip(columns, rows, strict=True)}
+    return {c: str(col_type).upper() for c, (_, col_type) in zip(columns, rows, strict=True)}
 
 
 def _nodata_literal(token: str, col_type: str | None) -> str:
@@ -497,7 +497,7 @@ def validate_agg_columns(
     request against a ``Height`` column.
     """
     for m in metrics:
-        if bound_column(m.column, available, option_name="metric") is not None:
+        if find_column(m.column, available, option_name="metric") is not None:
             continue
         if fold(m.column) == "count":
             raise InvalidParameterError(
@@ -512,7 +512,7 @@ def validate_agg_columns(
             f"Metric column '{m.column}' not found in input. "
             f"Available columns: {_format_available(available)}",
         )
-    if breakdown and bound_column(breakdown, available, option_name="breakdown") is None:
+    if breakdown and find_column(breakdown, available, option_name="breakdown") is None:
         raise InvalidParameterError(
             "breakdown",
             f"Breakdown column '{breakdown}' not found in input. "
@@ -520,7 +520,7 @@ def validate_agg_columns(
         )
     if (
         breakdown_metric is not None
-        and bound_column(breakdown_metric.column, available, option_name="breakdown-metric") is None
+        and find_column(breakdown_metric.column, available, option_name="breakdown-metric") is None
     ):
         raise InvalidParameterError(
             "breakdown-metric",

@@ -119,53 +119,6 @@ class TestDetectGeometryColumn:
         assert _detect_geometry_column(table) is None
 
 
-class TestExtractBigQueryTable:
-    """Test the extract_bigquery_table function for in-memory tables."""
-
-    def test_extract_with_limit(self):
-        """Test extracting with a row limit."""
-        from geoparquet_io.core.extract_bigquery import extract_bigquery_table
-
-        table = pa.table(
-            {
-                "id": [1, 2, 3, 4, 5],
-                "name": ["a", "b", "c", "d", "e"],
-            }
-        )
-        result = extract_bigquery_table(table, limit=3)
-        assert result.num_rows == 3
-
-    def test_extract_with_columns(self):
-        """Test extracting specific columns."""
-        from geoparquet_io.core.extract_bigquery import extract_bigquery_table
-
-        table = pa.table(
-            {
-                "id": [1, 2, 3],
-                "name": ["a", "b", "c"],
-                "value": [10, 20, 30],
-            }
-        )
-        result = extract_bigquery_table(table, columns=["id", "name"])
-        assert result.column_names == ["id", "name"]
-
-    def test_extract_with_exclude_columns(self):
-        """Test excluding specific columns."""
-        from geoparquet_io.core.extract_bigquery import extract_bigquery_table
-
-        table = pa.table(
-            {
-                "id": [1, 2, 3],
-                "name": ["a", "b", "c"],
-                "value": [10, 20, 30],
-            }
-        )
-        result = extract_bigquery_table(table, exclude_columns=["value"])
-        assert "value" not in result.column_names
-        assert "id" in result.column_names
-        assert "name" in result.column_names
-
-
 class TestBuildGeometrySelectExpr:
     """Test _build_geometry_select_expr handles different column types."""
 
@@ -768,7 +721,7 @@ class TestGeometryIdentifierQuoting:
 class TestColumnValidation:
     """``--include-cols``/``--exclude-cols`` are checked against the table (#969).
 
-    The parquet backend has run ``validate_columns`` since #731; the BigQuery
+    The parquet backend has run its column check since #731; the BigQuery
     backend had no equivalent, so a name the table does not carry was quoted
     into the SELECT and failed as a DuckDB binder error (or, for
     ``--exclude-cols``, silently excluded nothing). A blank entry was worse
@@ -809,20 +762,20 @@ class TestColumnValidation:
         result = resolve_columns_against_schema(["ID", "GeoM"], ["id", "geom"], "--exclude-cols")
         assert result == ["id", "geom"]
 
-    def test_an_exact_match_wins_over_a_case_fold(self):
-        """Case folding cannot be allowed to collapse two distinct columns.
+    @pytest.mark.parametrize("requested", ["id", "ID"])
+    def test_an_exact_spelling_does_not_rescue_a_case_twin(self, requested):
+        """DuckDB binds ``id`` and ``ID`` to one name, so an exact spelling is no answer.
 
         ``_schema_column_names`` also serves ``table_source="local"``, and DuckDB
-        lets a local table carry both ``id`` and ``ID``. A ``{col.lower(): col}``
-        map keeps only the last of those, so an exactly-spelled request has to be
-        honoured as itself before any folding is tried.
+        lets a local table carry both. The request is refused, naming both.
         """
         from geoparquet_io.core.column_selection import resolve_columns_against_schema
+        from geoparquet_io.core.exceptions import InvalidParameterError
 
         schema = ["id", "ID", "geom"]
-        assert resolve_columns_against_schema(["id"], schema, "--exclude-cols") == ["id"]
-        assert resolve_columns_against_schema(["ID"], schema, "--exclude-cols") == ["ID"]
-        # A spelling that matches neither exactly still folds, as before.
+        with pytest.raises(InvalidParameterError, match="matches ID, id"):
+            resolve_columns_against_schema([requested], schema, "--exclude-cols")
+        # A name with a single fold is resolved to the schema's spelling.
         assert resolve_columns_against_schema(["GeoM"], schema, "--include-cols") == ["geom"]
 
     @pytest.mark.parametrize("requested", ["Id", "iD"])

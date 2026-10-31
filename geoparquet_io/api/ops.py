@@ -493,18 +493,7 @@ def aggregate_a5(
     return aggregate_a5_table(
         table,
         resolution=resolution,
-        options=AggregateOptions(
-            metric=metric,
-            metric_nodata=metric_nodata,
-            breakdown=breakdown,
-            breakdown_limit=breakdown_limit,
-            breakdown_metric=breakdown_metric,
-            out_geometry=out_geometry,
-            where=where,
-            bucket_point=bucket_point,
-            bbox_column=bbox_column,
-            memory_limit=memory_limit,
-        ),
+        options=AggregateOptions.pick(locals()),
         geometry_column=geometry_column,
     )
 
@@ -559,18 +548,7 @@ def aggregate_h3(
     return aggregate_h3_table(
         table,
         resolution=resolution,
-        options=AggregateOptions(
-            metric=metric,
-            metric_nodata=metric_nodata,
-            breakdown=breakdown,
-            breakdown_limit=breakdown_limit,
-            breakdown_metric=breakdown_metric,
-            out_geometry=out_geometry,
-            where=where,
-            bucket_point=bucket_point,
-            bbox_column=bbox_column,
-            memory_limit=memory_limit,
-        ),
+        options=AggregateOptions.pick(locals()),
         geometry_column=geometry_column,
     )
 

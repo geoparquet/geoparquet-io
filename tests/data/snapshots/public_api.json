@@ -147,7 +147,6 @@
     "within_wrapped_x_sql"
   ],
   "geoparquet_io.core.column_selection": [
-    "bound_column",
     "exclude_columns",
     "find_column",
     "fold",
@@ -400,8 +399,7 @@
     "get_schema_columns",
     "is_geographic_crs",
     "looks_like_latlong_bbox",
-    "parse_geometry_input",
-    "validate_columns"
+    "parse_geometry_input"
   ],
   "geoparquet_io.core.file_utils": [
     "copy_file",
@@ -618,6 +616,10 @@
     "without_geometry_dictionary",
     "writable_geoparquet_version",
     "write_arrow_table"
+  ],
+  "geoparquet_io.core.process.aggregate.options": [
+    "AggregateOptions",
+    "BUCKET_POINT_GEOMETRY"
   ],
   "geoparquet_io.core.remote": [
     "REMOTE_SCHEMES",
