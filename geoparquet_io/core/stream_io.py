@@ -541,8 +541,21 @@ def _build_transform_query(transform_query_fn, source, con, input_path, metadata
     source_crs = _detect_transform_source_crs(input_path, metadata, is_stream)
     if len(_query_fn_params(transform_query_fn)) < 4:
         return transform_query_fn(source, con, source_crs)
-    edges = declared_nonplanar_edges(None if is_stream else input_path, metadata)
-    return transform_query_fn(source, con, source_crs, edges)
+    return transform_query_fn(
+        source, con, source_crs, input_nonplanar_edges(input_path, metadata, is_stream)
+    )
+
+
+def input_nonplanar_edges(input_path: str, metadata: dict | None, is_stream: bool) -> dict:
+    """``{column: edges}`` for an ``open_input`` input's non-planar columns.
+
+    The one place a streamed cell-key builder learns its edges (#1293): the
+    file when there is one, otherwise the stream's own block
+    (``write_funnels.declared_nonplanar_edges``). ``_build_transform_query``
+    hands it to a four-parameter builder (h3, s2, a5); ``add quadkey``, which
+    opens its own input, asks it directly.
+    """
+    return declared_nonplanar_edges(None if is_stream else input_path, metadata)
 
 
 def execute_transform(

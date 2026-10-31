@@ -1259,7 +1259,7 @@ def extract_bigquery(
             Auto-detected for native GEOGRAPHY columns. Use this to
             specify a VARCHAR column containing WKT or GeoJSON geometry.
         geometry_format: Format of geometry in VARCHAR columns ("wkt" or "geojson")
-        edges: Edge interpretation for GeoParquet metadata ("spherical" or "planar").
+        edges: Edge interpretation for GeoParquet metadata, one of ``edges.EDGES``.
             If None (default), uses "spherical" for native GEOGRAPHY columns (BigQuery
             uses S2 spherical geometry) and "planar" for VARCHAR columns.
         dry_run: Show SQL without executing

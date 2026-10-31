@@ -680,8 +680,9 @@ class Table:
             geography_column: Column containing geometry data. Auto-detected
                 for native GEOGRAPHY columns. Specify to parse VARCHAR columns.
             geometry_format: Format of VARCHAR geometry ("wkt" or "geojson")
-            edges: Edge interpretation ("spherical" or "planar"). Native
-                GEOGRAPHY columns default to "spherical", VARCHAR to "planar".
+            edges: Edge interpretation, one of ``edges.EDGES``: ``"planar"``,
+                ``"spherical"`` or an ellipsoidal algorithm. Native GEOGRAPHY
+                columns default to "spherical", VARCHAR to "planar".
 
         Returns:
             Table for chaining operations

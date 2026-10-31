@@ -49,7 +49,7 @@ from geoparquet_io.core.remote import (
     needs_httpfs,
     validate_profile_for_urls,
 )
-from geoparquet_io.core.stream_io import open_input, write_output
+from geoparquet_io.core.stream_io import input_nonplanar_edges, open_input, write_output
 from geoparquet_io.core.streaming import (
     find_geometry_column_from_table,
     is_stdin,
@@ -57,7 +57,6 @@ from geoparquet_io.core.streaming import (
 )
 from geoparquet_io.core.write_funnels import (
     collect_nonplanar_edges,
-    declared_nonplanar_edges,
     write_parquet_with_metadata,
 )
 
@@ -503,7 +502,7 @@ def _add_quadkey_streaming(
         # Check for bbox column. A stored bbox is in the input CRS, so it can't be
         # used when we need to reproject — fall back to the (reprojected) centroid.
         # Nor for non-planar edges, which key from a point on the sphere (#1293).
-        edges = declared_nonplanar_edges(None if is_stream else input_path, metadata).get(geom_col)
+        edges = input_nonplanar_edges(input_path, metadata, is_stream).get(geom_col)
         bbox_col = None
         if not use_centroid and not needs_transform and not is_nonplanar(edges):
             for name in ["bbox", "bounds", "bounding_box"]:
