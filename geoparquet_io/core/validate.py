@@ -2877,6 +2877,32 @@ def _check_native_geo_statistics(
         )
 
 
+def _projected_inverted_row_group(parquet_file: str, geom_col: str, con, crs) -> int | None:
+    """The first row group whose statistics have xmin > xmax under a projected CRS, or None."""
+    from geoparquet_io.core.duckdb_metadata import get_native_geo_stats_by_row_group
+
+    if is_geographic_crs(crs):
+        return None
+    for chunk in get_native_geo_stats_by_row_group(parquet_file, geom_col, con) or []:
+        xmin, xmax = chunk.get("xmin"), chunk.get("xmax")
+        if xmin is not None and xmax is not None and xmin > xmax:
+            return chunk.get("row_group_id")
+    return None
+
+
+def _projected_wrap_failure(geom_col: str, where: str = "") -> ValidationCheck:
+    return ValidationCheck(
+        name=f"native_geo_stats_contains_data_{geom_col}",
+        status=CheckStatus.FAILED,
+        message=(
+            f"geospatial statistics have xmin > xmax{where}; the antimeridian wrap-around "
+            "reading (RFC 7946, 5.2) applies only to geographic CRS, so these "
+            "statistics are invalid for the declared projected CRS"
+        ),
+        category="parquet_geo_types",
+    )
+
+
 def _check_native_geo_stats_contains_data(
     parquet_file: str, geom_col: str, con, sample_size: int, crs: Any = None
 ) -> ValidationCheck:
@@ -2903,6 +2929,12 @@ def _check_native_geo_stats_contains_data(
             )
 
         raw_url = resolve_file_url(parquet_file, verbose=False)
+
+        # A projected extent folds plainly, which can hide one row group's
+        # xmin > xmax behind a wider one; each chunk is checked on its own.
+        inverted = _projected_inverted_row_group(parquet_file, geom_col, con, crs)
+        if inverted is not None:
+            return _projected_wrap_failure(geom_col, f" (row group {inverted})")
 
         # The sample below spans the whole file, so it is judged against the
         # whole file's statistics -- the union over every row group, not the
@@ -2958,16 +2990,7 @@ def _check_native_geo_stats_contains_data(
         # and, like there, only for a geographic CRS.
         wrapped = xmin > xmax
         if wrapped and not is_geographic_crs(crs):
-            return ValidationCheck(
-                name=f"native_geo_stats_contains_data_{geom_col}",
-                status=CheckStatus.FAILED,
-                message=(
-                    "geospatial statistics have xmin > xmax; the antimeridian wrap-around "
-                    "reading (RFC 7946, 5.2) applies only to geographic CRS, so these "
-                    "statistics are invalid for the declared projected CRS"
-                ),
-                category="parquet_geo_types",
-            )
+            return _projected_wrap_failure(geom_col)
 
         limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
 

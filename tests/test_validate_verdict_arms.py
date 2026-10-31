@@ -715,6 +715,7 @@ FAILED_ARMS = {
     "_bbox_column_missing": ELSEWHERE,
     "_check_native_columns_in_metadata": ELSEWHERE,
     "_check_native_geo_stats_contains_data": ELSEWHERE,
+    "_projected_wrap_failure": "tests/test_validate_bbox_dimensions.py",
     "_check_geometry_types_match_stats": ELSEWHERE,
     "_check_v2_crs_consistency": ELSEWHERE,
     "_check_v2_edges_consistency": ELSEWHERE,

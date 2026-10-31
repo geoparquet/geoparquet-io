@@ -426,6 +426,27 @@ class TestNativeGeoStatsWrapNeedsGeographicCrs:
             bbox_check.message,
         )
 
+    def test_an_inverted_row_group_is_named_though_the_fold_hides_it(
+        self, antimeridian_file, con, monkeypatch
+    ):
+        # Projected coordinates fold plainly, so one inverted chunk beside a wider
+        # sane one no longer shows as xmin > xmax in the file's extent. Each
+        # chunk's well-formedness is validate's question, asked per row group.
+        chunks = [
+            dict(_chunk(-180.0, -10.0, 180.0, 10.0), row_group_id=0),
+            dict(_chunk(170.0, -5.0, -170.0, 5.0), row_group_id=1),
+        ]
+        monkeypatch.setattr(
+            "geoparquet_io.core.duckdb_metadata.get_native_geo_stats_by_row_group",
+            lambda *a, **k: chunks,
+        )
+        check = _check_native_geo_stats_contains_data(
+            str(antimeridian_file), "geometry", con, 0, crs=UTM_33N
+        )
+        assert check.status == CheckStatus.FAILED, check.message
+        assert "projected" in check.message.lower()
+        assert "row group 1" in check.message
+
     def _stats_check(self, path):
         result = validate_geoparquet(str(path))
         return next(c for c in result.checks if c.name == "native_geo_stats_contains_data_geometry")
