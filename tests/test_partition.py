@@ -196,13 +196,6 @@ class TestPartitionCommands:
         assert _partition_files(temp_output_dir) == []
 
     # Admin partition tests - skip because test files don't have admin:country_code column
-    @pytest.mark.skip(reason="Test files don't have admin:country_code column")
-    def test_partition_admin_preview(self, places_test_file):
-        """Test partition admin command with preview mode."""
-        runner = CliRunner()
-        runner.invoke(partition, ["admin", places_test_file, "--preview"])
-        # Will fail because column doesn't exist, but testing command structure
-        pass
 
     def test_partition_admin_no_output_folder(self, places_test_file):
         """partition admin without an output folder is the same usage error."""

@@ -610,7 +610,7 @@ class TestCartoToTable:
             "https://phl.carto.com/api/v2/sql",
             "opa_properties_public",
         )
-        assert geom_col is not None
+        assert geom_col == "the_geom"
 
     def test_table_has_geometry_true_for_spatial(self):
         """A populated spatial table is detected as geometry."""
@@ -722,6 +722,9 @@ class TestCartoCli:
                 ],
             )
             assert result.exit_code == 0, result.output
+            import pyarrow.parquet as pq
+
+            assert 0 < pq.ParquetFile(output_file).metadata.num_rows <= 5
 
     def test_cli_no_geometry_writes_plain_parquet(self):
         """--no-geometry writes plain Parquet with no 'geo' metadata key."""
@@ -816,6 +819,9 @@ class TestCartoCli:
                 ],
             )
             assert result.exit_code == 0, result.output
+            import pyarrow.parquet as pq
+
+            assert 0 < pq.ParquetFile(output_file).metadata.num_rows <= 5
 
     def test_cli_help(self):
         """CLI help shows all options."""
@@ -988,7 +994,9 @@ def status_http_server():
             pass
 
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread = threading.Thread(
+        target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     thread.start()
     try:
         yield f"http://127.0.0.1:{httpd.server_address[1]}/api/v2/sql", state
@@ -1129,7 +1137,20 @@ class TestFailureClassificationIgnoresTheUsersSql:
         ``--limit 404`` used to cost every retry and report "Table 't' not
         found" for what was only a connection failure.
         """
+        real_run_with_retry = carto_module.run_with_retry
+
+        def immediate_retry(*args, **kwargs):
+            kwargs["retry_delay"] = 0
+            return real_run_with_retry(*args, **kwargs)
+
+        monkeypatch.setattr(carto_module, "run_with_retry", immediate_retry)
         real_get_conn = carto_module.get_duckdb_connection
+
+        def immediate_connection():
+            conn = real_get_conn()
+            conn.execute("SET http_retry_wait_ms = 0")
+            return conn
+
         seen = {"attempts": 0}
 
         class _Counting:
@@ -1147,7 +1168,7 @@ class TestFailureClassificationIgnoresTheUsersSql:
                 return self._inner.sql(sql_text, *args, **kwargs)
 
         monkeypatch.setattr(
-            carto_module, "get_duckdb_connection", lambda *a, **k: _Counting(real_get_conn())
+            carto_module, "get_duckdb_connection", lambda *a, **k: _Counting(immediate_connection())
         )
 
         # A refused loopback connection fails in milliseconds; the generous

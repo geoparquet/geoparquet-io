@@ -631,15 +631,6 @@ class TestAdditionalCRSEdgeCases:
                 if os.path.exists(output):
                     os.unlink(output)
 
-    def test_custom_projjson_crs(self, runner, temp_output_file):
-        """
-        Test that custom PROJJSON CRS is preserved.
-
-        This tests CRS beyond simple EPSG codes.
-        """
-        # For now, skip this test - would require custom PROJJSON input
-        pytest.skip("Custom PROJJSON test requires specialized test data")
-
     def test_crs_consistency_between_schema_and_metadata(self, fields_5070_file, temp_output_file):
         """
         Test that CRS is identical in both schema and metadata for v2.0.

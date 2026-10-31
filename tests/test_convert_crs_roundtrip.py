@@ -159,7 +159,7 @@ class TestGeoPackageCRSExport:
         con.close()
 
         # Should have EPSG:4326 entry
-        assert result is not None, "GeoPackage missing SRS entry for EPSG:4326"
+        assert result == (4326, "EPSG", 4326)
 
 
 class TestConvertedGeoParquetPassesCheckAll:

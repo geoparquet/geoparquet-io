@@ -349,21 +349,6 @@ class TestCrossVersionSettingsPreservation:
             assert size == 2500
 
 
-class TestRowGroupSizeCalculation:
-    """Test row group size calculation with target MB instead of exact rows."""
-
-    @pytest.mark.skip(reason="Row group size calculation by MB not yet implemented in tests")
-    def test_row_group_size_mb_calculation(self, geojson_input, temp_output_file):
-        """
-        Test that row_group_size_mb parameter calculates appropriate row counts.
-
-        This is a more advanced feature where row group size is determined by
-        target MB size rather than exact row count.
-        """
-        # TODO: Implement when row_group_size_mb support is added
-        pass
-
-
 class TestCompressionLevel:
     """Test compression level settings."""
 

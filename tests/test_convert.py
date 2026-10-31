@@ -370,7 +370,15 @@ class TestConvertBestPractices:
         result = fetch_one(
             con.execute(f"SELECT ST_AsText(\"{geom_col}\") FROM '{best_practices_file}' LIMIT 1")
         )
-        assert result is not None
+        from tests.conftest import TEST_DATA_DIR
+
+        source_wkts = {
+            row[0]
+            for row in con.execute(
+                f"SELECT ST_AsText(geom) FROM ST_Read('{TEST_DATA_DIR / 'buildings_test.shp'}')"
+            ).fetchall()
+        }
+        assert result[0] in source_wkts
         con.close()
 
     def test_attribute_columns_preserved(self, best_practices_file):

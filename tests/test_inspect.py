@@ -174,6 +174,7 @@ def test_inspect_nonexistent_file(runner):
     result = runner.invoke(cli, ["inspect", "nonexistent.parquet"])
 
     assert result.exit_code != 0
+    assert "nonexistent.parquet" in result.output
 
 
 def test_inspect_non_parquet_file(runner, tmp_path):
@@ -1089,6 +1090,7 @@ class TestInspectSubcommands:
         result = runner.invoke(cli, ["inspect", "meta", test_file, "--geo"])
 
         assert result.exit_code == 0
+        assert "Primary Column: geometry" in result.output
 
     def test_inspect_meta_geo_stats_flag(self, runner, test_file):
         """Test meta subcommand with --geo-stats flag shows per-RG bbox table."""

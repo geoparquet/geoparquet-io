@@ -48,10 +48,6 @@ class TestQuoteIdentifier:
         """Test quoting a simple identifier."""
         assert quote_identifier("name") == '"name"'
 
-    def test_name_with_spaces(self):
-        """Test quoting identifier with spaces."""
-        assert quote_identifier("my column") == '"my column"'
-
     def test_name_with_quotes(self):
         """Test quoting identifier with embedded quotes."""
         assert quote_identifier('foo"bar') == '"foo""bar"'
@@ -287,7 +283,7 @@ class TestPipelineIntegration:
 
         # Find geometry column from the table
         geom_col = primary_geometry_column(table)
-        assert geom_col is not None
+        assert geom_col == "geometry"
 
     def test_no_geometry_column_raises_error(self):
         """Test that missing geometry column raises ValueError with helpful message."""

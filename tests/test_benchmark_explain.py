@@ -386,6 +386,7 @@ class TestExplainCLI:
         )
 
         assert result.exit_code == 0
+        assert "STREAMING_LIMIT" in result.output or "LIMIT" in result.output
 
     def test_explain_save_output(self, temp_output_dir):
         """Test explain saving output to file."""
@@ -422,6 +423,7 @@ class TestExplainCLI:
         )
 
         assert result.exit_code != 0
+        assert "does not exist" in result.output
 
 
 class TestExplainFilePlaceholder:

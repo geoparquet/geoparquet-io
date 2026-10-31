@@ -381,6 +381,7 @@ class TestAddCommands:
         result = runner.invoke(add, ["bbox", "nonexistent.parquet", temp_output_file])
         # Should fail with non-zero exit code
         assert result.exit_code != 0
+        assert "nonexistent.parquet" in result.output
 
     def test_add_bbox_metadata_on_v10_file_with_bbox_errors(self, temp_output_dir):
         """add bbox-metadata refuses a 1.0 file, whose version cannot carry covering.
@@ -421,10 +422,6 @@ class TestAddCommands:
 
     # Note: add admin-divisions tests are skipped because they require a countries file
     # and network access. These should be tested separately with appropriate test data.
-    @pytest.mark.skip(reason="Requires countries file and network access")
-    def test_add_admin_divisions(self, places_test_file, temp_output_file):
-        """Test adding admin divisions (skipped - requires countries file)."""
-        pass
 
 
 @pytest.fixture(scope="module")
