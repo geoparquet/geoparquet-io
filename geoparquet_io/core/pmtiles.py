@@ -669,10 +669,7 @@ def create_pmtiles_from_geoparquet(
 
     # Check the source before an extract/reproject child can lose its edge
     # declaration, and before tippecanoe can create or overwrite an archive.
-    preprocessed = bbox or where or cols or src_crs is not None or chunks
-    require_planar_geojson_file(
-        input_path, profile=profile, use_primary_geometry=bool(preprocessed)
-    )
+    require_planar_geojson_file(input_path, profile=profile)
 
     if chunks:
         # Deferred: pmtiles_chunks tiles each chunk through this function.

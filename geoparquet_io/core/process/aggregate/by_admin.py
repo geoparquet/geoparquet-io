@@ -44,6 +44,7 @@ from geoparquet_io.core.process.aggregate.common import (
 )
 from geoparquet_io.core.process.aggregate.grid_common import (
     _RESERVED_INTERNAL,
+    BUCKET_POINT_GEOMETRY,
     _resolve_bbox_column_for_file,
     _validate_bucket_point_args,
     _validate_keying_columns_for_file,
@@ -188,7 +189,7 @@ def aggregate_by_admin(
     show_sql: bool = False,
     where: str | None = None,
     metric_nodata: str | None = None,
-    bucket_point: str = "geometry",
+    bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
     memory_limit: str | None = None,

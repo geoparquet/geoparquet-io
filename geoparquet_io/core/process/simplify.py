@@ -163,7 +163,7 @@ def _first_wkb_of(column) -> bytes | None:
 
 def _geometry_column_of(table: pa.Table, override: str | None) -> str:
     """Resolve the geometry column: the override, else the table's primary."""
-    name = resolve_geometry_column(table, override, source="the table")
+    name = resolve_geometry_column(table, override, where="the table")
     field = table.schema.field(name)
     if field.type not in (pa.binary(), pa.large_binary()) and not is_wkb_extension_field(field):
         raise InvalidParameterError(

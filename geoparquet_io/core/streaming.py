@@ -490,7 +490,7 @@ def extract_crs_from_table(
         # exist on a file whose column is `geom`, and reported its CRS
         # as absent (#887 review). Ask the table's schema instead — the
         # shared recovery #960 shared out (#968).
-        geom_col_name = geometry_column or primary_geometry_column(table.column_names, geo=geo_meta)
+        geom_col_name = geometry_column or primary_geometry_column(table, geo=geo_meta)
         if geom_col_name in columns:
             if crs_is_explicitly_null(columns[geom_col_name]):
                 warn_null_crs_once(

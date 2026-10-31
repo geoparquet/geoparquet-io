@@ -53,6 +53,7 @@ from geoparquet_io.core.geometry_detection import (
     create_geometry_view,
     primary_geometry_column,
     require_geometry_column,
+    resolve_geometry_column,
 )
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, info, success, warn
@@ -222,9 +223,7 @@ def reproject_table(
             API never silently treats unknown data as the default.
     """
     # Detect geometry column
-    geom_col = geometry_column or require_geometry_column(
-        primary_geometry_column(table), "the table"
-    )
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table")
 
     # Resolve source CRS. An unknown CRS is not the default, so mirror the CLI
     # contract: require source_crs or assume_crs84, else raise, rather than

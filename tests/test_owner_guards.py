@@ -1853,21 +1853,6 @@ def _names_a_geometry_column(node: ast.AST) -> bool:
     return isinstance(node, ast.Name) and bool(_GEOM_COLUMN_NAME.search(node.id))
 
 
-def _param_default_literals(node: ast.AST) -> Iterator[ast.AST]:
-    """``def f(geometry_column="geometry")``: the literal as a column default."""
-    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        return
-    args = node.args
-    positional = [*args.posonlyargs, *args.args]
-    pairs = list(
-        zip(positional[len(positional) - len(args.defaults) :], args.defaults, strict=True)
-    )
-    pairs += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults, strict=True) if d]
-    for arg, default in pairs:
-        if _GEOM_COLUMN_NAME.search(arg.arg) and _is_geometry_literal(default):
-            yield default
-
-
 def _own_returns(fn: ast.AST) -> Iterator[ast.Return]:
     """The ``return`` statements of *fn* itself, not of a def nested in it."""
     stack = list(ast.iter_child_nodes(fn))
@@ -1942,17 +1927,47 @@ def _primary_literal(node: ast.AST) -> ast.AST | None:
     return None
 
 
-def _ifexp_literal(node: ast.AST) -> ast.AST | None:
-    """``"geometry" if x else y`` / ``x if c else "geometry"``: the literal as one
-    branch of a conditional is a column chosen by literal."""
-    # Both branches literals is a word chosen for a message ("geometry" /
-    # "geometries"), not a column.
-    if isinstance(node, ast.IfExp):
-        branches = (node.body, node.orelse)
-        if all(isinstance(b, ast.Constant) for b in branches):
-            return None
-        return next((b for b in branches if _is_geometry_literal(b)), None)
-    return None
+def _geometry_named_target(m: _Module, node: ast.AST) -> bool:
+    """Whether *node* is the value of an assignment to, or a keyword named, a
+    geometry column (``geom_col = ...``, ``primary = ...``,
+    ``f(geometry_column=...)``)."""
+    up = m.parents.get(id(node))
+    if isinstance(up, ast.keyword):
+        return bool(up.arg and _GEOM_COLUMN_NAME.search(up.arg))
+    if isinstance(up, (ast.Assign, ast.AnnAssign)) and up.value is node:
+        targets = up.targets if isinstance(up, ast.Assign) else [up.target]
+        return any(
+            _names_a_geometry_column(t) or (isinstance(t, ast.Name) and "primary" in t.id.lower())
+            for t in targets
+        )
+    return False
+
+
+def _is_str_constant(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+
+def _ifexp_literal(m: _Module, node: ast.AST) -> ast.AST | None:
+    """``"geometry" if x else y`` / ``x if c else "geometry"``: a geometry name as
+    one branch of a conditional is a column chosen by literal.
+
+    When *both* branches are strings it is a column only if it lands in a
+    geometry-named target or keyword (``geom_col = "geom" if legacy else
+    "geometry"``); otherwise it is a word for a message (``"geometry" if n == 1
+    else "geometries"``). ``None`` is not a string: ``"geometry" if has else
+    None`` is a column choice wherever it lands.
+    """
+    if not isinstance(node, ast.IfExp):
+        return None
+    branches = (node.body, node.orelse)
+    literal = next(
+        (b for b in branches if _is_str_constant(b) and b.value in _GEOMETRY_NAMES), None
+    )
+    if literal is None:
+        return None
+    if all(_is_str_constant(b) for b in branches) and not _geometry_named_target(m, node):
+        return None
+    return literal
 
 
 #: An expression that holds geometry columns (``geo_columns``,
@@ -1961,9 +1976,11 @@ def _ifexp_literal(node: ast.AST) -> ast.AST | None:
 _GEOM_COLUMNS_TEXT = re.compile(r"(?i)geo\w*_col")
 
 
-def _first_column_pick(node: ast.AST) -> bool:
-    """``next(iter(geo_columns))`` / ``geo_columns[0]``: the first of a set of
-    geometry columns as the answer, instead of the resolver's rule."""
+def _first_column_pick(m: _Module, node: ast.AST) -> bool:
+    """``next(iter(x))`` / ``x[0]``: the first entry of a collection taken as the
+    geometry column, instead of the resolver's rule -- either because the
+    collection holds geometry columns (``geo_columns[0]``) or because the pick
+    lands in a geometry-named target (``geom_col = columns[0]``)."""
     inner = None
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "next":
         arg = node.args[0] if node.args else None
@@ -1972,34 +1989,130 @@ def _first_column_pick(node: ast.AST) -> bool:
     elif isinstance(node, ast.Subscript):
         if isinstance(node.slice, ast.Constant) and node.slice.value == 0:
             inner = node.value
-    return inner is not None and bool(_GEOM_COLUMNS_TEXT.search(ast.unparse(inner)))
+    if inner is None:
+        return False
+    return bool(_GEOM_COLUMNS_TEXT.search(ast.unparse(inner))) or _geometry_named_target(m, node)
 
 
-def _primary_get(node: ast.AST) -> ast.AST | None:
-    """``geometry_column = geo.get("primary_column")``: the block's primary read
-    inline as the column, skipping the resolver's "the schema has it" check."""
-    if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+#: The legitimate reads of a ``geo`` block's ``primary_column`` claim outside
+#: the owner and T3a's block decoder (``core/geo_metadata.py``), each with why
+#: it is not a column choice.
+_PRIMARY_CLAIM_READS = {
+    ("geoparquet_io/core/validate.py", "_check_primary_column_present"): (
+        "the validator checks the claim itself"
+    ),
+    ("geoparquet_io/core/validate.py", "_check_primary_column_in_columns"): (
+        "the validator checks the claim itself"
+    ),
+    ("geoparquet_io/core/check_fixes.py", "_supply_or_strip_bbox_member"): (
+        "repairs the block entry the block declares primary"
+    ),
+    ("geoparquet_io/core/derive_geo_from_file.py", "_with_primary_column"): (
+        "a block repoint: compares the claim it is about to rewrite"
+    ),
+    ("geoparquet_io/core/inspect.py", "inspect_summary"): (
+        "extract_geo_info's result: the resolver's answer, not the block's claim"
+    ),
+    ("geoparquet_io/core/inspect.py", "inspect_preview"): (
+        "extract_geo_info's result: the resolver's answer, not the block's claim"
+    ),
+    ("geoparquet_io/core/inspect.py", "inspect_stats"): (
+        "extract_geo_info's result: the resolver's answer, not the block's claim"
+    ),
+}
+_PRIMARY_CLAIM_OWNERS = ("geoparquet_io/core/geo_metadata.py",)
+
+
+def _primary_get(m: _Module, node: ast.AST) -> ast.AST | None:
+    """``x.get("primary_column")`` outside the owner and the block decoder: the
+    block's claim read as the column, skipping the resolver's "the schema has
+    it" rule. The legitimate reads are pinned in :data:`_PRIMARY_CLAIM_READS`."""
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "primary_column"
+    ):
         return None
-    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-    if not any(_names_a_geometry_column(t) for t in targets):
+    if _owns(m.path, _PRIMARY_CLAIM_OWNERS):
         return None
-    for sub in ast.walk(node.value):
-        # ``extract_geo_info(...)``'s ``*_info`` result names the resolver's
-        # answer, not the block's claim.
-        receiver = getattr(sub, "func", None)
-        receiver = getattr(receiver, "value", None)
-        if isinstance(receiver, ast.Name) and receiver.id.endswith("_info"):
-            continue
-        if (
-            isinstance(sub, ast.Call)
-            and isinstance(sub.func, ast.Attribute)
-            and sub.func.attr == "get"
-            and sub.args
-            and isinstance(sub.args[0], ast.Constant)
-            and sub.args[0].value == "primary_column"
-        ):
-            return sub
-    return None
+    if (m.path, m.hit(node).name.rsplit(".", 1)[-1]) in _PRIMARY_CLAIM_READS:
+        return None
+    return node
+
+
+#: DuckDB type-name prefixes that decide a geometry read kind; the owner's
+#: ``GeometryRead.for_type`` decides it, ``duckdb_utils`` names the GEOMETRY type.
+_READ_KIND_TYPES = frozenset({"BLOB", "BINARY", "STRUCT", "GEOMETRY", "GEOGRAPHY", "VARCHAR"})
+
+
+#: Type tests that are not a geometry read kind, each with why.
+_TYPE_TEST_PINS = {
+    ("geoparquet_io/core/wfs.py", "_probe_properties_type"): (
+        "the GeoJSON properties column's type (unnest a STRUCT), not a geometry"
+    ),
+}
+
+
+def _type_test(m: _Module, node: ast.AST) -> bool:
+    """``t.upper().startswith("STRUCT")`` / ``startswith(("BLOB", "VARCHAR"))`` /
+    ``"BLOB" in t``: a read kind decided outside ``GeometryRead``. A prefix tuple
+    that also names non-geometry types (``"MAP"``, ``"UNION"``) is a general
+    type classifier, not a read kind."""
+    if not isinstance(node, (ast.Call, ast.Compare)):
+        return False
+    if (m.path, m.hit(node).name.rsplit(".", 1)[-1]) in _TYPE_TEST_PINS:
+        return False
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "startswith"
+        and node.args
+    ):
+        arg = node.args[0]
+        values = arg.elts if isinstance(arg, ast.Tuple) else [arg]
+        named = [v.value for v in values if _is_str_constant(v)]
+        return bool(named) and all(v in _READ_KIND_TYPES for v in named)
+    if isinstance(node, ast.Compare) and any(isinstance(op, _MEMBERSHIP_OPS) for op in node.ops):
+        return (
+            _is_str_constant(node.left)
+            and node.left.value in ("BLOB", "BINARY", "STRUCT")
+            and not isinstance(node.comparators[0], (ast.List, ast.Tuple, ast.Set))
+        )
+    return False
+
+
+def _positional_literal(node: ast.AST) -> ast.AST | None:
+    """``bounds_of(src, "geometry")``: a column named by a positional literal.
+
+    An exception's first argument is a parameter name, a mapping lookup's
+    (``.get("geometry")``) a key of some other document (GeoJSON, STAC), and a
+    Click declaration's strings are parameter names: none is a column.
+    """
+    if not isinstance(node, ast.Call):
+        return None
+    callee = (
+        node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+    )
+    if callee in _NOT_COLUMN_CALLS:
+        return None
+    skip_first = callee.endswith(("Error", "Exception")) or callee in _MAPPING_LOOKUPS
+    args = node.args[1:] if skip_first else node.args
+    return next((a for a in args if _is_geometry_literal(a)), None)
+
+
+_NOT_COLUMN_CALLS = frozenset({"option", "argument"})
+_MAPPING_LOOKUPS = frozenset({"get", "pop", "setdefault"})
+
+
+def _any_param_default(node: ast.AST) -> Iterator[ast.AST]:
+    """``def f(base="geometry")``: the literal as any parameter's default."""
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return
+    args = node.args
+    yield from (d for d in (*args.defaults, *args.kw_defaults) if _is_geometry_literal(d))
 
 
 _CASE_FOLDS = frozenset({"lower", "upper", "casefold"})
@@ -2060,7 +2173,7 @@ def _hand_rolled_read(m: _Module, fn: ast.AST) -> Iterator[ast.AST]:
             isinstance(node, ast.Compare)
             and isinstance(node.left, ast.Constant)
             and node.left.value in ("BLOB", "BINARY")
-            and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops)  # codespell:ignore
+            and any(isinstance(op, _MEMBERSHIP_OPS) for op in node.ops)
         ):
             yield node
             return
@@ -2103,6 +2216,19 @@ def _find_geometry_identity(m: _Module) -> Iterator[Hit]:
     a view it builds (``resolve_geometry_read`` / ``create_geometry_view`` are
     that read and that view).
 
+    The second pass (#1392 pass 2) made the narrowings precise: a conditional
+    whose branches are both strings is a column choice when it lands in a
+    geometry-named target or keyword (``None`` is not a string); every
+    ``.get("primary_column")`` outside the owner and ``geo_metadata`` (T3a's
+    decoder) is a hit unless pinned in :data:`_PRIMARY_CLAIM_READS` with its
+    reason; a first-entry pick into a geometry-named target is a hit whatever
+    the collection is called. New shapes: ``"geometry"`` as any positional
+    argument (not an exception's parameter name, a mapping key, or a Click
+    declaration) or any parameter's default, and a read-kind type test
+    (``startswith("STRUCT")``, ``startswith(("BLOB", "VARCHAR"))``,
+    ``"BLOB" in t``) outside the owner and ``duckdb_utils``, unless pinned in
+    :data:`_TYPE_TEST_PINS`.
+
     ``geometry_detection.resolve_geometry_read`` is the one BLOB-vs-native read
     expression, and the WKB codec is spelled once in ``duckdb_utils``
     (``as_wkb_sql`` / ``geom_from_wkb_sql``). What this does *not* make
@@ -2120,30 +2246,41 @@ def _find_geometry_identity(m: _Module) -> Iterator[Hit]:
     a case fold (``"geo" in name``, indistinguishable from list membership),
     and a codec call assembled by concatenation (``"ST_As" + "WKB("``).
     """
+    seen: set[int] = set()
+    for found in _geometry_identity_nodes(m):
+        # One finding per line: two shapes of one expression are one copy.
+        if found.lineno not in seen:
+            seen.add(found.lineno)
+            yield m.hit(found)
+
+
+def _geometry_identity_nodes(m: _Module) -> Iterator[ast.AST]:
+    """Every node one of the geometry-identity shapes flags (may repeat)."""
     wkb_owner = _owns(m.path, _WKB_CODEC_OWNERS)
     for node in ast.walk(m.tree):
-        for literal in (*_param_default_literals(node), *_fallback_returns(node)):
-            yield m.hit(literal)
-        literal = _literal_column_default(node)
-        if literal is not None:
-            yield m.hit(literal)
-        primary = _primary_literal(node)
-        if primary is not None:
-            yield m.hit(primary)
-        if _geometry_names_list(node) or _first_column_pick(node) or _substring_heuristic(node):
-            yield m.hit(node)
-        for shaped in (_ifexp_literal(node), _primary_get(node), _literal_column_kwarg(node)):
+        yield from (*_any_param_default(node), *_fallback_returns(node))
+        for shaped in (
+            _literal_column_default(node),
+            _primary_literal(node),
+            _ifexp_literal(m, node),
+            _primary_get(m, node),
+            _literal_column_kwarg(node),
+            _positional_literal(node),
+        ):
             if shaped is not None:
-                yield m.hit(shaped)
-        if not wkb_owner:
-            yield from (m.hit(n) for n in _hand_rolled_read(m, node))
-        if wkb_owner or id(node) in m.docstrings:
+                yield shaped
+        if _geometry_names_list(node) or _first_column_pick(m, node) or _substring_heuristic(node):
+            yield node
+        if wkb_owner:
             continue
-        if isinstance(m.parents.get(id(node)), ast.JoinedStr):
+        yield from _hand_rolled_read(m, node)
+        if _type_test(m, node):
+            yield node
+        if id(node) in m.docstrings or isinstance(m.parents.get(id(node)), ast.JoinedStr):
             continue
         template = _string_template(node)
         if template is not None and _WKB_CODEC_CALL.search(template):
-            yield m.hit(node)
+            yield node
 
 
 @dataclass(frozen=True)
@@ -3214,6 +3351,28 @@ GEOMETRY_IDENTITY_SHAPES = {
         'def f(fields):\n    return [n for n in fields if "geo" in n.lower()]\n'
     ),
     "keyword naming a built column": 'def f(t):\n    return sort(t, geometry_column="geometry")\n',
+    # The audit's second pass (#1392 pass 2).
+    "conditional with None": 'def f(has):\n    geometry_column = "geometry" if has else None\n',
+    "two-name conditional into a geometry name": (
+        'def f(legacy):\n    geom_col = "geom" if legacy else "geometry"\n'
+    ),
+    "block primary into its own name": (
+        'def f(geo):\n    primary = geo.get("primary_column")\n    return primary\n'
+    ),
+    "decoded block primary": (
+        "import json\n\ndef f(meta):\n"
+        '    geo_info = json.loads(meta[b"geo"])\n'
+        '    geometry_column = geo_info.get("primary_column")\n'
+    ),
+    "first of the columns into a geometry name": "def f(columns):\n    geom_col = columns[0]\n",
+    "next of inferred into a geometry name": (
+        "def f(inferred_columns):\n    primary = next(iter(inferred_columns))\n"
+    ),
+    "positional literal": 'def f(src):\n    return bounds_of(src, "geometry")\n',
+    "any parameter default": 'def f(cols, base="geometry"):\n    return base\n',
+    "STRUCT prefix test": 'def f(t):\n    return t.upper().startswith("STRUCT")\n',
+    "BLOB/VARCHAR prefix test": 'def f(t):\n    return not t.startswith(("BLOB", "VARCHAR"))\n',
+    "BLOB substring test": 'def f(t):\n    return "BLOB" in t\n',
 }
 #: ...and the output names and prose it must leave alone.
 GEOMETRY_IDENTITY_NEAR_MISSES = {
@@ -3221,8 +3380,8 @@ GEOMETRY_IDENTITY_NEAR_MISSES = {
     "keyword naming the built constant": (
         "def f(t):\n    return sort(t, geometry_column=BUILT_GEOMETRY_COLUMN)\n"
     ),
-    "enum value": 'def f(t, bucket_point: str = "geometry"):\n    return t\n',
-    "output name parameter": 'def f(t, geometry_name="geometry"):\n    return t\n',
+    "enum value": "def f(t, bucket_point: str = BUCKET_POINT_GEOMETRY):\n    return t\n",
+    "output name parameter": "def f(t, geometry_name=BUILT_GEOMETRY_COLUMN):\n    return t\n",
     "rename to the output name": 'def f(names, i):\n    names[i] = "geometry"\n',
     "single return of a dataset fact": 'def get_geometry_column():\n    return "geometry"\n',
     "type compare": 'def f(d):\n    return d.get("type") == "geometry"\n',
@@ -3232,19 +3391,22 @@ GEOMETRY_IDENTITY_NEAR_MISSES = {
     "type names list": 'TYPES = ["Point", "LineString", "Polygon"]\n',
     "logical type families": 'def f(t):\n    return t in ("Geometry", "Geography")\n',
     "list built from the owner's names": 'def f():\n    return ["wkt", *STANDARD_GEOMETRY_NAMES]\n',
-    "primary from the data": "def f(cols):\n    primary = cols[0]\n    primary = None\n",
+    "primary set to nothing": "def f(cols):\n    primary = None\n",
     "conditional on other names": 'def f(x):\n    return "geom" if x else "point"\n',
     "a word for a message": 'def f(n):\n    return "geometry" if n == 1 else "geometries"\n',
-    "the resolver's answer from an info dict": (
-        'def f(geo_info):\n    primary_geom_col = geo_info.get("primary_column")\n'
-    ),
+    "block read inside the decoder's owner": ('def f(geo):\n    return geo.get("primary")\n'),
     "first of anything else": "def f(rows):\n    return next(iter(rows)), rows[0]\n",
-    "BLOB test without the primitive": 'def f(t):\n    return "BLOB" in t\n',
+    "BLOB in a type list": 'def f(t):\n    return t in ("BLOB", "VARCHAR")\n',
+    "positional built constant": "def f(s):\n    return bounds_of(s, BUILT_GEOMETRY_COLUMN)\n",
+    "a parameter named geometry": (
+        'def f():\n    raise InvalidParameterError("geometry", "needs a column")\n'
+    ),
+    "first of anything into its own name": "def f(rows):\n    first = rows[0]\n",
+    "a message conditional into a non-geometry kwarg": (
+        'def f(n):\n    return say(word="geometry" if n == 1 else "geometries")\n'
+    ),
     "primitive without a type test": "def f(c):\n    return geom_from_wkb_sql(c)\n",
     "view without the primitive": 'def f(con):\n    con.execute("CREATE VIEW v AS SELECT * FROM t")\n',
-    "block primary into its own name": (
-        'def f(geo):\n    primary = geo.get("primary_column")\n    return primary\n'
-    ),
     "list membership": 'def f(names):\n    return "geo" in names\n',
     "substring of a non-geo fragment": 'def f(n):\n    return "bbox" in n.lower()\n',
 }

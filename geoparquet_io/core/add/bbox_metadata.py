@@ -32,6 +32,7 @@ from geoparquet_io.core.geo_metadata import (
 from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
     require_geometry_column,
+    resolve_geometry_column,
 )
 from geoparquet_io.core.logging_config import debug, success
 from geoparquet_io.core.parquet_footer import patch_or_rewrite
@@ -132,9 +133,7 @@ def add_bbox_metadata_table(
             version predates GeoParquet 1.1
     """
 
-    geom_col = require_geometry_column(
-        geometry_column or primary_geometry_column(table), "the table"
-    )
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table")
 
     if bbox_column not in table.column_names:
         raise ValueError(f"Bbox column '{bbox_column}' not found. Use add_bbox() first.")

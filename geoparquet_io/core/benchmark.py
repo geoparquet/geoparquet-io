@@ -25,10 +25,10 @@ import psutil
 
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
+    describe_query,
     duckdb_capabilities,
     fetch_one,
     get_duckdb_connection,
-    query_schema,
     quote_identifier,
     sql_path,
 )
@@ -134,9 +134,9 @@ def get_file_info(filepath: Path) -> dict[str, Any]:
             feature_count = result[0] if result else 0
 
             # Get schema to find geometry column
-            names = query_schema(conn, f"SELECT * FROM ST_Read({sql_path(filepath)})").names
-
-            geom_col = primary_geometry_column(names)
+            geom_col = primary_geometry_column(
+                describe_query(conn, f"SELECT * FROM ST_Read({sql_path(filepath)})")
+            )
 
             # Try to get geometry type from first row
             geom_type = "unknown"

@@ -68,6 +68,7 @@ from geoparquet_io.core.geo_metadata import (
 from geoparquet_io.core.geometry_detection import (
     create_geometry_view,
     primary_geometry_column,
+    resolve_geometry_column,
 )
 from geoparquet_io.core.geometry_repair import (
     nonplanar_edges_of_arrow_table,
@@ -721,15 +722,10 @@ def extract_table(
             named ``geometry_column`` is absent, or if ``bbox`` is requested on a
             table that has no geometry column.
     """
-    all_columns, detected_geom, bbox_info = _get_table_column_info(table)
-    geom_col = geometry_column or detected_geom
+    all_columns, _, bbox_info = _get_table_column_info(table)
+    # None for an attribute table; a named column the table lacks raises.
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table", required=False)
     bbox_col = bbox_info.get("bbox_column_name")
-
-    if geom_col is not None and geom_col not in all_columns:
-        raise InvalidParameterError(
-            "geometry_column",
-            f"geometry_column '{geom_col}' not found in table columns: {list(all_columns)}",
-        )
 
     # A table with no geometry column is a legitimate input (an attribute table
     # from an earlier exclude_columns=['geometry'], say): project and filter its

@@ -37,6 +37,7 @@ from geoparquet_io.core.extract import extract_table
 from geoparquet_io.core.file_utils import unlink_released_file as _unlink_released_file
 from geoparquet_io.core.hilbert_order import hilbert_order_table
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
+from geoparquet_io.core.process.aggregate.grid_common import BUCKET_POINT_GEOMETRY
 from geoparquet_io.core.reproject import reproject_table
 from geoparquet_io.core.sort_by_column import sort_by_column_table
 from geoparquet_io.core.sort_quadkey import sort_by_quadkey_table
@@ -452,7 +453,7 @@ def aggregate_a5(
     geometry_column: str | None = None,
     where: str | None = None,
     metric_nodata: str | None = None,
-    bucket_point: str = "geometry",
+    bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
     memory_limit: str | None = None,
@@ -515,7 +516,7 @@ def aggregate_h3(
     geometry_column: str | None = None,
     where: str | None = None,
     metric_nodata: str | None = None,
-    bucket_point: str = "geometry",
+    bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
     memory_limit: str | None = None,
@@ -577,7 +578,7 @@ def aggregate_admin(
     out_geometry: str = "polygon",
     where: str | None = None,
     metric_nodata: str | None = None,
-    bucket_point: str = "geometry",
+    bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
     memory_limit: str | None = None,

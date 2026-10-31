@@ -40,8 +40,10 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import has_glob_pattern, resolve_file_url
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
 from geoparquet_io.core.geometry_detection import (
+    BUILT_GEOMETRY_COLUMN,
     primary_geometry_column,
     require_geometry_column,
+    resolve_geometry_column,
 )
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.index_ops import (
@@ -842,8 +844,9 @@ def _result_geo_bbox(con, result) -> list[float] | None:
     # Measured on the caller's connection, under its memory settings.
     con.register("__agg_result", result)
     try:
-        source = QuerySource(con, "SELECT geometry FROM __agg_result")
-        return bounds_of(source, "geometry", antimeridian=True)
+        geometry = quote_identifier(BUILT_GEOMETRY_COLUMN)
+        source = QuerySource(con, f"SELECT {geometry} FROM __agg_result")
+        return bounds_of(source, BUILT_GEOMETRY_COLUMN, antimeridian=True)
     except duckdb.Error as exc:  # pragma: no cover - defensive
         debug(f"Could not compute an antimeridian-aware bbox: {exc}")
         return None
@@ -1017,7 +1020,7 @@ def aggregate_grid_table(
 
     # None when the table has no geometry column: the bbox and point-column
     # keying modes never read it (bucket_point_expr refuses it in geometry mode).
-    geom_col = geometry_column or primary_geometry_column(table)
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table", required=False)
     con = open_bounded_connection(load_spatial=True, load_httpfs=False, memory_limit=memory_limit)
     try:
         load_index(con, scheme.spec, feature=f"{scheme.name} aggregation")

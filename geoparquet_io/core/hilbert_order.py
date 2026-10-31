@@ -10,7 +10,6 @@ import pyarrow as pa
 
 from geoparquet_io.core.bbox_structure import dataset_bounds, get_bbox_advice
 from geoparquet_io.core.common import add_bbox, get_parquet_metadata
-from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     fetch_one,
@@ -23,9 +22,7 @@ from geoparquet_io.core.exceptions import RemoteAccessError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of, sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
-    primary_geometry_column,
     register_geometry_column,
-    require_geometry_column,
     resolve_geometry_column,
 )
 from geoparquet_io.core.logging_config import debug, info, success, warn
@@ -242,9 +239,7 @@ def hilbert_order_table(
     Returns:
         New table with rows reordered by Hilbert curve
     """
-    geom_col = geometry_column or require_geometry_column(
-        primary_geometry_column(table), "the table"
-    )
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table")
     idx_col = _row_index_name(geom_col)
     quoted_idx = quote_identifier(idx_col)
 
@@ -430,7 +425,7 @@ def _hilbert_order_streaming(
         # Find geometry column: the owner over the typed columns and the
         # stream's own `geo` block, as the file path asks it.
         geom_col = resolve_geometry_column(
-            described, geometry_column, geo=sanitized_carried_geo(metadata), source=input_path
+            described, geometry_column, geo=sanitized_carried_geo(metadata), where=input_path
         )
         quoted_geom = quote_identifier(geom_col)
 
@@ -547,14 +542,7 @@ def _hilbert_order_file_based(
     # the output shipped a bbox column nothing declared (#738).
     metadata, _ = get_parquet_metadata(working_parquet, verbose)
 
-    if geometry_column is None:
-        geometry_column = require_geometry_column(
-            primary_geometry_column(working_parquet, verbose=verbose), working_parquet
-        )
-    else:
-        resolve_geometry_column(
-            get_column_names(working_parquet), geometry_column, source=working_parquet
-        )
+    geometry_column = resolve_geometry_column(working_parquet, geometry_column, verbose=verbose)
     if verbose:
         debug(f"Using geometry column: {geometry_column}")
 

@@ -355,7 +355,7 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
     geoparquet_info = {}
     if geo_meta:
         version = declared_geoparquet_version(geo_meta, default=None)
-        primary_column = primary_geometry_column(list(geo_meta.get("columns") or {}), geo=geo_meta)
+        primary_column = primary_geometry_column(None, geo=geo_meta)
         columns_meta = geo_meta.get("columns", {})
 
         crs = None

@@ -34,6 +34,7 @@ from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
     register_geometry_column,
     require_geometry_column,
+    resolve_geometry_column,
 )
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, progress, success, warn
@@ -160,9 +161,7 @@ def add_bbox_table(
         New table with bbox column added
     """
     # Find geometry column
-    geom_col = geometry_column or require_geometry_column(
-        primary_geometry_column(table), "the table"
-    )
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table")
 
     table, bbox_column_name = _prepare_table_bbox_column(table, bbox_column_name)
 
@@ -424,7 +423,12 @@ def _add_bbox_streaming(
     # built. (add_bbox's query builder takes no source CRS, so nothing is lost.)
     with open_input(input_path, verbose=verbose) as (source, metadata, _is_stream, con):
         query, passed_through, bbox_column_name = _make_streaming_bbox_query(
-            source, con, bbox_column_name, force=force, geoparquet_version=write.geoparquet_version
+            source,
+            con,
+            bbox_column_name,
+            force=force,
+            geoparquet_version=write.geoparquet_version,
+            metadata=metadata,
         )
 
         write_output(
@@ -453,7 +457,12 @@ def _add_bbox_streaming(
 
 
 def _make_streaming_bbox_query(
-    source: str, con, bbox_column_name: str, force: bool, geoparquet_version: str | None = None
+    source: str,
+    con,
+    bbox_column_name: str,
+    force: bool,
+    geoparquet_version: str | None = None,
+    metadata: dict | None = None,
 ) -> tuple[str, bool, str]:
     """Build the add-bbox query for a streaming source.
 
@@ -479,7 +488,11 @@ def _make_streaming_bbox_query(
     # Get column names from query result (works with both table names and read_parquet)
     described = describe_query(con, f"SELECT * FROM {source}")
     col_names = [name for name, _ in described]
-    geom_col = require_geometry_column(primary_geometry_column(described), "the input stream")
+    # The owner over the typed columns and the stream's carried block (#1367).
+    geom_col = require_geometry_column(
+        primary_geometry_column(described, geo=sanitized_carried_geo(metadata)),
+        "the input stream",
+    )
 
     # --force over a real bbox struct replaces it in place; anything else of that
     # name is the user's own column and the computed one moves aside instead.

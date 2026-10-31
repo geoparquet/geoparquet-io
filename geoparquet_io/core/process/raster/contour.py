@@ -12,6 +12,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.logging_config import info
 from geoparquet_io.core.optional_deps import load_module, require_contourrs
 from geoparquet_io.core.process.raster.output import finalize_raster_table
@@ -90,7 +91,7 @@ def contour_array(
             "min_column", f"min_column and max_column are both '{min_column}'"
         )
     for name, value in (("min_column", min_column), ("max_column", max_column)):
-        if value == "geometry":
+        if value == BUILT_GEOMETRY_COLUMN:
             raise InvalidParameterError(name, "collides with the output's geometry column name")
     if max_column == "value" and min_column != "value":
         # contourrs' own output column is named 'value'; appending the max

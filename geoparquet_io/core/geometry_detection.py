@@ -11,6 +11,7 @@ import os
 import re
 import uuid
 from dataclasses import dataclass
+from typing import Literal, overload
 
 from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
@@ -234,6 +235,33 @@ def _described_columns(source) -> list[tuple[str, bool]]:
     return columns
 
 
+def _source_schema(source, geo, con, verbose):
+    """``(block, label, [(name, is_geometry_typed)] or None)`` of any source the
+    resolver takes: "typed columns of a source", spelled once."""
+    import pyarrow as pa
+
+    if source is None:
+        # The block alone (no schema to read): its declared columns stand.
+        return geo, None, [(name, False) for name in _block_declared(geo)]
+    if isinstance(source, (str, os.PathLike)):
+        label = str(source)
+        if geo is None:
+            from geoparquet_io.core.geo_metadata import raw_geo_of_file
+
+            geo = raw_geo_of_file(label, con).value
+            if verbose and geo:
+                debug(f"Geo metadata: {_summarize_geo_metadata(geo)}")
+        return geo, label, _file_columns(resolve_file_url(label, verbose=False), con, verbose)
+    if isinstance(source, (pa.Table, pa.Schema)):
+        schema = source.schema if isinstance(source, pa.Table) else source
+        if geo is None:
+            from geoparquet_io.core.geo_metadata import sanitized_carried_geo
+
+            geo = sanitized_carried_geo(schema.metadata)
+        return geo, None, _arrow_columns(schema)
+    return geo, None, _described_columns(source)
+
+
 def primary_geometry_column(
     source,
     *,
@@ -251,9 +279,12 @@ def primary_geometry_column(
       described columns and their types (both read on ``con`` when given);
     - a ``pa.Table`` or ``pa.Schema``: the block is its sanitized carried
       ``geo``, the schema its fields (a GeoArrow extension field is typed);
-    - an iterable of column names, or of ``(name, type)`` pairs (a
-      ``describe_query`` result, or Parquet logical types): no block. Bare
-      names carry no types.
+    - an iterable of ``(name, type)`` pairs (a ``describe_query`` result, or
+      Parquet logical types): no block unless ``geo`` is given. Bare names are
+      accepted but carry no types: a caller holding a table, schema, path or
+      query hands the owner that instead (#1367);
+    - ``None`` with ``geo``: the block alone, for a reader with no schema
+      (a carried metadata dict): its primary, else its first declared column.
 
     ``geo`` is a block the caller already holds; it replaces the source's own.
     ``extra_names`` are a source's own candidate names, tried after the
@@ -277,30 +308,8 @@ def primary_geometry_column(
     Only when the schema cannot be read at all does the block's primary stand
     on its own.
     """
-    import pyarrow as pa
-
-    label = None
-    if isinstance(source, (str, os.PathLike)):
-        label = str(source)
-        if geo is None:
-            from geoparquet_io.core.geo_metadata import raw_geo_of_file
-
-            geo = raw_geo_of_file(label, con).value
-            if verbose and geo:
-                debug(f"Geo metadata: {_summarize_geo_metadata(geo)}")
-        primary = _block_primary(geo, label)
-        columns = _file_columns(resolve_file_url(label, verbose=False), con, verbose)
-    elif isinstance(source, (pa.Table, pa.Schema)):
-        schema = source.schema if isinstance(source, pa.Table) else source
-        if geo is None:
-            from geoparquet_io.core.geo_metadata import sanitized_carried_geo
-
-            geo = sanitized_carried_geo(schema.metadata)
-        primary = _block_primary(geo, label)
-        columns = _arrow_columns(schema)
-    else:
-        primary = _block_primary(geo, label)
-        columns = _described_columns(source)
+    geo, label, columns = _source_schema(source, geo, con, verbose)
+    primary = _block_primary(geo, label)
     resolved = _resolve_primary(primary, _block_declared(geo), columns, extra_names)
     if verbose:
         debug(
@@ -322,30 +331,76 @@ def require_geometry_column(column: str | None, source=None) -> str:
     return column
 
 
-def resolve_geometry_column(columns, named: str | None = None, *, geo=None, source=None) -> str:
-    """The geometry column a command runs on: ``named`` when the caller named
-    one, else :func:`primary_geometry_column` of ``columns`` (and ``geo``).
+@overload
+def resolve_geometry_column(
+    source,
+    named: str | None = None,
+    *,
+    geo=None,
+    where=None,
+    required: Literal[True] = True,
+    con=None,
+    verbose: bool = False,
+) -> str: ...
 
-    Only the *block's* primary falls through to the schema. A column the user
-    named is the answer or an :class:`InvalidParameterError` -- never silently
-    swapped for another (#1367 audit). ``columns`` is any non-file source
-    :func:`primary_geometry_column` takes (names, ``(name, type)`` pairs, an
-    Arrow table or schema).
+
+@overload
+def resolve_geometry_column(
+    source,
+    named: str | None = None,
+    *,
+    geo=None,
+    where=None,
+    required: bool,
+    con=None,
+    verbose: bool = False,
+) -> str | None: ...
+
+
+def resolve_geometry_column(
+    source,
+    named: str | None = None,
+    *,
+    geo=None,
+    where=None,
+    required: bool = True,
+    con=None,
+    verbose: bool = False,
+) -> str | None:
+    """The geometry column a command runs on: the one front door (#1367).
+
+    ``source`` is any source :func:`primary_geometry_column` takes (a RAW
+    path, an Arrow table or schema, ``(name, type)`` pairs). ``named`` is the
+    caller's explicit column: it is the answer when ``source`` has it, else an
+    :class:`InvalidParameterError` -- never silently swapped for another. With
+    no ``named``, the resolver's answer, or :class:`GeometryColumnNotFoundError`.
+    Only a *block's* primary falls through to the schema. ``where`` names the
+    source in the error (default: the path, for a file). ``required=False`` is
+    for a path that runs without a geometry column (an attribute table, the
+    aggregate bbox and point-column modes): no column is then ``None``, but a
+    named one that is missing still raises.
     """
-    import pyarrow as pa
-
     if named is None:
-        return require_geometry_column(primary_geometry_column(columns, geo=geo), source)
-    if isinstance(columns, (pa.Table, pa.Schema)):
-        names = list(columns.schema.names if isinstance(columns, pa.Table) else columns.names)
-    else:
-        names = [c[0] if isinstance(c, (tuple, list)) else c for c in columns]
-    if named not in names:
-        where = f" in {source}" if source is not None else ""
-        raise InvalidParameterError(
-            "geometry_column", f"geometry column '{named}' not found{where}"
-        )
-    return named
+        found = primary_geometry_column(source, geo=geo, con=con, verbose=verbose)
+        if not required:
+            return found
+        label = where if where is not None else _label_of(source)
+        return require_geometry_column(found, label)
+    _, label, columns = _source_schema(source, {} if geo is None else geo, con, verbose)
+    if columns is None or any(name == named for name, _ in columns):
+        return named
+    label = where if where is not None else label
+    in_where = f" in {label}" if label is not None else ""
+    # The columns it does have, so a typo or a stale name is fixable.
+    available = ", ".join(repr(name) for name, _ in columns) or "none"
+    raise InvalidParameterError(
+        "geometry_column",
+        f"geometry column '{named}' not found{in_where}; its columns are: {available}",
+    )
+
+
+def _label_of(source) -> str | None:
+    return str(source) if isinstance(source, (str, os.PathLike)) else None
 
 
 def native_geometry_types_from_query(con, query: str, verbose: bool = False) -> dict[str, str]:

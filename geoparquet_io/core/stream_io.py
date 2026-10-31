@@ -355,7 +355,7 @@ def _extract_crs_from_metadata(
     columns = geo_meta.get("columns")
     if not isinstance(columns, dict):
         return None
-    col = geometry_column or primary_geometry_column(list(columns), geo=geo_meta)
+    col = geometry_column or primary_geometry_column(None, geo=geo_meta)
     col_meta = columns.get(col)
     return col_meta.get("crs") if isinstance(col_meta, dict) else None
 

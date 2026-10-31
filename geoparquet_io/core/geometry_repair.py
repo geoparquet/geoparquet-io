@@ -28,7 +28,10 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.edges import is_geodesic, is_nonplanar
 from geoparquet_io.core.exceptions import GeometryError
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
-from geoparquet_io.core.geometry_detection import primary_geometry_column, resolve_geometry_read
+from geoparquet_io.core.geometry_detection import (
+    resolve_geometry_column,
+    resolve_geometry_read,
+)
 from geoparquet_io.core.logging_config import debug, warn
 
 
@@ -118,7 +121,7 @@ def warn_planar_math_for_file(op: str, input_path: str, geometry_column: str | N
     try:
         from geoparquet_io.core.write_funnels import collect_nonplanar_edges
 
-        column = geometry_column or primary_geometry_column(input_path)
+        column = resolve_geometry_column(input_path, geometry_column, required=False)
         edges = collect_nonplanar_edges(input_path).get(column) if column else None
     except Exception as e:  # noqa: BLE001 - detection must never break a pipeline
         debug(f"Could not read the edges of {input_path}: {e}")

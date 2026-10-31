@@ -274,7 +274,7 @@ def _output_schema(
     empty = _empty(data_schema.append(level_field))
 
     geo_meta = sanitized_carried_geo(base_meta, source=str(base_path))
-    geometry_column = primary_geometry_column(data_schema.names, geo=geo_meta)
+    geometry_column = primary_geometry_column(data_schema, geo=geo_meta)
     if geometry_column is not None:
         col_meta = geo_meta.get("columns", {}).get(geometry_column, {})
         bbox, types = _union_geo(files, geometry_column)
@@ -372,9 +372,7 @@ def write_overview_file(
         )
         os.close(fd)
         try:
-            geometry_column = primary_geometry_column(
-                schema.names, geo=sanitized_carried_geo(schema.metadata)
-            )
+            geometry_column = primary_geometry_column(schema)
             # OVERVIEWS_SPEC 4.5: no dictionary encoding on the geometry.
             writer_kwargs = without_geometry_dictionary(
                 resolve_codec(compression, compression_level, context="process").pyarrow_kwargs(),

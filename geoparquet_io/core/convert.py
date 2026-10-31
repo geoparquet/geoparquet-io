@@ -309,6 +309,11 @@ _DRIVER_FID_COLUMNS = {"GPKG": "fid", "OpenFileGDB": "OBJECTID", "FileGDB": "OBJ
 _DEFAULT_FID_COLUMN = "OGC_FID"
 
 
+#: The column GDAL's ``ST_Read(..., keep_wkb := true)`` names its geometry when
+#: the source names none: GDAL's fixed name, not one gpio chooses.
+_ST_READ_WKB_COLUMN = "wkb_geometry"
+
+
 def _build_st_read_expr(
     input_path: str,
     layer: str | None = None,
@@ -1412,7 +1417,7 @@ def _csv_carried_columns(geom_info):
     return [name for name in geom_info["source_columns"] if str(name).lower() not in excluded]
 
 
-def _resolve_tabular_geometry_name(carried_columns, base="geometry"):
+def _resolve_tabular_geometry_name(carried_columns, base=BUILT_GEOMETRY_COLUMN):
     """The name the geometry built from WKT or lat/lon columns is written under.
 
     ``base`` is the name asked for -- ``geometry_column``'s value on the Arrow
@@ -2854,7 +2859,7 @@ class _LinearizedRead:
         self.max_angle_deg = DEFAULT_MAX_ANGLE_DEG if max_angle_deg is None else max_angle_deg
         self._reader = self._open_reader()
         self.schema = self._reader.schema
-        self.wkb_col = geom_column if geom_column in self.schema.names else "wkb_geometry"
+        self.wkb_col = geom_column if geom_column in self.schema.names else _ST_READ_WKB_COLUMN
         if self.wkb_col not in self.schema.names:
             raise GeoParquetError(
                 f"keep_wkb read of {input_file} exposes no '{geom_column}' column"

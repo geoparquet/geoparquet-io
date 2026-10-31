@@ -20,6 +20,7 @@ import json
 import struct
 from pathlib import Path
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -415,3 +416,74 @@ def test_an_explicit_missing_geometry_column_errors_on_every_sort_path(sort, out
     assert result.exit_code != 0, result.output
     assert "nope" in result.output
     assert "Traceback" not in result.output
+
+
+def test_convert_geojson_reads_the_declared_primary_not_a_standard_named_secondary(tmp_path):
+    """#1367 audit S1: the direct GeoJSON path described the file without its
+    ``geo`` block, so a ``geometry`` secondary beat the declared ``footprint``."""
+    from geoparquet_io.core.geojson_stream import convert_to_geojson_stream
+
+    con = duckdb.connect()
+    con.execute("INSTALL spatial; LOAD spatial;")
+    table = (
+        con.sql(
+            "SELECT 1 AS id, ST_AsWKB(ST_Point(1, 2)) AS footprint, "
+            "ST_AsWKB(ST_Point(50, 60)) AS geometry"
+        )
+        .arrow()
+        .read_all()
+    )
+    con.close()
+    entry = {"encoding": "WKB", "geometry_types": ["Point"]}
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "footprint",
+        "columns": {"footprint": entry, "geometry": entry},
+    }
+    src = tmp_path / "two.parquet"
+    pq.write_table(table.replace_schema_metadata({b"geo": json.dumps(geo).encode()}), src)
+    out = tmp_path / "out.geojson"
+    convert_to_geojson_stream(str(src), str(out))
+    feature = json.loads(out.read_text())["features"][0]
+    assert feature["geometry"]["coordinates"] == [1.0, 2.0]
+    assert "footprint" not in feature["properties"]
+
+
+def _api_table_paths():
+    from geoparquet_io.core.add.bbox import add_bbox_table
+    from geoparquet_io.core.add.kdtree import add_kdtree_table
+    from geoparquet_io.core.extract import extract_table
+    from geoparquet_io.core.hilbert_order import hilbert_order_table
+    from geoparquet_io.core.str_order import str_order_table
+
+    return {
+        "hilbert": lambda t: hilbert_order_table(t, geometry_column="nope"),
+        "str": lambda t: str_order_table(t, geometry_column="nope"),
+        "bbox": lambda t: add_bbox_table(t, geometry_column="nope"),
+        "kdtree": lambda t: add_kdtree_table(t, geometry_column="nope", iterations=2),
+        "extract": lambda t: extract_table(t, geometry_column="nope"),
+    }
+
+
+@pytest.mark.parametrize("path", ["hilbert", "str", "bbox", "kdtree", "extract"])
+def test_a_named_missing_column_errors_on_the_table_paths_too(path):
+    """#1367 audit S4/S5: ``resolve_geometry_column`` is the one front door; a
+    named column the table lacks is refused, never swapped or bound late."""
+    from geoparquet_io.core.exceptions import InvalidParameterError
+
+    src = Path(__file__).parent / "data" / "places_test.parquet"
+    table = pq.read_table(src)
+    with pytest.raises(InvalidParameterError, match="geometry column 'nope' not found"):
+        _api_table_paths()[path](table)
+
+
+def test_resolve_geometry_column_takes_a_file_source(tmp_path):
+    """#1367 audit S6: the front door takes every source the resolver takes."""
+    from geoparquet_io.core.exceptions import InvalidParameterError
+    from geoparquet_io.core.geometry_detection import resolve_geometry_column
+
+    src = str(Path(__file__).parent / "data" / "places_test.parquet")
+    assert resolve_geometry_column(src) == "geometry"
+    assert resolve_geometry_column(src, "geometry") == "geometry"
+    with pytest.raises(InvalidParameterError, match=r"'nope' not found in .*places_test"):
+        resolve_geometry_column(src, "nope")

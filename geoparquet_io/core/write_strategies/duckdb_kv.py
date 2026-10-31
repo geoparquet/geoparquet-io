@@ -33,7 +33,6 @@ from geoparquet_io.core.duckdb_utils import (
     _wrap_query_with_blob_conversion,
     build_kv_metadata_clause,
     describe_query,
-    duckdb_type_is_geometry,
     geom_from_wkb_sql,
     quote_identifier,
     register_arrow,
@@ -51,6 +50,7 @@ from geoparquet_io.core.geo_metadata import (
     strip_bboxless_covering,
 )
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
+from geoparquet_io.core.geometry_detection import GeometryRead
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import (
@@ -537,7 +537,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         column_types = dict(describe_query(con, query))
         for name in sorted(gaps):
             type_ = column_types.get(name, "")
-            if duckdb_type_is_geometry(type_) or type_.upper().startswith("STRUCT"):
+            if GeometryRead.for_type(name, type_ or None).kind in ("native", "geoarrow"):
                 self._compute_missing_metadata(con, query, name, gaps[name], verbose)
 
     def write_from_table(
@@ -606,21 +606,11 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 table, geometry_column, geometry_info, effective_version
             )
 
-            self.write_from_query(
-                con=con,
-                query=query,
-                output_path=output_path,
-                geometry_column=geometry_column,
-                original_metadata=None,
+            self._write_table_query(
+                con,
+                query,
+                locals(),
                 geoparquet_version=effective_version,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
-                input_crs=input_crs,
-                verbose=verbose,
-                custom_metadata=custom_metadata,
-                extra_kv_metadata=extra_kv_metadata,
                 geometry_info=geometry_info,
             )
         finally:

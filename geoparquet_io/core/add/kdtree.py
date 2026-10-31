@@ -22,6 +22,7 @@ from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_
 from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
     require_geometry_column,
+    resolve_geometry_column,
     resolve_geometry_read,
 )
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
@@ -393,9 +394,7 @@ def add_kdtree_table(
         raise InvalidParameterError("iterations", f"must be between 1 and 20, got {iterations}")
 
     # Find geometry column
-    geom_col = geometry_column or require_geometry_column(
-        primary_geometry_column(table), "the table"
-    )
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table")
 
     # Write table to temp file for processing (kdtree needs file access)
     temp_fd, temp_path = tempfile.mkstemp(suffix=".parquet")

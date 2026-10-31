@@ -1052,7 +1052,7 @@ class TestExtractTable:
         with pytest.raises(InvalidParameterError) as exc_info:
             extract_table(table, geometry_column="nonexistent")
 
-        assert "geometry_column 'nonexistent' not found" in str(exc_info.value)
+        assert "geometry column 'nonexistent' not found" in str(exc_info.value)
         assert "id" in str(exc_info.value)
         assert "name" in str(exc_info.value)
 

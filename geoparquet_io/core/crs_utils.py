@@ -1887,7 +1887,7 @@ def crs_string_from_geo_meta(geo_meta: dict | None, geom_col: str) -> str | None
     columns = geo_meta.get("columns", {})
     col_meta = columns.get(geom_col)
     if col_meta is None:
-        col_meta = columns.get(primary_geometry_column(list(columns), geo=geo_meta), {})
+        col_meta = columns.get(primary_geometry_column(None, geo=geo_meta), {})
     crs = col_meta.get("crs") if isinstance(col_meta, dict) else None
     return transform_source_crs(crs)
 

@@ -31,6 +31,7 @@ from geoparquet_io.core.geometry_detection import (
     create_geometry_view,
     primary_geometry_column,
     require_geometry_column,
+    resolve_geometry_column,
 )
 
 if TYPE_CHECKING:
@@ -104,14 +105,12 @@ def require_planar_geojson_file(
     input_path: str,
     geometry_column: str | None = None,
     profile: str | None = None,
-    *,
-    use_primary_geometry: bool = False,
 ) -> None:
     """Check file edge declarations before GeoJSON or PMTiles preprocessing.
 
-    PMTiles extract/reproject/chunk paths select the metadata primary, whereas
-    direct GeoJSON uses its existing geometry detection. Resolve that choice
-    under the same scoped profile as the footer reads.
+    The column is the file's primary (the owner's answer, block included) for
+    direct GeoJSON and PMTiles alike, resolved under the same scoped profile
+    as the footer reads.
     """
     edges = {
         column: algorithm
@@ -120,17 +119,12 @@ def require_planar_geojson_file(
     }
     if not edges:
         return
-    if geometry_column is None and use_primary_geometry:
-        geometry_column = primary_geometry_column(input_path)
     if geometry_column is None:
-        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-
-        input_url = resolve_file_url(input_path)
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_path))
-        try:
-            geometry_column = _find_geometry_column(con, f"read_parquet({sql_path(input_url)})")
-        finally:
-            con.close()
+        # The file's primary, block and typed columns both (#1367): the direct
+        # GeoJSON path and PMTiles ask the same question, of the first footer
+        # for a glob or a directory.
+        files = _geojson_input_files(input_path)
+        geometry_column = resolve_geometry_column(files[0] if files else input_path)
     _require_planar_geojson_edges(geometry_column, edges.get(geometry_column))
 
 
@@ -682,29 +676,6 @@ def _stream_feature_collection(
     return count
 
 
-def _find_geometry_column(
-    con: duckdb.DuckDBPyConnection,
-    source_ref: str,
-) -> str:
-    """
-    Find the geometry column in a table.
-
-    Args:
-        con: DuckDB connection
-        source_ref: Table reference for SQL query
-
-    Returns:
-        Name of geometry column
-
-    Raises:
-        GeometryColumnNotFoundError: If no geometry column found
-    """
-    # The query's own schema: a standard name, else the first GEOMETRY column.
-    return require_geometry_column(
-        primary_geometry_column(describe_query(con, f"SELECT * FROM {source_ref}"))
-    )
-
-
 @uses_aws_profile
 def convert_to_geojson_stream(
     input_path: str,
@@ -791,8 +762,9 @@ def convert_to_geojson_stream(
     try:
         source_ref = f"read_parquet({sql_path(input_url)})"
 
-        # Find geometry column
-        geometry_column = _find_geometry_column(con, source_ref)
+        # The file's primary, with its `geo` block: a declared `footprint`
+        # is the geometry even beside a `geometry` secondary (#1367).
+        geometry_column = resolve_geometry_column(input_path, con=con)
         require_planar_geojson_file(input_path, geometry_column)
         debug(f"Using geometry column: {geometry_column}")
 

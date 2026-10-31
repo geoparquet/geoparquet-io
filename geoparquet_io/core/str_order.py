@@ -11,7 +11,6 @@ import duckdb
 import pyarrow as pa
 
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.duckdb_utils import (
     as_wkb_sql,
     describe_query,
@@ -27,8 +26,6 @@ from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
     create_geometry_view,
-    primary_geometry_column,
-    require_geometry_column,
     resolve_geometry_column,
 )
 
@@ -188,9 +185,7 @@ def str_order_table(
     group", not as an exact tile capacity.
     """
     _validate_tile_size(tile_size)
-    geom_col = geometry_column or require_geometry_column(
-        primary_geometry_column(table), "the table"
-    )
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table")
     geom = quote_identifier(geom_col)
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
@@ -315,7 +310,7 @@ def _str_order_streaming(
         # in stream mode while working in file mode. A named column is the
         # answer or an error (#1367).
         geom_col = resolve_geometry_column(
-            described, geometry_column, geo=sanitized_carried_geo(metadata), source=input_path
+            described, geometry_column, geo=sanitized_carried_geo(metadata), where=input_path
         )
 
         source = create_geometry_view(con, source, geom_col)
@@ -370,14 +365,7 @@ def _str_order_file_based(
 
     source = sql_path(resolve_file_url(working_parquet, verbose))
     metadata, _ = get_parquet_metadata(working_parquet, verbose)
-    if geometry_column is None:
-        geometry_column = require_geometry_column(
-            primary_geometry_column(working_parquet, verbose=verbose), working_parquet
-        )
-    else:
-        resolve_geometry_column(
-            get_column_names(working_parquet), geometry_column, source=working_parquet
-        )
+    geometry_column = resolve_geometry_column(working_parquet, geometry_column, verbose=verbose)
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working_parquet))
     try:

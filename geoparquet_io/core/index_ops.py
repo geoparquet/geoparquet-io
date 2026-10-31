@@ -42,6 +42,7 @@ from geoparquet_io.core.geometry_detection import (
     create_geometry_view,
     primary_geometry_column,
     require_geometry_column,
+    resolve_geometry_column,
 )
 from geoparquet_io.core.geometry_repair import nonplanar_edges_of_arrow_table
 from geoparquet_io.core.logging_config import (
@@ -227,9 +228,7 @@ def add_index_table(spec, table, column_name, resolution, geometry_column=None, 
         resolution = int(resolution)
     validate_index_resolution(spec, resolution, table=True)
     preflight_index(spec, "add")
-    geom_col = geometry_column or require_geometry_column(
-        primary_geometry_column(table), "the table"
-    )
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table")
     source_crs = crs_string_from_table(table, geom_col)
     validate_index_crs(
         spec, sanitized_carried_geo(table.schema.metadata), geom_col, source_crs, "table"

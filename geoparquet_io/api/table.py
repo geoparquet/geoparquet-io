@@ -34,6 +34,7 @@ from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
 from geoparquet_io.core.index_ops import get_index_spec, validate_partition_arguments
 from geoparquet_io.core.logging_config import warn
+from geoparquet_io.core.process.aggregate.grid_common import BUCKET_POINT_GEOMETRY
 from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE
 from geoparquet_io.core.wfs import DEFAULT_WFS_PAGE_SIZE
 from geoparquet_io.core.write_funnels import write_geoparquet_table
@@ -525,7 +526,14 @@ class Table:
                 claimed OGC:CRS84 for projected data (issue #625).
         """
         self._table = table
-        self._geometry_column = geometry_column or self._detect_geometry_column()
+        from geoparquet_io.core.geometry_detection import primary_geometry_column
+
+        # A Table may hold a name its table lacks (a derived table, #1176):
+        # ``write()`` refuses it through ``resolve_geometry_column`` and names
+        # what the table has, so only the unnamed case is answered here.
+        self._geometry_column = (
+            geometry_column if geometry_column is not None else primary_geometry_column(table)
+        )
         # Auto-version hint captured at read time (see read()): pq.read_table
         # demotes native geometry columns to plain binary when geoarrow isn't
         # registered, so the table alone can't always tell a native-geo-only
@@ -565,12 +573,6 @@ class Table:
     def _wrap_geographic(self, table: pa.Table, geometry_column: str | None) -> Table:
         """Wrap new grid or admin boundaries in their output CRS, not the source CRS."""
         return self._wrap(table, geometry_column, crs="OGC:CRS84" if geometry_column else None)
-
-    def _detect_geometry_column(self) -> str | None:
-        """Detect geometry column from metadata or common names."""
-        from geoparquet_io.core.geometry_detection import primary_geometry_column
-
-        return primary_geometry_column(self._table)
 
     @classmethod
     def from_bigquery(
@@ -1312,17 +1314,9 @@ class Table:
         """
         if self._geometry_column is None:
             return
-        if self._geometry_column in self._table.column_names:
-            return
+        from geoparquet_io.core.geometry_detection import resolve_geometry_column
 
-        from geoparquet_io.core.exceptions import InvalidParameterError
-
-        available = ", ".join(repr(name) for name in self._table.column_names) or "none"
-        raise InvalidParameterError(
-            "geometry_column",
-            f"the table has no column named {self._geometry_column!r}; "
-            f"its columns are: {available}",
-        )
+        resolve_geometry_column(self._table, self._geometry_column, where="the table")
 
     def _write_geoparquet(
         self,
@@ -1954,7 +1948,7 @@ class Table:
         out_geometry: str = "polygon",
         where: str | None = None,
         metric_nodata: str | None = None,
-        bucket_point: str = "geometry",
+        bucket_point: str = BUCKET_POINT_GEOMETRY,
         bbox_column: str | None = None,
         breakdown_metric: str | None = None,
         memory_limit: str | None = None,
@@ -2014,7 +2008,7 @@ class Table:
         out_geometry: str = "polygon",
         where: str | None = None,
         metric_nodata: str | None = None,
-        bucket_point: str = "geometry",
+        bucket_point: str = BUCKET_POINT_GEOMETRY,
         bbox_column: str | None = None,
         breakdown_metric: str | None = None,
         memory_limit: str | None = None,
@@ -2074,7 +2068,7 @@ class Table:
         out_geometry: str = "polygon",
         where: str | None = None,
         metric_nodata: str | None = None,
-        bucket_point: str = "geometry",
+        bucket_point: str = BUCKET_POINT_GEOMETRY,
         bbox_column: str | None = None,
         breakdown_metric: str | None = None,
         memory_limit: str | None = None,

@@ -64,13 +64,6 @@
       "reviewed_by": "user"
     },
     {
-      "code_file": "geoparquet_io/api/ops.py",
-      "doc_target": "docs/api/python-api.md#Standalone Functions",
-      "reviewed_at": "2026-04-09T17:04:29.013106+00:00",
-      "code_commit_at_review": "b947445",
-      "reviewed_by": "Claude"
-    },
-    {
       "code_file": "geoparquet_io/cli/main.py",
       "doc_target": "docs/contributing.md",
       "reviewed_at": "2026-04-09T17:04:29.208315+00:00",
@@ -127,13 +120,6 @@
       "reviewed_by": "Claude"
     },
     {
-      "code_file": "geoparquet_io/core/benchmark.py",
-      "doc_target": "docs/cli/benchmark.md",
-      "reviewed_at": "2026-10-29T23:46:27.946962+00:00",
-      "code_commit_at_review": "f326bfc",
-      "reviewed_by": "claude-code (DuckDB 2.0 call-site migration, no doc-visible change)"
-    },
-    {
       "code_file": "geoparquet_io/cli/decorators.py",
       "doc_target": "geoparquet_io/skills/geoparquet.md#Compression Options",
       "reviewed_at": "2026-10-30T19:29:47.614633+00:00",
@@ -146,13 +132,6 @@
       "reviewed_at": "2026-10-30T19:29:47.741803+00:00",
       "code_commit_at_review": "166debd",
       "reviewed_by": "claude"
-    },
-    {
-      "code_file": "geoparquet_io/api/table.py",
-      "doc_target": "docs/api/python-api.md#Table Class",
-      "reviewed_at": "2026-10-31T02:25:40.941988+00:00",
-      "code_commit_at_review": "ef48aa5",
-      "reviewed_by": "T3c"
     },
     {
       "code_file": "geoparquet_io/cli/commands/process.py",
@@ -211,27 +190,6 @@
       "reviewed_by": "T3c"
     },
     {
-      "code_file": "geoparquet_io/core/convert.py",
-      "doc_target": "docs/guide/convert.md",
-      "reviewed_at": "2026-10-31T02:25:42.056735+00:00",
-      "code_commit_at_review": "ef48aa5",
-      "reviewed_by": "T3c"
-    },
-    {
-      "code_file": "geoparquet_io/core/extract.py",
-      "doc_target": "docs/guide/extract.md",
-      "reviewed_at": "2026-10-31T02:25:42.180259+00:00",
-      "code_commit_at_review": "ef48aa5",
-      "reviewed_by": "T3c"
-    },
-    {
-      "code_file": "geoparquet_io/core/hilbert_order.py",
-      "doc_target": "docs/guide/sort.md",
-      "reviewed_at": "2026-10-31T02:25:42.303902+00:00",
-      "code_commit_at_review": "ef48aa5",
-      "reviewed_by": "T3c"
-    },
-    {
       "code_file": "geoparquet_io/core/stac.py",
       "doc_target": "docs/guide/stac.md",
       "reviewed_at": "2026-10-31T02:25:42.426468+00:00",
@@ -243,6 +201,48 @@
       "doc_target": "docs/guide/check.md",
       "reviewed_at": "2026-10-31T02:25:42.549102+00:00",
       "code_commit_at_review": "ef48aa5",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/api/ops.py",
+      "doc_target": "docs/api/python-api.md#Standalone Functions",
+      "reviewed_at": "2026-10-31T04:21:52.692864+00:00",
+      "code_commit_at_review": "891d214",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/api/table.py",
+      "doc_target": "docs/api/python-api.md#Table Class",
+      "reviewed_at": "2026-10-31T04:21:52.885562+00:00",
+      "code_commit_at_review": "891d214",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/core/benchmark.py",
+      "doc_target": "docs/cli/benchmark.md",
+      "reviewed_at": "2026-10-31T04:21:53.052004+00:00",
+      "code_commit_at_review": "891d214",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/core/convert.py",
+      "doc_target": "docs/guide/convert.md",
+      "reviewed_at": "2026-10-31T04:21:53.308011+00:00",
+      "code_commit_at_review": "891d214",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/core/extract.py",
+      "doc_target": "docs/guide/extract.md",
+      "reviewed_at": "2026-10-31T04:21:53.488649+00:00",
+      "code_commit_at_review": "891d214",
+      "reviewed_by": "T3c"
+    },
+    {
+      "code_file": "geoparquet_io/core/hilbert_order.py",
+      "doc_target": "docs/guide/sort.md",
+      "reviewed_at": "2026-10-31T04:21:53.697102+00:00",
+      "code_commit_at_review": "259a378",
       "reviewed_by": "T3c"
     }
   ]
