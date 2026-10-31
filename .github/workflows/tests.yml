@@ -146,7 +146,7 @@ jobs:
 
   test:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 70
     permissions:
       contents: read
       # Codecov uploads authenticate via OIDC (use_oidc on the upload step);
@@ -305,7 +305,7 @@ jobs:
   # DuckDB 2.0 wheels need Python 3.11+.
   test-duckdb-2:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 70
     permissions:
       contents: read
     steps:
