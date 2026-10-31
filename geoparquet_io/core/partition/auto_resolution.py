@@ -9,7 +9,7 @@ resolutions based on target partition sizes and constraints.
 
 from __future__ import annotations
 
-from geoparquet_io.core.crs_utils import source_crs_string, transform_geom_sql
+from geoparquet_io.core.crs_utils import source_crs_string
 from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     get_duckdb_connection,
@@ -19,13 +19,17 @@ from geoparquet_io.core.duckdb_utils import (
     validate_where_clause,
     where_sql_fragment,
 )
-from geoparquet_io.core.edges import representative_point_sql
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
-from geoparquet_io.core.index_ops import calculate_index_resolution, get_index_spec, load_index
+from geoparquet_io.core.index_ops import (
+    calculate_index_resolution,
+    file_key_inputs,
+    get_index_spec,
+    index_point,
+    load_index,
+)
 from geoparquet_io.core.logging_config import debug, info, warn
 from geoparquet_io.core.remote import needs_httpfs
-from geoparquet_io.core.write_funnels import collect_nonplanar_edges
 
 # Tuning for the extent-aware probe (issue #524). Sampling a multiple of the
 # target partition count keeps cells near the target resolution well-populated,
@@ -106,11 +110,10 @@ def _probe_distinct_cell_counts(
     con,
     url: str,
     index_type: str,
-    geom_sql: str,
+    point: tuple[str, str],
     sample_clause: str,
     resolutions: list[int],
     where: str | None = None,
-    edges: str | None = None,
 ) -> list[int]:
     """Count distinct non-empty cells per resolution over a bounded sample.
 
@@ -121,10 +124,10 @@ def _probe_distinct_cell_counts(
     see a contiguous slice of the extent and badly underestimate the non-empty
     cell count -- the exact failure mode this probe exists to prevent (#524).
 
-    The point mirrors the cell assignment in the ``add/`` modules
-    (``edges.representative_point_sql``: the centroid for planar ``edges``, a
-    point on the sphere otherwise, #1293), so probe counts track real
-    partitioning. It is computed once per sampled row and reused for lon and lat.
+    ``point`` is the ``(lon, lat)`` SQL from ``index_ops.index_point``, the one
+    the IndexSpec driver keys each row from (a planar bbox column's midpoint for
+    a quadkey, otherwise the reprojected geometry's representative point for its
+    edges, #1293), so the probe counts the cells the partition writes.
 
     ``where`` restricts the probe to the rows the aggregation will see. The
     filter is nested *beneath* the sample: a WHERE sitting next to ``USING
@@ -133,9 +136,11 @@ def _probe_distinct_cell_counts(
     over-resolve (gpio #612). Nesting also keeps the clause away from the top
     level of the statement, where it could otherwise chain a second one.
     """
-    centroid = representative_point_sql(geom_sql, edges)
-    filtered = f"(SELECT {centroid} AS c FROM {sql_path(url)}{where_sql_fragment(where)})"
-    sample_cte = f"SELECT ST_X(c) AS lon, ST_Y(c) AS lat FROM {filtered}{sample_clause}"
+    lon, lat = point
+    filtered = (
+        f"(SELECT {lon} AS lon, {lat} AS lat FROM {sql_path(url)}{where_sql_fragment(where)})"
+    )
+    sample_cte = f"SELECT lon, lat FROM {filtered}{sample_clause}"
     spec = get_index_spec(index_type)
     if spec.prefix_partition:
         # A level-r quadkey is the length-r prefix of a finer one, so compute the
@@ -192,6 +197,7 @@ def _probe_extent_resolution(
     verbose: bool = False,
     profile: str | None = None,
     where: str | None = None,
+    use_centroid: bool = False,
 ) -> int | None:
     """Pick the resolution whose non-empty cell count best matches the target.
 
@@ -209,15 +215,18 @@ def _probe_extent_resolution(
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
         # Ensure ST_Transform (CRS-aware probing) emits lon/lat order.
         con.execute("SET geometry_always_xy = true;")
-        load_index(con, get_index_spec(spatial_index_type))
+        spec = get_index_spec(spatial_index_type)
+        load_index(con, spec)
 
         geom_col = find_primary_geometry_column(input_parquet, verbose)
-        # Reproject a known non-CRS84 input to lon/lat before centroiding, so the
-        # probe keys the same coordinates the add/ modules will (#530). Without
-        # this the probe feeds raw projected metres to the lon/lat cell functions
-        # and picks a resolution from garbage cell counts.
+        # Key each row the way the driver will: the same CRS (a known non-CRS84
+        # input is reprojected to lon/lat, #530), the same edges and the same
+        # bbox-midpoint decision, read through the driver's one file reader.
         source_crs = source_crs_string(input_parquet, verbose, geom_col)
-        geom_sql = transform_geom_sql(_geom_sql(con, url, geom_col), source_crs)
+        edges, bbox_col, _advice = file_key_inputs(
+            spec, input_parquet, geom_col, source_crs, use_centroid, verbose
+        )
+        point = index_point(_geom_sql(con, url, geom_col), source_crs, bbox_col, edges)
 
         sample_size = min(
             total_rows,
@@ -227,9 +236,8 @@ def _probe_extent_resolution(
         # Skip the reservoir sample (a full scan) when the file already fits the
         # budget; otherwise draw a uniform sample of sample_size rows.
         sample_clause = "" if sample_size >= total_rows else f" USING SAMPLE {sample_size} ROWS"
-        edges = collect_nonplanar_edges(input_parquet).get(geom_col)
         counts = _probe_distinct_cell_counts(
-            con, url, spatial_index_type, geom_sql, sample_clause, resolutions, where, edges
+            con, url, spatial_index_type, point, sample_clause, resolutions, where
         )
     except Exception as e:
         # Unconditional: falling back to the global formula silently produces a
@@ -268,6 +276,7 @@ def calculate_auto_resolution(
     verbose: bool = False,
     profile: str | None = None,
     where: str | None = None,
+    use_centroid: bool = False,
 ) -> int:
     """
     Calculate optimal spatial index resolution for target partition size.
@@ -285,6 +294,8 @@ def calculate_auto_resolution(
         verbose: Print debug messages
         profile: AWS profile name for S3 authentication (optional)
         where: Optional WHERE clause; sizing then reflects only matching rows (#568)
+        use_centroid: Key a quadkey from the geometry even when a bbox column
+            exists, as the partition will (the probe keys rows the way it does)
 
     Returns:
         Optimal resolution for the specified spatial index
@@ -356,6 +367,7 @@ def calculate_auto_resolution(
             verbose=verbose,
             profile=profile,
             where=where,
+            use_centroid=use_centroid,
         )
 
     return calculate_index_resolution(

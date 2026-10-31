@@ -287,7 +287,7 @@ class TestProbeFallbackIsAnnounced:
         monkeypatch.setattr(f"{module}.find_primary_geometry_column", lambda *a, **k: "geometry")
         monkeypatch.setattr(f"{module}.source_crs_string", lambda *a, **k: None)
         monkeypatch.setattr(f"{module}._geom_sql", lambda *a, **k: "geometry")
-        monkeypatch.setattr(f"{module}.transform_geom_sql", lambda *a, **k: "geometry")
+        monkeypatch.setattr(f"{module}.file_key_inputs", lambda *a, **k: (None, None, None))
         monkeypatch.setattr(f"{module}._probe_distinct_cell_counts", lambda *a, **k: [0, 0, 0])
 
         with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
@@ -593,3 +593,63 @@ class TestExtentAwareResolution:
         expected = partial(calculate_index_resolution, get_index_spec("a5"))(8000, 80)
         assert res == expected
         assert res > 0
+
+
+def _bbox_far_from_geometry(path):
+    """Two points on one spot whose (planar) bbox columns sit an ocean apart.
+
+    The driver keys a quadkey from a planar bbox column's midpoint, so the cells
+    ``add quadkey`` writes here are the bbox's, not the points'.
+    """
+    import json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import shapely
+
+    point = shapely.to_wkb(shapely.Point(5.0, 5.0))
+    boxes = [(10.0, 50.0, 10.0, 50.0), (-120.0, 40.0, -120.0, 40.0)]
+    table = pa.table(
+        {
+            "geometry": pa.array([point, point], pa.binary()),
+            "bbox": pa.array(
+                [dict(zip(("xmin", "ymin", "xmax", "ymax"), b, strict=True)) for b in boxes]
+            ),
+        }
+    )
+    covering = {"bbox": {k: ["bbox", k] for k in ("xmin", "ymin", "xmax", "ymax")}}
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "geometry_types": [], "covering": covering}},
+    }
+    pq.write_table(table.replace_schema_metadata({b"geo": json.dumps(geo).encode()}), path)
+
+
+@pytest.mark.parametrize("use_centroid", [False, True])
+def test_the_probe_counts_the_cells_the_partition_writes(tmp_path, use_centroid):
+    """The --auto probe keys each row the way the IndexSpec driver writes it:
+    from a planar bbox column's midpoint, or the geometry when told to."""
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.add.quadkey import add_quadkey_column
+
+    src = tmp_path / "far.parquet"
+    _bbox_far_from_geometry(src)
+    out = tmp_path / "keyed.parquet"
+    add_quadkey_column(str(src), str(out), resolution=1, use_centroid=use_centroid)
+    written = len(set(pq.read_table(out).column("quadkey").to_pylist()))
+
+    resolution = _probe_extent_resolution(
+        input_parquet=str(src),
+        spatial_index_type="quadkey",
+        target_partitions=2.0,
+        min_resolution=0,
+        max_resolution=1,
+        total_rows=2,
+        use_centroid=use_centroid,
+    )
+    # Two written cells at level 1 is what the probe must see to pick level 1;
+    # one cell (the points' own spot) keeps it at the coarsest level.
+    assert written == (1 if use_centroid else 2)
+    assert resolution == (0 if use_centroid else 1)

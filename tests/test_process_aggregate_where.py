@@ -245,7 +245,7 @@ def test_auto_empty_filter_result_names_the_filter(tmp_path):
 
 def test_probe_distinct_cell_counts_respects_where(tmp_path):
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-    from geoparquet_io.core.index_ops import get_index_spec, load_index
+    from geoparquet_io.core.index_ops import get_index_spec, index_point, load_index
     from geoparquet_io.core.partition.auto_resolution import (
         _probe_distinct_cell_counts,
     )
@@ -256,9 +256,10 @@ def test_probe_distinct_cell_counts_respects_where(tmp_path):
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         load_index(con, get_index_spec("quadkey"))
-        counts_all = _probe_distinct_cell_counts(con, str(src), "quadkey", "geometry", "", [5])
+        point = index_point("geometry")
+        counts_all = _probe_distinct_cell_counts(con, str(src), "quadkey", point, "", [5])
         counts_filtered = _probe_distinct_cell_counts(
-            con, str(src), "quadkey", "geometry", "", [5], where="crop = 'wheat'"
+            con, str(src), "quadkey", point, "", [5], where="crop = 'wheat'"
         )
         assert counts_all == [2]
         assert counts_filtered == [1]
@@ -274,7 +275,7 @@ def test_probe_filters_beneath_the_sample(tmp_path):
     and --auto over-resolved (#612).
     """
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-    from geoparquet_io.core.index_ops import get_index_spec, load_index
+    from geoparquet_io.core.index_ops import get_index_spec, index_point, load_index
     from geoparquet_io.core.partition.auto_resolution import (
         _probe_distinct_cell_counts,
     )
@@ -292,7 +293,7 @@ def test_probe_filters_beneath_the_sample(tmp_path):
             con,
             str(src),
             "quadkey",
-            "geometry",
+            index_point("geometry"),
             " USING SAMPLE 200 ROWS",
             [8],
             where="crop = 'wheat'",

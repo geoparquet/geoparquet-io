@@ -146,22 +146,42 @@ def load_index(con, spec, verbose=False, *, feature=None):
         spec.register(con)
 
 
-def index_expression(spec, geom_col, resolution, source_crs=None, bbox_col=None, edges=None):
-    """The one cell expression: ``spec.expression`` keyed from one lon/lat point.
+def index_point(geom_sql, source_crs=None, bbox_col=None, edges=None) -> tuple[str, str]:
+    """The ``(lon, lat)`` SQL every cell key takes, for the driver and the probe.
 
-    A bbox midpoint when ``bbox_col`` is set; otherwise
-    ``edges.representative_point_sql`` of the (reprojected) geometry with the
-    column's ``edges``, which the driver read once per input (#1293).
+    A bbox midpoint when ``bbox_col`` is set (see :func:`_keys_from_bbox`);
+    otherwise ``edges.representative_point_sql`` of ``geom_sql`` (a GEOMETRY
+    expression in the input CRS) reprojected to lon/lat, with the column's
+    ``edges``, which the caller read once per input (#1293).
     """
     if bbox_col:
         bbox = quote_identifier(bbox_col)
-        lat = f"(({bbox}.ymin + {bbox}.ymax) / 2.0)"
-        lon = f"(({bbox}.xmin + {bbox}.xmax) / 2.0)"
-    else:
-        geom = transform_geom_sql(quote_identifier(geom_col), source_crs)
-        point = representative_point_sql(geom, edges)
-        lat, lon = f"ST_Y({point})", f"ST_X({point})"
+        return f"(({bbox}.xmin + {bbox}.xmax) / 2.0)", f"(({bbox}.ymin + {bbox}.ymax) / 2.0)"
+    point = representative_point_sql(transform_geom_sql(geom_sql, source_crs), edges)
+    return f"ST_X({point})", f"ST_Y({point})"
+
+
+def index_expression(spec, geom_col, resolution, source_crs=None, bbox_col=None, edges=None):
+    """The one cell expression: ``spec.expression`` keyed from :func:`index_point`."""
+    lon, lat = index_point(quote_identifier(geom_col), source_crs, bbox_col, edges)
     return spec.expression(lon, lat, resolution)
+
+
+def file_key_inputs(spec, input_parquet, geom_col, source_crs, use_centroid=False, verbose=False):
+    """The driver's one read of how a file's cells are keyed: ``(edges, bbox_col, advice)``.
+
+    ``edges`` is the column's (``collect_nonplanar_edges``, which refuses a glob
+    whose files disagree); ``bbox_col`` the planar bbox column a quadkey keys
+    from, when :func:`_keys_from_bbox` allows one; ``advice`` the bbox advice
+    behind that answer (``None`` when no bbox was wanted), for the caller that
+    tells the user. ``add`` and the ``--auto`` probe both read it, so the probe
+    counts the cells the partition writes.
+    """
+    edges = collect_nonplanar_edges(input_parquet).get(geom_col)
+    if not _keys_from_bbox(spec, use_centroid, source_crs, edges):
+        return edges, None, None
+    advice = get_bbox_advice(input_parquet, "bounds_calculation", verbose)
+    return edges, advice["bbox_column_name"] if advice["has_bbox_column"] else None, advice
 
 
 def validate_index_resolution(spec, resolution, table=False, parameter=None):
@@ -261,15 +281,13 @@ def add_index_column(
     validate_index_crs(
         spec, sanitized_carried_geo_of_file(input_parquet), geom_col, source_crs, "file", verbose
     )
-    edges = collect_nonplanar_edges(input_parquet).get(geom_col)
-    bbox_col = None
-    if _keys_from_bbox(spec, use_centroid, source_crs, edges):
-        advice = get_bbox_advice(input_parquet, "bounds_calculation", verbose)
-        bbox_col = advice["bbox_column_name"] if advice["has_bbox_column"] else None
-        if advice["needs_warning"] and not bbox_col:
-            warn(advice["message"] + f" - using geometry centroid for {spec.label} calculation")
-            for suggestion in advice["suggestions"]:
-                info(f"Tip: {suggestion}")
+    edges, bbox_col, advice = file_key_inputs(
+        spec, input_parquet, geom_col, source_crs, use_centroid, verbose
+    )
+    if advice and advice["needs_warning"] and not bbox_col:
+        warn(advice["message"] + f" - using geometry centroid for {spec.label} calculation")
+        for suggestion in advice["suggestions"]:
+            info(f"Tip: {suggestion}")
     from geoparquet_io.core.common import add_computed_column
 
     description = f"{spec.label} cell ID at {spec.unit} {resolution} (~{spec.size(resolution)})"
@@ -344,6 +362,7 @@ def add_index_streaming(
         output_path,
         make_query,
         verbose=verbose,
+        input_aware=True,
         **write.funnel_kwargs(),
     )
     if not should_stream_output(output_path):
@@ -582,6 +601,7 @@ def partition_index(
     if auto:
         try:
             resolution = calculate_auto_resolution(
+                use_centroid=use_centroid,
                 input_parquet=actual_input,
                 spatial_index_type=spec.name,
                 target_rows_per_partition=target_rows,
