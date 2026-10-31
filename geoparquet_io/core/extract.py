@@ -20,6 +20,7 @@ import pyarrow as pa
 from geoparquet_io.core.bbox_structure import check_bbox_structure, dataset_bounds
 from geoparquet_io.core.bbox_parse import parse_bbox
 from geoparquet_io.core.bbox_parse import BBox, any_piece, parse_bbox
+from geoparquet_io.core import bbox_parse
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.column_selection import (
     reject_blank_column_entries,
@@ -546,8 +547,8 @@ def build_spatial_filter(
         if bbox_info.get("has_bbox_column"):
             col = quote_identifier(bbox_info["bbox_column_name"])
             conditions.append(
-                any_piece(
-                    BBox(*bbox),
+                bbox_parse.any_piece(
+                    bbox_parse.BBox(*bbox),
                     lambda b: (
                         f"({col}.xmax >= {b.xmin} AND {col}.xmin <= {b.xmax} "
                         f"AND {col}.ymax >= {b.ymin} AND {col}.ymin <= {b.ymax})"
@@ -557,8 +558,8 @@ def build_spatial_filter(
         else:
             geom = quote_identifier(geometry_col)
             conditions.append(
-                any_piece(
-                    BBox(*bbox),
+                bbox_parse.any_piece(
+                    bbox_parse.BBox(*bbox),
                     lambda b: (
                         f"ST_Intersects({geom}, "
                         f"ST_MakeEnvelope({b.xmin}, {b.ymin}, {b.xmax}, {b.ymax}))"
@@ -1376,7 +1377,7 @@ def _extract_impl(
 
     write = WriteOptions.pick(locals())
     if is_streaming and not dry_run:
-        bbox_tuple = parse_bbox(bbox) if bbox else None
+        bbox_tuple = bbox_parse.parse_bbox(bbox) if bbox else None
         geometry_wkt = parse_geometry_input(geometry, use_first_geometry) if geometry else None
         if where:
             validate_where_clause(where)
@@ -1413,7 +1414,7 @@ def _extract_impl(
     selected_columns = build_column_selection(
         all_columns, include_list, exclude_list, geometry_col, bbox_col
     )
-    bbox_tuple = parse_bbox(bbox) if bbox else None
+    bbox_tuple = bbox_parse.parse_bbox(bbox) if bbox else None
     if bbox_tuple and not dry_run:
         _warn_if_crs_mismatch(bbox_tuple, input_parquet, geometry_col)
 

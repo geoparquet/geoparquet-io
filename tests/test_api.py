@@ -1130,8 +1130,8 @@ PUBLIC_API_MODULES = (
     "geoparquet_io.core.format_writers",
     "geoparquet_io.cli.decorators",
     "geoparquet_io.cli.exception_handler",
-    # Concept 15 (shared CLI behaviour): the owner of parse_bbox / BBox, plus the
-    # check runner's module and core.extract, which re-exports parse_bbox.
+    # Concept 15 (shared CLI behaviour): the owner of parse_bbox / BBox, and
+    # the check runner's module.
     "geoparquet_io.core.bbox_parse",
     "geoparquet_io.cli.commands.check",
     "geoparquet_io.core.extract",

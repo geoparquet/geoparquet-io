@@ -15,6 +15,7 @@ import duckdb
 import pyarrow as pa
 import pytest
 
+from geoparquet_io.core.bbox_parse import parse_bbox
 from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.extract import (
@@ -27,7 +28,6 @@ from geoparquet_io.core.extract import (
     get_schema_columns,
     is_geographic_crs,
     looks_like_latlong_bbox,
-    parse_bbox,
     parse_geometry_input,
     validate_columns,
     validate_where_clause,
