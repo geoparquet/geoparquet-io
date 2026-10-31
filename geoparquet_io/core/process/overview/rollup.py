@@ -30,6 +30,7 @@ from geoparquet_io.core.geo_metadata import (
     bbox_struct_array,
     sanitized_carried_geo,
 )
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.process.aggregate.common import PCT_CELL_FUNC, geometry_to_geom_expr
 from geoparquet_io.core.process.aggregate.grid_common import (
@@ -206,7 +207,7 @@ def with_input_bbox(table: pa.Table, bbox_field: pa.Field | None) -> pa.Table:
     """``table`` with ``bbox_field``'s column rebuilt over its ``geometry`` (#1121)."""
     if bbox_field is None or bbox_field.name in table.column_names:
         return table
-    column = bbox_struct_array(table, "geometry", bbox_field.type)
+    column = bbox_struct_array(table, BUILT_GEOMETRY_COLUMN, bbox_field.type)
     return table.append_column(bbox_field, column)
 
 

@@ -33,7 +33,6 @@ Split out of ``common.py`` unchanged; every name is still importable from there.
 import contextlib
 import copy
 import functools
-import json
 import os
 import shutil
 from collections.abc import Collection, Iterator, Mapping
@@ -95,6 +94,7 @@ from geoparquet_io.core.geo_metadata import (
     compose_geo_block,
     composes_a_covering,
     declared_version,
+    geo_key_value,
     is_geoparquet_1x,
     prune_geo_metadata_to_columns,
     read_raw_geo,
@@ -102,6 +102,7 @@ from geoparquet_io.core.geo_metadata import (
     sanitized_carried_geo_of_file,
     strip_derived_stats,
     strip_nonplanar_edges,
+    with_geo_key,
 )
 from geoparquet_io.core.geodesic_bbox import (
     ColumnBounds,
@@ -463,13 +464,13 @@ def _restored_geo_block(
     """
     if geo_meta is None:
         return None
-    primary = geo_meta.get("primary_column")
+    primary = primary_geometry_column(written_schema, geo=geo_meta)
     columns = geo_meta.get("columns") or {}
-    if not isinstance(primary, str) or not isinstance(columns.get(primary), dict):
+    if primary is None or not isinstance(columns.get(primary), dict):
         return geo_meta
     version = writable_geoparquet_version(declared_version(geo_meta), preserve_input=True)
     return compose_geo_block(
-        SchemaSource(written_schema, {b"geo": json.dumps(geo_meta).encode("utf-8")}),
+        SchemaSource(written_schema, with_geo_key(None, geo_meta)),
         GeoBlockOptions(
             geometry_column=primary,
             version=version,
@@ -518,7 +519,7 @@ def _geo_block_updates(
     composed = _restored_geo_block(written_schema, geo_meta, edges_by_col, stats=stats)
     if composed == geo_meta and not force:
         return {}
-    return {"geo": json.dumps(composed)}
+    return {"geo": geo_key_value(composed)}
 
 
 def _ensure_v2_geo_metadata(
@@ -567,7 +568,7 @@ def _ensure_v2_geo_metadata(
 
     patch_or_rewrite(
         output_path,
-        {"geo": json.dumps(geo_meta)},
+        {"geo": geo_key_value(geo_meta)},
         rewrite=functools.partial(
             rewrite_footer_kv,
             write=WriteOptions(
@@ -677,7 +678,7 @@ def _plain_copy_to(
         # Preserved keys never collide here (`extract_preserved_kv_metadata`
         # excludes `geo`); only a caller that hand-passes `geo` is affected, and
         # `carry_geo_metadata` is the block this write decided to emit.
-        kv_pairs["geo"] = json.dumps(carry_geo_metadata)
+        kv_pairs["geo"] = geo_key_value(carry_geo_metadata)
     # A carried `geo` block turns the request into 'NONE', or DuckDB writes its
     # own `geo` key after ours (#1225). `duckdb_version` keeps the request, which
     # is what the V2 repair below is keyed on.

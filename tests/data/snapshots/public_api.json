@@ -477,6 +477,7 @@
     "covering_supported",
     "declared_version",
     "declares_covering_member",
+    "geo_key_value",
     "geoarrow_dimension",
     "geoarrow_primary_encoding",
     "geoarrow_wkb_codes",

@@ -499,9 +499,10 @@ class TestTheRemoteRepairPath:
             return real(con, query)
 
         monkeypatch.setattr(cf, "query_schema", spy)
-        geo = sanitized_carried_geo(get_parquet_metadata(declarable)[0])
+        metadata = get_parquet_metadata(declarable)[0]
+        geo = sanitized_carried_geo(metadata)
 
-        repaired = cf._supply_or_strip_bbox_member(declarable, geo, False)
+        repaired = cf._repaired_cover_block(declarable, metadata, geo, False)
 
         assert len(queries) == 1, queries
         assert "hive_partitioning=false" in queries[0], queries

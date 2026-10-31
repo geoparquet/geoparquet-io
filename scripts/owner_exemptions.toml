@@ -117,10 +117,6 @@ path = "geoparquet_io/core/bbox_structure.py"
 count = "*"
 reason = "metadata serialization, not a report: debug dump of the geo block"
 [[G1.json_dumps]]
-path = "geoparquet_io/core/check_fixes.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block repair"
-[[G1.json_dumps]]
 path = "geoparquet_io/core/constants.py"
 count = "*"
 reason = "metadata serialization, not a report: collection footer key"
@@ -181,10 +177,6 @@ path = "geoparquet_io/core/stac.py"
 count = "*"
 reason = "metadata serialization, not a report: STAC item/collection JSON file"
 [[G1.json_dumps]]
-path = "geoparquet_io/core/write_funnels.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
-[[G1.json_dumps]]
 path = "geoparquet_io/core/write_strategies/base.py"
 count = "*"
 reason = "metadata serialization, not a report: PROJJSON literal for SQL"
@@ -209,10 +201,6 @@ reason = "permanent: the validator checks the block's primary_column claim itsel
 path = "geoparquet_io/core/validate.py"
 name = "_check_primary_column_in_columns"
 reason = "permanent: the validator checks the block's primary_column claim itself"
-[[G1.geometry_identity]]
-path = "geoparquet_io/core/check_fixes.py"
-name = "_supply_or_strip_bbox_member"
-reason = "repairs the bbox member of the block entry the block declares primary; a block edit, not a column choice"
 [[G1.geometry_identity]]
 path = "geoparquet_io/core/derive_geo_from_file.py"
 name = "_with_primary_column"
