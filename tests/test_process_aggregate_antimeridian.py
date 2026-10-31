@@ -27,6 +27,7 @@ from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME, aggregate_by_a
 from geoparquet_io.core.process.aggregate.by_h3 import H3_SCHEME, aggregate_by_h3
 from geoparquet_io.core.process.aggregate.common import geometry_to_geom_expr
 from geoparquet_io.core.process.aggregate.grid_common import GridScheme, wrap_grid_geometry
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
 # Fiji sits on the antimeridian, so cells here straddle it at low resolutions.
 ANTIMERIDIAN_POINTS = [
@@ -523,7 +524,9 @@ def test_aggregate_writes_the_wrap_form_bbox(antimeridian_parquet, tmp_path):
 @pytest.mark.network
 def test_out_geometry_both_keeps_one_frame(antimeridian_parquet, tmp_path):
     out = tmp_path / "h3_both.parquet"
-    aggregate_by_h3(antimeridian_parquet, str(out), resolution=3, out_geometry="both")
+    aggregate_by_h3(
+        antimeridian_parquet, str(out), resolution=3, options=AggregateOptions(out_geometry="both")
+    )
     con = _spatial_connection()
     relation = f"read_parquet('{out}')"
     try:

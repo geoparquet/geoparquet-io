@@ -13,11 +13,11 @@ from geoparquet_io.core.constants import DEFAULT_H3_COLUMN_NAME
 from geoparquet_io.core.duckdb_utils import as_wkb_sql, geom_from_wkb_sql
 from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.grid_common import (
-    BUCKET_POINT_GEOMETRY,
     GridScheme,
     aggregate_grid_file,
     aggregate_grid_table,
 )
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
 SPEC = get_index_spec("h3")
 
@@ -48,22 +48,13 @@ def aggregate_by_h3(
     auto: bool = False,
     target_per_cell: int = 10000,
     max_cells: int = 500000,
-    metric: str | None = None,
-    breakdown: str | None = None,
-    breakdown_limit: int = 20,
-    out_geometry: str = "polygon",
+    options: AggregateOptions | None = None,
     h3_column_name: str = DEFAULT_H3_COLUMN_NAME,
     compression: str | None = None,
     compression_level: int | None = None,
     geoparquet_version: str | None = None,
     verbose: bool = False,
     show_sql: bool = False,
-    where: str | None = None,
-    metric_nodata: str | None = None,
-    bucket_point: str = BUCKET_POINT_GEOMETRY,
-    bbox_column: str | None = None,
-    breakdown_metric: str | None = None,
-    memory_limit: str | None = None,
 ) -> None:
     """Aggregate a GeoParquet file into H3 cells. Writes the output file."""
     compression_level = resolve_process_compression_level(compression, compression_level)
@@ -71,60 +62,33 @@ def aggregate_by_h3(
         H3_SCHEME,
         input_parquet,
         output_parquet,
+        options=options,
         resolution=resolution,
         auto=auto,
         target_per_cell=target_per_cell,
         max_cells=max_cells,
-        metric=metric,
-        breakdown=breakdown,
-        breakdown_limit=breakdown_limit,
-        out_geometry=out_geometry,
         cell_column=h3_column_name,
         compression=compression,
         compression_level=compression_level,
         geoparquet_version=geoparquet_version,
         verbose=verbose,
         show_sql=show_sql,
-        where=where,
-        metric_nodata=metric_nodata,
-        bucket_point=bucket_point,
-        bbox_column=bbox_column,
-        breakdown_metric=breakdown_metric,
-        memory_limit=memory_limit,
     )
 
 
 def aggregate_h3_table(
     table,
     resolution: int,
-    metric: str | None = None,
-    breakdown: str | None = None,
-    breakdown_limit: int = 20,
-    out_geometry: str = "polygon",
+    options: AggregateOptions | None = None,
     h3_column_name: str = DEFAULT_H3_COLUMN_NAME,
     geometry_column: str | None = None,
-    where: str | None = None,
-    metric_nodata: str | None = None,
-    bucket_point: str = BUCKET_POINT_GEOMETRY,
-    bbox_column: str | None = None,
-    breakdown_metric: str | None = None,
-    memory_limit: str | None = None,
 ) -> pa.Table:
     """Aggregate an in-memory Arrow table by h3 cell. Returns a new Arrow table."""
     return aggregate_grid_table(
         H3_SCHEME,
         table,
         resolution=resolution,
-        metric=metric,
-        breakdown=breakdown,
-        breakdown_limit=breakdown_limit,
-        out_geometry=out_geometry,
+        options=options,
         cell_column=h3_column_name,
         geometry_column=geometry_column,
-        where=where,
-        metric_nodata=metric_nodata,
-        bucket_point=bucket_point,
-        bbox_column=bbox_column,
-        breakdown_metric=breakdown_metric,
-        memory_limit=memory_limit,
     )

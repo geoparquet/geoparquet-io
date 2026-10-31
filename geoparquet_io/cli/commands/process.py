@@ -246,16 +246,7 @@ def process_aggregate_a5(
     auto,
     target_per_cell,
     max_cells,
-    metric,
-    metric_nodata,
-    breakdown,
-    breakdown_limit,
-    breakdown_metric,
-    out_geometry,
-    where,
-    bucket_point,
-    bbox_column,
-    write_memory,
+    aggregate_options,
     compression,
     compression_level,
     verbose,
@@ -287,24 +278,15 @@ def process_aggregate_a5(
                 auto=auto,
                 target_per_cell=target_per_cell,
                 max_cells=max_cells,
-                metric=metric,
-                breakdown=breakdown,
-                breakdown_limit=breakdown_limit,
-                breakdown_metric=breakdown_metric,
-                out_geometry=out_geometry,
+                options=aggregate_options,
                 compression=compression,
                 compression_level=compression_level,
                 geoparquet_version=geoparquet_version,
                 verbose=verbose,
                 show_sql=show_sql,
-                where=where,
-                metric_nodata=metric_nodata,
-                bucket_point=bucket_point,
-                bbox_column=bbox_column,
-                memory_limit=write_memory,
             )
         except (ValueError, duckdb.Error) as exc:
-            raise click_error_for(exc, hint=_where_hint(where)) from exc
+            raise click_error_for(exc, hint=_where_hint(aggregate_options.where)) from exc
 
 
 @process_aggregate.command(name="h3")
@@ -330,16 +312,7 @@ def process_aggregate_h3(
     auto,
     target_per_cell,
     max_cells,
-    metric,
-    metric_nodata,
-    breakdown,
-    breakdown_limit,
-    breakdown_metric,
-    out_geometry,
-    where,
-    bucket_point,
-    bbox_column,
-    write_memory,
+    aggregate_options,
     compression,
     compression_level,
     verbose,
@@ -371,24 +344,15 @@ def process_aggregate_h3(
                 auto=auto,
                 target_per_cell=target_per_cell,
                 max_cells=max_cells,
-                metric=metric,
-                breakdown=breakdown,
-                breakdown_limit=breakdown_limit,
-                breakdown_metric=breakdown_metric,
-                out_geometry=out_geometry,
+                options=aggregate_options,
                 compression=compression,
                 compression_level=compression_level,
                 geoparquet_version=geoparquet_version,
                 verbose=verbose,
                 show_sql=show_sql,
-                where=where,
-                metric_nodata=metric_nodata,
-                bucket_point=bucket_point,
-                bbox_column=bbox_column,
-                memory_limit=write_memory,
             )
         except (ValueError, duckdb.Error) as exc:
-            raise click_error_for(exc, hint=_where_hint(where)) from exc
+            raise click_error_for(exc, hint=_where_hint(aggregate_options.where)) from exc
 
 
 @process_aggregate.command(name="admin")

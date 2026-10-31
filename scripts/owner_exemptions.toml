@@ -493,14 +493,6 @@ reason = "permanent: the same keyword-argument list forwarded to one callee (API
 block = "cli.commands.add:add_h3|cli.commands.sort:str_order_command"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
-block = "cli.commands.process:process_aggregate_a5|core.process.aggregate.by_h3:aggregate_by_h3"
-count = 2
-reason = "aggregation options (metric, breakdown, bucket-point, ...) forwarded to the grid driver; T5a: one aggregate-options object"
-[[G3.pylint]]
-block = "cli.commands.process:process_aggregate_h3|core.process.aggregate.by_a5:aggregate_by_a5"
-count = 2
-reason = "aggregation options (metric, breakdown, bucket-point, ...) forwarded to the grid driver; T5a: one aggregate-options object"
-[[G3.pylint]]
 block = "core.add.quadkey:_is_geographic_crs|core.extract:is_geographic_crs"
 reason = "is-geographic CRS copy (approved change 8); T4c"
 [[G3.pylint]]
@@ -509,10 +501,6 @@ reason = "GeoArrow extension-name list copied; T3a's decoder owner"
 [[G3.pylint]]
 block = "core.extract:_extract_streaming|core.str_order:_str_order_streaming"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.process.aggregate.by_a5:aggregate_by_a5|core.process.aggregate.by_h3:aggregate_by_h3"
-count = 2
-reason = "aggregation options (metric, breakdown, bucket-point, ...) forwarded to the grid driver; T5a: one aggregate-options object"
 [[G3.pylint]]
 block = "core.process.raster.contour:contour_file|core.process.raster.polygonize:polygonize_file"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"

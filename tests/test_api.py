@@ -4,6 +4,7 @@ Tests for the Python API (fluent Table class and ops module).
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import inspect
 import json
@@ -321,7 +322,16 @@ class _CallRecorder:
     def __call__(self, *args, **kwargs):
         bound = self._signature.bind(*args, **kwargs)
         bound.apply_defaults()
-        self.delivered = {k: v for k, v in bound.arguments.items() if k != "table"}
+        delivered = {k: v for k, v in bound.arguments.items() if k != "table"}
+        options = delivered.get("options")
+        if dataclasses.is_dataclass(options):
+            # An options object stands for the keywords it holds: the doors are
+            # compared on the values core receives, not on how it is packed.
+            delivered = {
+                **{k: v for k, v in delivered.items() if k != "options"},
+                **dataclasses.asdict(options),
+            }
+        self.delivered = delivered
         return args[0]
 
 

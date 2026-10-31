@@ -70,6 +70,7 @@ from geoparquet_io.core.process.aggregate.common import (
     validate_breakdown_metric,
     validate_metric_nodata,
 )
+from geoparquet_io.core.process.aggregate.options import BUCKET_POINT_GEOMETRY, AggregateOptions
 from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.write_funnels import (
     collect_nonplanar_edges,
@@ -215,7 +216,6 @@ _RESERVED_INTERNAL = (
 )
 
 # --bucket-point mode keywords; any other value names an existing point column.
-BUCKET_POINT_GEOMETRY = "geometry"
 BUCKET_POINT_BBOX = "bbox"
 
 # Struct fields a bbox covering column must expose.
@@ -909,28 +909,24 @@ def aggregate_grid_file(
     input_parquet: str,
     output_parquet: str,
     *,
+    options: AggregateOptions | None = None,
     resolution: int | None = None,
     auto: bool = False,
     target_per_cell: int = 10000,
     max_cells: int = 500000,
-    metric: str | None = None,
-    breakdown: str | None = None,
-    breakdown_limit: int = 20,
-    out_geometry: str = "polygon",
     cell_column: str | None = None,
     compression: str | None = None,
     compression_level: int | None = None,
     geoparquet_version: str | None = None,
     verbose: bool = False,
     show_sql: bool = False,
-    where: str | None = None,
-    metric_nodata: str | None = None,
-    bucket_point: str = BUCKET_POINT_GEOMETRY,
-    bbox_column: str | None = None,
-    breakdown_metric: str | None = None,
-    memory_limit: str | None = None,
 ) -> None:
     """Aggregate a GeoParquet file into grid cells. Writes the output file."""
+    options = options or AggregateOptions()
+    metric, metric_nodata, breakdown = options.metric, options.metric_nodata, options.breakdown
+    breakdown_limit, breakdown_metric = options.breakdown_limit, options.breakdown_metric
+    out_geometry, where, memory_limit = options.out_geometry, options.where, options.memory_limit
+    bucket_point, bbox_column = options.bucket_point, options.bbox_column
     compression_level = resolve_process_compression_level(compression, compression_level)
     configure_verbose(verbose)
     cell_column = cell_column or scheme.default_column
@@ -1047,20 +1043,16 @@ def aggregate_grid_table(
     table,
     *,
     resolution: int,
-    metric: str | None = None,
-    breakdown: str | None = None,
-    breakdown_limit: int = 20,
-    out_geometry: str = "polygon",
+    options: AggregateOptions | None = None,
     cell_column: str | None = None,
     geometry_column: str | None = None,
-    where: str | None = None,
-    metric_nodata: str | None = None,
-    bucket_point: str = BUCKET_POINT_GEOMETRY,
-    bbox_column: str | None = None,
-    breakdown_metric: str | None = None,
-    memory_limit: str | None = None,
 ) -> pa.Table:
     """Aggregate an in-memory Arrow table into grid cells. Returns a new Arrow table."""
+    options = options or AggregateOptions()
+    metric, metric_nodata, breakdown = options.metric, options.metric_nodata, options.breakdown
+    breakdown_limit, breakdown_metric = options.breakdown_limit, options.breakdown_metric
+    out_geometry, where, memory_limit = options.out_geometry, options.where, options.memory_limit
+    bucket_point, bbox_column = options.bucket_point, options.bbox_column
     cell_column = cell_column or scheme.default_column
     _validate_out_geometry(out_geometry)
     if where:

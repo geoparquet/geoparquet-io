@@ -33,6 +33,7 @@ from geoparquet_io.core import admin_datasets, memory_limits
 from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.process.aggregate import by_admin, grid_common
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_a5_table, aggregate_by_a5
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 from geoparquet_io.core.process.overview import detect, rollup
 from tests.conftest import skip_if_grid_unavailable
 
@@ -73,7 +74,9 @@ def points_parquet(tmp_path):
 def cells_parquet(tmp_path, points_parquet):
     """An aggregate output, the input `gpio process overview` takes."""
     out = tmp_path / "cells.parquet"
-    aggregate_by_a5(str(points_parquet), str(out), resolution=5, metric="sum:height")
+    aggregate_by_a5(
+        str(points_parquet), str(out), resolution=5, options=AggregateOptions(metric="sum:height")
+    )
     return out
 
 
@@ -177,15 +180,18 @@ class TestTheLimitIsSet:
             str(points_parquet),
             str(tmp_path / "out.parquet"),
             resolution=5,
-            metric="sum:height",
-            memory_limit="523MB",
+            options=AggregateOptions(metric="sum:height", memory_limit="523MB"),
         )
         assert [r["memory_limit"] for r in connection_spy] == [_duckdb_renders("523MB")]
 
     def test_table_aggregate_uses_the_requested_limit(self, points_parquet, connection_spy):
         import pyarrow.parquet as pq
 
-        aggregate_a5_table(pq.read_table(points_parquet), resolution=5, memory_limit="523MB")
+        aggregate_a5_table(
+            pq.read_table(points_parquet),
+            resolution=5,
+            options=AggregateOptions(memory_limit="523MB"),
+        )
         assert [r["memory_limit"] for r in connection_spy] == [_duckdb_renders("523MB")]
 
     def test_overview_uses_the_requested_limit(self, cells_parquet, tmp_path, connection_spy):
@@ -217,9 +223,7 @@ class TestTheLimitIsSet:
                 str(points_parquet),
                 str(tmp_path / "out.parquet"),
                 resolution=12,
-                metric="sum:height",
-                breakdown="crop",
-                memory_limit="1MB",
+                options=AggregateOptions(metric="sum:height", breakdown="crop", memory_limit="1MB"),
             )
 
 
@@ -268,7 +272,7 @@ class TestTheDefaultLimit:
             str(points_parquet),
             str(tmp_path / "out.parquet"),
             resolution=5,
-            memory_limit="700MB",
+            options=AggregateOptions(memory_limit="700MB"),
         )
         assert connection_spy[0]["memory_limit"] == _duckdb_renders("700MB")
 
@@ -282,7 +286,7 @@ class TestThreadsAndOrdering:
             str(points_parquet),
             str(tmp_path / "out.parquet"),
             resolution=5,
-            memory_limit="2GB",
+            options=AggregateOptions(memory_limit="2GB"),
         )
         assert connection_spy[0]["threads"] == expected
 

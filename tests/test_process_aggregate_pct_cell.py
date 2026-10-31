@@ -44,6 +44,7 @@ from geoparquet_io.core.process.aggregate.grid_common import (
     needed_source_columns,
     read_grid_source_sql,
 )
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 from geoparquet_io.core.process.overview.detect import RollupColumn, _classify_columns
 from geoparquet_io.core.process.overview.rollup import build_rollup_agg_parts
 
@@ -411,7 +412,12 @@ def test_overview_parents_recompute_the_percentage_from_the_total(con, patch_par
     from geoparquet_io.core.process.overview.run import create_overviews
 
     base = tmp_path / "base.parquet"
-    aggregate_by_a5(str(patch_parquet), str(base), resolution=7, metric="pct_cell:area_m2")
+    aggregate_by_a5(
+        str(patch_parquet),
+        str(base),
+        resolution=7,
+        options=AggregateOptions(metric="pct_cell:area_m2"),
+    )
     written = create_overviews(str(base), levels=[5])
     assert len(written) == 1
     _level, parent_path = written[0]

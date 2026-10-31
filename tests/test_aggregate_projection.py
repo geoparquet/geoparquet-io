@@ -34,6 +34,7 @@ from geoparquet_io.core.process.aggregate.grid_common import (
     needed_source_columns,
     read_grid_source_sql,
 )
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 from tests.conftest import skip_if_grid_unavailable
 
 SCHEMES = {"a5": A5_SCHEME, "h3": H3_SCHEME}
@@ -198,7 +199,7 @@ class TestTheNarrowedSource:
                 str(points_parquet),
                 str(tmp_path / "out.parquet"),
                 resolution=4,
-                metric="sum:nosuch",
+                options=AggregateOptions(metric="sum:nosuch"),
             )
 
     def test_the_missing_column_error_still_lists_the_whole_input(self, points_parquet, tmp_path):
@@ -210,7 +211,7 @@ class TestTheNarrowedSource:
                 str(points_parquet),
                 str(tmp_path / "out.parquet"),
                 resolution=4,
-                metric="sum:nosuch",
+                options=AggregateOptions(metric="sum:nosuch"),
             )
         assert "note" in str(excinfo.value) and "crop" in str(excinfo.value)
 
@@ -342,9 +343,9 @@ def test_the_command_itself_produces_the_wide_answer(
         str(points_parquet),
         str(out),
         resolution=4,
-        metric="sum:height,avg:height",
-        breakdown="crop",
-        where="height > 1",
+        options=AggregateOptions(
+            metric="sum:height,avg:height", breakdown="crop", where="height > 1"
+        ),
     )
     wide = _grid_result(
         con,
@@ -535,7 +536,10 @@ def test_a_metric_named_like_an_internal_alias_reports_cleanly(tmp_path, engine)
     with pytest.raises(InvalidParameterError, match="__key"):
         if engine == "grid":
             aggregate_by_a5(
-                str(src), str(tmp_path / "out.parquet"), resolution=4, metric="sum:__key"
+                str(src),
+                str(tmp_path / "out.parquet"),
+                resolution=4,
+                options=AggregateOptions(metric="sum:__key"),
             )
         else:
             from geoparquet_io.core.process.aggregate.by_admin import aggregate_by_admin

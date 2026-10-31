@@ -6,6 +6,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
 
 def _write_points_geoparquet(path, rows):
@@ -109,9 +110,7 @@ def test_aggregate_a5_count_metric_breakdown(tmp_path):
         str(src),
         str(out),
         resolution=5,
-        metric="sum:area",
-        breakdown="crop",
-        out_geometry="polygon",
+        options=AggregateOptions(metric="sum:area", breakdown="crop", out_geometry="polygon"),
     )
     table = pq.read_table(out)
     cols = table.column_names
@@ -136,7 +135,7 @@ def test_aggregate_a5_out_geometry_none_is_plain_table(tmp_path):
     src = tmp_path / "fields.parquet"
     out = tmp_path / "agg_none.parquet"
     _write_points_geoparquet(src, [(10.0, 50.0, "wheat", 4.0)])
-    aggregate_by_a5(str(src), str(out), resolution=5, out_geometry="none")
+    aggregate_by_a5(str(src), str(out), resolution=5, options=AggregateOptions(out_geometry="none"))
     table = pq.read_table(out)
     assert "a5_cell" in table.column_names
     assert "count" in table.column_names
@@ -264,7 +263,7 @@ def test_aggregate_a5_input_with_reserved_column_names(tmp_path):
         """
     )
     con.close()
-    aggregate_by_a5(str(src), str(out), resolution=5, metric="sum:area")
+    aggregate_by_a5(str(src), str(out), resolution=5, options=AggregateOptions(metric="sum:area"))
     df = pq.read_table(out).to_pandas()
     # The real geometry is produced (not shadowed by the 'junk' __geom user column).
     assert int(df["count"].sum()) == 2

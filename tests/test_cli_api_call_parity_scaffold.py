@@ -75,6 +75,7 @@ it in isolation; in the full suite it is a non-issue.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import inspect
 import json
 from collections.abc import Callable
@@ -130,6 +131,7 @@ from geoparquet_io.core.process import overview as core_overview
 from geoparquet_io.core.process.aggregate import by_a5 as core_agg_a5
 from geoparquet_io.core.process.aggregate import by_admin as core_agg_admin
 from geoparquet_io.core.process.aggregate import by_h3 as core_agg_h3
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
 # Sentinel: the recorder returns its first positional argument. The table-centric
 # core functions return a table that the API front ends immediately re-wrap, so a
@@ -1441,7 +1443,19 @@ def _capture(frontend: Frontend, ctx: Ctx) -> dict[str, Any]:
             f"expected exactly one call to {target.__name__ if hasattr(target, '__name__') else target}"
             f".{attribute}, recorded {len(recorder.calls)}{detail}"
         )
-    return recorder.calls[0]
+    return _flatten_options(recorder.calls[0])
+
+
+def _flatten_options(call: dict[str, Any]) -> dict[str, Any]:
+    """A call's ``options=AggregateOptions(...)`` as the keywords it carries.
+
+    The grid-aggregate layers hand core one options object; parity is about the
+    values, so the comparison reads them out by field name.
+    """
+    options = call.get("options")
+    if not isinstance(options, AggregateOptions):
+        return call
+    return {**{k: v for k, v in call.items() if k != "options"}, **dataclasses.asdict(options)}
 
 
 def _mismatches(
