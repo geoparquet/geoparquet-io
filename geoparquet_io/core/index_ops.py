@@ -630,7 +630,7 @@ def partition_index(
                 force=force,
                 skip_analysis=skip_analysis,
                 filename_prefix=filename_prefix,
-                **write.funnel_kwargs(),
+                write=write,
             )
 
             total_size_mb, avg_size_mb = calculate_partition_stats(output_folder, num_partitions)

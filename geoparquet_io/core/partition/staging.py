@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import unquote
 
 from geoparquet_io.core.compression import resolve_codec
@@ -29,6 +29,7 @@ from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import output_is_kept
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.remote import is_remote_url
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
@@ -93,28 +94,20 @@ class PartitionWriteOptions:
     GEOGRAPHY edges, until the witness can be read once per run.
     """
 
+    #: The resolved output version; it replaces ``write.geoparquet_version``
+    #: (the request) in every partition write.
     geoparquet_version: str | None = None
     input_file: str | None = None
-    #: ``None``: the owner's default (``compression.resolve_codec``).
-    compression: str | None = None
-    compression_level: int | None = None
-    row_group_size_mb: int | None = None
-    row_group_rows: int | None = None
-    memory_limit: str | None = None
-    profile: str | None = None
+    #: The run's write options; ``None`` fields take the owners' defaults.
+    write: WriteOptions = field(default_factory=WriteOptions)
     extra_kv_metadata: dict[str, str] | None = None
 
     def as_write_kwargs(self) -> dict:
         """Return the kwargs accepted by ``write_parquet_with_metadata``."""
         return {
+            **self.write.funnel_kwargs(),
             "geoparquet_version": self.geoparquet_version,
             "input_file": None if is_remote_url(self.input_file) else self.input_file,
-            "compression": self.compression,
-            "compression_level": self.compression_level,
-            "row_group_size_mb": self.row_group_size_mb,
-            "row_group_rows": self.row_group_rows,
-            "memory_limit": self.memory_limit,
-            "profile": self.profile,
             "extra_kv_metadata": self.extra_kv_metadata,
         }
 

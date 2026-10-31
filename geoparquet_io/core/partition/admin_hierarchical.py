@@ -41,7 +41,7 @@ from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import output_is_kept, resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, progress, success, warn
-from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+from geoparquet_io.core.parquet_writer import WriteOptions, resolve_output_geoparquet_version
 from geoparquet_io.core.partition.common import raise_if_no_rows, sanitize_filename
 from geoparquet_io.core.partition.staging import (
     PartitionWriteOptions,
@@ -315,14 +315,8 @@ def _create_all_partitions(
     metadata,
     input_parquet,
     verbose,
-    profile,
     original_cols,
-    geoparquet_version=None,
-    compression=None,
-    compression_level=None,
-    row_group_size_mb=None,
-    row_group_rows=None,
-    memory_limit=None,
+    write: WriteOptions,
     vecorel=False,
     extra_kv=None,
 ):
@@ -348,15 +342,10 @@ def _create_all_partitions(
     )
     write_options = PartitionWriteOptions(
         geoparquet_version=resolve_output_geoparquet_version(
-            geoparquet_version, input_file=input_parquet, verbose=verbose
+            write.geoparquet_version, input_file=input_parquet, verbose=verbose
         ),
         input_file=input_parquet,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        memory_limit=memory_limit,
-        profile=profile,
+        write=write,
         extra_kv_metadata=extra_kv,
     )
 
@@ -367,7 +356,7 @@ def _create_all_partitions(
         select_sql = _build_admin_staging_select(
             enriched_table, output_column_names, original_cols, vecorel, aliases
         )
-        run_partitioned_copy(con, select_sql, aliases, staging_dir, verbose, memory_limit)
+        run_partitioned_copy(con, select_sql, aliases, staging_dir, verbose, write.memory_limit)
 
         for values, partition_dir in iter_staging_partitions(staging_dir):
             if _finalize_admin_partition(
@@ -560,14 +549,8 @@ def partition_by_admin_hierarchical(
                 metadata,
                 actual_input,
                 verbose,
-                profile,
                 original_cols,
-                geoparquet_version,
-                compression,
-                compression_level,
-                row_group_size_mb,
-                row_group_rows,
-                memory_limit,
+                WriteOptions.pick(locals()),
                 vecorel,
                 extra_kv,
             )

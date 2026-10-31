@@ -493,9 +493,6 @@ reason = "GeoArrow extension-name list copied; T3a's decoder owner"
 block = "core.extract:_extract_streaming|core.str_order:_str_order_streaming"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
-block = "core.partition.admin_hierarchical:_create_all_partitions|core.partition.common:partition_by_column"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
 block = "core.process.aggregate.by_a5:aggregate_by_a5|core.process.aggregate.by_h3:aggregate_by_h3"
 count = 2
 reason = "aggregation options (metric, breakdown, bucket-point, ...) forwarded to the grid driver; T5a: one aggregate-options object"

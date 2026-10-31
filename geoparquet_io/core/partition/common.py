@@ -19,7 +19,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.logging_config import debug, error, info, progress, warn
-from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+from geoparquet_io.core.parquet_writer import WriteOptions, resolve_output_geoparquet_version
 from geoparquet_io.core.partition.staging import (
     PartitionWriteOptions,
     check_output_collision,
@@ -775,13 +775,7 @@ def partition_by_column(
     force: bool = False,
     skip_analysis: bool = False,
     filename_prefix: str | None = None,
-    profile: str | None = None,
-    geoparquet_version: str | None = None,
-    compression: str | None = None,
-    compression_level: int | None = None,
-    row_group_size_mb: int | None = None,
-    row_group_rows: int | None = None,
-    memory_limit: str | None = None,
+    write: WriteOptions | None = None,
 ) -> int:
     """
     Common function to partition a GeoParquet file by column values.
@@ -801,13 +795,7 @@ def partition_by_column(
         force: Force partitioning even if analysis detects issues
         skip_analysis: Skip partition strategy analysis (for performance)
         filename_prefix: Optional prefix for partition filenames (e.g., 'fields' → fields_USA.parquet)
-        profile: AWS profile name (S3 only, optional)
-        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
-        compression: Compression codec (default: ZSTD)
-        compression_level: Compression level (default: 15)
-        row_group_size_mb: Row group size in MB (mutually exclusive with row_group_rows)
-        row_group_rows: Row group size in number of rows (mutually exclusive with row_group_size_mb)
-        memory_limit: DuckDB memory limit for write operations (e.g., "2GB")
+        write: The write options (codec, level, row groups, profile, version, memory)
 
     Returns:
         Number of partitions actually written this run. With overwrite=False,
@@ -823,6 +811,7 @@ def partition_by_column(
         Distinct partition values that sanitize to the same filename raise a
         ``PartitionError`` rather than silently dropping rows.
     """
+    write = write or WriteOptions()
     # Stop before touching the output: nothing to partition means nothing to
     # write, and --skip-analysis/--force must not get past this either (#823).
     raise_if_no_rows(input_parquet)
@@ -871,15 +860,10 @@ def partition_by_column(
             # their scratch file, which is lossless with respect to it (#993).
             write_options = PartitionWriteOptions(
                 geoparquet_version=resolve_output_geoparquet_version(
-                    geoparquet_version, input_file=input_parquet, verbose=verbose
+                    write.geoparquet_version, input_file=input_parquet, verbose=verbose
                 ),
                 input_file=input_parquet,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
-                memory_limit=memory_limit,
-                profile=profile,
+                write=write,
             )
 
             # Single pass: COPY ... PARTITION_BY routes every row in one input scan
@@ -892,7 +876,9 @@ def partition_by_column(
                 select_sql = _build_staging_select(
                     input_url, column_name, column_prefix_length, keep_partition_column, alias
                 )
-                run_partitioned_copy(con, select_sql, [alias], staging_dir, verbose, memory_limit)
+                run_partitioned_copy(
+                    con, select_sql, [alias], staging_dir, verbose, write.memory_limit
+                )
 
                 if not os.path.isdir(staging_dir) or not any(
                     "=" in d for d in os.listdir(staging_dir)
@@ -932,7 +918,11 @@ def partition_by_column(
                 debug(f"\nUploading {partition_count} partition files to {output_folder}...")
 
             upload_if_remote(
-                actual_output, output_folder, profile=profile, is_directory=True, verbose=verbose
+                actual_output,
+                output_folder,
+                profile=write.profile,
+                is_directory=True,
+                verbose=verbose,
             )
 
         return partition_count

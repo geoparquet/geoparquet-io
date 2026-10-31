@@ -171,7 +171,7 @@ def partition_by_string(
             force=force,
             skip_analysis=skip_analysis,
             filename_prefix=filename_prefix,
-            **write.funnel_kwargs(),
+            write=write,
         )
 
         success(f"Successfully created {num_partitions} partition file(s)")

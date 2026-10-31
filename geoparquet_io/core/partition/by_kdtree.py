@@ -20,6 +20,7 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.common import (
     partition_by_column,
     preview_partition,
@@ -277,13 +278,7 @@ def partition_by_kdtree(
                 force=force,
                 skip_analysis=skip_analysis,
                 filename_prefix=filename_prefix,
-                profile=profile,
-                geoparquet_version=geoparquet_version,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
-                memory_limit=memory_limit,
+                write=WriteOptions.pick(locals()),
             )
 
             if verbose:
