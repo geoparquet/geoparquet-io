@@ -181,6 +181,15 @@ path = "geoparquet_io/core/write_strategies/duckdb_kv.py"
 count = "*"
 reason = "metadata serialization, not a report: PROJJSON for SQL"
 
+# Who owns one key of a geo block's column entry (#1367 concept 4). The
+# geo_compose arm reads this table: an edit of a LISTED key in its module is the
+# composer's delegated step (step 5's CRS output rule, step 4's edges), not a
+# second composer. An ownership statement, not an exemption: it carries no
+# count, and any other key edited in these modules is still a hit.
+[G1.geo_compose_entry_key_owners]
+"geoparquet_io/core/crs_utils.py" = ["crs"]
+"geoparquet_io/core/edges.py" = ["edges", "orientation"]
+
 # A geometry column chosen outside core/geometry_detection.py (#1367 concept 7).
 # Seed baseline recorded when the arm was created (#1392 pass 3): counts only
 # go down from here; T0e zeroes what it can.

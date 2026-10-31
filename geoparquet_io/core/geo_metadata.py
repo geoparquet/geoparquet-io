@@ -1359,6 +1359,10 @@ class GeoBlockOptions:
     gates run either way. A block that is written (a repair, a patch) is never
     a description: it takes ``version`` from the facade's repair policy
     (``resolve_output_geoparquet_version(..., preserve_input=True)``).
+
+    ``geometry_info`` declares each column's entry. The carried-wins rule for
+    the primary's declared entry applies in description mode only; on a write
+    the primary entry describes the input and the composer builds the output.
     ``primary_column`` relabels the block's primary (a repair of DuckDB's
     first-column pick); otherwise the carried primary stays, or
     ``geometry_column`` is named. ``geometry_column`` is the column the

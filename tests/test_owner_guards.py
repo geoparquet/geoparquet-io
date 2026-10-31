@@ -2456,13 +2456,12 @@ def _block_edits(tree: ast.AST) -> Iterator[ast.AST]:
                     yield node  # a carried block re-stated over a splat
 
 
-#: Modules that own one key of a column entry and apply its rule for the
-#: composer (step 5's CRS output rule, step 4's edges): an edit of THAT key
-#: there is the composer's delegated step, not a second composer.
-_ENTRY_KEY_OWNERS = {
-    "geoparquet_io/core/crs_utils.py": frozenset({"crs"}),
-    "geoparquet_io/core/edges.py": frozenset({"edges", "orientation"}),
-}
+def _entry_key_owners() -> dict[str, frozenset[str]]:
+    """``[G1.geo_compose_entry_key_owners]`` of the one exemptions file: the
+    modules that own one key of a column entry and apply its rule for the
+    composer. An edit of THAT key there is the composer's delegated step."""
+    table = load_exemptions().get("G1", {}).get("geo_compose_entry_key_owners", {})
+    return {path: frozenset(keys) for path, keys in table.items()}
 
 
 def _module_str_constant(m: _Module, name: str) -> str | None:
@@ -2516,10 +2515,10 @@ def _find_geo_compose(m: _Module) -> Iterator[Hit]:
     comprehension; an edit through a loop target over ``columns.values()`` /
     ``.items()``; and an edit of a ``col_meta`` parameter. The CRS and edges
     owners' edits of their own key are the composer's delegated steps
-    (:data:`_ENTRY_KEY_OWNERS`).
+    (``[G1.geo_compose_entry_key_owners]`` in scripts/owner_exemptions.toml).
     """
     seen: set[int] = set()
-    owned = _ENTRY_KEY_OWNERS.get(m.path, frozenset())
+    owned = _entry_key_owners().get(m.path, frozenset())
     for node in _block_edits(m.tree):
         if id(node) not in seen:
             seen.add(id(node))
@@ -4629,3 +4628,29 @@ def test_g12_edges_arm_leaves_a_centroid_elsewhere_alone(tmp_path):
 def test_g12_edges_arm_flags_every_shape(shape, tmp_path):
     repo = _plant(tmp_path, "edges", EDGES_SHAPES[shape])
     assert arm_hits(repo, "edges"), shape
+
+
+@pytest.mark.parametrize(
+    ("module", "key", "flagged"),
+    [
+        ("crs_utils.py", "crs", False),
+        ("crs_utils.py", "covering", True),
+        ("edges.py", "orientation", False),
+        ("edges.py", "bbox", True),
+        ("some_module.py", "crs", True),
+    ],
+)
+def test_g12_an_entry_key_owner_edits_only_its_listed_keys(tmp_path, module, key, flagged):
+    """``[G1.geo_compose_entry_key_owners]`` excuses a listed key in its module only."""
+    target = tmp_path / "geoparquet_io" / "core" / module
+    target.parent.mkdir(parents=True)
+    target.write_text(f"def f(col_meta, v):\n    col_meta[{key!r}] = v\n", encoding="utf-8")
+    assert bool(arm_hits(tmp_path, "geo_compose")) is flagged
+
+
+def test_g12_the_entry_key_owner_table_names_real_modules():
+    owners = _entry_key_owners()
+    assert owners, "[G1.geo_compose_entry_key_owners] is missing"
+    for path, keys in owners.items():
+        assert (REPO / path).exists(), path
+        assert keys, path
