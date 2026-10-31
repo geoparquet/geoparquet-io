@@ -1053,6 +1053,7 @@ def _table_write(strategy: str):
 
 def _geo_rewrite(out: Path, level):
     """The funnel's one footer rewrite, every footer patch's fallback."""
+    from geoparquet_io.core.parquet_writer import WriteOptions
     from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
     pq.write_table(_plain_table(), str(out), compression="snappy")
@@ -1060,8 +1061,7 @@ def _geo_rewrite(out: Path, level):
         str(out),
         str(out),
         {"geo": '{"version": "2.0.0"}'},
-        compression="ZSTD",
-        compression_level=level,
+        write=WriteOptions(compression="ZSTD", compression_level=level),
     )
 
 

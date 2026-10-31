@@ -231,7 +231,7 @@ def test_a_failed_rewrite_leaves_the_input_and_no_staging_debris(zstd15_file, mo
         raise RuntimeError("planted failure")
 
     monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
-    monkeypatch.setattr("geoparquet_io.core.write_funnels._copy_row_groups", boom)
+    monkeypatch.setattr("geoparquet_io.core.write_funnels._rewrite_groups", boom)
     before = zstd15_file.read_bytes()
 
     # The funnel's own error, unwrapped: the fallback is the funnel's rewrite

@@ -252,8 +252,8 @@ class TestVecorelMetadataRewriteCodec:
         from geoparquet_io.core.parquet_writer import WriteOptions
 
         gm._add_vecorel_metadata_to_file(str(src), False, WriteOptions(compression="GZIP"))
-        assert seen["compression"] == "GZIP"
-        assert seen["compression_level"] is None
+        assert seen["write"].compression == "GZIP"
+        assert seen["write"].compression_level is None
 
 
 class TestHelpTextNamesTheRightDefault:

@@ -111,6 +111,7 @@ def test_rewrite_takes_the_facades_row_groups_when_unspecified(tmp_path):
     """
     import pyarrow as pa
 
+    from geoparquet_io.core.parquet_writer import WriteOptions
     from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
     path = str(tmp_path / "plain.parquet")
@@ -120,7 +121,9 @@ def test_rewrite_takes_the_facades_row_groups_when_unspecified(tmp_path):
     rewrite_footer_kv(path, path, {"geo": json.dumps({"version": "2.0.0"})})
     assert pq.ParquetFile(path).metadata.num_row_groups == 1
 
-    rewrite_footer_kv(path, path, {"geo": json.dumps({"version": "2.0.0"})}, row_group_rows=10)
+    rewrite_footer_kv(
+        path, path, {"geo": json.dumps({"version": "2.0.0"})}, write=WriteOptions(row_group_rows=10)
+    )
     assert pq.ParquetFile(path).metadata.num_row_groups == 3
 
 
@@ -128,12 +131,15 @@ def test_rewrite_preserves_lz4_codec_unit(tmp_path):
     """``resolve_codec`` keeps the normalized 'LZ4' name callers actually pass."""
     import pyarrow as pa
 
+    from geoparquet_io.core.parquet_writer import WriteOptions
     from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
     path = str(tmp_path / "plain.parquet")
     pq.write_table(pa.table({"a": [1, 2, 3]}), path, compression="lz4")
 
-    rewrite_footer_kv(path, path, {"geo": json.dumps({"version": "2.0.0"})}, compression="LZ4")
+    rewrite_footer_kv(
+        path, path, {"geo": json.dumps({"version": "2.0.0"})}, write=WriteOptions(compression="LZ4")
+    )
     codec = pq.ParquetFile(path).metadata.row_group(0).column(0).compression
     assert codec in ("LZ4", "LZ4_RAW"), codec
 
@@ -149,6 +155,7 @@ def test_rewrite_streams_instead_of_reading_whole_file(tmp_path, monkeypatch, ro
     """
     import pyarrow as pa
 
+    from geoparquet_io.core.parquet_writer import WriteOptions
     from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
     path = tmp_path / "plain.parquet"
@@ -162,7 +169,7 @@ def test_rewrite_streams_instead_of_reading_whole_file(tmp_path, monkeypatch, ro
         str(path),
         str(path),
         {"geo": json.dumps({"version": "2.0.0"})},
-        row_group_rows=row_group_rows,
+        write=WriteOptions(row_group_rows=row_group_rows),
     )
 
     with pq.ParquetFile(str(path)) as pf:
@@ -176,6 +183,7 @@ _MEASURE_REWRITE = """
 import json, sys
 import pyarrow as pa
 import pyarrow.parquet as pq
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
 path, rows = sys.argv[1], int(sys.argv[2])
@@ -200,7 +208,7 @@ def read_row_group_one_thread(self, i, columns=None, use_threads=True, use_panda
 
 pq.ParquetFile.read_row_group = read_row_group_one_thread
 baseline = pa.total_allocated_bytes()
-rewrite_footer_kv(path, path, {"geo": json.dumps({"version": "2.0.0"})}, row_group_rows=rows)
+rewrite_footer_kv(path, path, {"geo": json.dumps({"version": "2.0.0"})}, write=WriteOptions(row_group_rows=rows))
 print(json.dumps({"writes": len(peaks), "growth": max(peaks) - baseline if peaks else 0}))
 """
 

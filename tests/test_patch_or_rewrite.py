@@ -361,3 +361,32 @@ def test_the_assume_crs84_copy_is_a_footer_patch(tmp_path):
         assert _sidecars(Path(temp_path)) == SIDECARS
     finally:
         Path(temp_path).unlink(missing_ok=True)
+
+
+def test_an_mb_target_is_measured_on_the_facades_sample_not_the_first_row_group(tmp_path):
+    """The rewrite asks ``resolve_row_group_rows_for_sample`` over its leading
+    rows, as every streamed write does: the answer is the same whatever row
+    groups the input happened to have. It used to measure the whole first row
+    group, so a file whose first group was 500 small rows got a very different
+    count from the same rows in one big group."""
+    import pyarrow as pa
+
+    from geoparquet_io.core.parquet_writer import WriteOptions
+    from geoparquet_io.core.write_funnels import rewrite_footer_kv
+
+    n = 60_000
+    payload = ["x" if i < 500 else "y" * 200 for i in range(n)]
+    table = pa.table({"id": list(range(n)), "payload": payload})
+    one_group, small_first = tmp_path / "one_group.parquet", tmp_path / "small_first.parquet"
+    pq.write_table(table, str(one_group), row_group_size=n)
+    pq.write_table(table, str(small_first), row_group_size=500)
+
+    write = WriteOptions(row_group_size_mb=1)
+    groups = {}
+    for path in (one_group, small_first):
+        rewrite_footer_kv(str(path), str(path), {"k": "v"}, write=write)
+        md = pq.read_metadata(str(path))
+        groups[path.name] = [md.row_group(i).num_rows for i in range(md.num_row_groups)]
+        assert md.num_rows == n
+
+    assert groups["one_group.parquet"] == groups["small_first.parquet"], groups

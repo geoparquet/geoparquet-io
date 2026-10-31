@@ -280,13 +280,6 @@ def _add_vecorel_metadata_to_file(parquet_file: str, verbose: bool, write: Write
     patch_or_rewrite(
         parquet_file,
         extra_kv,
-        rewrite=functools.partial(
-            rewrite_footer_kv,
-            compression=write.compression,
-            compression_level=write.compression_level,
-            row_group_rows=write.row_group_rows,
-            row_group_size_mb=write.row_group_size_mb,
-            profile=write.profile,
-        ),
+        rewrite=functools.partial(rewrite_footer_kv, write=write),
         verbose=verbose,
     )

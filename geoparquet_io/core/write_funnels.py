@@ -33,6 +33,7 @@ Split out of ``common.py`` unchanged; every name is still importable from there.
 import contextlib
 import copy
 import functools
+import itertools
 import json
 import os
 import shutil
@@ -124,13 +125,16 @@ from geoparquet_io.core.parquet_footer import patch_or_rewrite
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.parquet_writer import (
     _CARRIED_SCHEMA_METADATA_KEYS,
+    WriteOptions,
     geoparquet_copy_options,
     note_duckdb_copy_rounding,
     output_schema_metadata,
+    regroup,
     resolve_input_crs,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
     resolve_row_group_rows_for_query,
+    resolve_row_group_rows_for_sample,
     resolve_row_group_rows_for_table,
     without_geometry_dictionary,
     write_arrow_table,
@@ -284,9 +288,11 @@ def apply_nonplanar_edges(
         geo_updates,
         rewrite=functools.partial(
             rewrite_footer_kv,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_rows=row_group_rows,
+            write=WriteOptions(
+                compression=compression,
+                compression_level=compression_level,
+                row_group_rows=row_group_rows,
+            ),
         ),
         geography=geography,
         geography_bbox=geography_bbox,
@@ -521,9 +527,11 @@ def _ensure_v2_geo_metadata(
         {"geo": json.dumps(geo_meta)},
         rewrite=functools.partial(
             rewrite_footer_kv,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_rows=row_group_rows,
+            write=WriteOptions(
+                compression=compression,
+                compression_level=compression_level,
+                row_group_rows=row_group_rows,
+            ),
         ),
         verbose=verbose,
     )
@@ -988,16 +996,33 @@ def rewrite_file_through_funnel(
             con.close()
 
 
-def _copy_row_groups(pf: pq.ParquetFile, writer: pq.ParquetWriter, row_group_rows: int) -> None:
-    """Copy ``pf`` into ``writer`` in pieces of ``row_group_rows``, one group each.
+def _rewrite_groups(
+    pf: pq.ParquetFile, row_group_rows: int | None, row_group_size_mb: float | None
+) -> tuple[Iterator, int]:
+    """``(batches, rows)`` for a streamed rewrite of *pf*, cut by ``regroup``.
 
-    Bounded by one row group in memory, never the whole file (#1155). The
-    pieces' own schema metadata is irrelevant: the footer's key/value metadata
-    comes from the schema ``writer`` was opened with, and ``write_table``
-    compares schemas without metadata.
+    A row count is read in batches of that size. A byte target is measured the
+    way every streamed write measures one: the leading batches are buffered
+    until the facade's ``resolve_row_group_rows_for_sample`` answers (its
+    bounded sample, whatever row groups the input had), and go back in front
+    of the rest, in order. Memory stays bounded by one row group (#1155).
     """
-    for batch in pf.iter_batches(batch_size=row_group_rows):
-        writer.write_table(pa.Table.from_batches([batch]), row_group_size=row_group_rows)
+    rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
+    if rows is not None:
+        return pf.iter_batches(batch_size=rows), rows
+    batches = pf.iter_batches()
+    head: list[pa.RecordBatch] = []
+    for batch in batches:
+        head.append(batch)
+        rows = resolve_row_group_rows_for_sample(
+            pa.Table.from_batches(head), None, row_group_size_mb, final=False
+        )
+        if rows is not None:
+            break
+    if rows is None:
+        sample = pa.Table.from_batches(head) if head else pf.schema_arrow.empty_table()
+        rows = resolve_row_group_rows_for_sample(sample, None, row_group_size_mb)
+    return itertools.chain(head, batches), rows
 
 
 def _footer_keys(pf: pq.ParquetFile) -> dict[bytes, bytes]:
@@ -1013,29 +1038,13 @@ def _footer_keys(pf: pq.ParquetFile) -> dict[bytes, bytes]:
     return keys
 
 
-def _rewrite_row_group_rows(
-    pf: pq.ParquetFile, row_group_rows: int | None, row_group_size_mb: float | None
-) -> int:
-    """The facade's row count for a rewrite of *pf*; an MB target is measured
-    on its first row group, so the sizing stays bounded by one group."""
-    if row_group_rows is None and row_group_size_mb is not None and pf.num_row_groups:
-        sample = pf.read_row_group(0)
-    else:
-        sample = pa.table({})
-    return resolve_row_group_rows_for_table(sample, row_group_rows, row_group_size_mb)
-
-
 def rewrite_footer_kv(
     source: str,
     destination: str,
     updates: Mapping[str, str | None],
     *,
-    compression: str | None = None,
-    compression_level: int | None = None,
-    row_group_rows: int | None = None,
-    row_group_size_mb: float | None = None,
+    write: WriteOptions | None = None,
     verbose: bool = False,
-    profile: str | None = None,
 ) -> None:
     """Re-encode *source* to *destination* with ``updates`` applied to its footer keys.
 
@@ -1045,12 +1054,11 @@ def rewrite_footer_kv(
     are copied as they are -- a native 2.0 column stays native, a WKB one WKB --
     and only what Parquet cannot carry over is chosen again:
 
-    * the codec and level, from ``compression``/``compression_level`` through
-      ``compression.resolve_codec`` (unset: the facade's ZSTD 15);
-    * the row groups, ``row_group_rows`` per group or a ``row_group_size_mb``
-      target measured on the first row group, through
-      ``parquet_writer.resolve_row_group_rows_for_table`` (unset: the facade's
-      default);
+    * the codec and level, from ``write`` through ``compression.resolve_codec``
+      (unset: the facade's ZSTD 15);
+    * the row groups, from ``write``'s row count or byte target through
+      ``parquet_writer.resolve_row_group_rows`` /
+      ``resolve_row_group_rows_for_sample`` (unset: the facade's default);
     * the footer keys, by the facade's one rule
       (``parquet_writer.output_schema_metadata``): every key the input carries
       survives with the keys ``updates`` names set or removed, except the
@@ -1065,17 +1073,20 @@ def rewrite_footer_kv(
         source: The file to read; local or remote.
         destination: Where the result goes; may be *source*.
         updates: Footer keys to set, as text; ``None`` removes a key.
-        compression, compression_level: The codec to write; unset is the facade's.
-        row_group_rows: Rows per group; unset is the facade's.
-        row_group_size_mb: A byte target per group, when no row count is given.
+        write: The caller's write facts (``parquet_writer.WriteOptions``): codec,
+            level, row groups, and the AWS profile for a remote *destination*.
+            The output version and memory limit do not apply: the logical types
+            are copied as they are, and no DuckDB connection is opened.
         verbose: Report the footer keys written.
-        profile: AWS profile for a remote *destination*.
     """
     # geoarrow registration makes pyarrow round-trip the native GEOMETRY/
     # GEOGRAPHY logical types (and their CRS) instead of demoting to binary.
     import geoarrow.pyarrow  # noqa: F401
 
-    write_kwargs = resolve_codec(compression, compression_level, context="write").pyarrow_kwargs()
+    write = write or WriteOptions()
+    write_kwargs = resolve_codec(
+        write.compression, write.compression_level, context="write"
+    ).pyarrow_kwargs()
     with remote_write_context(destination, verbose=verbose) as (local, _):
         with staged_replacement(local) as staged:
             # Every handle on *source* closes before the swap: Windows refuses
@@ -1086,7 +1097,6 @@ def rewrite_footer_kv(
                 # chunk `iter_batches` has read until the file closes, which grew
                 # to roughly the whole compressed file instead of one row group.
                 pf = stack.enter_context(pq.ParquetFile(handle, pre_buffer=False))
-                rows = _rewrite_row_group_rows(pf, row_group_rows, row_group_size_mb)
                 metadata = output_schema_metadata(
                     _carried_with_updates(_footer_keys(pf), updates), None
                 )
@@ -1096,8 +1106,12 @@ def rewrite_footer_kv(
                 with pq.ParquetWriter(
                     staged, schema, **without_geometry_dictionary(write_kwargs, schema)
                 ) as writer:
-                    _copy_row_groups(pf, writer, rows)
-        upload_if_remote(local, destination, profile=profile, verbose=verbose)
+                    batches, rows = _rewrite_groups(
+                        pf, write.row_group_rows, write.row_group_size_mb
+                    )
+                    for group in regroup(batches, rows):
+                        writer.write_table(pa.Table.from_batches([group]), row_group_size=rows)
+        upload_if_remote(local, destination, profile=write.profile, verbose=verbose)
 
 
 # Fields a carried `geo` block must still have for the 2.0 fast path to be able

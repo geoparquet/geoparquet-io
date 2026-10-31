@@ -32,6 +32,7 @@ from geoparquet_io.core.logging_config import debug, info, progress
 from geoparquet_io.core.parquet_footer import patch_or_rewrite
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
+    WriteOptions,
     resolve_output_geoparquet_version,
     resolve_row_group_rows_for_rewrite,
 )
@@ -267,7 +268,9 @@ def fix_bboxless_covering(parquet_file, output_file, verbose=False, profile=None
         parquet_file,
         {"geo": json.dumps(repaired)},
         output_file=output_file,
-        rewrite=functools.partial(rewrite_footer_kv, verbose=verbose, profile=profile),
+        rewrite=functools.partial(
+            rewrite_footer_kv, write=WriteOptions(profile=profile), verbose=verbose
+        ),
         verbose=verbose,
     )
 
