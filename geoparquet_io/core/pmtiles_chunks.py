@@ -44,7 +44,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from geoparquet_io.core.common import get_dataset_bounds, get_parquet_metadata
+from geoparquet_io.core.bbox_structure import dataset_bounds
+from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     query_schema,
@@ -144,7 +145,7 @@ def _dataset_bounds(
     bounds = _footer_bounds(sanitized_carried_geo(metadata), geometry_column)
     if bounds is not None:
         return bounds
-    found = get_dataset_bounds(input_path, geometry_column=geometry_column, verbose=verbose)
+    found = dataset_bounds(input_path, geometry_column=geometry_column, verbose=verbose)
     if found is None:
         raise RuntimeError(f"Could not determine bounds of {input_path} to chunk it")
     minx, miny, maxx, maxy = (float(v) for v in found)

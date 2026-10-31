@@ -75,7 +75,6 @@ import struct
 from collections.abc import Iterable, Mapping
 from typing import Any, NamedTuple
 
-from geoparquet_io.core.crs_utils import merge_longitude_ranges
 from geoparquet_io.core.optional_deps import load_module
 
 Box = tuple[float, float, float, float]
@@ -852,9 +851,14 @@ def row_group_geography_bboxes(
                 boxes.append(box)
     if unreadable or not boxes:
         return ColumnBounds(per_group, None, unreadable)
-    xmin, xmax = merge_longitude_ranges([(box[0], box[2]) for box in boxes])
-    whole = (xmin, min(b[1] for b in boxes), xmax, max(b[3] for b in boxes))
-    return ColumnBounds(per_group, whole, unreadable)
+    from geoparquet_io.core.geo_metadata import GeometryStats, merged_geometry_stats
+
+    # GEOGRAPHY coordinates are longitude/latitude by definition.
+    parts = (GeometryStats(list(b), []) for b in boxes)
+    merged = merged_geometry_stats(parts, geographic=True).bbox
+    assert merged is not None  # boxes is non-empty, so the fold has an extent
+    xmin, ymin, xmax, ymax = merged
+    return ColumnBounds(per_group, (xmin, ymin, xmax, ymax), unreadable)
 
 
 def geography_statistics(

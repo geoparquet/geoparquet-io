@@ -168,14 +168,8 @@ def test_the_residue_is_the_named_stage_c_list():
     assert public == {
         "add_bbox",
         "add_computed_column",
-        "calculate_file_bounds",
-        "compute_geometry_dimensions_via_sql",
-        "compute_geometry_types_via_sql",
-        "get_dataset_bounds",
         "get_parquet_metadata",
         "should_skip_bbox",
-        "split_zm_suffix",
-        "zm_suffix_sql",
     }
 
 
@@ -183,21 +177,16 @@ def test_the_residue_is_the_named_stage_c_list():
 #: let #1211 add ``_declares_geoarrow_encoding`` here unseen. This is a ceiling,
 #: not an exact pin: a name may leave (T2b is emptying the file) but none may
 #: arrive. When one leaves, drop it here too so it cannot come back.
-PRIVATE_NAMES_CEILING = frozenset(
-    {
-        "_DUCKDB_TO_SPEC_TYPE",
-        "_DUCKDB_ZMFLAG_TO_GEOARROW_DIM",
-        "_build_bounds_query",
-    }
-)
+PRIVATE_NAMES_CEILING: frozenset[str] = frozenset()
 
 #: Sizes measured on the tree G5 landed on: 789 lines (778 after T2a, 772 after
-#: T2e, 704 after T2b moved version resolution to parquet_writer), 15
-#: module-level functions and classes (11 after T2b). These are pins, not ceilings: growth fails, and so
+#: T2e, 704 after T2b moved version resolution to parquet_writer, 396 after T3b moved
+#: the stats, bounds and dimension helpers to geo_metadata), 15 module-level
+#: functions and classes (11 after T2b, 4 after T3b). These are pins, not ceilings: growth fails, and so
 #: does shrinking until the number here is lowered to match, so slack left by a
 #: deletion never becomes a budget for the next helper (T0b audit).
-LINE_PIN = 704
-DEF_PIN = 11
+LINE_PIN = 396
+DEF_PIN = 4
 
 
 def _private_names(common: Path = COMMON) -> set[str]:
@@ -277,11 +266,10 @@ def test_g12_the_size_pins_fail_on_shrinking(tmp_path):
     assert len(overruns) == 2 and all("lower" in o for o in overruns), overruns
 
 
-def test_g12_the_private_name_pin_fails_on_a_deleted_name(tmp_path):
-    planted = tmp_path / "common.py"
-    source = COMMON.read_text(encoding="utf-8")
-    planted.write_text(source.replace("def _build_bounds_query(", "def build_bounds_query("))
-    assert gone_private_names(planted) == {"_build_bounds_query"}
+def test_g12_the_private_name_pin_fails_on_a_deleted_name(monkeypatch):
+    # common.py binds no private name any more, so pin one it lacks.
+    monkeypatch.setitem(globals(), "PRIVATE_NAMES_CEILING", frozenset({"_gone_helper"}))
+    assert gone_private_names() == {"_gone_helper"}
 
 
 @pytest.mark.parametrize(

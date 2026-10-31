@@ -1,20 +1,22 @@
 """
-Tests for get_dataset_bounds function.
+Tests for the file-level bounds: ``geo_metadata.bounds_of`` on a path, and
+``bbox_structure.dataset_bounds`` (covering column first, geometry otherwise).
 """
 
 import logging
 
 import pytest
 
-from geoparquet_io.core.common import calculate_file_bounds, get_dataset_bounds
+from geoparquet_io.core.bbox_structure import dataset_bounds
+from geoparquet_io.core.geo_metadata import bounds_of
 
 
-class TestCalculateFileBounds:
-    """Test suite for calculate_file_bounds -- ST_XMin/ST_YMin extent via spatial extension."""
+class TestBoundsOfAFile:
+    """``bounds_of`` on a RAW path -- the owner's extent via the spatial extension."""
 
     def test_calculates_bounds_for_local_file(self, buildings_test_file):
         """A RAW local path resolves through resolve_file_url and sql_path (#802)."""
-        bounds = calculate_file_bounds(buildings_test_file, verbose=False)
+        bounds = bounds_of(buildings_test_file, None)
 
         assert bounds is not None
         xmin, ymin, xmax, ymax = bounds
@@ -25,19 +27,19 @@ class TestCalculateFileBounds:
         assert 49 < ymin < 51
 
     def test_auto_detects_geometry_column(self, buildings_test_file):
-        """geom_column=None triggers find_primary_geometry_column."""
-        explicit = calculate_file_bounds(buildings_test_file, geom_column="geometry", verbose=False)
-        auto = calculate_file_bounds(buildings_test_file, geom_column=None, verbose=False)
+        """geometry_column=None triggers find_primary_geometry_column for a file."""
+        explicit = bounds_of(buildings_test_file, "geometry")
+        auto = bounds_of(buildings_test_file, None)
 
         assert auto == explicit
 
 
 class TestGetDatasetBounds:
-    """Test suite for get_dataset_bounds function."""
+    """Test suite for dataset_bounds function."""
 
     def test_get_bounds_without_bbox_column(self, buildings_test_file):
         """Test getting bounds from file without bbox column."""
-        bounds = get_dataset_bounds(buildings_test_file, verbose=False)
+        bounds = dataset_bounds(buildings_test_file, verbose=False)
 
         assert bounds is not None
         assert len(bounds) == 4
@@ -59,7 +61,7 @@ class TestGetDatasetBounds:
 
     def test_get_bounds_with_bbox_column(self, places_test_file):
         """Test getting bounds from file with bbox column."""
-        bounds = get_dataset_bounds(places_test_file, verbose=False)
+        bounds = dataset_bounds(places_test_file, verbose=False)
 
         assert bounds is not None
         assert len(bounds) == 4
@@ -75,7 +77,7 @@ class TestGetDatasetBounds:
 
     def test_get_bounds_with_specific_geometry_column(self, buildings_test_file):
         """Test getting bounds with specified geometry column."""
-        bounds = get_dataset_bounds(buildings_test_file, geometry_column="geometry", verbose=False)
+        bounds = dataset_bounds(buildings_test_file, geometry_column="geometry", verbose=False)
 
         assert bounds is not None
         assert len(bounds) == 4
@@ -85,7 +87,7 @@ class TestGetDatasetBounds:
 
         # Capture log output at DEBUG level to see verbose messages
         with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
-            bounds = get_dataset_bounds(buildings_test_file, verbose=True)
+            bounds = dataset_bounds(buildings_test_file, verbose=True)
 
         # Should show debug message about dataset bounds
         log_text = " ".join(record.message.lower() for record in caplog.records)
@@ -101,13 +103,13 @@ class TestGetDatasetBounds:
         add_bbox_column(buildings_test_file, temp_output_file, verbose=False)
 
         # Now get bounds from file with bbox column (should be faster)
-        bounds = get_dataset_bounds(temp_output_file, verbose=False)
+        bounds = dataset_bounds(temp_output_file, verbose=False)
 
         assert bounds is not None
         assert len(bounds) == 4
 
         # Bounds should be the same as original
-        original_bounds = get_dataset_bounds(buildings_test_file, verbose=False)
+        original_bounds = dataset_bounds(buildings_test_file, verbose=False)
         xmin1, ymin1, xmax1, ymax1 = original_bounds
         xmin2, ymin2, xmax2, ymax2 = bounds
 
@@ -123,7 +125,7 @@ class TestGetDatasetBounds:
 
         # Should raise an exception for nonexistent file
         with pytest.raises(FileNotFoundGeoParquetError):
-            get_dataset_bounds("nonexistent.parquet", verbose=False)
+            dataset_bounds("nonexistent.parquet", verbose=False)
 
     def test_get_bounds_performance_difference(self, buildings_test_file, temp_output_file, caplog):
         """Test that bbox column actually helps performance (via warnings)."""
@@ -131,7 +133,7 @@ class TestGetDatasetBounds:
 
         # Get bounds without bbox column - should show warning
         with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
-            bounds1 = get_dataset_bounds(buildings_test_file, verbose=False)
+            bounds1 = dataset_bounds(buildings_test_file, verbose=False)
 
         # Should have warning about slow calculation
         log_text1 = " ".join(record.message.lower() for record in caplog.records)
@@ -144,7 +146,7 @@ class TestGetDatasetBounds:
         # Get bounds with bbox column - should not show warning
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
-            bounds2 = get_dataset_bounds(temp_output_file, verbose=False)
+            bounds2 = dataset_bounds(temp_output_file, verbose=False)
 
         # Should not have warning about slow calculation
         log_text2 = " ".join(record.message.lower() for record in caplog.records)

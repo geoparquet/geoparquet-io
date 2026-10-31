@@ -23,7 +23,6 @@ from geoparquet_io.core.crs_utils import reproject_to_source_sql, transform_geom
 from geoparquet_io.core.duckdb_utils import (
     build_spatial_join_condition,
     build_spatial_join_query,
-    fetch_one,
     get_duckdb_connection,
     orphaned_spill_dirs,
     pin_duckdb_settings,
@@ -38,6 +37,7 @@ from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     InvalidParameterError,
 )
+from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
 from geoparquet_io.core.logging_config import debug, info, warn
 from geoparquet_io.core.memory_limits import open_bounded_connection, scoped_write_memory_limit
 from geoparquet_io.core.overture import OVERTURE_FALLBACK_RELEASE, get_latest_overture_release
@@ -1333,23 +1333,13 @@ def _admin_input_extent(
     column segment of a struct-field access is, leaving ``.xmin`` bare (#926).
     """
     if input_bbox_col and not source_crs:
-        q_bbox = quote_identifier(input_bbox_col)
-        parts = (f"{q_bbox}.xmin", f"{q_bbox}.xmax", f"{q_bbox}.ymin", f"{q_bbox}.ymax")
+        source = QuerySource(con, f"SELECT * FROM {input_relation}")
+        bbox = bounds_of(source, input_geom_col, bbox_column=input_bbox_col)
     else:
         geom = transform_geom_sql(quote_identifier(input_geom_col), source_crs)
-        parts = tuple(f"ST_{fn}({geom})" for fn in ("XMin", "XMax", "YMin", "YMax"))
-    query = f"""
-            SELECT
-                MIN({parts[0]}) as xmin,
-                MAX({parts[1]}) as xmax,
-                MIN({parts[2]}) as ymin,
-                MAX({parts[3]}) as ymax
-            FROM {input_relation}
-        """
-    extent = fetch_one(con.execute(query))
-    if extent and all(v is not None for v in extent):
-        return extent
-    return None
+        source = QuerySource(con, f"SELECT {geom} AS __geometry FROM {input_relation}")
+        bbox = bounds_of(source, "__geometry")
+    return None if bbox is None else (bbox[0], bbox[2], bbox[1], bbox[3])
 
 
 def _admin_where_clause(

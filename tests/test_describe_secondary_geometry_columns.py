@@ -50,13 +50,16 @@ def _geo(path) -> dict:
 def _scans(monkeypatch) -> Counter:
     """Count duckdb-kv's stats scans per column."""
     seen: Counter = Counter()
-    real = duckdb_kv.compute_geo_stats_via_sql
 
-    def counting(con, query, column, **kwargs):
-        seen[column] += 1
-        return real(con, query, column, **kwargs)
+    def counting(real):
+        def wrapped(source, column, **kwargs):
+            seen[column] += 1
+            return real(source, column, **kwargs)
 
-    monkeypatch.setattr(duckdb_kv, "compute_geo_stats_via_sql", counting)
+        return wrapped
+
+    for name in ("geometry_stats_of", "geometry_types_of"):
+        monkeypatch.setattr(duckdb_kv, name, counting(getattr(duckdb_kv, name)))
     return seen
 
 

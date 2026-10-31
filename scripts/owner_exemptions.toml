@@ -316,8 +316,9 @@ reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
 "duckdb_type_contains_geometry" = ["geoparquet_io/core/duckdb_utils.py"]
 "duckdb_type_is_numeric" = ["geoparquet_io/core/duckdb_utils.py"]
 "parse_duckdb_geo_type" = ["geoparquet_io/core/duckdb_utils.py"]
-"_compute_geometry_types" = ["geoparquet_io/core/geo_metadata.py"]
-"_compute_bbox_from_data" = ["geoparquet_io/core/geo_metadata.py"]
+"geometry_stats_of" = ["geoparquet_io/core/geo_metadata.py"]
+"bounds_of" = ["geoparquet_io/core/geo_metadata.py"]
+"geometry_types_of" = ["geoparquet_io/core/geo_metadata.py"]
 "handle_output_overwrite" = ["geoparquet_io/core/file_utils.py"]
 "is_remote_url" = ["geoparquet_io/core/remote.py"]
 "parse_bbox" = ["geoparquet_io/core/bbox_parse.py"]
@@ -375,14 +376,6 @@ reason = "covering builder copy of build_bbox_covering; T3e"
 path = "geoparquet_io/core/add/quadkey.py"
 name = "_is_geographic_crs"
 reason = "is-geographic copy (approved change 8); T4c"
-[[G2.exemptions]]
-path = "geoparquet_io/core/arrow_geo_metadata.py"
-name = "_compute_geometry_types"
-reason = "stats twin of geo_metadata's; T3b"
-[[G2.exemptions]]
-path = "geoparquet_io/core/arrow_geo_metadata.py"
-name = "_compute_bbox_from_data"
-reason = "stats twin of geo_metadata's; T3b"
 [[G2.exemptions]]
 path = "geoparquet_io/core/carto.py"
 name = "_fetch_with_retry"
@@ -489,12 +482,6 @@ reason = "index add workflow, one copy per index; T5b's index_ops driver replace
 [[G3.pairs]]
 pair = "geoparquet_io/core/add/h3.py:_add_h3_streaming|geoparquet_io/core/add/s2.py:_add_s2_streaming"
 reason = "index add workflow, one copy per index; T5b's index_ops driver replaces it"
-[[G3.pairs]]
-pair = "geoparquet_io/core/arrow_geo_metadata.py:_compute_bbox_from_data|geoparquet_io/core/geo_metadata.py:_compute_bbox_from_data"
-reason = "geometry stats twin (concept 5); T3b"
-[[G3.pairs]]
-pair = "geoparquet_io/core/arrow_geo_metadata.py:_compute_geometry_types|geoparquet_io/core/geo_metadata.py:_compute_geometry_types"
-reason = "geometry stats twin (concept 5); T3b"
 [[G3.pairs]]
 pair = "geoparquet_io/core/benchmark.py:benchmark_geopandas_fiona|geoparquet_io/core/benchmark.py:benchmark_geopandas_pyogrio"
 reason = "geopandas benchmark harness differing only in the engine= literal; T5c (one function, engine parameter, two registry entries)"
@@ -622,14 +609,8 @@ reason = "permanent: the same keyword-argument list forwarded to one callee (API
 block = "core.add.quadkey:_is_geographic_crs|core.extract:is_geographic_crs"
 reason = "is-geographic CRS copy (approved change 8); T4c"
 [[G3.pylint]]
-block = "core.arrow_geo_metadata:_compute_geometry_types|core.geo_metadata:_compute_geometry_types"
-reason = "geometry stats twins; T3b"
-[[G3.pylint]]
 block = "core.crs_utils:<module>|core.duckdb_metadata:_get_pyarrow_logical_type"
 reason = "GeoArrow extension-name list copied; T3a's decoder owner"
-[[G3.pylint]]
-block = "core.duckdb_metadata:_format_geo_types|core.validate:<module>"
-reason = "WKB_TYPE_CODES table copied into validate; T3b"
 [[G3.pylint]]
 block = "core.extract:_execute_extraction|core.str_order:_str_order_file_based"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"

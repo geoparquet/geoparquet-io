@@ -2,7 +2,6 @@
 
 import codecs
 import gc
-import math
 import os
 import re
 import time
@@ -53,8 +52,12 @@ from geoparquet_io.core.file_utils import (
     validate_output_path,
 )
 from geoparquet_io.core.geo_metadata import (
+    QuerySource,
+    bbox_xy,
+    bounds_of,
     build_bbox_covering,
     sanitized_carried_geo_of_file,
+    split_zm_suffix,
 )
 from geoparquet_io.core.geojson_datetimes import DatetimeRead, plan_datetime_read
 from geoparquet_io.core.geometry_detection import (
@@ -234,9 +237,6 @@ def _parquet_geometry_expr(con, source: str, geom_column: str) -> tuple[str, boo
     return f"ST_GeomFromWKB({quoted})", False
 
 
-_DIMENSION_SUFFIX_RE = re.compile(r" (Z|M|ZM)$")
-
-
 def _flatten_geometry_metadata(column_meta: dict) -> dict:
     """The input's declared facts about a geometry column, corrected for 2D.
 
@@ -249,11 +249,11 @@ def _flatten_geometry_metadata(column_meta: dict) -> dict:
     meta = dict(column_meta)
     types = meta.get("geometry_types")
     if isinstance(types, list):
-        flat = [_DIMENSION_SUFFIX_RE.sub("", t) for t in types if isinstance(t, str)]
+        flat = [split_zm_suffix(t)[0] for t in types if isinstance(t, str)]
         meta["geometry_types"] = list(dict.fromkeys(flat))
     bbox = meta.get("bbox")
-    if isinstance(bbox, list) and len(bbox) == 6:
-        meta["bbox"] = [bbox[0], bbox[1], bbox[3], bbox[4]]
+    if isinstance(bbox, list) and len(bbox) in (6, 8):
+        meta["bbox"] = list(bbox_xy(bbox))
     return meta
 
 
@@ -712,38 +712,12 @@ def _calculate_bounds(
         else:
             table_expr = _build_st_read_expr(input_file, layer)
 
-    # Quote column name to handle special characters, spaces, and reserved words
-    quoted_geom = quote_identifier(geom_column)
-
-    # GeoArrow native encodings store geometry as nested structs/arrays that
-    # DuckDB cannot pass to ST_XMin directly. Use list_min/list_max via
-    # _geoarrow_coord_exprs — consistent with _build_conversion_query and
-    # avoids UNNEST row explosion for large multipolygon datasets.
-    geoarrow_native = encoding.lower() not in {"wkb", "wkt"}
-    if geoarrow_native:
-        xmin_e, ymin_e, xmax_e, ymax_e, _, _ = _geoarrow_coord_exprs(quoted_geom, encoding)
-        bounds_query = f"""
-            SELECT
-                MIN({xmin_e}) as xmin,
-                MIN({ymin_e}) as ymin,
-                MAX({xmax_e}) as xmax,
-                MAX({ymax_e}) as ymax
-            FROM {table_expr}
-            WHERE NOT isnan({xmax_e}) AND NOT isnan({ymax_e})
-        """
-    else:
-        bounds_query = f"""
-            SELECT
-                MIN(ST_XMin({quoted_geom})) as xmin,
-                MIN(ST_YMin({quoted_geom})) as ymin,
-                MAX(ST_XMax({quoted_geom})) as xmax,
-                MAX(ST_YMax({quoted_geom})) as ymax
-            FROM {table_expr}
-        """
-    bounds_result = fetch_one(con.execute(bounds_query))
-
-    if not bounds_result or any(v is None for v in bounds_result):
+    # The owner measures a GeoArrow native column (nested coordinate structs)
+    # off its coordinate lists, and anything else as GEOMETRY.
+    bbox = bounds_of(QuerySource(con, f"SELECT * FROM {table_expr}"), geom_column)
+    if bbox is None:
         return None
+    bounds_result = tuple(bbox)
 
     if verbose:
         xmin, ymin, xmax, ymax = bounds_result
@@ -1613,24 +1587,18 @@ def _calculate_csv_bounds(con, geom_info, verbose):
 
     csv_read = geom_info["csv_read"]
     geom_expr, where_clause = _get_geom_expr_and_where(geom_info)
-
-    bounds_query = f"""
-        SELECT
-            MIN(ST_XMin({geom_expr})) as xmin,
-            MIN(ST_YMin({geom_expr})) as ymin,
-            MAX(ST_XMax({geom_expr})) as xmax,
-            MAX(ST_YMax({geom_expr})) as ymax
-        FROM {csv_read}
-        {where_clause}
-    """
+    query = f"SELECT {geom_expr} AS __geometry FROM {csv_read} {where_clause}"
 
     try:
-        bounds_result = fetch_one(con.execute(bounds_query))
+        bbox = bounds_of(QuerySource(con, query), "__geometry")
+    except GeoParquetError:
+        raise
     except Exception as e:
         raise GeoParquetError(str(e)) from e
 
-    if not bounds_result or any(v is None for v in bounds_result):
+    if bbox is None:
         return None  # nothing to measure: caller writes unordered (#649)
+    bounds_result = tuple(bbox)
 
     if verbose:
         xmin, ymin, xmax, ymax = bounds_result
@@ -1684,27 +1652,16 @@ _NO_BOUNDS_WARNING = (
     "writing without Hilbert ordering."
 )
 
-#: Warned when the envelope exists but cannot be rendered into SQL (#1157): a
-#: NaN/inf bound interpolated as a Python float becomes the bare token
-#: ``nan``/``inf`` inside ``ST_MakeEnvelope`` and fails binding.
-_NONFINITE_BOUNDS_WARNING = (
-    "Dataset bounds contain a NaN or infinite coordinate; writing without Hilbert ordering."
-)
-
 
 def _usable_bounds(bounds):
-    """``bounds`` when Hilbert ordering can use them, else None with a warning.
+    """``bounds``, or None with a warning when there was nothing to measure (#649).
 
-    None means there was nothing to measure (#649); a non-finite value would
-    fail binding once interpolated into ``ST_MakeEnvelope`` (#1157). Either
-    way the caller falls back to an unordered write.
+    The caller then falls back to an unordered write. A non-finite bound never
+    arrives: the bounds owner refuses an infinite coordinate and skips NaN
+    (EMPTY) geometries (#1157, #1165).
     """
     if bounds is None:
         warn(_NO_BOUNDS_WARNING)
-        return None
-    if not all(math.isfinite(v) for v in bounds):
-        warn(_NONFINITE_BOUNDS_WARNING)
-        return None
     return bounds
 
 

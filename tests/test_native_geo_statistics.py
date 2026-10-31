@@ -309,10 +309,11 @@ def test_validator_reads_its_bbox_from_the_shared_reader(native_geo_file, monkey
     """Pin the validator to the shared reader, so it cannot grow its own read."""
     from geoparquet_io.core.validate import CheckStatus
 
+    chunk = {"row_group_id": 0, "xmin": 0.0, "ymin": 0.0, "xmax": 0.0, "ymax": 0.0}
     monkeypatch.setattr(
         duckdb_metadata,
-        "get_aggregated_native_geo_stats",
-        lambda *args, **kwargs: {"bbox": [0.0, 0.0, 0.0, 0.0], "geometry_types": ["Point"]},
+        "get_native_geo_stats_by_row_group",
+        lambda *args, **kwargs: [{**chunk, "geometry_types": ["Point"]}],
     )
 
     checks = _native_geo_checks(native_geo_file)

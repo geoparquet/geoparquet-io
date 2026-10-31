@@ -28,11 +28,12 @@ from geoparquet_io.core.geo_metadata import (
     _bbox_claimed_by_another_column,
     _declared_bbox_column,
     bbox_covering_problem,
+    bounds_of,
     covering_supported,
     is_covering_path,
     raw_geo_of_file,
 )
-from geoparquet_io.core.logging_config import debug, warn
+from geoparquet_io.core.logging_config import configure_verbose, debug, error, info, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns, schema_direct_children
 
 #: Struct fields a bbox covering column must expose.
@@ -493,3 +494,52 @@ def get_bbox_advice(
             ]
 
     return result
+
+
+def dataset_bounds(parquet_file, geometry_column=None, verbose=False, *, advise=True):
+    """``(xmin, ymin, xmax, ymax)`` of a Parquet file's geometry, or None.
+
+    Reads the primary geometry's bbox covering column when the file has one
+    (:func:`check_bbox_structure`), else measures the geometry; either way
+    through the one bounds owner, :func:`~geoparquet_io.core.geo_metadata.bounds_of`,
+    and its degenerate-geometry policy. None for nothing to measure (no rows,
+    every geometry NULL or EMPTY) or an unreadable file; an infinite coordinate
+    raises :class:`~geoparquet_io.core.exceptions.GeometryError`.
+
+    ``advise=False`` drops the "no bbox column, add one" advice, for a caller
+    whose bounds only feed its own diagnostics.
+    """
+    from geoparquet_io.core.exceptions import GeometryError
+    from geoparquet_io.core.file_utils import resolve_file_url
+    from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+
+    configure_verbose(verbose)
+    resolve_file_url(parquet_file, verbose)  # a missing file is reported as one, first
+    if not geometry_column:
+        geometry_column = find_primary_geometry_column(parquet_file, verbose)
+    bbox_info = check_bbox_structure(parquet_file, verbose)
+    bbox_column = bbox_info["bbox_column_name"] if bbox_info["has_bbox_column"] else None
+    if bbox_column:
+        debug(f"Using bbox column '{bbox_column}' for fast bounds calculation")
+    elif advise:
+        warn(
+            f"⚠️  No bbox column found - calculating bounds from geometry column "
+            f"'{geometry_column}' (this may be slow)"
+        )
+        info("💡 Tip: Add a bbox column for faster operations with 'gpio add bbox'")
+    try:
+        bounds = bounds_of(parquet_file, geometry_column, bbox_column=bbox_column)
+    except GeometryError:
+        raise
+    except Exception as e:
+        if verbose:
+            error(f"Error calculating bounds: {e}")
+        return None
+    if bounds is None:
+        if verbose:
+            warn("Could not calculate bounds (empty dataset or null geometries)")
+        return None
+    xmin, ymin, xmax, ymax = bounds
+    if verbose:
+        debug(f"Dataset bounds: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
+    return (xmin, ymin, xmax, ymax)

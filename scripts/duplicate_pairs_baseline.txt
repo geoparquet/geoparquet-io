@@ -15,8 +15,6 @@ geoparquet_io/core/add/a5.py:add_a5_column|geoparquet_io/core/add/h3.py:add_h3_c
 geoparquet_io/core/add/a5.py:add_a5_table|geoparquet_io/core/add/h3.py:add_h3_table
 geoparquet_io/core/add/h3.py:_add_h3_streaming.make_query|geoparquet_io/core/add/s2.py:_add_s2_streaming.make_query
 geoparquet_io/core/add/h3.py:_add_h3_streaming|geoparquet_io/core/add/s2.py:_add_s2_streaming
-geoparquet_io/core/arrow_geo_metadata.py:_compute_bbox_from_data|geoparquet_io/core/geo_metadata.py:_compute_bbox_from_data
-geoparquet_io/core/arrow_geo_metadata.py:_compute_geometry_types|geoparquet_io/core/geo_metadata.py:_compute_geometry_types
 geoparquet_io/core/benchmark.py:benchmark_geopandas_fiona|geoparquet_io/core/benchmark.py:benchmark_geopandas_pyogrio
 geoparquet_io/core/partition/auto_resolution.py:_calculate_a5_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_h3_resolution
 geoparquet_io/core/partition/auto_resolution.py:_calculate_a5_resolution|geoparquet_io/core/partition/auto_resolution.py:_calculate_quadkey_resolution

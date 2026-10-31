@@ -450,14 +450,15 @@ class TestGetGeometryTypeName:
         from geoparquet_io.core import arrow_geo_metadata, derive_geo_from_file, geo_metadata
 
         assert _get_geometry_type_name is geo_metadata._get_geometry_type_name
-        assert arrow_geo_metadata._get_geometry_type_name is geo_metadata._get_geometry_type_name
+        # The Arrow-side type fold that needed it is gone too (#1367 concept 5).
+        assert not hasattr(arrow_geo_metadata, "_get_geometry_type_name")
         assert not hasattr(arrow_geo_metadata, "_GEOMETRY_TYPE_CODES")
-        assert derive_geo_from_file._GEOMETRY_TYPE_CODES is geo_metadata._GEOMETRY_TYPE_CODES
-        assert derive_geo_from_file._DIMENSION_SUFFIXES is geo_metadata._DIMENSION_SUFFIXES
+        # derive_geo_from_file folds row-group stats through duckdb_metadata now.
+        assert not hasattr(derive_geo_from_file, "_GEOMETRY_TYPE_CODES")
 
     def test_2d_types(self):
-        """Test 2D geometry types (codes 0-7)."""
-        assert _get_geometry_type_name(0) == "Unknown"
+        """Test 2D geometry types (codes 1-7); code 0 names no spec type."""
+        assert _get_geometry_type_name(0) is None
         assert _get_geometry_type_name(1) == "Point"
         assert _get_geometry_type_name(2) == "LineString"
         assert _get_geometry_type_name(3) == "Polygon"
@@ -497,11 +498,12 @@ class TestGetGeometryTypeName:
         assert _get_geometry_type_name(3007) == "GeometryCollection ZM"
 
     def test_unknown_base_type(self):
-        """Test unknown base type returns Unknown."""
-        assert _get_geometry_type_name(8) == "Unknown"
-        assert _get_geometry_type_name(99) == "Unknown"
-        assert _get_geometry_type_name(1008) == "Unknown"
-        assert _get_geometry_type_name(2099) == "Unknown"
+        """An unknown base or dimension names no spec type: None, dropped by callers."""
+        assert _get_geometry_type_name(8) is None
+        assert _get_geometry_type_name(99) is None
+        assert _get_geometry_type_name(1008) is None
+        assert _get_geometry_type_name(2099) is None
+        assert _get_geometry_type_name(4001) is None
 
 
 class TestGetBboxAdvice:

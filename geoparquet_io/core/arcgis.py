@@ -39,7 +39,7 @@ from geoparquet_io.core.exceptions import (
 )
 from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geo_metadata import (
-    _compute_geometry_types,
+    geometry_types_of,
     prune_geo_metadata_to_columns,
 )
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
@@ -1561,7 +1561,7 @@ def _resolve_geometry_types(table: pa.Table, esri_geometry_type: str, verbose: b
     The two ways of arriving at ``[]`` are still worth telling apart for the
     user: unreadable geometry is a data-quality problem worth chasing, an empty
     column is not. They cannot be told apart by catching, because
-    ``_compute_geometry_types`` swallows the geoarrow error itself, so the
+    ``geometry_types_of`` swallows the geoarrow error itself, so the
     non-NULL geometries are counted first.
     """
     # Only reached with a geometry column: an excluded one (--exclude-cols) never
@@ -1574,7 +1574,7 @@ def _resolve_geometry_types(table: pa.Table, esri_geometry_type: str, verbose: b
         warn("Fetched data holds no geometries; declaring geometry_types as [] (types not known).")
         return []
 
-    computed = _compute_geometry_types(table, "geometry", verbose)
+    computed = geometry_types_of(table, "geometry", verbose=verbose)
     if not computed:
         warn(
             "Fetched geometry could not be read, so geometry_types is declared as [] "

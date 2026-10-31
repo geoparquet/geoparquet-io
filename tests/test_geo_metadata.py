@@ -12,12 +12,13 @@ import pytest
 from geoparquet_io.core.geo_metadata import (
     DEFAULT_GEOPARQUET_VERSION,
     GEOPARQUET_VERSIONS,
+    QuerySource,
     _add_bbox_covering,
     _add_custom_covering,
     _initialize_geo_metadata,
-    compute_bbox_via_sql,
-    compute_geometry_types_via_sql,
+    bounds_of,
     create_geo_metadata,
+    geometry_types_of,
     read_raw_geo,
     sanitized_carried_geo,
 )
@@ -416,7 +417,7 @@ class TestComputeBboxViaSql:
         """)
 
         query = "SELECT * FROM test"
-        bbox = compute_bbox_via_sql(spatial_con, query, "geometry")
+        bbox = bounds_of(QuerySource(spatial_con, query), "geometry")
 
         assert bbox is not None
         assert len(bbox) == 4
@@ -434,7 +435,7 @@ class TestComputeBboxViaSql:
         """)
 
         query = "SELECT * FROM test"
-        bbox = compute_bbox_via_sql(spatial_con, query, "geometry")
+        bbox = bounds_of(QuerySource(spatial_con, query), "geometry")
 
         assert bbox is None
 
@@ -443,15 +444,16 @@ class TestComputeBboxViaSql:
         spatial_con.execute("CREATE TABLE test AS SELECT 1 as id")
 
         query = "SELECT * FROM test"
-        bbox = compute_bbox_via_sql(spatial_con, query, "geometry")
+        bbox = bounds_of(QuerySource(spatial_con, query), "geometry")
 
         assert bbox is None
 
-    def test_handles_invalid_query(self, spatial_con):
-        """Returns None for invalid query."""
-        bbox = compute_bbox_via_sql(spatial_con, "SELECT * FROM nonexistent", "geometry")
+    def test_an_invalid_query_raises(self, spatial_con):
+        """A query that cannot bind raises, as the write it measures for would."""
+        import duckdb
 
-        assert bbox is None
+        with pytest.raises(duckdb.Error):
+            bounds_of(QuerySource(spatial_con, "SELECT * FROM nonexistent"), "geometry")
 
 
 class TestComputeGeometryTypesViaSql:
@@ -475,7 +477,7 @@ class TestComputeGeometryTypesViaSql:
         """)
 
         query = "SELECT * FROM test"
-        types = compute_geometry_types_via_sql(spatial_con, query, "geometry")
+        types = geometry_types_of(QuerySource(spatial_con, query), "geometry")
 
         assert "Point" in types
 
@@ -489,7 +491,7 @@ class TestComputeGeometryTypesViaSql:
         """)
 
         query = "SELECT * FROM test"
-        types = compute_geometry_types_via_sql(spatial_con, query, "geometry")
+        types = geometry_types_of(QuerySource(spatial_con, query), "geometry")
 
         assert len(types) >= 2
 

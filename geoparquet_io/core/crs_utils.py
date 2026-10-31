@@ -867,7 +867,7 @@ def extract_crs_from_table(table, geometry_column: str | None = None):
 
 
 def _crs_from_geo_block(
-    parquet_file, geometry_column: str | None = None
+    parquet_file, geometry_column: str | None = None, *, quiet: bool = False
 ) -> tuple[dict | str | None, str | None, bool]:
     """``(crs, column, stated)`` as the file's ``geo`` block states them.
 
@@ -896,7 +896,7 @@ def _crs_from_geo_block(
         col = _primary_column_of_file(geo_meta, parquet_file)
     if col not in columns:
         return None, col, False
-    if crs_is_explicitly_null(columns[col]):
+    if crs_is_explicitly_null(columns[col]) and not quiet:
         warn_null_crs_once(str(parquet_file))
     crs = columns[col].get("crs")
     stated = "crs" in columns[col]
@@ -1131,7 +1131,7 @@ def reset_crs_disagreement_warnings() -> None:
     _emit_crs_disagreement_warning.cache_clear()
 
 
-def extract_crs_from_parquet(parquet_file, verbose=False, geometry_column=None):
+def extract_crs_from_parquet(parquet_file, verbose=False, geometry_column=None, *, quiet=False):
     """
     The CRS (as PROJJSON dict) of a Parquet file's primary geometry column.
 
@@ -1171,8 +1171,14 @@ def extract_crs_from_parquet(parquet_file, verbose=False, geometry_column=None):
     ``parquet_schema`` DuckDB already runs for a remote one. It is bounded by the
     footer either way, and ``gpio check spec`` reads both halves of every file
     regardless.
+
+    ``quiet=True`` resolves the same answer without the null, srid:0 and
+    disagreement warnings, for a caller that only asks how to read coordinates
+    (:func:`column_is_geographic`) and must not add lines to a command's output.
     """
-    geo_block_crs, block_col, block_stated = _crs_from_geo_block(parquet_file, geometry_column)
+    geo_block_crs, block_col, block_stated = _crs_from_geo_block(
+        parquet_file, geometry_column, quiet=quiet
+    )
     if _block_omits_requested_column(parquet_file, block_col, geometry_column):
         # The block answered for its primary, not for the column asked about.
         # It says nothing about that column, so its native type is the answer.
@@ -1190,7 +1196,7 @@ def extract_crs_from_parquet(parquet_file, verbose=False, geometry_column=None):
     )
 
     if geo_block_crs is not None:
-        if _crs_sources_disagree(geo_block_crs, native_crs):
+        if not quiet and _crs_sources_disagree(geo_block_crs, native_crs):
             _emit_crs_disagreement_warning(
                 str(parquet_file),
                 _format_crs_display(geo_block_crs),
@@ -1205,7 +1211,7 @@ def extract_crs_from_parquet(parquet_file, verbose=False, geometry_column=None):
             debug(f"Found CRS in Parquet geo type: {_format_crs_display(native_crs)}")
         return native_crs
 
-    if type_unknown and not block_stated:
+    if type_unknown and not block_stated and not quiet:
         # `srid:0` is the only word on this column, and it says "unknown". The
         # caller gets None like any other no-CRS answer, so say it here (#1277).
         warn_srid0_crs_once(str(parquet_file))
@@ -1429,6 +1435,21 @@ def is_geographic_crs(crs: dict | str | None) -> bool:
         return any(x in crs_upper for x in ["4326", "CRS84", "WGS84"])
 
     return False
+
+
+def column_is_geographic(parquet_file, geometry_column: str | None = None) -> bool:
+    """Whether a file's geometry column is in a geographic CRS.
+
+    The question every stats fold asks before it reads xmin > xmax as an
+    antimeridian wrap (:func:`merge_longitude_ranges`). The CRS is the one
+    :func:`extract_crs_from_parquet` resolves; one that cannot be read is
+    answered as no CRS is, geographic (:func:`is_geographic_crs`).
+    """
+    try:
+        crs = extract_crs_from_parquet(parquet_file, geometry_column=geometry_column, quiet=True)
+    except Exception:
+        return True
+    return is_geographic_crs(crs)
 
 
 def merge_longitude_ranges(ranges: list[tuple[float, float]]) -> tuple[float, float]:

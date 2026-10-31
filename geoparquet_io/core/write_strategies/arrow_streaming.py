@@ -21,7 +21,6 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.arrow_geo_metadata import (
     _bbox_column_to_declare,
     _canonicalize_wkb_columns,
-    _compute_geometry_types,
     table_geometry_info,
 )
 from geoparquet_io.core.compression import ResolvedCodec, resolve_codec
@@ -34,9 +33,11 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     NATIVE_GEOMETRY_VERSIONS,
+    QuerySource,
     bbox_column_to_declare,
-    compute_geo_stats_via_sql,
     create_geo_metadata,
+    geometry_stats_of,
+    geometry_types_of,
     sanitized_carried_geo,
     strip_bboxless_covering,
     strip_illegal_bbox_covering,
@@ -365,15 +366,13 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         geoarrow_target_type = None
         geoarrow_encoding = None
         if geoarrow_native and should_add_geo_metadata:
-            from geoparquet_io.core.common import compute_geometry_dimensions_via_sql
             from geoparquet_io.core.geoarrow_encoding import determine_geoarrow_target_type
 
-            # Detect Z/M dimensionality so 3D/measured coordinates select a
-            # dimension-aware native type (or fall back to WKB) rather than being
-            # silently coerced down to 2D.
-            dimensions = compute_geometry_dimensions_via_sql(con, query, geometry_column)
+            # The owner's types carry the Z/M suffix, so 3D/measured coordinates
+            # select a dimension-aware native type (or fall back to WKB) rather
+            # than being silently coerced down to 2D.
             geoarrow_target_type, geoarrow_encoding = determine_geoarrow_target_type(
-                precomputed_geom_types, input_crs, dimensions=dimensions
+                precomputed_geom_types, input_crs
             )
             if verbose:
                 debug(f"1.1-geoarrow target encoding: {geoarrow_encoding}")
@@ -460,9 +459,10 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
 
         if verbose:
             debug("Pre-computing bbox/geometry types via SQL...")
-        return compute_geo_stats_via_sql(
-            con, query, geometry_column, need_bbox=need_bbox, need_geometry_types=True
-        )
+        if not need_bbox:
+            return None, geometry_types_of(QuerySource(con, query), geometry_column)
+        stats = geometry_stats_of(QuerySource(con, query), geometry_column)
+        return stats.bbox, stats.geometry_types
 
     def _build_geo_metadata_for_query(
         self,
@@ -783,20 +783,16 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
 
         geom_types: list[str] = []
         if should_add_geo_metadata:
-            geom_types = _compute_geometry_types(table, geometry_column, verbose)
+            geom_types = geometry_types_of(table, geometry_column, verbose=verbose)
 
             if geoarrow_native:
-                from geoparquet_io.core.geoarrow_encoding import (
-                    detect_wkb_dimensions,
-                    determine_geoarrow_target_type,
-                )
+                from geoparquet_io.core.geoarrow_encoding import determine_geoarrow_target_type
 
-                # Detect Z/M dimensionality from the actual geometry so 3D/measured
-                # coordinates select a dimension-aware native type (or fall back to
-                # WKB) instead of being silently coerced down to 2D.
-                dimensions = detect_wkb_dimensions(table.column(geometry_column))
+                # The owner's types carry the Z/M suffix, so 3D/measured
+                # coordinates select a dimension-aware native type (or fall back
+                # to WKB) instead of being silently coerced down to 2D.
                 geoarrow_target_type, geoarrow_encoding = determine_geoarrow_target_type(
-                    geom_types, input_crs, dimensions=dimensions
+                    geom_types, input_crs
                 )
                 if verbose:
                     debug(f"1.1-geoarrow target encoding: {geoarrow_encoding}")

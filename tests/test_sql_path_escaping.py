@@ -50,7 +50,6 @@ from geoparquet_io.cli.main import add, check, convert, inspect
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.duckdb_metadata import (
     detect_geometry_columns,
-    get_bbox_from_row_group_stats,
     get_column_names,
     get_compression_info,
     get_file_metadata,
@@ -147,7 +146,6 @@ class TestEscapingIsAppliedOnce:
         bbox_col = check_bbox_structure(apostrophe_file_with_bbox)["bbox_column_name"]
         assert bbox_col == "bbox"
         assert get_per_row_group_bbox_stats(apostrophe_file_with_bbox, bbox_col)
-        assert get_bbox_from_row_group_stats(apostrophe_file_with_bbox, bbox_col)
 
 
 class TestCliCommandsOnApostrophePath:

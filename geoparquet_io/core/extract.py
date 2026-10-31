@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.bbox_structure import check_bbox_structure, dataset_bounds
 from geoparquet_io.core.column_selection import (
     reject_blank_column_entries,
     split_column_list,
@@ -44,6 +44,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
+    GeometryError,
     GeoParquetError,
     InvalidParameterError,
 )
@@ -183,27 +184,16 @@ def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | No
 
 
 def _get_data_bounds(input_parquet: str, geometry_col: str) -> tuple | None:
-    """Get actual data bounds from file."""
+    """The file's data bounds through the one file entry point (covering first), or None.
+
+    Only the CRS-mismatch warning reads them, so the owner's refusal of an
+    infinite coordinate is reported there rather than ending the extract.
+    """
     try:
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
-        raw_url = resolve_file_url(input_parquet, verbose=False)
-        result = fetch_one(
-            con.execute(f"""
-            SELECT
-                MIN(ST_XMin({quote_identifier(geometry_col)})) as xmin,
-                MIN(ST_YMin({quote_identifier(geometry_col)})) as ymin,
-                MAX(ST_XMax({quote_identifier(geometry_col)})) as xmax,
-                MAX(ST_YMax({quote_identifier(geometry_col)})) as ymax
-            FROM read_parquet({sql_path(raw_url)})
-        """)
-        )
-        con.close()
-        if result and all(v is not None for v in result):
-            return result
-    except Exception:
-        # Bounds extraction is optional - used only for warning messages
-        pass
-    return None
+        return dataset_bounds(input_parquet, geometry_col, advise=False)
+    except GeometryError as exc:
+        warn(f"Data bounds not shown: {exc}")
+        return None
 
 
 def _warn_if_crs_mismatch(

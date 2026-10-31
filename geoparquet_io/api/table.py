@@ -27,7 +27,7 @@ from geoparquet_io.core.add.kdtree import (
 from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 from geoparquet_io.core.check_parquet_structure import CheckProfile
-from geoparquet_io.core.duckdb_utils import fetch_one, quote_identifier
+from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.file_utils import unlink_released_file
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
 from geoparquet_io.core.logging_config import warn
@@ -156,52 +156,25 @@ def _calculate_bounds_from_table(
     table: pa.Table,
     geometry_column: str | None,
 ) -> tuple[float, float, float, float] | None:
+    """``(xmin, ymin, xmax, ymax)`` of an in-memory table's geometry, or None.
+
+    Measured by the one bounds owner (``geo_metadata.bounds_of``) on the Arrow
+    path, so a GeoArrow WKB extension column reads like plain WKB (#1292). None
+    when there is no geometry column or nothing to measure; an infinite
+    coordinate raises ``GeometryError`` there, as on every other path.
     """
-    Calculate bounding box from an in-memory PyArrow Table.
+    from geoparquet_io.core.exceptions import GeometryError
+    from geoparquet_io.core.geo_metadata import bounds_of
 
-    Uses DuckDB to compute the bbox from geometry column.
-
-    Args:
-        table: PyArrow Table
-        geometry_column: Name of geometry column
-
-    Returns:
-        Tuple of (xmin, ymin, xmax, ymax) or None if empty/error
-    """
     if geometry_column is None or geometry_column not in table.column_names:
         return None
-
-    if table.num_rows == 0:
-        return None
-
-    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, register_arrow
-
-    con = None
     try:
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-        register_arrow(con, "input_table", table)
-
-        # Use ST_Extent to get the bounding box of all geometries
-        query = f"""
-            SELECT
-                ST_XMin(ST_Extent_Agg(ST_GeomFromWKB({quote_identifier(geometry_column)}))),
-                ST_YMin(ST_Extent_Agg(ST_GeomFromWKB({quote_identifier(geometry_column)}))),
-                ST_XMax(ST_Extent_Agg(ST_GeomFromWKB({quote_identifier(geometry_column)}))),
-                ST_YMax(ST_Extent_Agg(ST_GeomFromWKB({quote_identifier(geometry_column)})))
-            FROM input_table
-            WHERE {quote_identifier(geometry_column)} IS NOT NULL
-        """
-        result = fetch_one(con.execute(query))
-
-        if result and all(v is not None for v in result):
-            return (result[0], result[1], result[2], result[3])
-        return None
-
+        bbox = bounds_of(table, geometry_column)
+    except GeometryError:
+        raise
     except Exception:
         return None
-    finally:
-        if con is not None:
-            con.close()
+    return None if bbox is None else (bbox[0], bbox[1], bbox[2], bbox[3])
 
 
 def _surviving_geometry_column(current: str | None, result: pa.Table) -> str | None:

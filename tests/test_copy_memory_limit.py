@@ -515,7 +515,7 @@ class TestDirectCopyMemoryLimit:
     def test_pmtiles_split_copy_is_memory_bounded(self, tmp_path, monkeypatch, test_data_dir):
         """pmtiles chunking has no --write-memory, so the ceiling-based default applies."""
         from geoparquet_io.core import pmtiles_chunks as pc
-        from geoparquet_io.core.common import get_dataset_bounds
+        from geoparquet_io.core.bbox_structure import dataset_bounds
         from geoparquet_io.core.partition import staging
 
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
@@ -530,7 +530,7 @@ class TestDirectCopyMemoryLimit:
             str(parts_dir),
             geometry_column="geometry",
             key_sql=pc.chunk_key_sql(
-                "geometry", tuple(get_dataset_bounds(buildings, geometry_column="geometry")), 2, 2
+                "geometry", tuple(dataset_bounds(buildings, geometry_column="geometry")), 2, 2
             ),
             where=None,
             projection="*",

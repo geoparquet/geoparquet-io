@@ -13,7 +13,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from geoparquet_io.core.derive_geo_from_file import (
-    _geo_code_to_type_name,
     _geo_col_meta_from_stats,
     _geography_edges_from_logical,
 )
@@ -38,10 +37,10 @@ class _FakeParquetFile:
 
 
 def test_type_codes_map_to_names_and_unknown_codes_are_dropped():
-    assert _geo_code_to_type_name(3002) == "LineString ZM"
-    assert _geo_code_to_type_name(1) == "Point"
-    assert _geo_code_to_type_name(9999) is None, "an unknown base must not invent a type"
-    assert _geo_code_to_type_name(4001) is None, "an unknown dimension must not invent a suffix"
+    """The fold (``duckdb_metadata.aggregate_native_geo_stats``) names the codes."""
+    pf = _FakeParquetFile([_stats([3002, 1, 9999, 4001, 0], 0.0, 0.0, 1.0, 1.0)])
+    meta = _geo_col_meta_from_stats(pf, 0, "Geometry", "unused.parquet")
+    assert meta["geometry_types"] == ["LineString ZM", "Point"]
 
 
 def test_geography_edges_default_to_spherical_and_read_a_declared_algorithm():

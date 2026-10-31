@@ -115,7 +115,6 @@ convert_to_geopackage  # unused function (geoparquet_io/api/ops.py:2275) -- dyna
 convert_to_csv  # unused function (geoparquet_io/api/ops.py:2362) -- dynamic: public Python API (docs/api/python-api.md)
 get_row_group_geo_stats  # unused function (geoparquet_io/api/ops.py:2767) -- dynamic: public Python API (docs/api/python-api.md)
 inspect_layers  # unused function (geoparquet_io/cli/commands/inspect.py:405) -- dynamic: Click command, registered by its decorator
-calculate_file_bounds  # unused function (geoparquet_io/core/common.py:140) -- dead: T0e deletes (no package caller; only tests)
 add_admin_divisions  # unused function (geoparquet_io/api/ops.py:243) -- dynamic: public Python API (docs/api/python-api.md)
 add_kdtree  # unused function (geoparquet_io/api/ops.py:803) -- dynamic: public Python API (docs/api/python-api.md)
 contour  # unused function (geoparquet_io/api/ops.py:3240) -- dynamic: public Python API (docs/api/python-api.md)

@@ -13,7 +13,6 @@ Docs: docs/guide/process-simplify.md
 from __future__ import annotations
 
 import json
-import math
 import os
 from typing import Any
 
@@ -23,12 +22,18 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.bbox_structure import bbox_covering_column_for
 from geoparquet_io.core.compression import resolve_process_compression_level
+from geoparquet_io.core.crs_utils import is_geographic_crs
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
     InvalidParameterError,
 )
-from geoparquet_io.core.geo_metadata import sanitized_carried_geo
+from geoparquet_io.core.geo_metadata import (
+    GeometryStats,
+    geometry_stats_of,
+    merged_geometry_stats,
+    sanitized_carried_geo,
+)
 from geoparquet_io.core.geoarrow_encoding import is_wkb_extension_field
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, info, warn
@@ -523,19 +528,6 @@ def simplify_table(
 #: to Parquet's geometry logical type, which only the in-memory funnel does.
 _STREAMABLE_VERSIONS = ("1.0", "1.1")
 
-#: Geometry-type names by shapely type id, spelled as the GeoParquet spec
-#: (and the funnel's geoarrow-based computation) spells them.
-_TYPE_NAMES = {
-    0: "Point",
-    1: "LineString",
-    2: "LineString",  # LinearRing reads back as a LineString
-    3: "Polygon",
-    4: "MultiPoint",
-    5: "MultiLineString",
-    6: "MultiPolygon",
-    7: "GeometryCollection",
-}
-
 
 def _can_stream(pf: pq.ParquetFile, geom_col: str, resolved_version: str | None) -> bool:
     """Whether the bounded-memory writer reproduces the funnel's output.
@@ -552,46 +544,17 @@ def _can_stream(pf: pq.ParquetFile, geom_col: str, resolved_version: str | None)
     return bool(pa.types.is_binary(pf.schema_arrow.field(geom_col).type))
 
 
-def _accumulate_stats(shapely, np, geoms, row_bounds, types: set, bbox: list) -> None:
-    """Fold one batch's simplified geometries into the running stats.
-
-    ``geoms`` and ``row_bounds`` come from the simplify step itself
-    (:func:`_simplify_values` / :func:`_row_bounds`), not a re-parse of the
-    output WKB; null rows are NaN in ``row_bounds`` and absent from ``geoms``.
-    """
-    if len(geoms) == 0:
-        return
-    # The set can only ever hold the 16 (type code, has-Z) pairs _TYPE_NAMES
-    # covers, so fold to the distinct pairs in C and loop over those instead of
-    # over every geometry. A missing geometry types as -1, which gives a code
-    # below zero and no name, exactly as the per-row lookup did.
-    codes = shapely.get_type_id(geoms).astype("int64") * 2 + shapely.has_z(geoms)
-    for code in np.unique(codes):
-        name = _TYPE_NAMES.get(int(code) >> 1)
-        if name:
-            types.add(f"{name} Z" if int(code) & 1 else name)
-    bounds = row_bounds
-    finite = np.isfinite(bounds[:, 0])
-    if finite.any():
-        bounds = bounds[finite]
-        bbox[0] = min(bbox[0], float(bounds[:, 0].min()))
-        bbox[1] = min(bbox[1], float(bounds[:, 1].min()))
-        bbox[2] = max(bbox[2], float(bounds[:, 2].max()))
-        bbox[3] = max(bbox[3], float(bounds[:, 3].max()))
-
-
 def _footer_kv_via_funnel(
     schema: pa.Schema,
     geom_col: str,
-    types: set,
-    bbox: list,
+    stats: GeometryStats,
     geoparquet_version: str | None,
     compression: str | None,
     compression_level: int | None,
 ) -> dict[str, str]:
     """The streamed file's footer metadata, produced by the real funnel.
 
-    A zero-row table carrying the accumulated ``geometry_types``/``bbox`` as
+    A zero-row table carrying the merged ``geometry_types``/``bbox`` as
     its geo block goes through :func:`write_geoparquet_table` into a scratch
     file; the footer that comes back is exactly what the in-memory path
     would have written (carried stats win over recomputation, so the empty
@@ -605,19 +568,17 @@ def _footer_kv_via_funnel(
         geo = {"version": "1.1.0", "primary_column": geom_col, "columns": {}}
     columns = geo.setdefault("columns", {})
     col_meta = columns.setdefault(geom_col, {"encoding": "WKB"})
-    if types:
-        col_meta["geometry_types"] = sorted(types)
+    if stats.geometry_types:
+        col_meta["geometry_types"] = stats.geometry_types
     else:
         # Zero valid geometries: leave stats to the funnel's own empty-table
         # behavior, same as the in-memory path.
         col_meta.pop("geometry_types", None)
-    if all(math.isfinite(v) for v in bbox):
-        col_meta["bbox"] = bbox
+    if stats.bbox is not None:
+        col_meta["bbox"] = stats.bbox
     else:
-        # No finite bounds (every geometry empty): omit the key the way
-        # _compute_bbox_from_data does. The accumulator's inf sentinel must
-        # never reach json.dumps, which would emit it as bare Infinity and
-        # make the geo footer unreadable to strict JSON parsers.
+        # Nothing measurable (every geometry NULL or EMPTY): omit the key, as
+        # the bounds owner does for the in-memory path.
         col_meta.pop("bbox", None)
     metadata[b"geo"] = json.dumps(geo).encode("utf-8")
     empty = schema.with_metadata(metadata).empty_table()
@@ -668,8 +629,11 @@ def _simplify_file_streaming(
         )
     rows = resolve_row_group_rows(row_group_rows, None)
     writer_schema = schema.with_metadata(None)
-    types: set = set()
-    bbox = [float("inf"), float("inf"), float("-inf"), float("-inf")]
+    batch_stats: list[GeometryStats] = []
+    # The output keeps the input's CRS, which decides how the batch extents fold.
+    geographic = is_geographic_crs(
+        sanitized_carried_geo(schema.metadata).get("columns", {}).get(geom_col, {}).get("crs")
+    )
     collapsed = 0
     dropped = 0
     forward = inverse = None
@@ -740,16 +704,14 @@ def _simplify_file_streaming(
                         table = table.filter(pa.array(keep))
                         dropped += int(empty_flags.sum())
                         row_bounds = row_bounds[keep]
-                        geoms = geoms[keep[idx]]
                     table = _refresh_bbox_covering(table, geom_col, bounds=row_bounds)
-                    _accumulate_stats(shapely, np, geoms, row_bounds, types, bbox)
+                    batch_stats.append(geometry_stats_of(table, geom_col))
                     writer.write_table(table, row_group_size=rows)
                 writer.add_key_value_metadata(
                     _footer_kv_via_funnel(
                         schema,
                         geom_col,
-                        types,
-                        bbox,
+                        merged_geometry_stats(batch_stats, geographic=geographic),
                         geoparquet_version,
                         compression,
                         compression_level,

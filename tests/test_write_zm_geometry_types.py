@@ -16,9 +16,9 @@ import json
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.common import split_zm_suffix
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.geo_metadata import split_zm_suffix
 from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 from tests.conftest import get_geo_metadata
@@ -64,9 +64,9 @@ def test_split_zm_suffix():
     assert split_zm_suffix("LineString ZM") == ("LineString", " ZM")
 
 
-def test_compute_geometry_types_via_sql_is_dimension_aware():
-    """Both copies (common + geo_metadata) must return spec-suffixed names."""
-    from geoparquet_io.core import common, geo_metadata
+def test_geometry_types_of_a_query_is_dimension_aware():
+    """The one owner returns spec-suffixed names on the DuckDB path."""
+    from geoparquet_io.core.geo_metadata import QuerySource, geometry_types_of
 
     con = get_duckdb_connection(load_spatial=True)
     try:
@@ -75,8 +75,7 @@ def test_compute_geometry_types_via_sql_is_dimension_aware():
             "UNION ALL SELECT ST_GeomFromText('LINESTRING (2 2, 3 3)')"
         )
         expected = ["LineString", "LineString ZM"]
-        assert common.compute_geometry_types_via_sql(con, query, "geometry") == expected
-        assert geo_metadata.compute_geometry_types_via_sql(con, query, "geometry") == expected
+        assert geometry_types_of(QuerySource(con, query), "geometry") == expected
     finally:
         con.close()
 
@@ -124,8 +123,8 @@ def test_every_write_strategy_declares_the_same_suffix(tmp_path, strategy, dim):
     assert geo["columns"]["geometry"]["geometry_types"] == [expected]
 
 
-def test_compute_geometry_types_from_arrow_is_dimension_aware():
-    """The Arrow/geoarrow computation, on both copies, keeps the suffix (#892).
+def test_geometry_types_of_a_table_is_dimension_aware():
+    """The owner's Arrow/geoarrow path keeps the suffix (#892).
 
     geoarrow reports the base type and the dimensions in separate struct
     fields, so reading only ``geometry_type`` spelled every dimension "Polygon".
@@ -134,7 +133,7 @@ def test_compute_geometry_types_from_arrow_is_dimension_aware():
     import shapely
     from shapely import wkt as shapely_wkt
 
-    from geoparquet_io.core import arrow_geo_metadata, geo_metadata
+    from geoparquet_io.core.geo_metadata import geometry_types_of
 
     for _dim, (wkt, expected) in POLYGON_BY_DIM.items():
         table = pa.table(
@@ -145,5 +144,4 @@ def test_compute_geometry_types_from_arrow_is_dimension_aware():
                 )
             }
         )
-        assert arrow_geo_metadata._compute_geometry_types(table, "geometry", False) == [expected]
-        assert geo_metadata._compute_geometry_types(table, "geometry", False) == [expected]
+        assert geometry_types_of(table, "geometry") == [expected]

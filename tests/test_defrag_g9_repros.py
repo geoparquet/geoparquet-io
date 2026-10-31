@@ -256,9 +256,8 @@ def test_1359_convert_geojson_writes_an_empty_collection_for_zero_rows(tmp_path)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="#1292")
 def test_1292_table_bounds_of_a_geoarrow_wkb_column():
-    """Expected to fail: ``bounds`` is ``None``, expected ``(1.0, 2.0, 1.0, 2.0)``."""
+    """Was ``bounds`` is ``None``; the bounds owner reads the GeoArrow WKB column (T3b)."""
     import geoarrow.pyarrow as ga
 
     import geoparquet_io as gpio
@@ -307,9 +306,8 @@ def test_906_check_spec_accepts_nad83_points_in_its_area_of_use(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="#1165")
 def test_1165_convert_geoparquet_handles_an_infinite_coordinate(tmp_path):
-    """Expected to fail: ``Error: Conversion failed: Invalid Input Error: UnsupportedOperationException:``.
+    """Was ``Error: Conversion failed: Invalid Input Error: UnsupportedOperationException:``; now one clear refusal (T3b).
 
     The issue accepts either contract -- write with honest (possibly absent)
     stats, or reject up front with a clear error naming the non-finite value --
@@ -331,6 +329,111 @@ def test_1165_convert_geoparquet_handles_an_infinite_coordinate(tmp_path):
         lowered = result.output.lower()
         assert "infinite" in lowered or "non-finite" in lowered, _explain(result)
         assert isinstance(result.exception, SystemExit), _explain(result)
+
+
+# ---------------------------------------------------------------------------
+# #236 -- a bbox that is not four numbers: crashing on one, and writing one
+# ---------------------------------------------------------------------------
+
+
+def test_236_inspect_reads_a_bbox_of_nulls_without_crashing(tmp_path):
+    """Failed on the base with ``Error: unsupported format string passed to NoneType.__format__``.
+
+    The issue's geoarrow-rs file declares ``"bbox": [null, null, null, null]``
+    for a column holding an EMPTY geometry. Fixed on the integration branch
+    by T3a's sanitized decoder, which warns and drops the malformed ``bbox``.
+    """
+    geo = geo_block(bbox=[None, None, None, None])
+    src = write_with_geo(tmp_path / "nullbbox.parquet", points_table(3), geo)
+    for command in (("inspect", "summary"), ("inspect", "meta")):
+        result = _run(*command, src)
+        assert result.exit_code == 0, _explain(result)
+        assert "NoneType" not in result.output, _explain(result)
+
+
+def _infinite_point_file(tmp_path) -> Path:
+    table = pa.table(
+        {
+            "id": pa.array([0, 1], pa.int64()),
+            "geometry": pa.array(
+                [struct.pack("<BI2d", 1, 1, float("inf"), 0.0), point_wkb(1.0, 1.0)], pa.binary()
+            ),
+        }
+    )
+    return write_with_geo(tmp_path / "inf.parquet", table, geo_block())
+
+
+def _assert_finite_bbox_or_clean_refusal(result, out: Path) -> None:
+    """Either the write is refused naming the value, or its bbox is four finite numbers."""
+    if result.exit_code != 0:
+        assert "non-finite" in result.output.lower(), _explain(result)
+        assert not out.exists(), "a refused write left an output behind"
+        return
+    raw = footer_kv(out)[b"geo"].decode("utf-8")
+    assert "Infinity" not in raw and "NaN" not in raw, raw
+    bbox = json.loads(raw)["columns"]["geometry"].get("bbox")
+    assert bbox is None or all(isinstance(v, float) and abs(v) < float("inf") for v in bbox), raw
+
+
+def test_236_no_write_path_declares_a_non_finite_bbox(tmp_path):
+    """Was ``"bbox": [1.0, 0.0, Infinity, 1.0]`` -- not JSON; the owner refuses the geometry (T3b).
+
+    The gpio side of #236: a degenerate value measured into the ``geo`` block
+    is what made the issue's file unreadable. ``--no-repair-geometry`` keeps
+    the DuckDB stats pass from dying on ``ST_MakeValid`` first (#1165); the
+    Python API measures the same table on the Arrow path.
+    """
+    import geoparquet_io as gpio
+
+    src = _infinite_point_file(tmp_path)
+    out = tmp_path / "duckdb.parquet"
+    result = _run("convert", "geoparquet", src, out, "--no-repair-geometry", "--skip-hilbert")
+    _assert_finite_bbox_or_clean_refusal(result, out)
+
+    out = tmp_path / "arrow.parquet"
+    try:
+        gpio.read(str(src)).write(str(out))
+    except Exception as exc:  # the API's refusal is the exception itself
+        assert "non-finite" in str(exc).lower(), repr(exc)
+        assert not out.exists()
+    else:
+        raw = footer_kv(out)[b"geo"].decode("utf-8")
+        assert "Infinity" not in raw, raw
+
+
+# ---------------------------------------------------------------------------
+# #1146 -- a trailing row group holding only NULL geometry has no bbox stats
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(strict=True, reason="#1146")
+def test_1146_every_row_group_holds_a_located_geometry(tmp_path):
+    """Expected to fail: the last row group is the 3 NULL rows alone, with no covering stats.
+
+    ``convert`` orders located rows first and NULL/EMPTY rows last, so when
+    the located count is an exact multiple of the row-group size the writer
+    flushes the degenerate rows as a group of their own.
+    """
+    n = 4096
+    geoms = [point_wkb(-10.0 + 20.0 * ((i * 7919) % n) / n, 40.0) for i in range(n)]
+    table = pa.table(
+        {
+            "id": pa.array(range(n + 3), pa.int64()),
+            "geometry": pa.array([*geoms, None, None, None], pa.binary()),
+        }
+    )
+    src = write_with_geo(tmp_path / "points.parquet", table, geo_block())
+    out = tmp_path / "out.parquet"
+    result = _run("convert", "geoparquet", src, out, "--row-group-size", "2048")
+    assert result.exit_code == 0, _explain(result)
+    md = pq.read_metadata(str(out))
+    geom_index = md.schema.names.index("geometry")
+    for rg in range(md.num_row_groups):
+        group = md.row_group(rg)
+        stats = group.column(geom_index).statistics
+        assert stats is None or stats.null_count < group.num_rows, (
+            f"row group {rg} of {md.num_row_groups} holds {group.num_rows} rows, all NULL"
+        )
 
 
 # ---------------------------------------------------------------------------

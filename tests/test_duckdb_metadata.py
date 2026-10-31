@@ -8,7 +8,6 @@ from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.duckdb_metadata import (
     GeoParquetError,
     detect_geometry_columns,
-    get_bbox_from_row_group_stats,
     get_column_names,
     get_compression_info,
     get_kv_metadata,
@@ -180,13 +179,16 @@ class TestGetPerRowGroupBboxStats:
 
 
 class TestGetBboxFromRowGroupStats:
-    """Tests for get_bbox_from_row_group_stats function."""
+    """The covering's row-group statistics, folded by the one fold (geo_metadata)."""
 
     def test_with_bbox_column(self, places_test_file):
         """Test getting overall bbox for file with bbox."""
+        from geoparquet_io.core.geo_metadata import row_group_geometry_stats
+
         bbox_name = check_bbox_structure(places_test_file)["bbox_column_name"]
         if bbox_name:
-            result = get_bbox_from_row_group_stats(places_test_file, bbox_name)
+            rows = get_per_row_group_bbox_stats(places_test_file, bbox_name)
+            result = row_group_geometry_stats(rows, geographic=True).bbox
             if result is not None:
                 assert len(result) == 4
                 # xmin <= xmax and ymin <= ymax

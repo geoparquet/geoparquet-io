@@ -16,6 +16,7 @@ from geoparquet_io.core.check_verdict import (
     result_verdict,
     worst,
 )
+from geoparquet_io.core.crs_utils import column_is_geographic
 from geoparquet_io.core.duckdb_metadata import (
     get_per_row_group_bbox_stats,
     get_per_row_group_native_geo_stats,
@@ -251,7 +252,9 @@ def _check_spatial_order_from_row_group_bboxes(
     # Hilbert-sorted data often has overlapping consecutive row group bboxes
     # but each bbox covers only a small fraction of the total extent.
     if not passed and len(row_group_bboxes) >= 3:
-        avg_area_ratio, avg_skip_rate = _compute_locality_metrics(row_group_bboxes)
+        avg_area_ratio, avg_skip_rate = _compute_locality_metrics(
+            row_group_bboxes, geographic=column_is_geographic(parquet_file)
+        )
 
         if verbose:
             debug(
@@ -404,11 +407,12 @@ def _sample_distances(con, raw_url, geometry_column, limit_rows, random_sample_s
     return consecutive_avg, random_avg
 
 
-def _compute_data_extent(row_group_bboxes: list[dict]) -> dict:
+def _compute_data_extent(row_group_bboxes: list[dict], *, geographic: bool) -> dict:
     """Compute the total spatial extent across all row group bboxes.
 
     Args:
         row_group_bboxes: List of dicts with xmin, ymin, xmax, ymax keys.
+        geographic: Whether the file's CRS is geographic (how X folds).
 
     Returns:
         Dict with xmin, ymin, xmax, ymax for the full extent.
@@ -416,14 +420,12 @@ def _compute_data_extent(row_group_bboxes: list[dict]) -> dict:
     Raises:
         ValueError: If row_group_bboxes is empty.
     """
+    from geoparquet_io.core.geo_metadata import bbox_xy, row_group_geometry_stats
+
     if not row_group_bboxes:
         raise ValueError("No row group bboxes provided")
-    return {
-        "xmin": min(b["xmin"] for b in row_group_bboxes),
-        "ymin": min(b["ymin"] for b in row_group_bboxes),
-        "xmax": max(b["xmax"] for b in row_group_bboxes),
-        "ymax": max(b["ymax"] for b in row_group_bboxes),
-    }
+    bbox = row_group_geometry_stats(row_group_bboxes, geographic=geographic).bbox
+    return dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox_xy(bbox), strict=True))
 
 
 def _generate_sample_query_bboxes(
@@ -500,6 +502,8 @@ def _compute_locality_metrics(
     num_samples: int = _DEFAULT_NUM_SAMPLES,
     query_fraction: float = _DEFAULT_QUERY_FRACTION,
     seed: int = _DEFAULT_SEED,
+    *,
+    geographic: bool,
 ) -> tuple[float, float]:
     """Compute spatial locality metrics for a set of row group bboxes.
 
@@ -509,7 +513,7 @@ def _compute_locality_metrics(
     Returns:
         Tuple of (avg bbox area ratio, avg skip rate across sample queries).
     """
-    extent = _compute_data_extent(row_group_bboxes)
+    extent = _compute_data_extent(row_group_bboxes, geographic=geographic)
     avg_area_ratio = _compute_avg_bbox_area_ratio(row_group_bboxes, extent)
     samples = _generate_sample_query_bboxes(
         extent, num_samples=num_samples, query_fraction=query_fraction, seed=seed
@@ -617,7 +621,11 @@ def check_spatial_pushdown_readiness(
         }
 
     avg_area_ratio, avg_skip_rate = _compute_locality_metrics(
-        row_group_bboxes, num_samples=num_samples, query_fraction=query_fraction, seed=seed
+        row_group_bboxes,
+        num_samples=num_samples,
+        query_fraction=query_fraction,
+        seed=seed,
+        geographic=column_is_geographic(parquet_file),
     )
 
     if verbose:

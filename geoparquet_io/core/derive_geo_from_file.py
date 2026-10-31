@@ -22,7 +22,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.compression import resolve_codec
-from geoparquet_io.core.crs_utils import NULL_CRS_HINT, is_default_crs, is_unknown_type_crs
+from geoparquet_io.core.crs_utils import (
+    NULL_CRS_HINT,
+    is_default_crs,
+    is_geographic_crs,
+    is_unknown_type_crs,
+)
 from geoparquet_io.core.duckdb_metadata import (
     get_schema_info,
     native_geo_type,
@@ -30,32 +35,13 @@ from geoparquet_io.core.duckdb_metadata import (
     resolve_crs_reference,
 )
 from geoparquet_io.core.geo_metadata import (
-    _DIMENSION_SUFFIXES,
-    _GEOMETRY_TYPE_CODES,
     read_raw_geo,
+    row_group_geometry_stats,
     sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.parquet_writer import without_geometry_dictionary
-
-
-def _geo_code_to_type_name(code: int) -> str | None:
-    """Map a Parquet geospatial type code (e.g. 3002) to 'LineString ZM'.
-
-    Reads the one WKB type-code table in ``geo_metadata``. Base 0 is refused
-    on purpose: the table maps it to the placeholder ``"Unknown"``, which is
-    not a GeoParquet ``geometry_types`` value, and a derived block names only
-    the types it can actually read off the file. An unrecognised base or
-    dimension falls through to ``None`` and :func:`_geo_col_meta_from_stats`
-    drops it.
-    """
-    dim, base = divmod(code, 1000)
-    name = _GEOMETRY_TYPE_CODES.get(base)
-    suffix = _DIMENSION_SUFFIXES.get(dim)
-    if base == 0 or name is None or suffix is None:
-        return None
-    return name + suffix
 
 
 def _geography_edges_from_logical(logical: str) -> str | None:
@@ -102,48 +88,35 @@ def _crs_from_geo_logical(logical: str, parquet_file: str) -> tuple[bool, Any]:
 
 def _geo_col_meta_from_stats(pf, col_index: int, logical: str, parquet_file: str) -> dict:
     """Build one geo column metadata dict from a column's native geo statistics."""
-    codes: set[int] = set()
-    bbox = None
-    zrange = None
+    chunks = []
     for rg in range(pf.metadata.num_row_groups):
         stats = pf.metadata.row_group(rg).column(col_index).geo_statistics
         if stats is None:
             continue
-        codes.update(stats.geospatial_types or [])
-        if stats.xmin is not None:
-            # Limitation: min/max-merging row-group extents assumes planar
-            # edges; geography data crossing the antimeridian can yield an
-            # over-wide (though never under-covering) bbox here.
-            if bbox is None:
-                bbox = [stats.xmin, stats.ymin, stats.xmax, stats.ymax]
-            else:
-                bbox = [
-                    min(bbox[0], stats.xmin),
-                    min(bbox[1], stats.ymin),
-                    max(bbox[2], stats.xmax),
-                    max(bbox[3], stats.ymax),
-                ]
-        if stats.zmin is not None:
-            if zrange is None:
-                zrange = [stats.zmin, stats.zmax]
-            else:
-                zrange = [min(zrange[0], stats.zmin), max(zrange[1], stats.zmax)]
-
-    geometry_types = sorted(t for t in (_geo_code_to_type_name(c) for c in codes) if t is not None)
-    col_meta: dict = {"encoding": "WKB", "geometry_types": geometry_types}
-    if bbox is not None:
-        # RFC 7946 order; 6 values when a Z range exists (M is never
-        # part of bbox per spec).
-        if zrange is not None:
-            col_meta["bbox"] = [bbox[0], bbox[1], zrange[0], bbox[2], bbox[3], zrange[1]]
-        else:
-            col_meta["bbox"] = bbox
+        chunks.append(
+            {
+                "xmin": stats.xmin,
+                "ymin": stats.ymin,
+                "xmax": stats.xmax,
+                "ymax": stats.ymax,
+                "zmin": stats.zmin,
+                "zmax": stats.zmax,
+                "geometry_types": list(stats.geospatial_types or []),
+            }
+        )
+    # The one fold (geo_metadata): X merged on the circle, Z over the row
+    # groups that carry an extent, the spec's interleaved bbox (M is never part
+    # of a bbox), spec type names only.
     # The rebuilt block is the file's only geo metadata, so a CRS left behind
     # here is not merely missing: an absent `crs` *means* OGC:CRS84, which
     # relabels projected coordinates as lon/lat while the Parquet logical type
     # still names the real CRS (#785). Mirror the logical type, which is the
-    # authority at 2.0.
+    # authority at 2.0; it also decides how the extents fold.
     crs_present, crs = _crs_from_geo_logical(logical, parquet_file)
+    folded = row_group_geometry_stats(chunks, geographic=is_geographic_crs(crs))
+    col_meta: dict = {"encoding": "WKB", "geometry_types": folded.geometry_types}
+    if folded.bbox is not None:
+        col_meta["bbox"] = folded.bbox
     if crs_present:
         col_meta["crs"] = crs
     # A Geography logical type carries edge semantics the geo metadata must
