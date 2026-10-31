@@ -18,12 +18,9 @@ import json
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.common import (
-    compute_geometry_dimensions_via_sql,
-    compute_geometry_types_via_sql,
-)
+from geoparquet_io.core.common import compute_geometry_dimensions_via_sql
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-from geoparquet_io.core.geo_metadata import compute_geo_stats_via_sql
+from geoparquet_io.core.geo_metadata import QuerySource, geometry_stats_of, geometry_types_of
 
 _HILBERT_ORDER = "ORDER BY ST_Hilbert(geometry, ST_Extent(ST_MakeEnvelope(-180, -85, 180, 85)))"
 
@@ -88,7 +85,7 @@ def test_stats_scan_does_not_sort_the_input(spatial_con, scrambled_points):
     recorder = _RecordingConnection(spatial_con)
     query = f"SELECT * FROM '{scrambled_points.as_posix()}' {_HILBERT_ORDER}"
 
-    compute_geo_stats_via_sql(recorder, query, "geometry")
+    geometry_stats_of(QuerySource(recorder, query), "geometry")
 
     assert recorder.statements, "the stats scan executed nothing"
     assert not recorder.sorting_statements(), "the stats scan still sorts the input: " + "\n".join(
@@ -100,8 +97,9 @@ def test_stats_scan_answers_the_same_with_and_without_the_order(spatial_con, scr
     """Dropping the order must not change either aggregate."""
     base = f"SELECT * FROM '{scrambled_points.as_posix()}'"
 
-    assert compute_geo_stats_via_sql(spatial_con, base, "geometry") == compute_geo_stats_via_sql(
-        spatial_con, f"{base} {_HILBERT_ORDER}", "geometry"
+    ordered = QuerySource(spatial_con, f"{base} {_HILBERT_ORDER}")
+    assert geometry_stats_of(QuerySource(spatial_con, base), "geometry") == geometry_stats_of(
+        ordered, "geometry"
     )
 
 
@@ -109,7 +107,7 @@ def test_stats_scan_keeps_an_order_that_a_limit_depends_on(spatial_con, scramble
     """``ORDER BY ... LIMIT n`` decides *which* rows exist, so it must survive."""
     limited = f"SELECT * FROM '{scrambled_points.as_posix()}' ORDER BY id LIMIT 2"
 
-    bbox, _ = compute_geo_stats_via_sql(spatial_con, limited, "geometry")
+    bbox = geometry_stats_of(QuerySource(spatial_con, limited), "geometry").bbox
 
     # ids 1 and 2 only: (10, 10) and (-50, -20). Keeping the whole file's rows
     # would give xmax 170 / ymin -80.
@@ -160,9 +158,8 @@ def test_the_disk_rewrite_stats_scan_drops_the_order_but_the_copy_keeps_it(
 ):
     """``disk-rewrite`` calls the type scan directly, so it needs the strip too.
 
-    ``compute_geo_stats_via_sql`` strips the order for the funnel's own scan, but
-    this strategy reaches past it: it calls ``compute_bbox_via_sql`` and
-    ``compute_geometry_types_via_sql`` itself with the caller's ordered query. The
+    The strategy hands the caller's ordered query to the stats owner
+    (``geometry_stats_of``) itself, so the owner must strip the order. The
     type scan is a ``SELECT DISTINCT`` -- an answer no row order can change --
     yet DuckDB still sorted the whole input to produce it (#1177).
     """
@@ -197,8 +194,8 @@ def test_geometry_types_scan_answers_the_same_with_and_without_the_order(
     base = f"SELECT * FROM '{scrambled_points.as_posix()}'"
     recorder = _RecordingConnection(spatial_con)
 
-    unordered = compute_geometry_types_via_sql(spatial_con, base, "geometry")
-    ordered = compute_geometry_types_via_sql(recorder, f"{base} {_HILBERT_ORDER}", "geometry")
+    unordered = geometry_types_of(QuerySource(spatial_con, base), "geometry")
+    ordered = geometry_types_of(QuerySource(recorder, f"{base} {_HILBERT_ORDER}"), "geometry")
 
     assert ordered == unordered == ["Point"]
     assert recorder.statements, "the type scan executed nothing"
@@ -227,7 +224,7 @@ def test_geometry_types_scan_keeps_an_order_that_a_limit_depends_on(spatial_con,
 
     # ids 1 and 2 only: both points. Keeping the whole file's rows would also
     # report the LineString.
-    assert compute_geometry_types_via_sql(spatial_con, limited, "geometry") == ["Point"]
+    assert geometry_types_of(QuerySource(spatial_con, limited), "geometry") == ["Point"]
 
 
 @pytest.fixture
@@ -255,7 +252,7 @@ def test_dimensions_scan_answers_the_same_with_and_without_the_order(
     """The 1.1-geoarrow dimension probe is the same DISTINCT shape (#1177).
 
     ``arrow-streaming`` takes its bbox and types through
-    ``compute_geo_stats_via_sql``, which strips, but calls this one itself with
+    ``geometry_stats_of``, which strips, but calls this one itself with
     the caller's ordered query -- the last sorted extra scan on that path.
     """
     base = f"SELECT * FROM '{mixed_dimension_points.as_posix()}'"

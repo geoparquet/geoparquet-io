@@ -30,9 +30,8 @@ from typing import TYPE_CHECKING
 
 from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
-    _get_query_column_type,
-    _get_query_columns,
     _strip_trailing_order_by,
+    describe_query,
     fetch_one,
     query_schema,
     quote_identifier,
@@ -1229,9 +1228,9 @@ def backfill_derived_stats(
             if not isinstance(col_meta, dict) or name not in table.column_names:
                 continue
             if not col_meta.get("geometry_types"):
-                col_meta["geometry_types"] = _compute_geometry_types(table, name, verbose)
+                col_meta["geometry_types"] = geometry_types_of(table, name, verbose=verbose)
             if "bbox" not in col_meta:
-                bbox = _compute_bbox_from_data(table, name, verbose)
+                bbox = bounds_of(table, name, verbose=verbose)
                 if bbox:
                     col_meta["bbox"] = bbox
         return geo_dict
@@ -1574,208 +1573,487 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
 # =============================================================================
 
 
-def compute_bbox_via_sql(
-    con,
-    query: str,
-    geometry_column: str,
-) -> list[float] | None:
+# =============================================================================
+# Geometry statistics and dataset bounds (#1367 concept 5)
+# =============================================================================
+#
+# One routine measures ``bbox`` and ``geometry_types`` for every source gpio
+# holds geometry in -- an Arrow table, a DuckDB query, a Parquet file -- with
+# one degenerate-geometry policy:
+#
+# * NULL and EMPTY geometries are skipped, for the bbox and for the types. A
+#   geometry is EMPTY when its envelope is inverted or absent: that is how
+#   ``POLYGON EMPTY``, ``POINT(NaN NaN)`` (WKB's empty point) and a
+#   coordinate-free collection measure, on DuckDB and on geoarrow alike.
+#   geoarrow cannot name the type of every EMPTY geometry, so counting their
+#   types made the two paths disagree.
+# * Empty or all-degenerate input yields ``bbox=None`` and ``[]`` types --
+#   never ``[0, 0, 0, 0]``, never the inverted ``[inf, inf, -inf, -inf]`` a
+#   min/max fold of EMPTY envelopes gives, never a raise.
+# * A located geometry with an infinite coordinate has no bbox anyone can
+#   use. It raises :class:`GeometryError` naming the column and the geometry
+#   (#1165), so no write declares ``Infinity`` in a ``geo`` bbox (#236).
+# * ``geometry_types`` is sorted (the SQL path always was; the Arrow path
+#   listed them in type-code order).
+# * ``antimeridian=True`` reports lon/lat data astride the antimeridian in the
+#   RFC 7946 wrap form, ``xmin > xmax`` (moved here from process/aggregate).
+
+#: How close to +/-180 data must reach before the antimeridian scan runs.
+_ANTIMERIDIAN_EPS = 1e-6
+
+# DuckDB ST_GeometryType names ("POINT") -> GeoParquet spec names ("Point").
+_DUCKDB_TO_SPEC_TYPE = {
+    "POINT": "Point",
+    "LINESTRING": "LineString",
+    "POLYGON": "Polygon",
+    "MULTIPOINT": "MultiPoint",
+    "MULTILINESTRING": "MultiLineString",
+    "MULTIPOLYGON": "MultiPolygon",
+    "GEOMETRYCOLLECTION": "GeometryCollection",
+}
+
+
+def split_zm_suffix(name: str) -> tuple[str, str]:
+    """Split a spec geometry type into (base, suffix): 'Point ZM' -> ('Point', ' ZM').
+
+    Names without a dimension suffix (and non-string inputs) return ('' suffix).
     """
-    Compute bounding box from query using DuckDB spatial functions.
+    if isinstance(name, str):
+        for suffix in (" ZM", " Z", " M"):
+            if name.endswith(suffix):
+                return name[: -len(suffix)], suffix
+    return name, ""
 
-    Uses ST_XMin/YMin/XMax/YMax aggregate functions to compute the
-    overall bounding box of all geometries.
 
-    Args:
-        con: DuckDB connection with spatial extension loaded
-        query: SQL query containing geometry column
-        geometry_column: Name of geometry column
+def zm_suffix_sql(geom_expr: str, sep: str = " ") -> str:
+    """SQL fragment producing the dimension suffix (''/'{sep}Z'/'{sep}M'/'{sep}ZM').
 
-    Returns:
-        [xmin, ymin, xmax, ymax] or None if query returns no rows
-        or geometry column not in query
+    The GeoParquet spec treats "LineString" and "LineString ZM" as distinct
+    geometry_types entries, so any SQL type scan must append this suffix to
+    ST_GeometryType() output instead of collapsing dimensions.
     """
-    # An extent is an aggregate over every row, so the order they are read in
-    # cannot change it -- but DuckDB keeps the ORDER_BY operator in the plan of
-    # an ordered subquery, so measuring one costs a full sort of the input on
-    # top of the sort the COPY already does (#1177).
-    query = _strip_trailing_order_by(query)
+    return (
+        f"CASE WHEN ST_HasZ({geom_expr}) AND ST_HasM({geom_expr}) THEN '{sep}ZM' "
+        f"WHEN ST_HasZ({geom_expr}) THEN '{sep}Z' "
+        f"WHEN ST_HasM({geom_expr}) THEN '{sep}M' "
+        f"ELSE '' END"
+    )
 
-    import duckdb
 
-    # Check if geometry column exists in query result
-    try:
-        columns = _get_query_columns(con, query)
-        if geometry_column not in columns:
-            return None
-    except (duckdb.Error, RuntimeError, ValueError, AttributeError):
-        # If we can't determine schema, return None rather than failing
-        return None
+@dataclass(frozen=True)
+class GeometryStats:
+    """What :func:`geometry_stats_of` measured: ``[xmin, ymin, xmax, ymax]`` or None, and the types."""
 
-    quoted_geom = quote_identifier(geometry_column)
+    bbox: list[float] | None
+    geometry_types: list[str]
 
-    # GeoArrow native types (STRUCT(x DOUBLE, y DOUBLE)[N]) cannot be passed to
-    # ST_XMin directly. Detect at runtime and use UNNEST to extract coordinates.
-    col_type = _get_query_column_type(con, query, geometry_column) or ""
+
+_NO_STATS = GeometryStats(None, [])
+
+
+def merged_geometry_stats(parts) -> GeometryStats:
+    """The stats of the union of the sources ``parts`` were measured on.
+
+    For a writer that measures batch by batch: each batch's
+    :func:`geometry_stats_of`, merged, is the whole stream's -- the types'
+    union and the bboxes' planar union.
+    """
+    boxes = [p.bbox for p in parts if p.bbox is not None]
+    types = sorted({t for p in parts for t in p.geometry_types})
+    if not boxes:
+        return GeometryStats(None, types)
+    return GeometryStats(
+        [
+            min(b[0] for b in boxes),
+            min(b[1] for b in boxes),
+            max(b[2] for b in boxes),
+            max(b[3] for b in boxes),
+        ],
+        types,
+    )
+
+
+def _non_finite_error(column: str, example: str) -> Exception:
+    from geoparquet_io.core.exceptions import GeometryError
+
+    return GeometryError(
+        f"Column '{column}' holds a geometry with a non-finite (infinite) coordinate, "
+        f"{example}, so its bounds cannot be measured. Fix or remove that geometry and "
+        "try again."
+    )
+
+
+# -- DuckDB ------------------------------------------------------------------
+
+
+def _envelope_columns(read_expr: str, col_type: str, quoted: str) -> tuple[str, str] | None:
+    """``(type expression, the four envelope expressions)`` of one row, or None.
+
+    The type expression is NULL where SQL cannot name the type (a GeoArrow
+    coordinate struct, which ``ST_GeometryType`` does not take).
+    """
     if "STRUCT" in col_type:
-        # bracket_depth = col_type.count("[]"): 0=point, 1=linestring/multipoint,
-        # 2=polygon/multilinestring, 3=multipolygon. Maps directly to _GEOARROW_FLATTEN_DEPTH
-        # (flatten_count = bracket_depth - 1 for non-point).
-        _depth_to_encoding = {0: "point", 1: "linestring", 2: "polygon", 3: "multipolygon"}
-        enc = _depth_to_encoding.get(col_type.count("[]"), "linestring")
-        xmin_e, ymin_e, xmax_e, ymax_e, _, _ = _geoarrow_coord_exprs(quoted_geom, enc)
-        bbox_query = f"""
-            SELECT
-                MIN({xmin_e}) as xmin,
-                MIN({ymin_e}) as ymin,
-                MAX({xmax_e}) as xmax,
-                MAX({ymax_e}) as ymax
-            FROM ({query})
-            WHERE NOT isnan({xmax_e}) AND NOT isnan({ymax_e})
-        """
-    else:
-        bbox_query = f"""
-            SELECT
-                MIN(ST_XMin({quoted_geom})) as xmin,
-                MIN(ST_YMin({quoted_geom})) as ymin,
-                MAX(ST_XMax({quoted_geom})) as xmax,
-                MAX(ST_YMax({quoted_geom})) as ymax
-            FROM ({query})
-        """
-    result = fetch_one(con.execute(bbox_query))
-
-    if result and all(v is not None for v in result):
-        return list(result)
-    return None
+        depth_to_encoding = {0: "point", 1: "linestring", 2: "polygon", 3: "multipolygon"}
+        enc = depth_to_encoding.get(col_type.count("[]"), "linestring")
+        xmin_e, ymin_e, xmax_e, ymax_e, _, _ = _geoarrow_coord_exprs(quoted, enc)
+        # A GeoArrow EMPTY carries NaN coordinates instead of none.
+        xmin_e, ymin_e = (f"nullif({e}, 'NaN'::DOUBLE)" for e in (xmin_e, ymin_e))
+        xmax_e, ymax_e = (f"nullif({e}, 'NaN'::DOUBLE)" for e in (xmax_e, ymax_e))
+        return "NULL::VARCHAR", f"{xmin_e}, {ymin_e}, {xmax_e}, {ymax_e}"
+    g = read_expr
+    return (
+        f"ST_GeometryType({g}) || {zm_suffix_sql(g)}",
+        f"ST_XMin({g}), ST_YMin({g}), ST_XMax({g}), ST_YMax({g})",
+    )
 
 
-def _fold_geo_stat_rows(rows) -> tuple[list[float] | None, list[str]]:
-    """Fold ``(geom_type, xmin, ymin, xmax, ymax)`` rows into ``(bbox, types)``."""
-    from geoparquet_io.core.common import _DUCKDB_TO_SPEC_TYPE, split_zm_suffix
+def _located_rows_sql(con, query: str, geometry_column: str, bbox_column: str | None):
+    """A SELECT of ``(__t, __x0, __y0, __x1, __y1, __g)`` over the located rows, or None.
 
-    types: set[str] = set()
-    extents: list[tuple[float, float, float, float]] = []
-    for geom_type, xmin, ymin, xmax, ymax in rows:
-        if geom_type:
-            base, suffix = split_zm_suffix(geom_type)
-            types.add(_DUCKDB_TO_SPEC_TYPE.get(base.upper(), base) + suffix)
-        if None not in (xmin, ymin, xmax, ymax):
-            extents.append((xmin, ymin, xmax, ymax))
-
-    if not extents:
-        return None, sorted(types)
-    bbox = [
-        min(e[0] for e in extents),
-        min(e[1] for e in extents),
-        max(e[2] for e in extents),
-        max(e[3] for e in extents),
-    ]
-    return bbox, sorted(types)
-
-
-def _geo_stats_unsupported(con, query: str, geometry_column: str) -> bool:
-    """True when the combined per-type aggregation cannot run on this column.
-
-    GeoArrow native types (``STRUCT(x DOUBLE, y DOUBLE)[N]``) support neither
-    ``ST_GeometryType`` nor the shared aggregation, and a column that is not in
-    the query result obviously cannot be aggregated. Both cases fall back to the
-    single-stat helpers, which already handle them.
+    ``__t`` is the spec type name base from DuckDB (NULL when unknowable),
+    ``__g`` the GEOMETRY (NULL on the struct paths). None when the column is
+    not in the query's output; a query that cannot be bound raises, as it
+    would at the write it is measured for.
     """
-    import duckdb
+    from geoparquet_io.core.geometry_detection import GeometryRead
+
+    target = bbox_column or geometry_column
+    col_type = dict(describe_query(con, query)).get(target)
+    if col_type is None:
+        return None
+    quoted = quote_identifier(target)
+    if bbox_column is not None:
+        type_expr, env = (
+            "NULL::VARCHAR",
+            ", ".join(f"{quoted}.{f}" for f in ("xmin", "ymin", "xmax", "ymax")),
+        )
+        geom = "NULL::GEOMETRY"
+    else:
+        read = GeometryRead.for_type(target, col_type)
+        g = read.shape_expr if read.kind == "wkb" else quoted
+        type_expr, env = _envelope_columns(g, col_type, quoted)
+        geom = "NULL::GEOMETRY" if "STRUCT" in col_type else g
+    return f"""
+        SELECT * FROM (
+            SELECT {type_expr} AS __t, {env}, {geom} AS __g
+            FROM ({query})
+        ) AS __m(__t, __x0, __y0, __x1, __y1, __g)
+        WHERE __x0 <= __x1 AND __y0 <= __y1
+    """
+
+
+def _spec_type_name(duckdb_type: str) -> str:
+    """DuckDB's ``MULTIPOINT ZM`` (or ``ST_POINT``) in spec casing; an unmapped
+    base keeps its own spelling and its suffix once (``TRIANGLE Z``)."""
+    base, suffix = split_zm_suffix(duckdb_type)
+    base = base.upper().removeprefix("ST_")
+    return _DUCKDB_TO_SPEC_TYPE.get(base, base) + suffix
+
+
+_FINITE_SQL = "isfinite(__x0) AND isfinite(__y0) AND isfinite(__x1) AND isfinite(__y1)"
+
+
+def _query_stats(
+    con, query: str, geometry_column: str, bbox_column: str | None, need_bbox: bool
+) -> tuple[GeometryStats, str | None]:
+    """The stats of a query, and the located-rows SQL they came from (None: nothing to read)."""
+    query = _strip_trailing_order_by(query)
+    located = _located_rows_sql(con, query, geometry_column, bbox_column)
+    if located is None:
+        return _NO_STATS, None
+    rows = con.execute(f"""
+        SELECT __t, MIN(__x0), MIN(__y0), MAX(__x1), MAX(__y1),
+               COUNT(*) FILTER (WHERE NOT ({_FINITE_SQL}))
+        FROM ({located})
+        GROUP BY 1
+    """).fetchall()
+    if need_bbox and any(r[5] for r in rows):
+        example = fetch_one(
+            con.execute(f"""
+            SELECT COALESCE(ST_AsText(__g),
+                   'envelope [' || __x0 || ', ' || __y0 || ', ' || __x1 || ', ' || __y1 || ']')
+            FROM ({located}) WHERE NOT ({_FINITE_SQL}) LIMIT 1
+        """)
+        )
+        raise _non_finite_error(geometry_column, example[0] if example else "")
+    types = sorted({_spec_type_name(r[0]) for r in rows if r[0]})
+    if not rows:
+        return GeometryStats(None, types), located
+    bbox = [
+        min(r[1] for r in rows),
+        min(r[2] for r in rows),
+        max(r[3] for r in rows),
+        max(r[4] for r in rows),
+    ]
+    return GeometryStats(bbox, types), located
+
+
+#: The widest longitude gap between the parts of the located geometries, by a
+#: running max over the sorted part extents -- the standard interval merge.
+#: The parts, not the whole geometries: a cut cell's own extent already spans
+#: -180 to 180 and would hide the gap that makes the crossing visible.
+_WIDEST_LON_GAP_SQL = """
+WITH parts AS (
+    SELECT ST_XMin(p) AS lo, ST_XMax(p) AS hi
+    FROM (SELECT UNNEST(ST_Dump(__g)).geom AS p FROM ({located}) WHERE __g IS NOT NULL)
+    WHERE NOT ST_IsEmpty(p)
+), merged AS (
+    SELECT lo, max(hi) OVER (ORDER BY lo ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prev
+    FROM parts
+)
+SELECT lo, prev FROM merged WHERE prev IS NOT NULL AND lo > prev ORDER BY lo - prev DESC LIMIT 1
+"""
+
+
+def _antimeridian_wrap(con, located: str, bbox: list[float]) -> list[float]:
+    """``bbox`` in RFC 7946 wrap form when the data sits astride the antimeridian.
+
+    A cell that straddles the antimeridian is written cut into a MultiPolygon
+    with parts at both -180 and +180 (RFC 7946 3.1.9). Plain min/max over such
+    a dataset reports [-180, ..., 180, ...] -- true, but it claims the whole
+    globe for data that only touches the seam. RFC 7946 5.2, which GeoParquet's
+    ``bbox`` follows, writes the crossing extent as xmin > xmax instead, when
+    the data leaves a longitude gap wider than the one the plain extent
+    implies. Longitudes are assumed: the caller establishes a geographic CRS.
+    """
+    xmin, ymin, xmax, ymax = bbox
+    # Only data reaching both edges can be hiding a crossing; anything else is
+    # already reported tightly and must not pay for the part-level scan.
+    if xmin > -180.0 + _ANTIMERIDIAN_EPS or xmax < 180.0 - _ANTIMERIDIAN_EPS:
+        return bbox
+    gap = fetch_one(con.execute(_WIDEST_LON_GAP_SQL.format(located=located)))
+    if gap is None or (gap[0] - gap[1]) <= (xmin + 360.0) - xmax:
+        return bbox
+    return [gap[0], ymin, gap[1], ymax]
+
+
+# -- Arrow ------------------------------------------------------------------
+
+
+def _arrow_types(wkb, verbose: bool) -> list[str]:
+    import geoarrow.pyarrow as ga
 
     try:
-        col_type = _get_query_column_type(con, query, geometry_column) or ""
-        if "STRUCT" in col_type:
-            return True
-        return geometry_column not in _get_query_columns(con, query)
-    except (duckdb.Error, RuntimeError, ValueError, AttributeError):
-        return True
+        codes = geoarrow_wkb_codes(ga.unique_geometry_types(ga.as_wkb(wkb)))
+    except Exception as e:  # geoarrow C++ errors, e.g. a type code of 0
+        if verbose:
+            debug(f"Could not compute geometry_types: {e}")
+        return []
+    names = sorted({_get_geometry_type_name(code) for code in codes})
+    if verbose:
+        debug(f"Computed geometry_types from data: {names}")
+    return names
 
 
-def compute_geo_stats_via_sql(
-    con,
-    query: str,
-    geometry_column: str,
-    need_bbox: bool = True,
-    need_geometry_types: bool = True,
-) -> tuple[list[float] | None, list[str]]:
-    """Compute ``bbox`` and ``geometry_types`` in a SINGLE scan of ``query``.
+def _arrow_envelopes(table: pa.Table, geometry_column: str, bbox_column: str | None):
+    """``(storage, x0, y0, x1, y1)`` of the non-NULL rows as flat arrays, or None."""
+    import pyarrow as pa
+    import pyarrow.compute as pc
 
-    Both stats are aggregates over the same rows, so grouping by geometry type
-    yields one small row per type carrying that type's extent — the union of
-    which is the collection bbox. That replaces the two independent full scans
-    the write strategies used to run, which matters because invalidating a
-    carried bbox forces the (possibly expensive, e.g. ``ST_Transform``) query to
-    be re-executed for it.
+    if bbox_column is not None:
+        storage = table.column(bbox_column).combine_chunks()
+        storage = storage.filter(pc.is_valid(storage))
+        fields = [pc.struct_field(storage, f) for f in ("xmin", "ymin", "xmax", "ymax")]
+        return (None, *fields)
+    import geoarrow.pyarrow as ga
 
-    Args:
-        con: DuckDB connection with spatial extension loaded
-        query: SQL query containing the geometry column
-        geometry_column: Name of the geometry column
-        need_bbox: Compute the bbox (``False`` returns ``None`` for it)
-        need_geometry_types: Compute geometry types (``False`` returns ``[]``)
+    wkb = ga.as_wkb(table.column(geometry_column)).combine_chunks()
+    storage = wkb.storage if isinstance(wkb, pa.ExtensionArray) else wkb
+    storage = storage.filter(pc.is_valid(storage))
+    if len(storage) == 0:
+        return None
+    box = ga.box(ga.as_wkb(storage)).storage
+    return (storage, *(pc.struct_field(box, f) for f in ("xmin", "ymin", "xmax", "ymax")))
 
-    Returns:
-        ``(bbox_or_None, geometry_types)``
-    """
-    from geoparquet_io.core.common import compute_geometry_types_via_sql, zm_suffix_sql
 
-    # Both stats are aggregates over every row, so neither depends on the order
-    # the rows arrive in. `convert` hands the write funnel its Hilbert `ORDER BY`
-    # already applied, and DuckDB keeps the ORDER_BY operator in the plan of the
-    # subquery this wraps -- so every write whose carried stats had to be
-    # recomputed sorted the input twice, once here and once in the COPY (#1177).
-    # Stripped once, here, so the schema probes below and both single-stat
-    # helpers see the unordered query too. The COPY is built from the caller's
-    # query and is untouched: the output's row order does not change.
-    query = _strip_trailing_order_by(query)
+def _arrow_stats(
+    table: pa.Table, geometry_column: str, bbox_column: str | None, need_bbox: bool, verbose: bool
+) -> GeometryStats:
+    import pyarrow.compute as pc
 
-    def _separately() -> tuple[list[float] | None, list[str]]:
-        return (
-            compute_bbox_via_sql(con, query, geometry_column) if need_bbox else None,
-            compute_geometry_types_via_sql(con, query, geometry_column)
-            if need_geometry_types
-            else [],
+    target = bbox_column or geometry_column
+    if target not in table.column_names or table.num_rows == 0:
+        return _NO_STATS
+    try:
+        found = _arrow_envelopes(table, geometry_column, bbox_column)
+    except Exception as e:  # geoarrow C++ errors on malformed WKB
+        if verbose:
+            debug(f"Could not compute bbox: {e}")
+        return _NO_STATS
+    if found is None:
+        return _NO_STATS
+    storage, x0, y0, x1, y1 = found
+    located = pc.fill_null(pc.and_(pc.less_equal(x0, x1), pc.less_equal(y0, y1)), False)
+    if not pc.any(located).as_py():
+        return _NO_STATS
+    finite = pc.and_(
+        pc.and_(pc.is_finite(x0), pc.is_finite(y0)), pc.and_(pc.is_finite(x1), pc.is_finite(y1))
+    )
+    bad = pc.and_(located, pc.invert(finite))
+    if need_bbox and pc.any(bad).as_py():
+        example = "envelope " + str([pc.filter(v, bad)[0].as_py() for v in (x0, y0, x1, y1)])
+        if storage is not None:
+            import geoarrow.pyarrow as ga
+
+            example = ga.as_wkt(ga.as_wkb(pc.filter(storage, bad)))[0].as_py()
+        raise _non_finite_error(geometry_column, example)
+    types = [] if storage is None else _arrow_types(pc.filter(storage, located), verbose)
+    bbox = [
+        pc.min(pc.filter(x0, located)).as_py(),
+        pc.min(pc.filter(y0, located)).as_py(),
+        pc.max(pc.filter(x1, located)).as_py(),
+        pc.max(pc.filter(y1, located)).as_py(),
+    ]
+    if verbose:
+        debug(
+            f"Computed bbox from data: [{bbox[0]:.6f}, {bbox[1]:.6f}, {bbox[2]:.6f}, {bbox[3]:.6f}]"
         )
+    return GeometryStats(bbox, types)
 
-    if not (need_bbox and need_geometry_types):
-        return _separately()
-    if _geo_stats_unsupported(con, query, geometry_column):
-        return _separately()
 
-    quoted = quote_identifier(geometry_column)
-    stats_query = f"""
-        SELECT
-            ST_GeometryType({quoted}) || {zm_suffix_sql(quoted)} AS geom_type,
-            MIN(ST_XMin({quoted})) AS xmin,
-            MIN(ST_YMin({quoted})) AS ymin,
-            MAX(ST_XMax({quoted})) AS xmax,
-            MAX(ST_YMax({quoted})) AS ymax
-        FROM ({query})
-        WHERE {quoted} IS NOT NULL
-        GROUP BY 1
+# -- the owner ----------------------------------------------------------------
+
+
+def _stats(
+    source,
+    geometry_column: str | None,
+    *,
+    antimeridian: bool,
+    bbox_column: str | None,
+    need_bbox: bool,
+    verbose: bool,
+) -> GeometryStats:
+    import pyarrow as pa
+
+    if isinstance(source, ArrowTableSource):
+        source = source.table
+    if isinstance(source, pa.Table):
+        if not antimeridian:
+            return _arrow_stats(source, geometry_column, bbox_column, need_bbox, verbose)
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection, register_arrow
+
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+        try:
+            keep = [c for c in (geometry_column, bbox_column) if c in source.column_names]
+            register_arrow(con, "__stats_source", source.select(keep))
+            return _stats(
+                QuerySource(con, "SELECT * FROM __stats_source"),
+                geometry_column,
+                antimeridian=True,
+                bbox_column=bbox_column,
+                need_bbox=need_bbox,
+                verbose=verbose,
+            )
+        finally:
+            con.close()
+    if isinstance(source, QuerySource):
+        stats, located = _query_stats(
+            source.con, source.query, geometry_column, bbox_column, need_bbox
+        )
+        if antimeridian and stats.bbox is not None and bbox_column is None:
+            stats = GeometryStats(
+                _antimeridian_wrap(source.con, located, stats.bbox), stats.geometry_types
+            )
+        return stats
+    return _file_stats(
+        source,
+        geometry_column,
+        antimeridian=antimeridian,
+        bbox_column=bbox_column,
+        need_bbox=need_bbox,
+        verbose=verbose,
+    )
+
+
+def _file_stats(path, geometry_column: str | None, **kwargs) -> GeometryStats:
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+    from geoparquet_io.core.file_utils import resolve_file_url
+    from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+    from geoparquet_io.core.remote import needs_httpfs
+
+    path = str(path)
+    if geometry_column is None:
+        geometry_column = find_primary_geometry_column(path, verbose=False)
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path))
+    try:
+        query = f"SELECT * FROM read_parquet({sql_path(resolve_file_url(path, verbose=False))})"
+        return _stats(QuerySource(con, query), geometry_column, **kwargs)
+    finally:
+        con.close()
+
+
+def geometry_stats_of(
+    source,
+    geometry_column: str | None,
+    *,
+    antimeridian: bool = False,
+    bbox_column: str | None = None,
+    verbose: bool = False,
+) -> GeometryStats:
+    """The ``bbox`` and ``geometry_types`` of ``geometry_column`` in ``source``, in one scan.
+
+    ``source`` is an Arrow table (or :class:`ArrowTableSource`), a
+    :class:`QuerySource` (only its ``con`` and ``query`` are read), or the RAW
+    path or URL of a Parquet file. ``geometry_column`` may be None only for a
+    file, whose primary geometry column is then looked up. The degenerate-
+    geometry policy is the one in the section comment above: NULL and EMPTY
+    are skipped, nothing measurable is ``GeometryStats(None, [])``, and an
+    infinite coordinate raises :class:`~geoparquet_io.core.exceptions.GeometryError`.
+
+    ``bbox_column`` measures a bbox covering's struct (its ``xmin``..``ymax``
+    fields) instead of the geometry: the fast path for a file that has one.
+    It yields no types. ``antimeridian=True`` returns a lon/lat extent astride
+    the antimeridian with ``xmin > xmax``.
+
+    A trailing ``ORDER BY`` on a query is dropped first: an aggregate cannot
+    depend on row order, and DuckDB would otherwise sort the input to measure
+    it (#1177). A column the query does not output measures nothing.
     """
-    return _fold_geo_stat_rows(con.execute(stats_query).fetchall())
+    return _stats(
+        source,
+        geometry_column,
+        antimeridian=antimeridian,
+        bbox_column=bbox_column,
+        need_bbox=True,
+        verbose=verbose,
+    )
 
 
-def compute_geometry_types_via_sql(
-    con,
-    query: str,
-    geometry_column: str,
-) -> list[str]:
+def bounds_of(
+    source,
+    geometry_column: str | None,
+    *,
+    antimeridian: bool = False,
+    bbox_column: str | None = None,
+    verbose: bool = False,
+) -> list[float] | None:
+    """``[xmin, ymin, xmax, ymax]`` of ``geometry_column`` in ``source``, or None.
+
+    :func:`geometry_stats_of`'s bbox; the same sources and the same policy.
     """
-    Compute distinct geometry types from query using DuckDB.
+    return geometry_stats_of(
+        source,
+        geometry_column,
+        antimeridian=antimeridian,
+        bbox_column=bbox_column,
+        verbose=verbose,
+    ).bbox
 
-    Delegates to the canonical dimension-aware implementation in
-    ``geoparquet_io.core.common`` (lazy import: common imports this module
-    at top level, so a module-level import here would be circular).
 
-    Returns:
-        List of spec geometry type names with dimension suffixes
-        (e.g., ["Point", "LineString ZM"]) or empty list if column not in query
+def geometry_types_of(source, geometry_column: str | None, *, verbose: bool = False) -> list[str]:
+    """The sorted GeoParquet ``geometry_types`` of ``geometry_column`` in ``source``.
+
+    :func:`geometry_stats_of`'s types, with the dimension suffix ("Point Z").
+    Needs no envelope, so a non-finite coordinate does not stop it.
     """
-    from geoparquet_io.core.common import compute_geometry_types_via_sql as _impl
-
-    return _impl(con, query, geometry_column)
+    return _stats(
+        source,
+        geometry_column,
+        antimeridian=False,
+        bbox_column=None,
+        need_bbox=False,
+        verbose=verbose,
+    ).geometry_types
 
 
 # The struct fields GeoParquet's "Bounding Box Columns" requires. The *name*
@@ -2173,140 +2451,3 @@ def _get_geometry_type_name(code: int) -> str:
 
     suffix = _DIMENSION_SUFFIXES.get(dimension, "")
     return base_name + suffix
-
-
-# =============================================================================
-# Geometry Data Computation
-# =============================================================================
-
-
-def _compute_geometry_types(table: pa.Table, geometry_column: str, verbose: bool) -> list[str]:
-    """
-    Compute geometry types from a geometry column using geoarrow.
-
-    Analyzes the actual geometry data to determine the set of geometry types
-    present in the column.
-
-    Args:
-        table: PyArrow Table containing the geometry column
-        geometry_column: Name of the geometry column
-        verbose: Whether to print verbose output
-
-    Returns:
-        List of GeoParquet geometry type names (e.g., ["Point", "Polygon"])
-    """
-    import geoarrow.pyarrow as ga
-    import pyarrow.compute as pc
-
-    # Skip for empty tables (geoarrow crashes on empty arrays)
-    if table.num_rows == 0:
-        return []
-
-    try:
-        geom_col = table.column(geometry_column)
-
-        # Filter out NULL values to avoid geoarrow errors on invalid geometries
-        # This handles cases where BigQuery returns NULL or empty geometries
-        non_null_mask = pc.is_valid(geom_col)
-        if pc.any(non_null_mask).as_py():
-            geom_col = pc.filter(geom_col, non_null_mask)
-        else:
-            # All values are NULL
-            return []
-
-        # Skip if no valid geometries remain after filtering
-        if len(geom_col) == 0:
-            return []
-
-        wkb_arr = ga.as_wkb(geom_col)
-        types_struct = ga.unique_geometry_types(wkb_arr)
-
-        # Extract geometry type codes from struct array. geoarrow reports the
-        # base type and the dimensions separately, so the two are recombined
-        # into a WKB code -- reading `geometry_type` alone dropped the " Z" /
-        # " M" / " ZM" the spec makes part of the type name (#892).
-        type_codes = geoarrow_wkb_codes(types_struct)
-
-        # Map codes to GeoParquet standard names (avoid duplicates)
-        type_names = []
-        for code in type_codes:
-            name = _get_geometry_type_name(code)
-            if name not in type_names:
-                type_names.append(name)
-
-        if verbose:
-            debug(f"Computed geometry_types from data: {type_names}")
-        return type_names
-
-    except Exception as e:
-        # Catch all exceptions including geoarrow C++ errors
-        # (e.g., "Expected valid geometry type code but found 0")
-        if verbose:
-            debug(f"Could not compute geometry_types: {e}")
-        # Return empty list as fallback (allowed by spec - means any type)
-        return []
-
-
-def _compute_bbox_from_data(
-    table: pa.Table, geometry_column: str, verbose: bool
-) -> list[float] | None:
-    """
-    Compute bounding box from geometry column data.
-
-    Uses geoarrow to compute the overall bounding box of all geometries
-    in the column.
-
-    Args:
-        table: PyArrow Table containing the geometry column
-        geometry_column: Name of the geometry column
-        verbose: Whether to print verbose output
-
-    Returns:
-        [xmin, ymin, xmax, ymax] or None if computation fails
-    """
-    import geoarrow.pyarrow as ga
-    import pyarrow.compute as pc
-
-    # Skip for empty tables
-    if table.num_rows == 0:
-        return None
-
-    try:
-        geom_col = table.column(geometry_column)
-
-        # Filter out NULL values to avoid geoarrow errors on invalid geometries
-        non_null_mask = pc.is_valid(geom_col)
-        if pc.any(non_null_mask).as_py():
-            geom_col = pc.filter(geom_col, non_null_mask)
-        else:
-            # All values are NULL
-            return None
-
-        # Skip if no valid geometries remain after filtering
-        if len(geom_col) == 0:
-            return None
-
-        wkb_arr = ga.as_wkb(geom_col)
-        box_arr = ga.box(wkb_arr)
-
-        # Combine chunks and get storage (underlying struct array)
-        combined = box_arr.combine_chunks()
-        storage = combined.storage
-
-        # Extract struct fields and compute min/max
-        xmin = pc.min(pc.struct_field(storage, "xmin")).as_py()
-        ymin = pc.min(pc.struct_field(storage, "ymin")).as_py()
-        xmax = pc.max(pc.struct_field(storage, "xmax")).as_py()
-        ymax = pc.max(pc.struct_field(storage, "ymax")).as_py()
-
-        if all(v is not None for v in [xmin, ymin, xmax, ymax]):
-            if verbose:
-                debug(f"Computed bbox from data: [{xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f}]")
-            return [xmin, ymin, xmax, ymax]
-
-    except Exception as e:
-        # Catch all exceptions including geoarrow C++ errors
-        if verbose:
-            debug(f"Could not compute bbox: {e}")
-
-    return None

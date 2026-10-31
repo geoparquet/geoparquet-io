@@ -32,11 +32,11 @@ from geoparquet_io.core.geo_metadata import (
     GEOGRAPHY_EDGE_ALGORITHMS,
     GEOPARQUET_VERSIONS,
     _bbox_claimed_by_another_column,
-    _get_geometry_type_name,
     _self_evident_bbox_column,
     bbox_column_to_declare,
+    bounds_of,
     create_geo_metadata,
-    geoarrow_wkb_codes,
+    geometry_types_of,
     sanitized_carried_geo,
     strip_absent_covering,
     strip_bboxless_covering,
@@ -453,130 +453,6 @@ def _process_geometry_column_for_version(
     return table
 
 
-def _compute_geometry_types(table, geometry_column: str, verbose: bool) -> list[str]:
-    """
-    Compute geometry types from a geometry column using geoarrow.
-
-    Args:
-        table: PyArrow Table containing the geometry column
-        geometry_column: Name of the geometry column
-        verbose: Whether to print verbose output
-
-    Returns:
-        list: List of GeoParquet geometry type names (e.g., ["Point", "Polygon"])
-    """
-    import geoarrow.pyarrow as ga
-    import pyarrow.compute as pc
-
-    # Skip for empty tables (geoarrow crashes on empty arrays)
-    if table.num_rows == 0:
-        return []
-
-    try:
-        geom_col = table.column(geometry_column)
-
-        # Filter out NULL values to avoid geoarrow errors on invalid geometries
-        # This handles cases where BigQuery returns NULL or empty geometries
-        non_null_mask = pc.is_valid(geom_col)
-        if pc.any(non_null_mask).as_py():
-            geom_col = pc.filter(geom_col, non_null_mask)
-        else:
-            # All values are NULL
-            return []
-
-        # Skip if no valid geometries remain after filtering
-        if len(geom_col) == 0:
-            return []
-
-        wkb_arr = ga.as_wkb(geom_col)
-        types_struct = ga.unique_geometry_types(wkb_arr)
-
-        # Extract geometry type codes from struct array. geoarrow reports the
-        # base type and the dimensions separately, so the two are recombined
-        # into a WKB code -- reading `geometry_type` alone dropped the " Z" /
-        # " M" / " ZM" the spec makes part of the type name (#892).
-        type_codes = geoarrow_wkb_codes(types_struct)
-
-        # Map codes to GeoParquet standard names (avoid duplicates)
-        type_names = []
-        for code in type_codes:
-            name = _get_geometry_type_name(code)
-            if name not in type_names:
-                type_names.append(name)
-
-        if verbose:
-            debug(f"Computed geometry_types from data: {type_names}")
-        return type_names
-
-    except Exception as e:
-        # Catch all exceptions including geoarrow C++ errors
-        # (e.g., "Expected valid geometry type code but found 0")
-        if verbose:
-            debug(f"Could not compute geometry_types: {e}")
-        # Return empty list as fallback (allowed by spec - means any type)
-        return []
-
-
-def _compute_bbox_from_data(table, geometry_column: str, verbose: bool) -> list[float] | None:
-    """
-    Compute bounding box from geometry column data.
-
-    Args:
-        table: PyArrow Table containing the geometry column
-        geometry_column: Name of the geometry column
-        verbose: Whether to print verbose output
-
-    Returns:
-        list: [xmin, ymin, xmax, ymax] or None if computation fails
-    """
-    import geoarrow.pyarrow as ga
-    import pyarrow.compute as pc
-
-    # Skip for empty tables
-    if table.num_rows == 0:
-        return None
-
-    try:
-        geom_col = table.column(geometry_column)
-
-        # Filter out NULL values to avoid geoarrow errors on invalid geometries
-        non_null_mask = pc.is_valid(geom_col)
-        if pc.any(non_null_mask).as_py():
-            geom_col = pc.filter(geom_col, non_null_mask)
-        else:
-            # All values are NULL
-            return None
-
-        # Skip if no valid geometries remain after filtering
-        if len(geom_col) == 0:
-            return None
-
-        wkb_arr = ga.as_wkb(geom_col)
-        box_arr = ga.box(wkb_arr)
-
-        # Combine chunks and get storage (underlying struct array)
-        combined = box_arr.combine_chunks()
-        storage = combined.storage
-
-        # Extract struct fields and compute min/max
-        xmin = pc.min(pc.struct_field(storage, "xmin")).as_py()
-        ymin = pc.min(pc.struct_field(storage, "ymin")).as_py()
-        xmax = pc.max(pc.struct_field(storage, "xmax")).as_py()
-        ymax = pc.max(pc.struct_field(storage, "ymax")).as_py()
-
-        if all(v is not None for v in [xmin, ymin, xmax, ymax]):
-            if verbose:
-                debug(f"Computed bbox from data: [{xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f}]")
-            return [xmin, ymin, xmax, ymax]
-
-    except Exception as e:
-        # Catch all exceptions including geoarrow C++ errors
-        if verbose:
-            debug(f"Could not compute bbox: {e}")
-
-    return None
-
-
 def _assemble_and_apply_geo_metadata(
     table,
     geo_meta: dict,
@@ -894,9 +770,9 @@ def _apply_geoparquet_metadata(
     # Stats are read off the written data, so they are filled in after step 2.
     col_meta = geo_meta["columns"][geometry_column]
     if "geometry_types" not in col_meta:
-        col_meta["geometry_types"] = _compute_geometry_types(table, geometry_column, verbose)
+        col_meta["geometry_types"] = geometry_types_of(table, geometry_column, verbose=verbose)
 
-    computed_bbox = geo_bbox or _compute_bbox_from_data(table, geometry_column, verbose)
+    computed_bbox = geo_bbox or bounds_of(table, geometry_column, verbose=verbose)
     if computed_bbox:
         col_meta["bbox"] = computed_bbox
 

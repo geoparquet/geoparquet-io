@@ -586,7 +586,9 @@ print(json.dumps({{"writes": len(peaks), "growth": growth, "one_group": one_grou
         geo = json.loads(raw, parse_constant=reject_non_finite)
         col = geo["columns"]["geometry"]
         assert "bbox" not in col
-        assert col["geometry_types"] == ["Polygon"]
+        # One degenerate policy (#1367 concept 5): an EMPTY geometry is not
+        # located, so it adds no type either -- the in-memory path agrees.
+        assert col["geometry_types"] == []
 
     def test_mid_stream_failure_leaves_no_output_file(self, tmp_path, monkeypatch):
         """pyarrow finalizes a readable file even when the loop raises; a

@@ -41,9 +41,11 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.geo_metadata import (
     NATIVE_GEOMETRY_VERSIONS,
-    compute_geo_stats_via_sql,
+    QuerySource,
     declare_carried_bbox_column,
     gate_illegal_bbox_covering,
+    geometry_stats_of,
+    geometry_types_of,
     sanitized_carried_geo,
     strip_bboxless_covering,
 )
@@ -491,17 +493,15 @@ class DuckDBKVStrategy(BaseWriteStrategy):
 
         if verbose:
             debug("Computing bbox/geometry types via SQL...")
-        bbox, geometry_types = compute_geo_stats_via_sql(
-            con,
-            query,
-            geometry_column,
-            need_bbox=need_bbox,
-            need_geometry_types=need_types,
-        )
-        if need_bbox and bbox:
-            col_meta["bbox"] = bbox
-        if need_types:
-            col_meta["geometry_types"] = geometry_types
+        source = QuerySource(con, query)
+        if need_bbox:
+            stats = geometry_stats_of(source, geometry_column)
+            if stats.bbox:
+                col_meta["bbox"] = stats.bbox
+            if need_types:
+                col_meta["geometry_types"] = stats.geometry_types
+        else:
+            col_meta["geometry_types"] = geometry_types_of(source, geometry_column)
 
     def _compute_missing_secondary_metadata(
         self,

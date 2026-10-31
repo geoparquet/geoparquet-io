@@ -21,7 +21,6 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.arrow_geo_metadata import (
     _bbox_column_to_declare,
     _canonicalize_wkb_columns,
-    _compute_geometry_types,
     table_geometry_info,
 )
 from geoparquet_io.core.compression import ResolvedCodec, resolve_codec
@@ -34,9 +33,11 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     NATIVE_GEOMETRY_VERSIONS,
+    QuerySource,
     bbox_column_to_declare,
-    compute_geo_stats_via_sql,
     create_geo_metadata,
+    geometry_stats_of,
+    geometry_types_of,
     sanitized_carried_geo,
     strip_bboxless_covering,
     strip_illegal_bbox_covering,
@@ -460,9 +461,10 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
 
         if verbose:
             debug("Pre-computing bbox/geometry types via SQL...")
-        return compute_geo_stats_via_sql(
-            con, query, geometry_column, need_bbox=need_bbox, need_geometry_types=True
-        )
+        if not need_bbox:
+            return None, geometry_types_of(QuerySource(con, query), geometry_column)
+        stats = geometry_stats_of(QuerySource(con, query), geometry_column)
+        return stats.bbox, stats.geometry_types
 
     def _build_geo_metadata_for_query(
         self,
@@ -783,7 +785,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
 
         geom_types: list[str] = []
         if should_add_geo_metadata:
-            geom_types = _compute_geometry_types(table, geometry_column, verbose)
+            geom_types = geometry_types_of(table, geometry_column, verbose=verbose)
 
             if geoarrow_native:
                 from geoparquet_io.core.geoarrow_encoding import (

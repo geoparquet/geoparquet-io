@@ -20,7 +20,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import table_geometry_info
-from geoparquet_io.core.common import compute_geometry_types_via_sql
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
     _wrap_query_with_wkb_conversion,
@@ -30,9 +29,10 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.geo_metadata import (
-    compute_bbox_via_sql,
+    QuerySource,
     declare_carried_bbox_column,
     gate_illegal_bbox_covering,
+    geometry_stats_of,
     sanitized_carried_geo,
     strip_bboxless_covering,
 )
@@ -170,12 +170,9 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             final_path = os.path.join(work_dir, "final.parquet") if is_remote else output_path
 
             if verbose:
-                debug("Computing bbox via SQL...")
-            bbox = compute_bbox_via_sql(con, query, geometry_column)
-
-            if verbose:
-                debug("Computing geometry types via SQL...")
-            geometry_types = compute_geometry_types_via_sql(con, query, geometry_column)
+                debug("Computing bbox and geometry types via SQL...")
+            stats = geometry_stats_of(QuerySource(con, query), geometry_column)
+            bbox, geometry_types = stats.bbox, stats.geometry_types
 
             final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
 
