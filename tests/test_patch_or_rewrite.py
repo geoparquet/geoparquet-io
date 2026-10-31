@@ -6,17 +6,24 @@ patch falls back to the funnel's one metadata-only rewrite
 it was being copied -- is never answered with a rewrite. Four callers used to
 hand-write that decision, each its own way: ``add bbox-metadata`` answered a
 race with a rewrite and kept the input's codec, ``check``'s covering repair
-re-encoded at the facade's, and ``add stac-metadata`` refused.
+re-encoded at the facade's, and ``add stac-metadata`` refused. Two more
+(``add geometry-metrics``' Vecorel key, ``reproject --assume-crs84``'s
+sanitized copy) re-encoded every file without trying the patch.
 
 The table: every footer-writing command x {patchable, unpatchable, raced}, on
 one fixture carrying sidecar keys. Whatever the cell, the sidecar keys that
 survive are the same on every path, and only the key the command writes
 changes. A patched output keeps the input's pages (SNAPPY, 100-row groups) by
 construction; a rewrite takes the facade's codec and row-group count (the lead's
-policy for #1367); ``add stac-metadata`` keeps its refusal, by explicit
-argument; a race propagates and writes nothing.
+policy for #1367), ``add stac-metadata`` included -- it used to refuse, and now
+re-encodes like every other footer write (approved change 3's consequence); a
+race propagates and writes nothing.
 
-The refusal is planted in ``parquet_footer.patch_footer``, the mechanism every
+The four ``covering_repair`` cells are pins, not red-first tests: they passed on
+the base, where ``check``'s covering repair already had this policy. They hold
+it in place while the other paths are routed through the same owner.
+
+The refusal is planted in ``parquet_footer._patch_footer_file``, the mechanism every
 path reaches, rather than crafted into a file: what is under test is the
 hand-off, not the refusal.
 """
@@ -133,7 +140,7 @@ def _plant(monkeypatch, refusal: type[FooterPatchUnsupported]) -> None:
     def refuse(*args, **kwargs):
         raise refusal("planted")
 
-    monkeypatch.setattr(parquet_footer, "patch_footer", refuse)
+    monkeypatch.setattr(parquet_footer, "_patch_footer_file", refuse)
 
 
 def _assert_wrote(name: str, src: Path, out: Path) -> None:
@@ -156,7 +163,7 @@ def test_a_patchable_footer_keeps_every_sidecar_key_and_the_input_pages(name, tm
     assert _layout(out) == _layout(src), "a footer patch re-encoded the data"
 
 
-@pytest.mark.parametrize("name", [n for n in PATHS if n != "add_stac_metadata"])
+@pytest.mark.parametrize("name", PATHS)
 def test_an_unpatchable_footer_rewrites_through_the_funnel_keeping_the_same_keys(
     name, tmp_path, monkeypatch
 ):
@@ -172,18 +179,6 @@ def test_an_unpatchable_footer_rewrites_through_the_funnel_keeping_the_same_keys
     assert pq.read_table(str(out)).num_rows == N_ROWS
 
 
-def test_an_unpatchable_footer_is_refused_by_add_stac_metadata(tmp_path, monkeypatch):
-    """The one caller whose policy is to stop: rewriting a file to add one key
-    would cost its compression level. Passed to the owner as an argument."""
-    _plant(monkeypatch, FooterPatchUnsupported)
-    src, out, result = _run("add_stac_metadata", tmp_path)
-
-    assert result.exit_code != 0
-    assert "Cannot write the stac-geoparquet key" in result.output, result.output
-    assert "gpio stops here instead" in result.output, result.output
-    assert not out.exists()
-
-
 @pytest.mark.parametrize("name", PATHS)
 def test_a_raced_patch_is_never_answered_with_a_rewrite(name, tmp_path, monkeypatch):
     """The input changed under the copy; a rewrite would stamp another writer's rows."""
@@ -197,7 +192,6 @@ def test_a_raced_patch_is_never_answered_with_a_rewrite(name, tmp_path, monkeypa
         # reaches the user, not a fallback's or a refusal's.
         assert "planted" in result.output, result.output
         assert "Falling back" not in result.output, result.output
-        assert "Cannot write the" not in result.output, result.output
     else:
         assert isinstance(error, FooterPatchRaced), f"{name}: {error!r}"
     if name == "add_bbox_metadata":
@@ -231,3 +225,109 @@ def test_a_rewrite_into_an_existing_destination_keeps_its_mode(tmp_path, monkeyp
 
     assert result.exit_code == 0, result.output
     assert (out.stat().st_mode & 0o777) == 0o640
+
+
+# ---------------------------------------------------------------------------
+# The owner's own answers
+# ---------------------------------------------------------------------------
+
+
+def _recording_rewrite(calls: list):
+    def rewrite(source, destination, updates):
+        calls.append((source, destination, dict(updates)))
+
+    return rewrite
+
+
+def test_a_dropped_retype_is_named_in_the_owners_warning(tmp_path, monkeypatch, caplog):
+    """A rewrite cannot retype a column; the owner says so, no caller has to."""
+    _plant(monkeypatch, FooterPatchUnsupported)
+    src = _source(tmp_path / "source.parquet")
+    calls: list = []
+
+    retyped = parquet_footer.patch_or_rewrite(
+        str(src),
+        {"geo": "{}"},
+        rewrite=_recording_rewrite(calls),
+        arrow_edges={"geometry": "spherical"},
+    )
+
+    assert retyped == []
+    assert calls == [(str(src), str(src), {"geo": "{}"})]
+    assert "Edge columns stay planar" in caplog.text, caplog.text
+
+
+def test_a_remote_path_is_rewritten_without_trying_the_patch(tmp_path, monkeypatch, caplog):
+    """The patcher reads a local file; a remote one goes to the rewrite, unwarned."""
+    _plant(monkeypatch, FooterPatchRaced)  # reached only if the patch is tried
+    calls: list = []
+
+    parquet_footer.patch_or_rewrite(
+        "s3://bucket/a.parquet", {"geo": "{}"}, rewrite=_recording_rewrite(calls)
+    )
+
+    assert calls == [("s3://bucket/a.parquet", "s3://bucket/a.parquet", {"geo": "{}"})]
+    assert "Falling back" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The two callers that re-encoded every file without trying the patch
+# ---------------------------------------------------------------------------
+
+
+def _pages(path: Path) -> bytes:
+    """Every byte below the footer: what a footer patch copies verbatim."""
+    raw = path.read_bytes()
+    return raw[: len(raw) - 8 - int.from_bytes(raw[-8:-4], "little")]
+
+
+def test_the_vecorel_key_is_patched_onto_the_metrics_output(tmp_path, monkeypatch):
+    """``add geometry-metrics`` writes once, then adds ``collection`` by patch."""
+    from geoparquet_io.core.add import geometry_metrics
+
+    out = tmp_path / "metrics.parquet"
+    write_with_geo(out, points_table(50), geo_block(), compression="gzip")
+    before = _pages(out)
+
+    geometry_metrics._add_vecorel_metadata_to_file(str(out), False, "GZIP", None)
+
+    assert _pages(out) == before, "the Vecorel key re-encoded the command's output"
+    assert b"collection" in footer_kv(out)
+
+
+def test_the_vecorel_fallback_keeps_the_commands_codec(tmp_path, monkeypatch):
+    """#1335 through the owner: a GZIP output is not re-encoded as ZSTD."""
+    from geoparquet_io.core.add import geometry_metrics
+
+    _plant(monkeypatch, FooterPatchUnsupported)
+    out = tmp_path / "metrics.parquet"
+    write_with_geo(out, points_table(50), geo_block(), compression="gzip")
+
+    geometry_metrics._add_vecorel_metadata_to_file(str(out), False, "GZIP", None)
+
+    assert _layout(out)[0] == "GZIP", _layout(out)
+    assert b"collection" in footer_kv(out)
+
+
+def test_the_assume_crs84_copy_is_a_footer_patch(tmp_path):
+    """``reproject --assume-crs84``'s sanitized copy keeps the input's pages."""
+    from geoparquet_io.core.reproject import _sanitize_null_crs_file
+
+    src = write_with_geo(
+        tmp_path / "null_crs.parquet",
+        points_table(50),
+        geo_block(crs=None),
+        extra_kv=dict(SIDECARS),
+        # A level Parquet does not record: only a patch can keep it.
+        compression="zstd",
+        compression_level=19,
+    )
+
+    read_path, temp_path = _sanitize_null_crs_file(str(src))
+    try:
+        assert read_path == temp_path
+        assert _pages(Path(temp_path)) == _pages(src), "the sanitized copy re-encoded the data"
+        assert "crs" not in json.loads(footer_kv(temp_path)[b"geo"])["columns"]["geometry"]
+        assert _sidecars(Path(temp_path)) == SIDECARS
+    finally:
+        Path(temp_path).unlink(missing_ok=True)

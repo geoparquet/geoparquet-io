@@ -21,7 +21,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.check_fixes import fix_bboxless_covering
-from geoparquet_io.core.parquet_footer import patch_footer
+from geoparquet_io.core.parquet_footer import _patch_footer_file
 from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
 
 H3_ENTRY = {"column": "h3", "resolution": 9}
@@ -57,7 +57,7 @@ def _refooter(src, dest, covering, version="1.1.0"):
         column.pop("covering", None)
     else:
         column["covering"] = covering
-    patch_footer(str(src), {"geo": json.dumps(geo)}, output_file=str(dest))
+    _patch_footer_file(str(src), {"geo": json.dumps(geo)}, output_file=str(dest))
     return str(dest)
 
 
@@ -205,7 +205,9 @@ class TestFixDropsIt:
     def test_other_footer_keys_are_kept(self, buildings_test_file, tmp_path):
         """A metadata-only repair must not drop the keys beside ``geo``."""
         with_extra = tmp_path / "extra.parquet"
-        patch_footer(buildings_test_file, {"stac:collection": "mine"}, output_file=str(with_extra))
+        _patch_footer_file(
+            buildings_test_file, {"stac:collection": "mine"}, output_file=str(with_extra)
+        )
         bad = _refooter(with_extra, tmp_path / "bad.parquet", {"h3": H3_ENTRY})
         out = tmp_path / "fixed.parquet"
 
@@ -222,7 +224,7 @@ class TestFixDropsIt:
         def refuse(*args, **kwargs):
             raise FooterPatchUnsupported("pretend this footer is unreadable")
 
-        monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", refuse)
+        monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
         out = tmp_path / "rewritten.parquet"
 
         fix_bboxless_covering(bboxless, str(out))
@@ -274,7 +276,7 @@ class TestFixSuppliesTheMissingMember:
 
         patched = tmp_path / "patched.parquet"
         fix_bboxless_covering(declarable, str(patched))
-        monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", refuse)
+        monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
         rewritten = tmp_path / "rewritten.parquet"
 
         fix_bboxless_covering(declarable, str(rewritten))
@@ -293,7 +295,7 @@ class TestFixSuppliesTheMissingMember:
 class TestARacedPatchIsNotAnsweredByARewrite:
     """A file that changed under the call is not an invitation to rewrite it.
 
-    ``patch_footer`` refuses both a footer it cannot read and an input
+    ``_patch_footer_file`` refuses both a footer it cannot read and an input
     another writer replaced mid-copy. Falling back to a rewrite is right for the
     first and wrong for the second: the rewrite re-reads whatever is on disk
     *now* and stamps those rows with a ``geo`` block derived from the bytes that
@@ -309,7 +311,7 @@ class TestARacedPatchIsNotAnsweredByARewrite:
         def raced(*args, **kwargs):
             raise FooterPatchRaced("pretend another writer landed mid-copy")
 
-        monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", raced)
+        monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", raced)
         out = tmp_path / "never_written.parquet"
 
         with pytest.raises(FooterPatchRaced):
@@ -459,47 +461,48 @@ class TestTheRemoteRepairPath:
         self, bboxless, monkeypatch
     ):
         """A remote URL cannot be footer-patched in place, so the repair falls
-        through to the funnel rewrite (which applies the same gate)."""
+        through to the funnel's one rewrite. Nothing here reaches a store: the
+        rewrite is planted, and the owner's own remote check is what routes."""
         import geoparquet_io.core.check_fixes as cf
 
         src = bboxless
         patched: list[str] = []
         monkeypatch.setattr(
-            "geoparquet_io.core.parquet_footer.patch_footer",
+            "geoparquet_io.core.parquet_footer._patch_footer_file",
             lambda *a, **k: patched.append("patched"),
         )
-        monkeypatch.setattr(cf, "is_remote_url", lambda p: str(p).startswith("s3://"))
-        rewrote: list[str] = []
+        rewrote: list[tuple] = []
         monkeypatch.setattr(
-            "geoparquet_io.core.write_funnels.write_parquet_with_metadata",
-            lambda *a, **k: rewrote.append("rewrote"),
+            cf, "rewrite_footer_kv", lambda src, dst, updates, **k: rewrote.append((dst, *updates))
         )
 
         summary = cf.fix_bboxless_covering(str(src), "s3://bucket/out.parquet", verbose=False)
 
         assert patched == [], "a remote output must not be footer-patched"
-        assert rewrote == ["rewrote"]
+        assert rewrote == [("s3://bucket/out.parquet", "geo")]
         assert summary["success"] is True
 
-    def test_a_remote_input_is_asked_the_same_question_through_duckdb(
-        self, declarable, monkeypatch
-    ):
-        """The remote repair supplies the member too, rather than stripping unasked.
-
-        The patch and its fallback now get one repaired block, so the remote
-        schema read (DuckDB's probe; ``pq.read_schema`` cannot open a URL) has
-        to answer the declaration gate exactly as the local read does. The
-        file is local; only the remote predicate is planted.
-        """
+    def test_the_gate_reads_the_schema_the_funnels_rewrite_reads(self, declarable, monkeypatch):
+        """One probe for a local and a remote file: ``query_schema`` over the
+        funnel's ``file_relation``, so the declaration gate and the rewrite see
+        the same columns (``pq.read_schema`` cannot open a URL, and a second
+        branch for it is how the remote repair used to strip unasked)."""
         import geoparquet_io.core.check_fixes as cf
         from geoparquet_io.core.common import get_parquet_metadata
         from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 
+        queries: list[str] = []
+        real = cf.query_schema
+
+        def spy(con, query):
+            queries.append(query)
+            return real(con, query)
+
+        monkeypatch.setattr(cf, "query_schema", spy)
         geo = sanitized_carried_geo(get_parquet_metadata(declarable)[0])
-        local = cf._supply_or_strip_bbox_member(declarable, geo, False)
-        monkeypatch.setattr(cf, "is_remote_url", lambda p: True)
 
-        remote = cf._supply_or_strip_bbox_member(declarable, geo, False)
+        repaired = cf._supply_or_strip_bbox_member(declarable, geo, False)
 
-        assert remote == local
-        assert remote[1] == "bbox", remote
+        assert len(queries) == 1, queries
+        assert "hive_partitioning=false" in queries[0], queries
+        assert repaired[1] == "bbox", repaired

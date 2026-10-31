@@ -18,7 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
-from geoparquet_io.core.parquet_footer import patch_footer
+from geoparquet_io.core.parquet_footer import _patch_footer_file
 from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
 
 BULGE_LINE = "LINESTRING (-30 60, 30 60)"  # great-circle peak ~63.43 N
@@ -35,7 +35,7 @@ def _geography_file(tmp_path, wkt: str, geography_bbox=None, name="geo.parquet")
         )
     finally:
         con.close()
-    patch_footer(
+    _patch_footer_file(
         str(path),
         geography={"geometry": "spherical"},
         geography_bbox=geography_bbox,
@@ -168,7 +168,9 @@ def _two_row_groups(tmp_path, name: str, boxes) -> Path:
         )
     finally:
         con.close()
-    patch_footer(str(path), geography={"geometry": "spherical"}, geography_bbox={"geometry": boxes})
+    _patch_footer_file(
+        str(path), geography={"geometry": "spherical"}, geography_bbox={"geometry": boxes}
+    )
     return path
 
 
@@ -370,7 +372,9 @@ def _many_row_groups(tmp_path, groups: int) -> Path:
     finally:
         con.close()
     boxes = [(-1.0, -1.0, 20.0, 3.0)] * (groups - 1) + [(-30.0, 60.0, 30.0, 60.0)]
-    patch_footer(str(path), geography={"geometry": "spherical"}, geography_bbox={"geometry": boxes})
+    _patch_footer_file(
+        str(path), geography={"geometry": "spherical"}, geography_bbox={"geometry": boxes}
+    )
     return path
 
 

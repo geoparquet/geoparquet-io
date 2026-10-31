@@ -190,13 +190,15 @@ def test_an_unreadable_block_is_left_alone(raw):
 
 @pytest.mark.parametrize("verbose", [False, True], ids=["quiet", "verbose"])
 def test_the_correction_is_a_footer_patch(tmp_path, v2_input, verbose):
-    """The relabel goes in by ``patch_footer``: no page below the footer moves."""
+    """The relabel goes in by ``_patch_footer_file``: no page below the footer moves."""
     from unittest.mock import patch
 
     from geoparquet_io.core import parquet_footer
 
     out = tmp_path / "out.parquet"
-    with patch.object(parquet_footer, "patch_footer", wraps=parquet_footer.patch_footer) as patched:
+    with patch.object(
+        parquet_footer, "_patch_footer_file", wraps=parquet_footer._patch_footer_file
+    ) as patched:
         _run(
             "extract",
             "geoparquet",

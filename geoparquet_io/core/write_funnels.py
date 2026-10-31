@@ -23,11 +23,13 @@ Split out of ``common.py`` unchanged; every name is still importable from there.
 
 import contextlib
 import copy
+import functools
 import json
 import os
 import shutil
 from collections.abc import Collection, Iterator, Mapping
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import (
@@ -47,7 +49,6 @@ from geoparquet_io.core.crs_utils import (
     parse_crs_string_to_projjson,
 )
 from geoparquet_io.core.derive_geo_from_file import (
-    _rewrite_file_with_geo_metadata,
     derive_secondary_geometry_info,
     derive_v2_geo_metadata,
 )
@@ -76,11 +77,7 @@ from geoparquet_io.core.edges import (
     restore_edges,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
-from geoparquet_io.core.file_utils import (
-    get_all_parquet_files,
-    is_partition_path,
-    resolve_file_url,
-)
+from geoparquet_io.core.file_utils import get_all_parquet_files, is_partition_path
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     SELF_EVIDENT_BBOX_COLUMN,
@@ -120,16 +117,20 @@ from geoparquet_io.core.parquet_writer import (
     _CARRIED_SCHEMA_METADATA_KEYS,
     geoparquet_copy_options,
     note_duckdb_copy_rounding,
+    output_schema_metadata,
     resolve_input_crs,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
     resolve_row_group_rows_for_query,
+    resolve_row_group_rows_for_table,
+    without_geometry_dictionary,
     write_arrow_table,
 )
 from geoparquet_io.core.remote import (
     get_remote_error_hint,
     is_remote_url,
     needs_httpfs,
+    open_url,
     remote_write_context,
     upload_if_remote,
 )
@@ -223,7 +224,8 @@ def apply_nonplanar_edges(
     the same WKB either way, so nothing below the footer is re-encoded. The
     block-only rewrite this replaced cost a full pass and lost the compression
     level; it stays as the fallback for a footer that cannot be read
-    (``_rewrite_own_output``), which leaves the columns planar.
+    (``rewrite_footer_kv`` at the funnel's own codec and row groups), which
+    leaves the columns planar.
 
     A retyped column gets its bounding boxes back (#1272): the row-group
     GeospatialStatistics and the block's ``bbox`` were vertex boxes on a plane,
@@ -233,7 +235,7 @@ def apply_nonplanar_edges(
     block's planar ``bbox`` goes with it. A column with non-planar edges that
     is *not* retyped -- every 1.x output, or a 2.0 column that is not a
     top-level GEOMETRY -- gets the geodesic block ``bbox`` only: it has no
-    GEOGRAPHY statistics to patch (and ``patch_footer`` only replaces a box
+    GEOGRAPHY statistics to patch (and the footer patch only replaces a box
     DuckDB wrote, it never adds one). A bbox covering column is per-row data,
     not footer, and stays the vertex box it was written as.
 
@@ -271,11 +273,15 @@ def apply_nonplanar_edges(
     retyped = patch_or_rewrite(
         output_file,
         geo_updates,
-        rewrite=_rewrite_own_output(compression, compression_level, row_group_rows),
+        rewrite=functools.partial(
+            rewrite_footer_kv,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_rows=row_group_rows,
+        ),
         geography=geography,
         geography_bbox=geography_bbox,
         arrow_edges=arrow_edges,
-        fallback_note="Edge columns stay planar in the Parquet schema.",
         verbose=verbose,
     )
 
@@ -482,7 +488,7 @@ def _ensure_v2_geo_metadata(
     from pyarrow's own defaults, and came back both bigger than the COPY it was
     repairing and re-chunked -- so an XYM 2.0 output had a different layout from
     an XY one for the same command. It stays as the fallback for a footer that
-    cannot be read (``_rewrite_own_output``).
+    cannot be read (``rewrite_footer_kv`` at the COPY's codec and row groups).
 
     This lives here rather than beside the derivation because
     ``derive_geo_from_file`` sits below ``parquet_footer`` in the import
@@ -490,7 +496,7 @@ def _ensure_v2_geo_metadata(
 
     With ``defer`` the derived block is returned instead of patched: an edges
     patch is about to rewrite the same footer, and folding the key into that
-    one ``patch_footer`` call halves the post-write I/O (#1270). Returns the
+    one ``patch_or_rewrite`` call halves the post-write I/O (#1270). Returns the
     pending block then, ``None`` otherwise.
     """
     geo_meta = derive_v2_geo_metadata(output_path, primary_column=primary_column)
@@ -504,7 +510,12 @@ def _ensure_v2_geo_metadata(
     patch_or_rewrite(
         output_path,
         {"geo": json.dumps(geo_meta)},
-        rewrite=_rewrite_own_output(compression, compression_level, row_group_rows),
+        rewrite=functools.partial(
+            rewrite_footer_kv,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_rows=row_group_rows,
+        ),
         verbose=verbose,
     )
     if verbose:
@@ -570,7 +581,7 @@ def _plain_copy_to(
             makes outside its limit carry past a cgroup cap (#1153).
         defer_v2_geo_repair: Hand the V2 geo repair's block back to the caller
             instead of patching it here, because the caller is about to patch
-            the same footer for non-planar edges and one ``patch_footer`` call
+            the same footer for non-planar edges and one ``patch_or_rewrite`` call
             can carry both (#1270).
         secondary_geo_columns: The ``geo.columns`` entries the secondaries'
             CRS comes from, so a 2.0 type carries each one's own CRS.
@@ -883,14 +894,26 @@ def _carried_with_updates(
 
 
 @contextlib.contextmanager
-def _replacing(destination: str) -> Iterator[str]:
-    """Where a rewrite writes, so that it replaces *destination* only once closed.
+def staged_replacement(destination: str) -> Iterator[str]:
+    """The path a rewrite writes to, put over *destination* once it is closed.
 
-    An existing local destination is staged beside itself and keeps its mode:
-    DuckDB moving its own ``tmp_`` file over a path its scan still holds open is
-    what Windows refuses (#1032), and a 0640 file should not come back with the
-    staging file's mode. A new or remote destination is written directly; the
-    funnel stages a remote one locally and uploads it.
+    The one staging rule for a file rewritten where it lies, or written over an
+    existing output. A ``COPY`` whose destination exists writes ``tmp_<name>``
+    beside it and *moves* that over the destination; when the destination is
+    the file the same statement reads, nothing but the scheduler orders the
+    release of the scan handle against the move, and Windows refuses to rename
+    over a path a handle holds open (``Could not move file: Access is denied``,
+    #1032). So *any* existing local destination is staged beside itself
+    (:func:`~geoparquet_io.core.write_strategies.base.atomic_write`: same
+    filesystem, so the swap stays a rename) and swapped in by ``os.replace``
+    only after the caller has closed its writer and every reader it opened. The
+    original is never unlinked or truncated first, so a failure leaves it
+    intact and the staging directory is discarded (#959). The result takes the
+    original's mode: a 0640 file does not come back with the staging file's.
+
+    A new local destination needs none of it. Neither does a remote one: there
+    is no file on this machine to rename over, and the writer stages and
+    uploads it (``remote_write_context``).
     """
     if is_remote_url(destination) or not os.path.exists(destination):
         yield destination
@@ -901,55 +924,50 @@ def _replacing(destination: str) -> Iterator[str]:
             shutil.copymode(destination, staged)
 
 
-def rewrite_footer_kv(
+def file_relation(url: str) -> str:
+    """The one ``read_parquet`` spelling a whole-file rewrite reads its input through.
+
+    ``hive_partitioning=false``: a file under a ``key=value`` directory is one
+    file, not a partition whose key would become a column of the rewrite.
+    """
+    return f"read_parquet({sql_path(url)}, hive_partitioning=false)"
+
+
+def rewrite_file_through_funnel(
     source: str,
     destination: str,
-    updates: Mapping[str, str | None],
+    query: str,
     *,
     verbose: bool = False,
     profile: str | None = None,
+    geoparquet_version: str | None = None,
+    original_metadata: dict | None = None,
+    row_group_rows: int | None = None,
 ) -> None:
-    """Re-encode *source* to *destination* with ``updates`` applied to its footer keys.
+    """Run *query* over *source* through the query funnel into *destination*, staged.
 
-    The funnel's one metadata-only rewrite: the fallback
-    :func:`~geoparquet_io.core.parquet_footer.patch_or_rewrite` takes for a
-    footer it cannot patch. A rewrite decodes every page, so it is a write like
-    any other and takes the facade's policy for one -- codec and level, row
-    groups, output version (from ``source``, so a native 2.0 input stays native
-    and a 1.x one stays WKB, #712), one ``geo`` key (#1225) -- and the
-    funnel's rule for which footer keys survive: every sidecar key the input
-    carries (``extract_preserved_kv_metadata``) and the ``geo`` block, with
-    the keys ``updates`` names replaced or removed. The input's ``pandas`` and
-    ``ARROW:schema`` describe the input's rows and are not carried (#710).
-
-    Args:
-        source: The file to read.
-        destination: Where the result goes; may be *source*.
-        updates: Footer keys to set, as text; ``None`` removes a key.
-        verbose: Report the carried keys and the query.
-        profile: AWS profile for a remote *source* or *destination*.
+    The rewrite the ``check --fix`` repairs share: one staged destination
+    (:func:`staged_replacement`), one DuckDB connection closed before the swap,
+    the facade's codec, and *source* named as the facade's witness -- the file
+    whose rows *query* reads (#1001). A remote read failure is reported with
+    the store's hint (``RemoteAccessError``).
     """
     import duckdb  # deferred: the embeddable import surface defers duckdb (#1307)
 
-    carried = _carried_with_updates(get_kv_metadata(source), updates)
-    url = resolve_file_url(source, verbose)
-    if verbose:
-        debug("\nPreserving file properties:")
-        debug(f"Existing metadata keys: {[bytes(key).decode() for key in carried]}")
-    with _replacing(destination) as staged:
+    with staged_replacement(destination) as staged:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(source))
         try:
             write_parquet_with_metadata(
                 con=con,
-                query=f"SELECT * FROM read_parquet({sql_path(url)}, hive_partitioning=false)",
+                query=query,
                 output_file=staged,
-                original_metadata=carried,
+                original_metadata=original_metadata,
                 compression=None,
                 compression_level=None,
-                row_group_rows=None,
+                row_group_rows=row_group_rows,
                 verbose=verbose,
-                show_sql=verbose,
                 profile=profile,
+                geoparquet_version=geoparquet_version,
                 input_file=source,
             )
         except duckdb.IOException as e:
@@ -961,25 +979,87 @@ def rewrite_footer_kv(
             con.close()
 
 
-def _rewrite_own_output(compression, compression_level, row_group_rows):
-    """The fallback for a repair of a file this funnel just wrote.
+def _copy_row_groups(pf: pq.ParquetFile, writer: pq.ParquetWriter, row_group_rows: int) -> None:
+    """Copy ``pf`` into ``writer`` in pieces of ``row_group_rows``, one group each.
 
-    That file already carries exactly the keys the funnel chose, so the rewrite
-    keeps every one and replaces only the ``geo`` block, row group by row group
-    at the funnel's own codec, level and row-group count
-    (``derive_geo_from_file._rewrite_file_with_geo_metadata``).
+    Bounded by one row group in memory, never the whole file (#1155). The
+    pieces' own schema metadata is irrelevant: the footer's key/value metadata
+    comes from the schema ``writer`` was opened with, and ``write_table``
+    compares schemas without metadata.
     """
+    for batch in pf.iter_batches(batch_size=row_group_rows):
+        writer.write_table(pa.Table.from_batches([batch]), row_group_size=row_group_rows)
 
-    def rewrite(_source: str, destination: str, updates: Mapping[str, str | None]) -> None:
-        _rewrite_file_with_geo_metadata(
-            destination,
-            read_raw_geo(dict(updates)).value,
-            compression,
-            compression_level,
-            row_group_rows,
-        )
 
-    return rewrite
+def rewrite_footer_kv(
+    source: str,
+    destination: str,
+    updates: Mapping[str, str | None],
+    *,
+    compression: str | None = None,
+    compression_level: int | None = None,
+    row_group_rows: int | None = None,
+    verbose: bool = False,
+    profile: str | None = None,
+) -> None:
+    """Re-encode *source* to *destination* with ``updates`` applied to its footer keys.
+
+    The one fallback :func:`~geoparquet_io.core.parquet_footer.patch_or_rewrite`
+    takes for a footer it cannot patch, for a user's file and for a repair of a
+    file the funnel just wrote alike. The rows, the schema and its logical types
+    are copied as they are -- a native 2.0 column stays native, a WKB one WKB --
+    and only what Parquet cannot carry over is chosen again:
+
+    * the codec and level, from ``compression``/``compression_level`` through
+      ``compression.resolve_codec`` (unset: the facade's ZSTD 15);
+    * the row groups, ``row_group_rows`` per group through
+      ``parquet_writer.resolve_row_group_rows`` (unset: the facade's default);
+    * the footer keys, by the facade's one rule
+      (``parquet_writer.output_schema_metadata``): every key the input carries
+      survives with the keys ``updates`` names set or removed, except the
+      input's ``pandas``, ``ARROW:schema`` and ``geo:overviews``, which describe
+      the input's rows (#710, #1268); pyarrow regenerates ``ARROW:schema``.
+
+    Streams one row group at a time (#1155), and stages the destination
+    (:func:`staged_replacement`), so an in-place rewrite never writes over the
+    file it reads.
+
+    Args:
+        source: The file to read; local or remote.
+        destination: Where the result goes; may be *source*.
+        updates: Footer keys to set, as text; ``None`` removes a key.
+        compression, compression_level: The codec to write; unset is the facade's.
+        row_group_rows: Rows per group; unset is the facade's.
+        verbose: Report the footer keys written.
+        profile: AWS profile for a remote *destination*.
+    """
+    # geoarrow registration makes pyarrow round-trip the native GEOMETRY/
+    # GEOGRAPHY logical types (and their CRS) instead of demoting to binary.
+    import geoarrow.pyarrow  # noqa: F401
+
+    write_kwargs = resolve_codec(compression, compression_level, context="write").pyarrow_kwargs()
+    rows = resolve_row_group_rows(row_group_rows, None)
+    with remote_write_context(destination, verbose=verbose) as (local, _):
+        with staged_replacement(local) as staged:
+            # Every handle on *source* closes before the swap: Windows refuses
+            # to replace a file that is still open.
+            with contextlib.ExitStack() as stack:
+                handle = stack.enter_context(open_url(source)) if is_remote_url(source) else source
+                # pre_buffer off: pyarrow's pre-buffer cache keeps every column
+                # chunk `iter_batches` has read until the file closes, which grew
+                # to roughly the whole compressed file instead of one row group.
+                pf = stack.enter_context(pq.ParquetFile(handle, pre_buffer=False))
+                metadata = output_schema_metadata(
+                    _carried_with_updates(pf.metadata.metadata, updates), None
+                )
+                schema = pf.schema_arrow.with_metadata(metadata)
+                if verbose:
+                    debug(f"Rewriting with footer keys: {[key.decode() for key in metadata]}")
+                with pq.ParquetWriter(
+                    staged, schema, **without_geometry_dictionary(write_kwargs, schema)
+                ) as writer:
+                    _copy_row_groups(pf, writer, rows)
+        upload_if_remote(local, destination, profile=profile, verbose=verbose)
 
 
 # Fields a carried `geo` block must still have for the 2.0 fast path to be able
@@ -1586,7 +1666,7 @@ def write_parquet_with_metadata(
                 carry_geo_metadata=carried_geo_block,
                 extra_kv_metadata=extra_kv_metadata,
                 memory_limit=memory_limit,
-                # An edges patch is coming: one patch_footer call carries the
+                # An edges patch is coming: one patch_or_rewrite call carries the
                 # M/ZM geo repair and the retype together (#1270).
                 defer_v2_geo_repair=bool(edges_to_restore),
                 secondary_geo_columns=secondary_geo_columns,
@@ -1923,12 +2003,16 @@ def write_geoparquet_table(
         # The DuckDB-query funnel restores edges in `_preserve_edges_after_write`.
         # This is the same step for a table: the block's `edges` and, at 2.0,
         # the GEOGRAPHY logical type, so the two never disagree (#1269).
+        # A fallback rewrite keeps the groups just written: the count
+        # write_arrow_table resolved, asked again of the same rows (silent).
         apply_nonplanar_edges(
             edges_by_col,
             actual_output,
             compression=codec.name,
             compression_level=codec.level,
-            row_group_rows=row_group_rows,
+            row_group_rows=resolve_row_group_rows_for_table(
+                table, row_group_rows, row_group_size_mb
+            ),
             verbose=verbose,
         )
 

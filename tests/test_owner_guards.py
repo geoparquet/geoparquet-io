@@ -63,7 +63,7 @@ CHECK_OWNER_DEFS = REPO / "scripts" / "check_owner_defs.py"
 #: The pinned number of exemption entries per check (G1 per arm). Lower it with
 #: the commit that deletes a copy; raising it needs a reason in review.
 EXPECTED_COUNTS = {
-    "G1.tid251": 15,
+    "G1.tid251": 13,
     "G1.geo_parse": 0,
     "G1.set_memory_limit": 0,
     "G1.sql_escape": 0,
@@ -76,7 +76,7 @@ EXPECTED_COUNTS = {
     "G1.retry_status_sets": 2,
     "G1.retry_after": 0,
     "G1.retry_wrappers": 0,
-    "G1.json_dumps": 35,
+    "G1.json_dumps": 34,
     "G1.parquet_metadata": 0,
     "G1.row_group_policy": 2,
     "G1.scheme_test": 0,
@@ -1745,7 +1745,7 @@ def _find_edges(m: _Module) -> Iterator[Hit]:
 
 
 #: The footer patch's mechanism and its two refusals (``core/parquet_footer.py``).
-_FOOTER_PATCH_CALLS = frozenset({"patch_footer", "patch_footer_kv"})
+_FOOTER_PATCH_CALLS = frozenset({"_patch_footer_file", "patch_footer", "patch_footer_kv"})
 _FOOTER_PATCH_REFUSALS = frozenset({"FooterPatchUnsupported", "FooterPatchRaced"})
 
 
@@ -2596,7 +2596,7 @@ FOOTER_PATCH_SHAPES = {
     ),
     "module-attribute patch call": (
         "from geoparquet_io.core import parquet_footer\n\n"
-        "def add(p):\n    return parquet_footer.patch_footer(p, None)\n"
+        "def add(p):\n    return parquet_footer._patch_footer_file(p, None)\n"
     ),
     "race caught": (
         "from geoparquet_io.core import parquet_footer as pf\n\n"

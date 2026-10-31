@@ -227,25 +227,25 @@ class TestVecorelMetadataRewriteCodec:
     """
 
     def test_the_requested_codec_reaches_the_rewrite(self, tmp_path, monkeypatch):
+        """The key is a footer patch; the codec matters on its fallback, the
+        funnel's one rewrite, which must be handed the command's codec."""
         import geoparquet_io.core.add.geometry_metrics as gm
-        import geoparquet_io.core.duckdb_utils as du
+        from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
 
         src = tmp_path / "in.parquet"
         pq.write_table(pa.table({"id": ["a"]}), str(src), compression="GZIP")
         seen: dict = {}
 
-        def fake_write(con, query, out, **kwargs):
+        def refuse(*args, **kwargs):
+            raise FooterPatchUnsupported("forced for the test")
+
+        def fake_rewrite(source, destination, updates, **kwargs):
             seen.update(kwargs)
-            pq.write_table(pa.table({"id": ["a"]}), out, compression="GZIP")
 
-        class FakeCon:
-            def close(self):
-                pass
-
-        monkeypatch.setattr(gm, "write_parquet_with_metadata", fake_write)
-        monkeypatch.setattr(du, "get_duckdb_connection", lambda **k: FakeCon())
+        monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
+        monkeypatch.setattr(gm, "rewrite_footer_kv", fake_rewrite)
         gm._add_vecorel_metadata_to_file(
-            str(src), False, None, compression="GZIP", compression_level=None
+            str(src), False, compression="GZIP", compression_level=None
         )
         assert seen["compression"] == "GZIP"
         assert seen["compression_level"] is None

@@ -6,7 +6,7 @@ attaches it (#589). Attaching it used to mean a full pyarrow rewrite of a file
 the COPY had just finished writing -- every page decoded and re-encoded with a
 different writer's defaults to add one footer key (#1177, item 2).
 
-``core/parquet_footer.patch_footer`` copies every byte below the footer
+``core/parquet_footer._patch_footer_file`` copies every byte below the footer
 verbatim, so the codec, the compression level, the encodings, the row-group
 boundaries and the row order are kept by construction rather than by
 re-derivation. These tests hold that: the data bytes are untouched, the layout
@@ -177,7 +177,7 @@ def test_an_unpatchable_footer_still_gets_its_geo_metadata(xym_source, monkeypat
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("pretend this footer cannot be read")
 
-    monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", refuse)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
 
     write_funnels._ensure_v2_geo_metadata(str(xym_source), primary_column="geometry")
 
@@ -194,7 +194,7 @@ def test_a_raced_footer_patch_propagates_instead_of_rewriting(xym_source, monkey
     def race(*args, **kwargs):
         raise FooterPatchRaced("pretend the file changed while it was being copied")
 
-    monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", race)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", race)
     before = xym_source.read_bytes()
 
     with pytest.raises(FooterPatchRaced):

@@ -147,6 +147,8 @@ class TestGlobFixesEveryMatch:
         files = broken_files(COMPRESSION, austria_bbox_covering_file, tmp_path / "data")
         (tmp_path / "data" / "._a.parquet").write_bytes(b"AppleDouble")
         (tmp_path / "data" / ".gpio-fix-orphan.parquet").write_bytes(b"half a file")
+        (tmp_path / "data" / ".gpio-stage-orphan").mkdir()
+        (tmp_path / "data" / ".gpio-stage-orphan" / "a.parquet").write_bytes(b"half a file")
 
         result = invoke("check", "compression", tmp_path / "data", "--fix")
 

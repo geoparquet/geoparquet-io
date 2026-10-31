@@ -45,11 +45,6 @@ path = "geoparquet_io/core/constants.py"
 name = "pyarrow.parquet.ParquetWriter"
 reason = "vecorel schema fix rewrites the file itself; private write outside the facade, T2f"
 [[G1.tid251]]
-path = "geoparquet_io/core/derive_geo_from_file.py"
-name = "pyarrow.parquet.ParquetWriter"
-count = 2
-reason = "footer rewrite with derived geo metadata (annotation + call); private write outside the facade, T2f"
-[[G1.tid251]]
 path = "geoparquet_io/core/duckdb_utils.py"
 name = "psutil"
 reason = "permanent: process-liveness check for stale DuckDB temp dirs, not a memory fact; optional import (#1330)"
@@ -62,10 +57,6 @@ reason = "overview writer (annotation + call); private write outside the facade,
 path = "geoparquet_io/core/process/simplify.py"
 name = "pyarrow.parquet.ParquetWriter"
 reason = "streaming simplify writer; private write outside the facade, T2f"
-[[G1.tid251]]
-path = "geoparquet_io/core/reproject.py"
-name = "pyarrow.parquet.ParquetWriter"
-reason = "null-CRS sanitize rewrite; private write outside the facade, T2f"
 [[G1.tid251]]
 path = "geoparquet_io/core/streaming.py"
 name = "pyarrow.parquet.write_table"
@@ -149,10 +140,6 @@ reason = "metadata serialization, not a report: collection footer key"
 path = "geoparquet_io/core/crs_utils.py"
 count = "*"
 reason = "metadata serialization, not a report: PROJJSON for SQL, cache keys and messages"
-[[G1.json_dumps]]
-path = "geoparquet_io/core/derive_geo_from_file.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/duckdb_metadata.py"
 count = "*"

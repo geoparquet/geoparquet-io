@@ -28,7 +28,7 @@ from geoparquet_io.core.check_verdict import (
     validation_verdict,
     worst,
 )
-from geoparquet_io.core.parquet_footer import patch_footer
+from geoparquet_io.core.parquet_footer import _patch_footer_file
 
 DATA = Path(__file__).parent / "data"
 PLACES = DATA / "places_test.parquet"  # GeoParquet 1.0, SNAPPY, unsorted-enough
@@ -51,7 +51,7 @@ def _geo(path):
 def _refooter(src, dest, mutate):
     geo = _geo(src)
     mutate(geo)
-    patch_footer(str(src), {"geo": json.dumps(geo)}, output_file=str(dest))
+    _patch_footer_file(str(src), {"geo": json.dumps(geo)}, output_file=str(dest))
     return str(dest)
 
 

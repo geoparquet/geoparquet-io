@@ -44,7 +44,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core import check_fixes
+from geoparquet_io.core import check_fixes, write_funnels
 from geoparquet_io.core.check_optimization import _check_row_group_size
 from geoparquet_io.core.check_parquet_structure import SPATIAL_ROW_COUNT_RANGE
 from geoparquet_io.core.parquet_writer import (
@@ -78,37 +78,38 @@ def _row_group_kwarg(recorded: list[dict]) -> int:
     return recorded[0]["row_group_rows"]
 
 
-def _spy(monkeypatch, name: str) -> list[dict]:
-    """Replace a ``check_fixes`` write entry point with a recording no-op."""
+def _spy(monkeypatch, name: str, module=check_fixes) -> list[dict]:
+    """Replace a write entry point (``check_fixes``' by default) with a recording no-op."""
     recorded: list[dict] = []
 
     def record(*args, **kwargs):
         recorded.append(kwargs)
         return {"success": True}
 
-    monkeypatch.setattr(check_fixes, name, record)
+    monkeypatch.setattr(module, name, record)
     return recorded
 
 
 class TestEveryFixAsksForTheSortDefault:
-    """All five write sites, so a new hardcode in any one of them fails."""
+    """All five write sites, so a new hardcode in any one of them fails. The three
+    COPY rewrites reach the funnel through ``write_funnels.rewrite_file_through_funnel``."""
 
     def test_fix_compression(self, monkeypatch, places_test_file, tmp_path):
-        recorded = _spy(monkeypatch, "write_parquet_with_metadata")
+        recorded = _spy(monkeypatch, "write_parquet_with_metadata", write_funnels)
 
         check_fixes.fix_compression(places_test_file, str(tmp_path / "out.parquet"))
 
         assert _row_group_kwarg(recorded) == DEFAULT_ROW_GROUP_ROWS
 
     def test_fix_row_groups(self, monkeypatch, places_test_file, tmp_path):
-        recorded = _spy(monkeypatch, "write_parquet_with_metadata")
+        recorded = _spy(monkeypatch, "write_parquet_with_metadata", write_funnels)
 
         check_fixes.fix_row_groups(places_test_file, str(tmp_path / "out.parquet"))
 
         assert _row_group_kwarg(recorded) == DEFAULT_ROW_GROUP_ROWS
 
     def test_fix_bbox_removal(self, monkeypatch, places_test_file, tmp_path):
-        recorded = _spy(monkeypatch, "write_parquet_with_metadata")
+        recorded = _spy(monkeypatch, "write_parquet_with_metadata", write_funnels)
 
         check_fixes.fix_bbox_removal(places_test_file, str(tmp_path / "out.parquet"), "bbox")
 
@@ -219,13 +220,13 @@ class TestAFixedFilePassesTheRowGroupFactor:
         """Control: the same file written the old way still fails, so the test
         above is measuring the fix and not the fixture."""
         fixed = str(tmp_path / "legacy.parquet")
-        real_writer = check_fixes.write_parquet_with_metadata
+        real_writer = write_funnels.write_parquet_with_metadata
 
         def write_at_100k(*args, **kwargs):
             kwargs["row_group_rows"] = 100_000
             return real_writer(*args, **kwargs)
 
-        with mock.patch.object(check_fixes, "write_parquet_with_metadata", write_at_100k):
+        with mock.patch.object(write_funnels, "write_parquet_with_metadata", write_at_100k):
             check_fixes.fix_row_groups(oversized_row_group_file, fixed)
 
         verdict = _check_row_group_size(fixed)

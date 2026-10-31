@@ -85,7 +85,11 @@ SIDECAR_REFERENCE = {"aggregate_h3_none": "aggregate_h3_polygon"}
 #: input's, byte for byte, so on the codec, row-group and level axes they are
 #: held to the input, not to the facade (the lead's policy for #1367 T2d: only a
 #: footer that cannot be patched is rewritten, and that rewrite goes through the
-#: funnel and takes the facade's policy -- tests/test_patch_or_rewrite.py).
+#: funnel and takes the facade's policy). This matrix runs the patchable cell
+#: only. The unpatchable cell -- the facade's codec and row groups, every
+#: metadata-only command -- is owned by tests/test_patch_or_rewrite.py's table
+#: (``test_an_unpatchable_footer_rewrites_through_the_funnel_keeping_the_same_keys``),
+#: so it is not repeated here.
 METADATA_ONLY = {"check_bbox_fix", "add_bbox_metadata"}
 #: The invariants a footer patch answers by passing the input's pages through.
 LAYOUT_INVARIANTS = {"codec", "row_groups", "level"}

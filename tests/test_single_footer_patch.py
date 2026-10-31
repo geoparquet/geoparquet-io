@@ -2,10 +2,10 @@
 
 A GeoParquet 2.0 write of an M geometry with non-planar edges needs two footer
 edits: the ``geo`` block DuckDB omits for M geometries (#589) and the
-edges/GEOGRAPHY retype (#999). Each ``patch_footer`` call is a full copy of
+edges/GEOGRAPHY retype (#999). Each ``_patch_footer_file`` call is a full copy of
 every byte below the footer plus an atomic replace, so doing them separately
 doubles the post-write I/O on large outputs. Both edits go into one
-``patch_footer`` call.
+``_patch_footer_file`` call.
 
 The copy passes are counted at ``parquet_footer._copy_below_footer``, the one
 routine every footer patch pays its full-file copy through.
@@ -25,7 +25,7 @@ import pytest
 from geoparquet_io.core import parquet_footer, write_funnels
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
-from geoparquet_io.core.parquet_footer import patch_footer
+from geoparquet_io.core.parquet_footer import _patch_footer_file
 from tests.native_geo_probes import geo_block, native_geo_edges, spec_problems
 
 _ROWS = 300
@@ -54,7 +54,7 @@ def xym_geography(tmp_path) -> Path:
         """)
     finally:
         con.close()
-    patch_footer(str(path), geography={"geometry": "spherical"})
+    _patch_footer_file(str(path), geography={"geometry": "spherical"})
 
     # Non-vacuity: the fixture is what the issue describes -- GEOGRAPHY logical
     # type, no geo key for the repair to find.
@@ -161,7 +161,7 @@ def test_an_unpatchable_merged_footer_keeps_both_edits_in_the_block(
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("refused for the test")
 
-    monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", refuse)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
     out = tmp_path / "out.parquet"
     convert_to_geoparquet(str(xym_geography), str(out), skip_hilbert=True, geoparquet_version="2.0")
 
@@ -184,10 +184,10 @@ def test_a_raced_merged_patch_propagates_without_a_rewrite(xym_geography, tmp_pa
     def race(*args, **kwargs):
         raise FooterPatchRaced("changed for the test")
 
-    monkeypatch.setattr("geoparquet_io.core.parquet_footer.patch_footer", race)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", race)
     monkeypatch.setattr(
         write_funnels,
-        "_rewrite_file_with_geo_metadata",
+        "rewrite_footer_kv",
         lambda *a, **k: pytest.fail("a raced patch must not fall back to a rewrite"),
     )
 

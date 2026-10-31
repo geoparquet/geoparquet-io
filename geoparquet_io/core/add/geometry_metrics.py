@@ -13,8 +13,8 @@ the command used to write without a word (#1193).
 
 from __future__ import annotations
 
+import functools
 import json
-from typing import Any
 
 from geoparquet_io.core.common import (
     add_computed_column,
@@ -27,18 +27,18 @@ from geoparquet_io.core.crs_utils import (
     transform_geom_sql,
 )
 from geoparquet_io.core.duckdb_utils import query_schema, quote_identifier
-from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
+from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
 from geoparquet_io.core.logging_config import success
+from geoparquet_io.core.parquet_footer import patch_or_rewrite
 from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.reader import require_single_file
-from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.stream_io import execute_transform
 from geoparquet_io.core.streaming import is_stdin, should_stream_output
-from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
 AREA_COLUMN = "metrics:area"
 PERIMETER_COLUMN = "metrics:perimeter"
@@ -244,7 +244,7 @@ def _add_metrics_file_based(
         from geoparquet_io.core.constants import ensure_vecorel_columns
 
         _add_vecorel_metadata_to_file(
-            output_parquet, verbose, write.memory_limit, write.compression, write.compression_level
+            output_parquet, verbose, write.compression, write.compression_level
         )
         ensure_vecorel_columns(
             output_parquet,
@@ -259,13 +259,16 @@ def _add_metrics_file_based(
 def _add_vecorel_metadata_to_file(
     parquet_file: str,
     verbose: bool,
-    memory_limit: str | None,
     compression: str | None = None,
     compression_level: int | None = None,
 ) -> None:
-    """Add Vecorel schema metadata to an existing file via rewrite."""
-    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+    """Add the Vecorel ``collection`` key to the file this command just wrote.
 
+    One footer key: a footer patch, every page kept as the command wrote it.
+    A footer that cannot be patched falls back to the funnel's rewrite at the
+    command's own codec (``patch_or_rewrite``); the caller's codec always goes
+    through, so a GZIP output is not re-encoded as ZSTD on that fallback.
+    """
     metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
     extra_kv = _build_vecorel_metadata(metadata)
 
@@ -280,46 +283,11 @@ def _add_vecorel_metadata_to_file(
             except (json.JSONDecodeError, AttributeError):
                 pass
 
-    import os
-    import tempfile
-
-    input_path = resolve_file_url(parquet_file, verbose=False)
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
-
-    fd, temp_out = tempfile.mkstemp(suffix=".parquet")
-    os.close(fd)
-    os.unlink(temp_out)
-
-    # The caller's codec always goes through -- dropping it when the level is
-    # unset re-encoded a GZIP output as ZSTD on this one rewrite. An unset
-    # level stays None here and resolves in the write funnel's owner
-    # (`compression.resolve_codec`), as on the command's other writes (#1335).
-    level_kwargs: dict[str, Any] = {
-        "compression": compression,
-        "compression_level": compression_level,
-    }
-    try:
-        try:
-            write_parquet_with_metadata(
-                con,
-                f"SELECT * FROM {sql_path(input_path)}",
-                temp_out,
-                original_metadata=metadata,
-                extra_kv_metadata=extra_kv,
-                verbose=verbose,
-                **level_kwargs,
-                # A whole-file rewrite to attach one sidecar key must not also
-                # change the geometry encoding. Without this witness auto mode
-                # read the carried `geo` key, which does not say whether the
-                # column is native, and the rewrite re-encoded it as WKB (#993).
-                input_file=parquet_file,
-                memory_limit=memory_limit,
-            )
-        finally:
-            # Release DuckDB's read handle on the source before replacing it;
-            # an open connection makes os.replace() fail on Windows.
-            con.close()
-        os.replace(temp_out, parquet_file)
-    finally:
-        if os.path.exists(temp_out):
-            os.unlink(temp_out)
+    patch_or_rewrite(
+        parquet_file,
+        extra_kv,
+        rewrite=functools.partial(
+            rewrite_footer_kv, compression=compression, compression_level=compression_level
+        ),
+        verbose=verbose,
+    )
