@@ -2509,14 +2509,41 @@ def _name_read_receiver(node: ast.AST) -> ast.Name | None:
 _SCHEMA_LISTING = re.compile(r"schema", re.IGNORECASE)
 
 
+def _is_schema_listing_source(m: _Module, source: ast.AST) -> bool:
+    """A loop iterable that is a raw schema listing: ``schema_info``,
+    ``get_schema_info(p)``, ``enumerate(schema_info)``, or a local assigned from
+    one (``rows = get_schema_info(p)``). ``root_schema_*(...)`` is the owner's
+    root-only walk, so it is not one."""
+    calls = [n for n in ast.walk(source) if isinstance(n, ast.Call)]
+    if any(_ident(c.func).startswith("root_schema_") for c in calls):
+        return False
+    if _SCHEMA_LISTING.search(ast.unparse(source)):
+        return True
+    func = _enclosing_function(m, source)
+    if func is None:
+        return False
+    names = {n.id for n in ast.walk(source) if isinstance(n, ast.Name)}
+    return any(
+        isinstance(a, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id in names for t in a.targets)
+        and _SCHEMA_LISTING.search(ast.unparse(a.value))
+        and not any(
+            _ident(c.func).startswith("root_schema_")
+            for c in ast.walk(a.value)
+            if isinstance(c, ast.Call)
+        )
+        for a in ast.walk(func)
+    )
+
+
 def _walks_schema_listing(m: _Module, receiver: ast.Name) -> bool:
-    """Whether *receiver* is the target of a loop over a raw schema listing (a loop
-    over ``root_schema_columns(...)`` is the owner's root-only walk)."""
+    """Whether *receiver* is a target (a plain name or one of a tuple, as in
+    ``for i, c in enumerate(schema_info)``) of a loop over a raw schema listing."""
     for loop in _enclosing_loops(m, receiver):
         target = loop.target
-        if isinstance(target, ast.Name) and target.id == receiver.id:
-            source = ast.unparse(loop.iter)
-            return bool(_SCHEMA_LISTING.search(source)) and not source.startswith("root_schema_")
+        elts = target.elts if isinstance(target, ast.Tuple) else [target]
+        if any(isinstance(e, ast.Name) and e.id == receiver.id for e in elts):
+            return _is_schema_listing_source(m, loop.iter)
     return False
 
 
@@ -2665,8 +2692,12 @@ def _fold_method_on_column(m: _Module, node: ast.AST, targets) -> bool:
     return root.id in _BARE_NAMES and _function_deals_in_columns(m, node)
 
 
-#: Owns the shape of the schema walk only; a fold or a suffix loop there is flagged.
-_SCHEMA_WALK_OWNER = ("geoparquet_io/core/parquet_schema.py",)
+@functools.lru_cache(maxsize=1)
+def _schema_walk_owners() -> tuple[str, ...]:
+    """``[G1.column_fold_walk_owners]`` of the one exemptions file: the modules that
+    own the shape of the schema walk only; a fold or a suffix loop there is flagged."""
+    table = load_exemptions().get("G1", {}).get("column_fold_walk_owners", {})
+    return tuple(table.get("modules", ()))
 
 
 def _find_column_fold(m: _Module) -> Iterator[Hit]:
@@ -2714,7 +2745,7 @@ def _find_column_fold(m: _Module) -> Iterator[Hit]:
             or _ascii_fold_table(node)
             or _fold_keyed(node)
             or _exact_column_compare(m, node, targets)
-            or (not _owns(m.path, _SCHEMA_WALK_OWNER) and _schema_listing_walk(m, node))
+            or (not _owns(m.path, _schema_walk_owners()) and _schema_listing_walk(m, node))
         ):
             yield m.hit(node)
         elif (
@@ -5383,6 +5414,15 @@ COLUMN_FOLD_SHAPES = {
         "def f(schema_info):\n    out = {}\n    for col in schema_info:\n"
         '        out[col["name"]] = col\n    return out\n'
     ),
+    "name-read through enumerate": (
+        "def f(schema_info, columns):\n    for i, col in enumerate(schema_info):\n"
+        '        if col["name"] in columns:\n            return i\n'
+    ),
+    "name-read over a listing held in a local": (
+        "from m import get_schema_info\n\n"
+        "def f(path, geom_col):\n    rows = get_schema_info(path)\n    for col in rows:\n"
+        '        if col.get("name") == geom_col:\n            return col\n'
+    ),
     "type-named loop target": (
         "def f(columns):\n    for col_type in columns:\n        yield col_type.lower()\n"
     ),
@@ -5412,6 +5452,11 @@ COLUMN_FOLD_NEAR_MISSES = {
         "def f(schema_info, columns):\n"
         '    return [c for c in root_schema_columns(schema_info) if c["name"] not in columns]\n'
     ),
+    "a walk over root columns held in a local": (
+        "from geoparquet_io.core.parquet_schema import root_schema_columns\n\n"
+        "def f(schema_info, columns):\n    rows = root_schema_columns(schema_info)\n"
+        '    return [c for c in rows if c["name"] not in columns]\n'
+    ),
     "a schema name read that is only listed": (
         'def f(schema_info):\n    return [col["name"] for col in schema_info]\n'
     ),
@@ -5436,6 +5481,13 @@ def _plant_in(tmp_path: Path, relative: str, source: str) -> Path:
     target.parent.mkdir(parents=True)
     target.write_text(source, encoding="utf-8")
     return tmp_path
+
+
+def test_g12_the_schema_walk_owner_table_names_real_modules():
+    owners = _schema_walk_owners()
+    assert owners, "[G1.column_fold_walk_owners] is missing"
+    for path in owners:
+        assert (REPO / path).exists(), path
 
 
 def test_g12_column_fold_owner_of_the_schema_walk_may_walk(tmp_path):

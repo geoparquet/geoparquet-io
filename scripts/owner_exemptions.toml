@@ -190,6 +190,13 @@ reason = "metadata serialization, not a report: PROJJSON for SQL"
 "geoparquet_io/core/crs_utils.py" = ["crs"]
 "geoparquet_io/core/edges.py" = ["edges", "orientation"]
 
+# The modules that own the SHAPE of a schema-listing walk (G1.column_fold's
+# "tests or keys a column by name" check): the walk is not a hit there. An
+# ownership statement, not an exemption: a fold or a suffix loop in the same
+# module is still a hit.
+[G1.column_fold_walk_owners]
+modules = ["geoparquet_io/core/parquet_schema.py"]
+
 # A geometry column chosen outside core/geometry_detection.py (#1367 concept 7).
 # Seed baseline recorded when the arm was created (#1392 pass 3): counts only
 # go down from here; T0e zeroes what it can.
