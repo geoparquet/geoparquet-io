@@ -205,7 +205,7 @@ jobs:
           # DuckDB extension downloads (extensions.duckdb.org) occasionally fail
           # with a transient network error, which broke otherwise-green builds.
           # Retry with backoff before giving up.
-          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
+          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community'); con.execute('INSTALL a5 FROM community')"
           for attempt in 1 2 3 4 5; do
             if uv run python -c "$install"; then
               echo "DuckDB extensions installed (attempt $attempt)."
@@ -295,9 +295,9 @@ jobs:
   # The fast suite on DuckDB 2.0, which the lock does not allow yet: pyproject
   # caps duckdb <1.6 until the 'geography' community extension (S2) is published
   # for 2.0. Installing 2.0 over the synced lock and running with --no-sync keeps
-  # the code working on both. S2 and a5 tests skip here: 'geography' is not
-  # built for 2.0 and a5 moved to the Query.Farm repository (tests/conftest.py).
-  # DuckDB 2.0 wheels need Python 3.11+.
+  # the code working on both. S2 tests skip here: 'geography' is not built for
+  # 2.0. a5 runs for real: gpio installs it from the Query.Farm repository on
+  # 2.0+ at first use (#1347). DuckDB 2.0 wheels need Python 3.11+.
   test-duckdb-2:
     runs-on: ubuntu-latest
     timeout-minutes: 70
@@ -326,7 +326,11 @@ jobs:
       - name: Pre-install DuckDB extensions
         shell: bash
         run: |
-          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community')"
+          # a5 on 2.0+ installs from the Query.Farm repository through gpio's
+          # own path (#1347); prewarming through require_community_extension
+          # exercises that flow under the same retry, and the CI canary test
+          # (tests/test_extension_probe_offline.py) then asserts a5 is usable.
+          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); from geoparquet_io.core.duckdb_utils import require_community_extension; require_community_extension('a5')"
           for attempt in 1 2 3 4 5; do
             if uv run --no-sync python -c "$install"; then
               echo "DuckDB extensions installed (attempt $attempt)."
@@ -416,7 +420,7 @@ jobs:
         run: |
           # Same transient-failure retry as the fast matrix: extensions.duckdb.org
           # occasionally drops a request and breaks an otherwise-green build.
-          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
+          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community'); con.execute('INSTALL a5 FROM community')"
           for attempt in 1 2 3 4 5; do
             if uv run python -c "$install"; then
               echo "DuckDB extensions installed (attempt $attempt)."
@@ -503,7 +507,7 @@ jobs:
           # DuckDB extension downloads (extensions.duckdb.org) occasionally fail
           # with a transient network error, which broke otherwise-green builds.
           # Retry with backoff before giving up.
-          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
+          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community'); con.execute('INSTALL a5 FROM community')"
           for attempt in 1 2 3 4 5; do
             if uv run python -c "$install"; then
               echo "DuckDB extensions installed (attempt $attempt)."
@@ -621,7 +625,7 @@ jobs:
           # DuckDB extension downloads (extensions.duckdb.org) occasionally fail
           # with a transient network error, which broke otherwise-green builds.
           # Retry with backoff before giving up.
-          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
+          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community'); con.execute('INSTALL a5 FROM community')"
           for attempt in 1 2 3 4 5; do
             if uv run python -c "$install"; then
               echo "DuckDB extensions installed (attempt $attempt)."

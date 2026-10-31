@@ -238,6 +238,17 @@ def open_bounded_connection(
     cap has to be part of the connection (#1179). Left uncapped, DuckDB sized
     itself for the host and a 42 GB aggregate peaked at 115 GiB RSS.
 
+    The bound is what creates the spill pressure, not a stopgap for an engine
+    that cannot spill: under it, a grouped aggregate whose state outgrows the
+    limit spills to ``temp_directory`` and completes, on DuckDB 1.5 and 2.0
+    alike (measured at a 1GB limit against ~5GB of aggregate state, and on the
+    real ``gpio process aggregate``/``overview`` paths -- #1354 has the table).
+    So the bound stays on 2.0. What it never covered is the result's own
+    ``.arrow().read_all()`` materialization, which DuckDB does not account;
+    that is why peak RSS still runs past the limit, and one more reason the
+    share of the ceiling is half rather than DuckDB's 80% (the share's own
+    rationale is on :data:`DEFAULT_MEMORY_FRACTION`).
+
     ``preserve_insertion_order`` defaults off: every caller today takes its
     output order from a GROUP BY, so buffering the scan to keep the input's
     order buys nothing and costs the whole scan's width in memory. It is a

@@ -210,7 +210,8 @@ class ValidationError(GeoParquetError):
 # DuckDB 2.0 adds a second shape: the community a5 build downloads and loads,
 # then its init refuses because a5 for 2.0+ is "distributed from the Query.Farm
 # extension repository, not the DuckDB community repository". Equally not a
-# network problem, and equally not published where gpio installs from.
+# network problem. gpio installs a5 from Query.Farm itself on 2.0+ (#1347), so
+# this shape only appears when the community stub was installed outside gpio.
 _NOT_PUBLISHED_SIGNATURES = ("http 404", "not the duckdb community repository")
 
 
@@ -242,9 +243,13 @@ def is_unpublished_extension_error(exc: BaseException | str | None) -> bool:
 # cannot say.
 _UNPUBLISHED_EXTENSION_HINTS = {
     "a5": (
-        "For DuckDB 2.0 and later, a5 moved to the Query.Farm extension "
-        "repository, and gpio installs only from the DuckDB community repository. "
-        "Use DuckDB 1.5 for the a5 commands."
+        "For DuckDB 2.0 and later, gpio installs a5 automatically from the "
+        "Query.Farm extension repository (https://duckdb-extensions.query.farm), "
+        "where its maintainers publish it; the community registry carries only "
+        "a stub. This failure means the Query.Farm install itself did not "
+        "produce a loadable a5: either no build is published there for this "
+        "DuckDB version and platform, or a community stub installed outside "
+        "gpio was loaded."
     ),
     "geography": (
         "'geography' is published for gpio's whole DuckDB range on mainstream "
@@ -309,10 +314,16 @@ class ExtensionUnavailableError(GeoParquetError):
         duckdb_version: str,
         detail: str | None = None,
         feature: str | None = None,
+        query_farm: bool = False,
     ) -> None:
+        """``query_farm``: the install routed to the Query.Farm repository
+        (``duckdb_utils._installs_from_query_farm``), so reachability guidance
+        must name https://duckdb-extensions.query.farm, not the community
+        registry this install never talked to."""
         self.name = name
         self.duckdb_version = duckdb_version
         self.feature = feature
+        self.query_farm = query_farm
         self.unpublished = is_unpublished_extension_error(detail)
         subject = f"'{feature}' requires" if feature else "This operation requires"
         listing = f"https://community-extensions.duckdb.org/extensions/{name}.html"
@@ -330,10 +341,16 @@ class ExtensionUnavailableError(GeoParquetError):
             if hint:
                 msg = f"{msg} {hint}"
         elif detail:
-            # A failure that is NOT a 404: do not blame the extension registry.
+            # A failure that is NOT a 404: do not blame the extension registry,
+            # and name the registry this install actually talked to.
+            registry = (
+                "https://duckdb-extensions.query.farm"
+                if query_farm
+                else "https://community-extensions.duckdb.org"
+            )
             msg += (
                 " This is not the 'not published for this DuckDB version' 404, so "
-                "check that https://community-extensions.duckdb.org is reachable "
+                f"check that {registry} is reachable "
                 "from here (proxy, firewall, offline)."
             )
         else:

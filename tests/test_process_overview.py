@@ -374,8 +374,15 @@ class TestGridDetectionStubbed:
         con = RecordingCon()
         ensure_grid_extension(con, "a5")
         sql = [statement for statement, _ in con.statements]
-        assert any(s.startswith("INSTALL a5 FROM community") for s in sql)
-        assert any(s.startswith("LOAD a5") for s in sql)
+        # On DuckDB 2.0+ a5 comes from Query.Farm, where a cached install means
+        # the first LOAD succeeds with no INSTALL at all (the stub never raises).
+        from geoparquet_io.core.duckdb_utils import _installs_from_query_farm
+
+        if _installs_from_query_farm("a5"):
+            assert any(s.startswith("LOAD a5 FROM query_farm") for s in sql)
+        else:
+            assert any(s.startswith("INSTALL a5 FROM community") for s in sql)
+            assert any(s.startswith("LOAD a5") for s in sql)
         assert all(
             opt_out is not None for statement, opt_out in con.statements if "LOAD" in statement
         )
