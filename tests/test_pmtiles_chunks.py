@@ -412,9 +412,9 @@ class TestSplit:
 
 
 def _bounds(path):
-    from geoparquet_io.core.common import get_dataset_bounds
+    from geoparquet_io.core.bbox_structure import dataset_bounds
 
-    return get_dataset_bounds(path, geometry_column="geometry")
+    return dataset_bounds(path, geometry_column="geometry")
 
 
 class TestSplitDropsUnplaceableRows:

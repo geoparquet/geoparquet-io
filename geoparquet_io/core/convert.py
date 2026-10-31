@@ -53,6 +53,8 @@ from geoparquet_io.core.file_utils import (
     validate_output_path,
 )
 from geoparquet_io.core.geo_metadata import (
+    QuerySource,
+    bounds_of,
     build_bbox_covering,
     sanitized_carried_geo_of_file,
 )
@@ -712,38 +714,12 @@ def _calculate_bounds(
         else:
             table_expr = _build_st_read_expr(input_file, layer)
 
-    # Quote column name to handle special characters, spaces, and reserved words
-    quoted_geom = quote_identifier(geom_column)
-
-    # GeoArrow native encodings store geometry as nested structs/arrays that
-    # DuckDB cannot pass to ST_XMin directly. Use list_min/list_max via
-    # _geoarrow_coord_exprs — consistent with _build_conversion_query and
-    # avoids UNNEST row explosion for large multipolygon datasets.
-    geoarrow_native = encoding.lower() not in {"wkb", "wkt"}
-    if geoarrow_native:
-        xmin_e, ymin_e, xmax_e, ymax_e, _, _ = _geoarrow_coord_exprs(quoted_geom, encoding)
-        bounds_query = f"""
-            SELECT
-                MIN({xmin_e}) as xmin,
-                MIN({ymin_e}) as ymin,
-                MAX({xmax_e}) as xmax,
-                MAX({ymax_e}) as ymax
-            FROM {table_expr}
-            WHERE NOT isnan({xmax_e}) AND NOT isnan({ymax_e})
-        """
-    else:
-        bounds_query = f"""
-            SELECT
-                MIN(ST_XMin({quoted_geom})) as xmin,
-                MIN(ST_YMin({quoted_geom})) as ymin,
-                MAX(ST_XMax({quoted_geom})) as xmax,
-                MAX(ST_YMax({quoted_geom})) as ymax
-            FROM {table_expr}
-        """
-    bounds_result = fetch_one(con.execute(bounds_query))
-
-    if not bounds_result or any(v is None for v in bounds_result):
+    # The owner measures a GeoArrow native column (nested coordinate structs)
+    # off its coordinate lists, and anything else as GEOMETRY.
+    bbox = bounds_of(QuerySource(con, f"SELECT * FROM {table_expr}"), geom_column)
+    if bbox is None:
         return None
+    bounds_result = tuple(bbox)
 
     if verbose:
         xmin, ymin, xmax, ymax = bounds_result
@@ -1613,24 +1589,18 @@ def _calculate_csv_bounds(con, geom_info, verbose):
 
     csv_read = geom_info["csv_read"]
     geom_expr, where_clause = _get_geom_expr_and_where(geom_info)
-
-    bounds_query = f"""
-        SELECT
-            MIN(ST_XMin({geom_expr})) as xmin,
-            MIN(ST_YMin({geom_expr})) as ymin,
-            MAX(ST_XMax({geom_expr})) as xmax,
-            MAX(ST_YMax({geom_expr})) as ymax
-        FROM {csv_read}
-        {where_clause}
-    """
+    query = f"SELECT {geom_expr} AS __geometry FROM {csv_read} {where_clause}"
 
     try:
-        bounds_result = fetch_one(con.execute(bounds_query))
+        bbox = bounds_of(QuerySource(con, query), "__geometry")
+    except GeoParquetError:
+        raise
     except Exception as e:
         raise GeoParquetError(str(e)) from e
 
-    if not bounds_result or any(v is None for v in bounds_result):
+    if bbox is None:
         return None  # nothing to measure: caller writes unordered (#649)
+    bounds_result = tuple(bbox)
 
     if verbose:
         xmin, ymin, xmax, ymax = bounds_result

@@ -39,6 +39,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import has_glob_pattern, resolve_file_url
+from geoparquet_io.core.geo_metadata import bounds_of
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success, warn
@@ -49,7 +50,6 @@ from geoparquet_io.core.process.aggregate.common import (
     MetricSpec,
     _fold,
     aggregate_source_relation,
-    antimeridian_aware_bbox,
     build_breakdown_pivot,
     build_metric_select,
     geometry_to_geom_expr,
@@ -858,14 +858,11 @@ def _result_geo_bbox(con, result) -> list[float] | None:
     min/max over that reads as global coverage. Best-effort: a bbox is metadata,
     so a failure here leaves it to the writer rather than losing the output.
     """
-    con.register("__agg_result", result)
     try:
-        return antimeridian_aware_bbox(con, "__agg_result", "geometry")
+        return bounds_of(result, "geometry", antimeridian=True)
     except duckdb.Error as exc:  # pragma: no cover - defensive
         debug(f"Could not compute an antimeridian-aware bbox: {exc}")
         return None
-    finally:
-        con.unregister("__agg_result")
 
 
 def aggregate_grid_file(
@@ -965,7 +962,7 @@ def aggregate_grid_file(
         result = con.sql(final_sql).arrow().read_all()
         # The cells are keyed in lon/lat, so the output is always geographic --
         # whatever the input CRS was -- which is what makes the wrap form
-        # readable (see `antimeridian_aware_bbox`).
+        # readable (see `geo_metadata.bounds_of`).
         geo_bbox = None if out_geometry == "none" else _result_geo_bbox(con, result)
     finally:
         con.close()

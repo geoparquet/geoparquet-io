@@ -10,6 +10,8 @@ dropped or failing the conversion.
 unparsable are still dropped. Only *missing* geometry is retained.
 """
 
+import re
+
 import duckdb
 import pytest
 from click.testing import CliRunner
@@ -220,28 +222,23 @@ class TestNonFiniteBounds:
             assert _usable_bounds((1.0, 1.0, 5.0, 5.0)) == (1.0, 1.0, 5.0, 5.0)
         assert caplog.text == ""
 
-    def test_wkt_inf_coordinate_builds_an_unordered_query(self, tmp_path, caplog):
-        """End to end through _convert_csv_path: no ORDER BY, no binder error."""
-        import logging
+    def test_wkt_inf_coordinate_is_refused_naming_the_geometry(self, tmp_path):
+        """End to end through the CLI: one clear refusal, not a raw DuckDB error (#1165).
 
-        from geoparquet_io.core.convert import _convert_csv_path
-        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-
+        #1157 kept the infinite bound out of ``ST_MakeEnvelope`` and wrote
+        unordered, but the same row then killed the stats pass with
+        ``UnsupportedOperationException``. The bounds owner now refuses the
+        geometry where it is first measured, naming the column and the value.
+        """
         source = _write(
             tmp_path / "wkt.csv",
             "id,geom\n1,POINT(1 1)\n2,POINT(1e400 1)\n3,POINT(5 5)\n",
         )
-        con = get_duckdb_connection()
-        try:
-            with caplog.at_level(logging.WARNING):
-                query, _, order_by, _geom = _convert_csv_path(
-                    con, str(source), None, "geom", None, None, "EPSG:4326", False, False, False
-                )
-            assert order_by is None
-            assert "NaN or infinite" in caplog.text
-            assert len(con.execute(query).fetchall()) == 3
-        finally:
-            con.close()
+        result = _convert(source, tmp_path / "out.parquet")
+        assert result.exit_code != 0
+        assert "non-finite" in result.output
+        assert re.search(r"POINT \((inf|Infinity) 1\)", result.output), result.output
+        assert "UnsupportedOperationException" not in result.output
 
 
 class TestNullLatLon:

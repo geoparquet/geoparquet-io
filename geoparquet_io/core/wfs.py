@@ -66,6 +66,7 @@ from geoparquet_io.core.exceptions import (
     is_auth_status,
 )
 from geoparquet_io.core.file_utils import handle_output_overwrite
+from geoparquet_io.core.geo_metadata import bounds_of
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
     DEFAULT_MAX_RETRIES,
@@ -540,29 +541,11 @@ def _validate_crs_coordinates(
         return True, None
 
     try:
-        # Extract bbox from geometry column using DuckDB
-        # Geometry is stored as WKB, so we need ST_GeomFromWKB to convert
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-        try:
-            con.register("data", table)
-            result = fetch_one(
-                con.execute("""
-                SELECT
-                    MIN(ST_XMin(ST_GeomFromWKB(geometry))) as xmin,
-                    MIN(ST_YMin(ST_GeomFromWKB(geometry))) as ymin,
-                    MAX(ST_XMax(ST_GeomFromWKB(geometry))) as xmax,
-                    MAX(ST_YMax(ST_GeomFromWKB(geometry))) as ymax
-                FROM data
-                WHERE geometry IS NOT NULL
-            """)
-            )
-
-            if result is None or result[0] is None:
-                return True, None
-
-            bbox = (result[0], result[1], result[2], result[3])
-        finally:
-            con.close()
+        # The fetched geometry is WKB; the bounds owner measures it on the Arrow path.
+        measured = bounds_of(table, "geometry")
+        if measured is None:
+            return True, None
+        bbox = (measured[0], measured[1], measured[2], measured[3])
 
         # Validate coordinates match requested CRS
         normalized_crs = _normalize_crs(requested_crs)

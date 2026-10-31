@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pystac
 
-from geoparquet_io.core.common import get_dataset_bounds, get_parquet_metadata
+from geoparquet_io.core.bbox_structure import dataset_bounds
+from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
@@ -142,7 +143,7 @@ def generate_stac_geometry(parquet_file: str, verbose: bool = False) -> dict:
     """
     Generate GeoJSON geometry for STAC Item from dataset bounds.
 
-    Uses existing get_dataset_bounds() function.
+    Uses existing dataset_bounds() function.
 
     Args:
         parquet_file: Path to parquet file
@@ -151,7 +152,7 @@ def generate_stac_geometry(parquet_file: str, verbose: bool = False) -> dict:
     Returns:
         GeoJSON Polygon dict representing dataset extent
     """
-    bounds = get_dataset_bounds(parquet_file, verbose=verbose)
+    bounds = dataset_bounds(parquet_file, verbose=verbose)
     if not bounds:
         raise GeoParquetError("Could not calculate dataset bounds")
 
@@ -333,7 +334,7 @@ def generate_stac_item(
     Generate STAC Item for a single GeoParquet file.
 
     Uses existing metadata extraction:
-    - get_dataset_bounds() for bbox
+    - dataset_bounds() for bbox
     - sanitized_carried_geo() for CRS/geometry info
     - file mtime or current time for datetime
 
@@ -376,7 +377,7 @@ def generate_stac_item(
     geo_meta = sanitized_carried_geo(metadata, source=parquet_file)
 
     # Get bounds and geometry
-    bounds = get_dataset_bounds(parquet_file, verbose=False)
+    bounds = dataset_bounds(parquet_file, verbose=False)
     if not bounds:
         raise GeoParquetError(f"Could not calculate bounds for {parquet_file}")
 
@@ -448,7 +449,7 @@ def _generate_stac_item_no_warning(
     geo_meta = sanitized_carried_geo(metadata, source=parquet_file)
 
     # Get bounds and geometry
-    bounds = get_dataset_bounds(parquet_file, verbose=False)
+    bounds = dataset_bounds(parquet_file, verbose=False)
     if not bounds:
         raise GeoParquetError(f"Could not calculate bounds for {parquet_file}")
 

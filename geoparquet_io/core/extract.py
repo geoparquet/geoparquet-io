@@ -56,6 +56,7 @@ from geoparquet_io.core.file_utils import (
 )
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
+    bounds_of,
     carried_geometry_column,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
@@ -183,27 +184,13 @@ def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | No
 
 
 def _get_data_bounds(input_parquet: str, geometry_col: str) -> tuple | None:
-    """Get actual data bounds from file."""
+    """Actual data bounds of the file, from the bounds owner; None if unmeasurable."""
     try:
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
-        raw_url = resolve_file_url(input_parquet, verbose=False)
-        result = fetch_one(
-            con.execute(f"""
-            SELECT
-                MIN(ST_XMin({quote_identifier(geometry_col)})) as xmin,
-                MIN(ST_YMin({quote_identifier(geometry_col)})) as ymin,
-                MAX(ST_XMax({quote_identifier(geometry_col)})) as xmax,
-                MAX(ST_YMax({quote_identifier(geometry_col)})) as ymax
-            FROM read_parquet({sql_path(raw_url)})
-        """)
-        )
-        con.close()
-        if result and all(v is not None for v in result):
-            return result
+        bbox = bounds_of(input_parquet, geometry_col)
     except Exception:
         # Bounds extraction is optional - used only for warning messages
-        pass
-    return None
+        return None
+    return tuple(bbox) if bbox else None
 
 
 def _warn_if_crs_mismatch(

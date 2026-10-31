@@ -31,7 +31,6 @@ from geoparquet_io.core.validate import (
     _is_crs84_equivalent,
     _is_ogc_crs84,
     _is_read_failure,
-    _normalize_found_geometry_type,
     _version_at_least,
     validate_geoparquet,
 )
@@ -373,11 +372,19 @@ class TestProjjsonTypeMember:
 class TestGeomTypeNormalization:
     """046-V10: unmapped base types must not get their Z/M suffix doubled."""
 
+    # The data-side type names now come from the stats owner (#1367 concept 5).
+
     def test_unmapped_base_no_double_suffix(self):
-        assert _normalize_found_geometry_type("TRIANGLE Z") == "TRIANGLE Z"
+        from geoparquet_io.core.geo_metadata import _spec_type_name
+
+        assert _spec_type_name("TRIANGLE Z") == "TRIANGLE Z"
 
     def test_mapped_with_suffix(self):
-        assert _normalize_found_geometry_type("MULTIPOINT ZM") == "MultiPoint ZM"
+        from geoparquet_io.core.geo_metadata import _spec_type_name
+
+        assert _spec_type_name("MULTIPOINT ZM") == "MultiPoint ZM"
 
     def test_st_prefix_stripped(self):
-        assert _normalize_found_geometry_type("ST_POINT") == "Point"
+        from geoparquet_io.core.geo_metadata import _spec_type_name
+
+        assert _spec_type_name("ST_POINT") == "Point"

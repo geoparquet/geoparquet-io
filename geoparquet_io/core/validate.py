@@ -18,7 +18,6 @@ from rich.console import Console
 from rich.markup import escape
 
 from geoparquet_io.core.check_verdict import validation_verdict
-from geoparquet_io.core.common import split_zm_suffix, zm_suffix_sql
 from geoparquet_io.core.crs_utils import (
     CRS_ABSENT,
     NULL_CRS_HINT,
@@ -51,7 +50,7 @@ from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
     sql_path,
 )
-from geoparquet_io.core.exceptions import GeoParquetError
+from geoparquet_io.core.exceptions import GeometryError, GeoParquetError
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
@@ -59,9 +58,13 @@ from geoparquet_io.core.geo_metadata import (
     GEOARROW_ENCODINGS,
     GEOGRAPHY_EDGE_ALGORITHMS,
     GEOPARQUET_VERSIONS,
+    QuerySource,
+    bounds_of,
     covering_lacks_bbox,
+    geometry_types_of,
     is_covering_path,
     read_raw_geo,
+    split_zm_suffix,
 )
 from geoparquet_io.core.geometry_detection import (
     GeometryPresence,
@@ -159,43 +162,6 @@ VALID_GEOMETRY_TYPES = [
     "MultiPolygon",
     "GeometryCollection",
 ]
-
-# WKB integer codes for Parquet native geo types
-WKB_TYPE_CODES = {
-    # XY
-    1: "Point",
-    2: "LineString",
-    3: "Polygon",
-    4: "MultiPoint",
-    5: "MultiLineString",
-    6: "MultiPolygon",
-    7: "GeometryCollection",
-    # XYZ (add 1000)
-    1001: "Point Z",
-    1002: "LineString Z",
-    1003: "Polygon Z",
-    1004: "MultiPoint Z",
-    1005: "MultiLineString Z",
-    1006: "MultiPolygon Z",
-    1007: "GeometryCollection Z",
-    # XYM (add 2000)
-    2001: "Point M",
-    2002: "LineString M",
-    2003: "Polygon M",
-    2004: "MultiPoint M",
-    2005: "MultiLineString M",
-    2006: "MultiPolygon M",
-    2007: "GeometryCollection M",
-    # XYZM (add 3000)
-    3001: "Point ZM",
-    3002: "LineString ZM",
-    3003: "Polygon ZM",
-    3004: "MultiPoint ZM",
-    3005: "MultiLineString ZM",
-    3006: "MultiPolygon ZM",
-    3007: "GeometryCollection ZM",
-}
-
 
 # =============================================================================
 # Core Metadata Checks (GeoParquet 1.0+)
@@ -1340,30 +1306,6 @@ def _geometry_read(con, raw_url: str, geom_col: str) -> GeometryRead:
     return read
 
 
-# Uppercase DuckDB geometry type names -> expected GeoParquet casing.
-_GEOM_TYPE_DISPLAY = {
-    "POINT": "Point",
-    "LINESTRING": "LineString",
-    "POLYGON": "Polygon",
-    "MULTIPOINT": "MultiPoint",
-    "MULTILINESTRING": "MultiLineString",
-    "MULTIPOLYGON": "MultiPolygon",
-    "GEOMETRYCOLLECTION": "GeometryCollection",
-}
-
-
-def _normalize_found_geometry_type(raw: str) -> str:
-    """Map a DuckDB type + dimension suffix ("MULTIPOINT Z") to spec casing.
-
-    Strips any ST_ prefix, splits off the Z/M/ZM suffix, maps the base name,
-    then re-appends the suffix ("MultiPoint Z"). Unmapped base names keep the
-    uppercase base (never the raw string, which still carries the suffix and
-    would double it: "TRIANGLE Z Z").
-    """
-    base, suffix = split_zm_suffix(raw.replace("ST_", "").upper())
-    return _GEOM_TYPE_DISPLAY.get(base, base) + suffix
-
-
 def _compare_geometry_types(
     normalized_found: set, declared_types: list, total_count: int, geom_col: str
 ) -> ValidationCheck:
@@ -1461,34 +1403,19 @@ def _check_geometry_types_match_data(
             )
 
         read = _geometry_read(con, raw_url, geom_col)
-        geom_expr = read.expr
-
-        # Get both distinct types and total count in one query. The dimension
-        # suffix matters: "LineString" and "LineString ZM" are distinct
-        # geometry_types per spec, so the scan must not collapse them.
-        typed_expr = f"ST_GeometryType({geom_expr}) || {zm_suffix_sql(geom_expr)}"
-        query = f"""
-            SELECT {typed_expr} as geom_type, COUNT(*) as cnt
-            FROM (
-                SELECT {read.quoted}
-                FROM read_parquet({sql_path(raw_url)})
-                WHERE {read.present_sql}
-                {limit_clause}
-            )
-            GROUP BY {typed_expr}
+        sample = f"""
+            SELECT {read.quoted}
+            FROM read_parquet({sql_path(raw_url)})
+            WHERE {read.present_sql}
+            {limit_clause}
         """
-
-        result = con.execute(query).fetchall()
-        found_types = {}
-        total_count = 0
-        for row in result:
-            if row[0]:
-                found_types[row[0]] = row[1]
-                total_count += row[1]
-
-        normalized_found = {_normalize_found_geometry_type(t) for t in found_types.keys() if t}
-
-        return _compare_geometry_types(normalized_found, declared_types, total_count, geom_col)
+        # The owner's types (dimension suffix included: "LineString" and
+        # "LineString ZM" are distinct geometry_types per spec), under the one
+        # degenerate-geometry policy the writers use: an EMPTY geometry has no
+        # type to declare, so it cannot be an undeclared one either.
+        found = set(geometry_types_of(QuerySource(con, sample), geom_col))
+        total_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sample})"))[0]
+        return _compare_geometry_types(found, declared_types, total_count, geom_col)
     except Exception as e:
         check_name = f"geometry_types_match_data_{geom_col}"
         if _is_geoarrow_encoding(encoding):
@@ -2381,7 +2308,16 @@ def _check_geography_coordinate_bounds(
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
 
     try:
-        result = _execute_bounds_query(con, raw_url, geom_col, limit_clause)
+        try:
+            result = _execute_bounds_query(con, raw_url, geom_col, limit_clause)
+        except GeometryError as e:  # an infinite coordinate: the owner refuses to measure it
+            return ValidationCheck(
+                name=f"geography_coordinate_bounds_{geom_col}",
+                status=CheckStatus.FAILED,
+                message="GEOGRAPHY coordinates exceed valid bounds",
+                details=str(e),
+                category="parquet_geo_types",
+            )
         if not result:
             return ValidationCheck(
                 name=f"geography_coordinate_bounds_{geom_col}",
@@ -2418,24 +2354,16 @@ def _check_geography_coordinate_bounds(
 
 
 def _execute_bounds_query(con, raw_url: str, geom_col: str, limit_clause: str):
-    """Execute query to get coordinate bounds for a geometry column."""
+    """``(min_x, max_x, min_y, max_y)`` of the sampled geometries, or None (the owner's bounds)."""
     read = _geometry_read(con, raw_url, geom_col)
-    geom_expr = read.expr
-
-    query = f"""
-        SELECT
-            MIN(ST_XMin({geom_expr})) as min_x,
-            MAX(ST_XMax({geom_expr})) as max_x,
-            MIN(ST_YMin({geom_expr})) as min_y,
-            MAX(ST_YMax({geom_expr})) as max_y
-        FROM (
-            SELECT {read.quoted}
-            FROM read_parquet({sql_path(raw_url)})
-            WHERE {read.present_sql}
-            {limit_clause}
-        )
+    sample = f"""
+        SELECT {read.quoted}
+        FROM read_parquet({sql_path(raw_url)})
+        WHERE {read.present_sql}
+        {limit_clause}
     """
-    return fetch_one(con.execute(query))
+    bbox = bounds_of(QuerySource(con, sample), geom_col)
+    return None if bbox is None else (bbox[0], bbox[2], bbox[1], bbox[3])
 
 
 # =============================================================================
@@ -3131,30 +3059,18 @@ def _check_native_geo_types_match(
             )
 
         # Sample actual geometry types from the data. DuckDB's geo_types
-        # naming is dimension-aware ("linestring_m"), so append the matching
-        # suffix from ST_HasZ/ST_HasM instead of comparing base names only.
+        # naming is dimension-aware ("linestring_m"): the owner's spec name
+        # ("LineString M") spelled that way compares suffix and all.
         quoted_col = quote_identifier(geom_col)
-        typed_expr = f"ST_GeometryType({quoted_col}) || {zm_suffix_sql(quoted_col, sep='_')}"
-        if sample_size == 0:
-            # Check all rows
-            actual_result = con.execute(f"""
-                SELECT DISTINCT {typed_expr} as geom_type
-                FROM read_parquet({sql_path(raw_url)})
-                WHERE {quote_identifier(geom_col)} IS NOT NULL
-            """).fetchall()
-        else:
-            # Sample rows
-            actual_result = con.execute(f"""
-                SELECT DISTINCT {typed_expr} as geom_type
-                FROM (
-                    SELECT {quote_identifier(geom_col)}
-                    FROM read_parquet({sql_path(raw_url)})
-                    WHERE {quote_identifier(geom_col)} IS NOT NULL
-                    LIMIT {sample_size}
-                )
-            """).fetchall()
-
-        actual_types = {row[0].lower() for row in actual_result if row[0]}
+        limit = f"LIMIT {sample_size}" if sample_size else ""
+        sample = f"""
+            SELECT {quoted_col} FROM read_parquet({sql_path(raw_url)})
+            WHERE {quoted_col} IS NOT NULL {limit}
+        """
+        actual_types = {
+            t.lower().replace(" ", "_")
+            for t in geometry_types_of(QuerySource(con, sample), geom_col)
+        }
 
         # Check if actual types are a subset of declared types
         undeclared = actual_types - declared_types
@@ -3219,10 +3135,15 @@ def _check_native_columns_in_metadata(schema_info: list, columns: dict) -> Valid
 
 
 def _stats_geometry_type_name(raw) -> str:
-    """'point_z' / 1001 from parquet_metadata().geo_types -> 'Point Z'."""
-    if isinstance(raw, int):
-        return WKB_TYPE_CODES.get(raw, str(raw))
-    return _normalize_found_geometry_type(str(raw).replace("_", " "))
+    """'point_z' / 1001 from parquet_metadata().geo_types -> 'Point Z'.
+
+    Named by the row-group stats fold's own namer, so this check and the fold
+    agree; a value that is no spec type comes back as written.
+    """
+    from geoparquet_io.core.duckdb_metadata import _format_geo_types
+
+    names = _format_geo_types([raw])
+    return names[0] if names else str(raw)
 
 
 def _check_geometry_types_match_stats(
@@ -3845,42 +3766,28 @@ def _detect_geographic_in_projected(
 def _get_geometry_bounds(
     con, raw_url: str, geom_col: str, limit_clause: str, encoding: Any = "WKB"
 ) -> tuple[float, float, float, float, int] | None:
-    """Query actual coordinate bounds from geometry data."""
+    """``(min_x, max_x, min_y, max_y, rows checked)`` of the sampled geometries, or None."""
     if _is_geoarrow_encoding(encoding):
-        query = f"""
-            SELECT MIN(xmin) as min_x, MAX(xmax) as max_x,
-                   MIN(ymin) as min_y, MAX(ymax) as max_y,
-                   COUNT(*) as total
+        # Native columns carry coordinates, not serialized geometries: the
+        # per-row coordinate bounds are measured as a bbox struct.
+        sample = f"""
+            SELECT {{'xmin': xmin, 'ymin': ymin, 'xmax': xmax, 'ymax': ymax}} AS __bbox
             FROM ({_geoarrow_bounds_subquery(raw_url, geom_col, encoding, limit_clause)})
         """
-        result = fetch_one(con.execute(query))
-        if result is None or result[0] is None:
-            return None
-        return result[0], result[1], result[2], result[3], result[4]
-
-    read = _geometry_read(con, raw_url, geom_col)
-    geom_expr = read.expr
-
-    query = f"""
-        SELECT
-            MIN(ST_XMin({geom_expr})) as min_x,
-            MAX(ST_XMax({geom_expr})) as max_x,
-            MIN(ST_YMin({geom_expr})) as min_y,
-            MAX(ST_YMax({geom_expr})) as max_y,
-            COUNT(*) as total
-        FROM (
+        bbox = bounds_of(QuerySource(con, sample), geom_col, bbox_column="__bbox")
+    else:
+        read = _geometry_read(con, raw_url, geom_col)
+        sample = f"""
             SELECT {read.quoted}
             FROM read_parquet({sql_path(raw_url)})
             WHERE {read.present_sql}
             {limit_clause}
-        )
-    """
-    result = fetch_one(con.execute(query))
-
-    if result is None or result[0] is None:
+        """
+        bbox = bounds_of(QuerySource(con, sample), geom_col)
+    if bbox is None:
         return None
-
-    return result[0], result[1], result[2], result[3], result[4]
+    total = fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sample})"))[0]
+    return bbox[0], bbox[2], bbox[1], bbox[3], total
 
 
 def _check_coordinates_valid_for_crs(

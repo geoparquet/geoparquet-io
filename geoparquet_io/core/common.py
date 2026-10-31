@@ -13,19 +13,16 @@ may import it back -- and ``tests/test_common_split_guards.py`` refuses a new
 re-export shim.
 
 What remains is the stage-C residue, each block with a home already named in
-#1010's plan: the SQL-side geometry-type helpers (``zm_suffix_sql``,
-``split_zm_suffix``, ``compute_geometry_types_via_sql``,
-``compute_geometry_dimensions_via_sql``), ``get_parquet_metadata``, the
-bounds helpers (``calculate_file_bounds``, ``get_dataset_bounds``),
-``add_computed_column``/``add_bbox`` and ``should_skip_bbox``. Nothing new
-belongs here.
+#1010's plan: ``compute_geometry_dimensions_via_sql``, ``get_parquet_metadata``,
+``add_computed_column``/``add_bbox`` and ``should_skip_bbox``. The geometry-type
+and bounds helpers went to their owner, ``geo_metadata`` (#1367 concept 5).
+Nothing new belongs here.
 """
 
 import os
 
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.duckdb_utils import (
     _DuckDBSchemaWrapper,
@@ -50,9 +47,7 @@ from geoparquet_io.core.file_utils import (
 from geoparquet_io.core.geo_metadata import build_bbox_covering
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import (
-    configure_verbose,
     debug,
-    error,
     info,
     progress,
     success,
@@ -132,157 +127,6 @@ def get_parquet_metadata(parquet_file, verbose=False):
     return kv_metadata, schema
 
 
-def calculate_file_bounds(file_path, geom_column=None, verbose=False):
-    """
-    Calculate the bounding box of all geometries in a parquet file.
-
-    Uses DuckDB's spatial extension to compute the extent of all geometries.
-
-    Args:
-        file_path: Path to the parquet file (local or remote URL)
-        geom_column: Name of geometry column (auto-detected if None)
-        verbose: Print verbose output
-
-    Returns:
-        tuple: (xmin, ymin, xmax, ymax) or None if calculation fails
-    """
-    if geom_column is None:
-        geom_column = find_primary_geometry_column(file_path, verbose=False)
-
-    # RAW path: sql_path escapes it at the point of interpolation, so nothing
-    # downstream can escape it a second time (#802).
-    read_url = resolve_file_url(file_path, verbose=False)
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(file_path))
-
-    try:
-        bounds_query = f"""
-            SELECT
-                MIN(ST_XMin({quote_identifier(geom_column)})) as xmin,
-                MIN(ST_YMin({quote_identifier(geom_column)})) as ymin,
-                MAX(ST_XMax({quote_identifier(geom_column)})) as xmax,
-                MAX(ST_YMax({quote_identifier(geom_column)})) as ymax
-            FROM read_parquet({sql_path(read_url)})
-        """
-        result = fetch_one(con.execute(bounds_query))
-
-        if result and all(v is not None for v in result):
-            if verbose:
-                debug(
-                    f"Calculated bounds: ({result[0]:.6f}, {result[1]:.6f}, "
-                    f"{result[2]:.6f}, {result[3]:.6f})"
-                )
-            return result
-        return None
-    except Exception as e:
-        if verbose:
-            debug(f"Failed to calculate bounds: {e}")
-        return None
-    finally:
-        con.close()
-
-
-def zm_suffix_sql(geom_expr: str, sep: str = " ") -> str:
-    """SQL fragment producing the dimension suffix (''/'{sep}Z'/'{sep}M'/'{sep}ZM').
-
-    The GeoParquet spec treats "LineString" and "LineString ZM" as distinct
-    geometry_types entries, so any SQL type scan must append this suffix to
-    ST_GeometryType() output instead of collapsing dimensions.
-    """
-    return (
-        f"CASE WHEN ST_HasZ({geom_expr}) AND ST_HasM({geom_expr}) THEN '{sep}ZM' "
-        f"WHEN ST_HasZ({geom_expr}) THEN '{sep}Z' "
-        f"WHEN ST_HasM({geom_expr}) THEN '{sep}M' "
-        f"ELSE '' END"
-    )
-
-
-def split_zm_suffix(name: str) -> tuple[str, str]:
-    """Split a spec geometry type into (base, suffix): 'Point ZM' -> ('Point', ' ZM').
-
-    Names without a dimension suffix (and non-string inputs) return ('' suffix).
-    """
-    if isinstance(name, str):
-        for suffix in (" ZM", " Z", " M"):
-            if name.endswith(suffix):
-                return name[: -len(suffix)], suffix
-    return name, ""
-
-
-# DuckDB ST_GeometryType names ("POINT") -> GeoParquet spec names ("Point").
-_DUCKDB_TO_SPEC_TYPE = {
-    "POINT": "Point",
-    "LINESTRING": "LineString",
-    "POLYGON": "Polygon",
-    "MULTIPOINT": "MultiPoint",
-    "MULTILINESTRING": "MultiLineString",
-    "MULTIPOLYGON": "MultiPolygon",
-    "GEOMETRYCOLLECTION": "GeometryCollection",
-}
-
-
-def compute_geometry_types_via_sql(
-    con,
-    query: str,
-    geometry_column: str,
-) -> list[str]:
-    """
-    Compute distinct geometry types from query using DuckDB.
-
-    Args:
-        con: DuckDB connection with spatial extension loaded
-        query: SQL query containing geometry column
-        geometry_column: Name of geometry column
-
-    Returns:
-        List of spec geometry type names with dimension suffixes
-        (e.g., ["Point", "LineString ZM"]) or empty list if column not in query
-    """
-    # A SELECT DISTINCT over every row cannot change with the order they arrive
-    # in -- but DuckDB keeps the ORDER_BY operator in the plan of an ordered
-    # subquery, so measuring the types cost a full sort of the input on top of
-    # the sort the COPY already does (#1177). Stripped here, in the canonical
-    # implementation, because `disk-rewrite` calls it directly rather than
-    # through `compute_geo_stats_via_sql`, which strips for its own scan. The
-    # COPY is built from the caller's query and is untouched: the output's row
-    # order does not change.
-    query = _strip_trailing_order_by(query)
-
-    import duckdb
-
-    # Check if geometry column exists in query result
-    try:
-        columns = _get_query_columns(con, query)
-        if geometry_column not in columns:
-            return []
-    except (duckdb.Error, RuntimeError, ValueError, AttributeError):
-        # If we can't determine schema, return empty list rather than failing
-        return []
-
-    # GeoArrow native types (STRUCT(x DOUBLE, y DOUBLE)[N]) can't use ST_GeometryType.
-    # Returning [] is valid — GeoParquet allows omitting geometry_types.
-    col_type = _get_query_column_type(con, query, geometry_column) or ""
-    if "STRUCT" in col_type:
-        return []
-
-    quoted_col = quote_identifier(geometry_column)
-    typed_expr = f"ST_GeometryType({quoted_col}) || {zm_suffix_sql(quoted_col)}"
-    types_query = f"""
-        SELECT DISTINCT {typed_expr} as geom_type
-        FROM ({query})
-        WHERE {quoted_col} IS NOT NULL
-    """
-    results = con.execute(types_query).fetchall()
-
-    types = []
-    for (geom_type,) in results:
-        if geom_type:
-            base, suffix = split_zm_suffix(geom_type)
-            normalized = _DUCKDB_TO_SPEC_TYPE.get(base.upper(), base)
-            types.append(normalized + suffix)
-
-    return sorted(set(types))
-
-
 # DuckDB ST_ZMFlag codes -> geoarrow.types.Dimensions values.
 # DuckDB: 0=XY, 1=XYM, 2=XYZ, 3=XYZM. geoarrow: 1=XY, 2=XYZ, 3=XYM, 4=XYZM.
 _DUCKDB_ZMFLAG_TO_GEOARROW_DIM = {0: 1, 1: 3, 2: 2, 3: 4}
@@ -305,7 +149,7 @@ def compute_geometry_dimensions_via_sql(
     # Same DISTINCT shape, same reason as the type scan above: the set of
     # dimensions present cannot change with the order the rows arrive in, and
     # `arrow-streaming` calls this itself -- its bbox and types go through
-    # `compute_geo_stats_via_sql`, which strips, so this was the last sorted
+    # `geo_metadata.geometry_stats_of`, which strips, so this was the last sorted
     # extra scan on the 1.1-geoarrow path (#1177).
     query = _strip_trailing_order_by(query)
 
@@ -343,93 +187,6 @@ def compute_geometry_dimensions_via_sql(
         if zm is not None and zm in _DUCKDB_ZMFLAG_TO_GEOARROW_DIM:
             dims.add(_DUCKDB_ZMFLAG_TO_GEOARROW_DIM[zm])
     return dims
-
-
-def _build_bounds_query(parquet_path, bbox_info, geometry_column, verbose):
-    """Build query for bounds calculation.
-
-    ``parquet_path`` is RAW: ``sql_path`` quotes and escapes it here, at the one
-    point it becomes SQL (#802).
-    """
-    if bbox_info["has_bbox_column"]:
-        bbox_col = bbox_info["bbox_column_name"]
-        if verbose:
-            debug(f"Using bbox column '{bbox_col}' for fast bounds calculation")
-
-        q_bbox = quote_identifier(bbox_col)
-        return f"""
-        SELECT
-            MIN({q_bbox}.xmin) as xmin,
-            MIN({q_bbox}.ymin) as ymin,
-            MAX({q_bbox}.xmax) as xmax,
-            MAX({q_bbox}.ymax) as ymax
-        FROM {sql_path(parquet_path)}
-        """
-    else:
-        warn(
-            f"⚠️  No bbox column found - calculating bounds from geometry column '{geometry_column}' (this may be slow)"
-        )
-        info("💡 Tip: Add a bbox column for faster operations with 'gpio add bbox'")
-
-        q_geom = quote_identifier(geometry_column)
-        return f"""
-        SELECT
-            MIN(ST_XMin({q_geom})) as xmin,
-            MIN(ST_YMin({q_geom})) as ymin,
-            MAX(ST_XMax({q_geom})) as xmax,
-            MAX(ST_YMax({q_geom})) as ymax
-        FROM {sql_path(parquet_path)}
-        """
-
-
-def get_dataset_bounds(parquet_file, geometry_column=None, verbose=False):
-    """
-    Calculate the bounding box of the entire dataset.
-
-    Uses bbox column if available for fast calculation, otherwise calculates
-    from geometry column (slower).
-
-    Args:
-        parquet_file: Path to the parquet file
-        geometry_column: Geometry column name (if None, will auto-detect)
-        verbose: Whether to print verbose output
-
-    Returns:
-        tuple: (xmin, ymin, xmax, ymax) or None if error
-    """
-    configure_verbose(verbose)
-    read_url = resolve_file_url(parquet_file, verbose)
-
-    # Get geometry column if not specified
-    if not geometry_column:
-        geometry_column = find_primary_geometry_column(parquet_file, verbose)
-
-    # Check for bbox column
-    bbox_info = check_bbox_structure(parquet_file, verbose)
-
-    # Create DuckDB connection with httpfs if needed
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
-
-    try:
-        query = _build_bounds_query(read_url, bbox_info, geometry_column, verbose)
-        result = fetch_one(con.execute(query))
-
-        if result and all(v is not None for v in result):
-            xmin, ymin, xmax, ymax = result
-            if verbose:
-                debug(f"Dataset bounds: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
-            return (xmin, ymin, xmax, ymax)
-        else:
-            if verbose:
-                warn("Could not calculate bounds (empty dataset or null geometries)")
-            return None
-
-    except Exception as e:
-        if verbose:
-            error(f"Error calculating bounds: {e}")
-        return None
-    finally:
-        con.close()
 
 
 def add_computed_column(

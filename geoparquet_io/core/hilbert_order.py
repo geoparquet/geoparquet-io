@@ -8,8 +8,8 @@ from itertools import pairwise
 import duckdb
 import pyarrow as pa
 
-from geoparquet_io.core.bbox_structure import get_bbox_advice
-from geoparquet_io.core.common import add_bbox, get_dataset_bounds, get_parquet_metadata
+from geoparquet_io.core.bbox_structure import dataset_bounds, get_bbox_advice
+from geoparquet_io.core.common import add_bbox, get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     fetch_one,
@@ -20,6 +20,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import RemoteAccessError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
+from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
@@ -251,19 +252,12 @@ def hilbert_order_table(
         # One projection of the parsed geometry, shared by both queries below.
         source_ref = f"(SELECT {quoted_idx}, {read.shape_expr} AS __g FROM __input_table)"
 
-        # One scan for the empty/NULL count and the bounds of everything else
-        # (ST_IsEmpty is NULL for a NULL geometry, so FILTER drops those too).
-        empty_count, xmin, ymin, xmax, ymax = fetch_one(
-            con.execute(f"""
-            SELECT
-                COUNT(*) FILTER (WHERE __g IS NULL OR ST_IsEmpty(__g)),
-                MIN(ST_XMin(__g)) FILTER (WHERE NOT ST_IsEmpty(__g)),
-                MIN(ST_YMin(__g)) FILTER (WHERE NOT ST_IsEmpty(__g)),
-                MAX(ST_XMax(__g)) FILTER (WHERE NOT ST_IsEmpty(__g)),
-                MAX(ST_YMax(__g)) FILTER (WHERE NOT ST_IsEmpty(__g))
-            FROM {source_ref}
-        """)
+        # The empty/NULL count, then the owner's bounds of everything else.
+        (empty_count,) = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM {source_ref} WHERE __g IS NULL OR ST_IsEmpty(__g)")
         )
+        bbox = bounds_of(QuerySource(con, f"SELECT __g FROM {source_ref}"), "__g")
+        xmin, ymin, xmax, ymax = bbox if bbox else (None, None, None, None)
 
         if empty_count > 0:
             warn(
@@ -476,18 +470,8 @@ def _hilbert_order_streaming(
                 "These will be placed at the end of the sorted output."
             )
 
-        # Calculate dataset bounds from non-empty geometries only
-        bounds_result = fetch_one(
-            con.execute(f"""
-            SELECT
-                MIN(ST_XMin({quoted_geom})) as xmin,
-                MIN(ST_YMin({quoted_geom})) as ymin,
-                MAX(ST_XMax({quoted_geom})) as xmax,
-                MAX(ST_YMax({quoted_geom})) as ymax
-            FROM {source}
-            WHERE {quoted_geom} IS NOT NULL AND NOT ST_IsEmpty({quoted_geom})
-        """)
-        )
+        # Dataset bounds of the located geometries (the owner skips NULL/EMPTY)
+        bounds_result = bounds_of(QuerySource(con, f"SELECT * FROM {source}"), geom_col)
 
         # If all geometries are empty/null, pass through unchanged
         if not bounds_result or any(v is None for v in bounds_result):
@@ -624,7 +608,7 @@ def _hilbert_order_file_based(
         )
 
     # Get bounds (empty geometries naturally excluded since ST_XMin returns NULL for them)
-    bounds = get_dataset_bounds(working_parquet, geometry_column, verbose=verbose)
+    bounds = dataset_bounds(working_parquet, geometry_column, verbose=verbose)
 
     # If all geometries are empty/null, copy file unchanged
     if not bounds:
