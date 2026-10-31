@@ -14,7 +14,8 @@ This module owns:
   the tuples built from them, in parquet.thrift's enum order);
 * the version gate, :func:`edges_for_version` (what a 1.x block may say);
 * the one precedence, :func:`detect_edges` -- an explicit request, then the
-  carried ``geo`` block, then the native type;
+  carried ``geo`` block, then the native type -- and its cross-file form,
+  :func:`agree_across_files`, for a glob that must describe one column;
 * the key's readers and writers on a column entry (:func:`edges_of`,
   :func:`declares_edges`, :func:`set_edges`, :func:`without_edges`) and the
   strip/restore pair a rewrite runs on a block (:func:`strip_edges`,
@@ -31,7 +32,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping, MutableMapping
 
-from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.logging_config import warn
 
 PLANAR = "planar"
@@ -56,6 +57,10 @@ GEOPARQUET_1X_EDGES = (PLANAR, SPHERICAL)
 EDGES = (PLANAR, *GEOGRAPHY_EDGE_ALGORITHMS)
 
 _KEY = "edges"
+
+
+class EdgesConflictError(GeoParquetError):
+    """The files of one input declare different edges for the same column."""
 
 
 def is_nonplanar(edges: object) -> bool:
@@ -239,3 +244,30 @@ def detect_edges(
         else:
             edges_by_col[primary] = explicit
     return edges_by_col
+
+
+def agree_across_files(per_file: Mapping[str, Mapping[str, str]]) -> dict[str, str]:
+    """The one ``{column: edges}`` the files of a dataset declare, or an error.
+
+    ``per_file`` maps each file to its :func:`detect_edges` answer (planar
+    columns absent). A glob or directory is read as one column per name, so
+    its files must agree: reading the first file only repaired a spherical
+    file's rings as planar, or relabelled a planar file spherical (#1289).
+    Raises :class:`EdgesConflictError` naming a file for each value.
+    """
+    answers = list(per_file.items())
+    if not answers:
+        return {}
+    columns = {name for _, edges_by_col in answers for name in edges_by_col}
+    for name in sorted(columns):
+        seen: dict[str, str] = {}
+        for path, edges_by_col in answers:
+            seen.setdefault(edges_by_col.get(name, PLANAR), path)
+        if len(seen) > 1:
+            listed = "; ".join(f"{edges} in {path}" for edges, path in seen.items())
+            raise EdgesConflictError(
+                f"The input files disagree on the edges of column '{name}' ({listed}). "
+                "One column cannot be both; convert the files separately, or rewrite "
+                "them to one edges declaration first."
+            )
+    return dict(answers[0][1])

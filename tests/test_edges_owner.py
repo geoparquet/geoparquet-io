@@ -81,6 +81,19 @@ def test_an_unknown_explicit_request_is_refused():
         owner.detect_edges({}, {}, "great-circle", primary="g")
 
 
+def test_files_that_agree_give_one_answer():
+    assert owner.agree_across_files({"a": {"g": "spherical"}, "b": {"g": "spherical"}}) == {
+        "g": "spherical"
+    }
+    assert owner.agree_across_files({"a": {}, "b": {}}) == {}
+    assert owner.agree_across_files({}) == {}
+
+
+def test_files_that_disagree_are_refused_by_name():
+    with pytest.raises(owner.EdgesConflictError, match="planar in a.*spherical in b"):
+        owner.agree_across_files({"a": {}, "b": {"g": "spherical"}})
+
+
 def test_strip_and_restore():
     geo = {
         "columns": {
@@ -254,7 +267,6 @@ def _part(path, ring, edges):
     return write_with_geo(path, table, geo_block("1.1.0", ["Polygon"], **extra))
 
 
-@pytest.mark.xfail(strict=True, reason="#1289")
 @pytest.mark.parametrize("planar_first", [True, False], ids=["planar-first", "spherical-first"])
 def test_1289_a_glob_whose_files_disagree_on_edges_is_refused(tmp_path, planar_first):
     """Edges were read off the first file only: a planar first file had the

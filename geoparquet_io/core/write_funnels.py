@@ -62,6 +62,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.edges import (
     PLANAR,
+    agree_across_files,
     block_edges,
     detect_edges,
     edges_for_version,
@@ -71,7 +72,7 @@ from geoparquet_io.core.edges import (
     restore_edges,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.file_utils import is_partition_path
+from geoparquet_io.core.file_utils import get_all_parquet_files, is_partition_path
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     SELF_EVIDENT_BBOX_COLUMN,
@@ -141,8 +142,19 @@ def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
     Each file's native GEOGRAPHY types and ``geo`` block, weighed by the one
     precedence (:func:`~geoparquet_io.core.edges.detect_edges`): the block's
     explicit planar or recognized non-planar declaration wins over the type,
-    and an unrecognized value says nothing.
+    and an unrecognized value says nothing. A glob or directory is read as one
+    column per name, so every file is asked and they must agree
+    (:func:`~geoparquet_io.core.edges.agree_across_files`): the first file
+    alone decided for all of them before (#1289).
     """
+    files = get_all_parquet_files(input_file) if is_partition_path(input_file) else []
+    if len(files) < 2:
+        return _file_nonplanar_edges(input_file)
+    return agree_across_files({path: _file_nonplanar_edges(path) for path in files})
+
+
+def _file_nonplanar_edges(input_file: str) -> dict[str, str]:
+    """:func:`collect_nonplanar_edges` of one file (or the first of a partition)."""
     native: dict[str, str] = {}
     declared: dict[str, object] = {}
     try:
