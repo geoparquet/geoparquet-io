@@ -86,8 +86,24 @@ def pinned(exemptions: Path) -> Counter[str]:
 
 
 def run_pylint(repo: Path, target: str) -> str:
+    # Pylint picks representative pairs from overlapping copies in input order.
+    # Filesystem traversal order differs between checkouts and platforms.
     result = subprocess.run(
-        [sys.executable, "-m", "pylint", target],
+        [
+            sys.executable,
+            "-m",
+            "pylint",
+            "--jobs=1",
+            "--min-similarity-lines=8",
+            *(
+                [
+                    str(p.relative_to(repo))
+                    for p in sorted((repo / target).rglob("*.py"), reverse=True)
+                ]
+                if (repo / target).is_dir()
+                else [target]
+            ),
+        ],
         cwd=repo,
         capture_output=True,
         text=True,

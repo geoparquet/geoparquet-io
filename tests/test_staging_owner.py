@@ -144,6 +144,9 @@ def _umask_mode() -> int:
 
 
 @pytest.mark.parametrize("name", _cases("mode", *COMMANDS))
+@pytest.mark.skipif(
+    os.name == "nt", reason="Windows chmod does not implement POSIX permission bits"
+)
 def test_a_rewrite_keeps_the_destinations_mode(name, tmp_path):
     work = tmp_path / "work"
     sibs = tmp_path / "sibs"
@@ -239,7 +242,7 @@ def test_a_second_in_place_fix_keeps_the_first_backup(tmp_path):
 def test_scratch_dir_retries_a_released_leftover(monkeypatch):
     from geoparquet_io.core.file_utils import scratch_dir
 
-    real_unlink = os.unlink
+    real_unlink = Path.unlink
     failures = []
 
     def unlink(path, *args, **kwargs):
@@ -251,7 +254,7 @@ def test_scratch_dir_retries_a_released_leftover(monkeypatch):
     with scratch_dir() as directory:
         leftover = Path(directory) / "response.gfs"
         leftover.write_text("schema")
-        monkeypatch.setattr(os, "unlink", unlink)
+        monkeypatch.setattr(Path, "unlink", unlink)
     assert failures
     assert not leftover.exists()
     assert not Path(directory).exists()

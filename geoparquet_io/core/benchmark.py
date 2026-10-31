@@ -36,6 +36,7 @@ from geoparquet_io.core.exceptions import FileNotFoundGeoParquetError, GeoParque
 from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.logging_config import progress
+from geoparquet_io.core.parquet_writer import resolve_row_group_rows
 from geoparquet_io.core.remote import needs_httpfs
 
 # Converter registry with detection functions
@@ -261,7 +262,7 @@ def benchmark_duckdb(input_path: Path, output_path: Path) -> tuple[float, float]
         conn.execute(f"""
             COPY (SELECT * FROM ST_Read({sql_path(input_path)}))
             TO {sql_path(output_path)}
-            (FORMAT PARQUET, {codec_options}, ROW_GROUP_SIZE 100000)
+            (FORMAT PARQUET, {codec_options}, ROW_GROUP_SIZE {resolve_row_group_rows(100000, None)})
         """)
         elapsed = time.perf_counter() - start
         _, peak = tracemalloc.get_traced_memory()

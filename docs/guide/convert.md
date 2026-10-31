@@ -875,7 +875,7 @@ Control compression type and level:
 gpio convert input.shp output.parquet --compression GZIP --compression-level 6
 
 # Uncompressed (not recommended)
-gpio convert input.geojson output.parquet --compression UNCOMPRESSED
+gpio convert input.geojson uncompressed.parquet --compression UNCOMPRESSED
 ```
 
 Available compression types:
@@ -952,10 +952,10 @@ writes it as 2.0. A `geo` block that declares a version still wins over both.
     gpio convert input.geojson output.parquet --geoparquet-version 1.1-geoarrow
 
     # GeoParquet 1.0 with WKB encoding
-    gpio convert input.shp output.parquet --geoparquet-version 1.0
+    gpio convert input.shp v1_0.parquet --geoparquet-version 1.0
 
     # GeoParquet 1.1 with WKB encoding (default)
-    gpio convert input.shp output.parquet --geoparquet-version 1.1
+    gpio convert input.shp v1_1.parquet --geoparquet-version 1.1
     ```
 
 === "Python"
@@ -1011,7 +1011,7 @@ Shows:
 
     <!-- doctest: needs-ogr, setup="ogr2ogr -f 'ESRI Shapefile' buildings.shp places.geojson" -->
     ```bash
-    gpio convert buildings.shp buildings.parquet
+    gpio convert buildings.shp converted_buildings.parquet
     ```
 
     Output:

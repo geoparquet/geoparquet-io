@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
@@ -1906,9 +1907,7 @@ class TestGMLResponseParsing:
         import tempfile
 
         monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-        import os
-
-        real_unlink = os.unlink
+        real_unlink = Path.unlink
         failures = []
 
         def unlink(path, *args, **kwargs):
@@ -1917,7 +1916,7 @@ class TestGMLResponseParsing:
                 raise PermissionError("GDAL handle still closing")
             return real_unlink(path, *args, **kwargs)
 
-        monkeypatch.setattr(os, "unlink", unlink)
+        monkeypatch.setattr(Path, "unlink", unlink)
         self._fetch_gml()
         if closing_handle:
             assert failures

@@ -219,7 +219,7 @@ def test_quote_doubling_lives_only_in_duckdb_utils():
     found = {}
     for path in sorted(PACKAGE.rglob("*.py")):
         rel = path.relative_to(PACKAGE).as_posix()
-        count = quote_doublings(path.read_text())
+        count = quote_doublings(path.read_text(encoding="utf-8"))
         if count:
             found[rel] = count
     assert found == {"core/duckdb_utils.py": 2}

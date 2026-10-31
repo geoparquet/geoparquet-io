@@ -212,8 +212,7 @@ def _connection_limit(memory_limit: str | None) -> tuple[str | None, int | None]
     if not limit_bytes:  # pragma: no cover - validate_memory_limit accepts only sizes
         return limit, None
     threads = _thread_cap(limit_bytes)
-    default_threads = os.cpu_count() or threads
-    return limit, (threads if threads < default_threads else None)
+    return limit, threads
 
 
 def open_bounded_connection(

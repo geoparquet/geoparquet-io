@@ -533,7 +533,7 @@ class TestFixSpatialOrdering:
         # Staged in a directory beside the target (``atomic_write``), so the
         # swap is a rename on one filesystem.
         staging_dir = os.path.dirname(os.path.abspath(seen[0]))
-        assert os.path.dirname(staging_dir) == os.path.abspath(temp_output_dir)
+        assert os.path.realpath(os.path.dirname(staging_dir)) == os.path.realpath(temp_output_dir)
         assert os.path.basename(staging_dir).startswith(".gpio-stage-")
         assert_places_output_is_sound(target, version="1.0", covering=False)
 

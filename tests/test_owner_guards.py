@@ -81,7 +81,7 @@ EXPECTED_COUNTS = {
     "G1.retry_wrappers": 0,
     "G1.json_dumps": 20,
     "G1.parquet_metadata": 0,
-    "G1.row_group_policy": 2,
+    "G1.row_group_policy": 1,
     "G1.scheme_test": 0,
     "G1.overwrite_check": 0,
     "G1.output_version": 0,
@@ -5923,9 +5923,17 @@ def test_g12_pylint_missing_fails(tmp_path):
     # A fresh venv has no pylint; its interpreter is also used by the runner.
     import venv
 
-    venv.EnvBuilder(with_pip=False).create(tmp_path / "empty")
+    venv.EnvBuilder(with_pip=False, symlinks=sys.platform != "win32").create(tmp_path / "empty")
     result = subprocess.run(
-        [str(tmp_path / "empty/bin/python"), str(CHECK_PYLINT_DUPLICATES), "--repo", str(REPO)],
+        [
+            str(
+                tmp_path
+                / ("empty/Scripts/python.exe" if sys.platform == "win32" else "empty/bin/python")
+            ),
+            str(CHECK_PYLINT_DUPLICATES),
+            "--repo",
+            str(REPO),
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -6512,7 +6520,7 @@ def exception__gpio_error_names() -> frozenset[str]:
     """Names of ``GeoParquetError`` and every subclass defined in the package."""
     bases: dict[str, set[str]] = {}
     for path in PACKAGE.rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text())):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.ClassDef):
                 bases.setdefault(node.name, set()).update(
                     b.id if isinstance(b, ast.Name) else b.attr

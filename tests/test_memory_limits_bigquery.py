@@ -81,7 +81,9 @@ def test_write_memory_caps_threads_with_the_limit(local_bigquery):
     assert _settings(local_bigquery) == ("953.6 MiB", 1)
 
 
-def test_bare_number_is_megabytes(local_bigquery):
+def test_bare_number_is_megabytes(local_bigquery, monkeypatch):
+    # An existing session can have more threads than the host CPU count.
+    monkeypatch.setattr(os, "cpu_count", lambda: 2)
     _run("2000")
     assert _settings(local_bigquery) == ("1.8 GiB", 3)
 
