@@ -484,21 +484,22 @@ class TestTheRemoteRepairPath:
 
     def test_the_gate_reads_the_schema_the_funnels_rewrite_reads(self, declarable, monkeypatch):
         """One probe for a local and a remote file: ``query_schema`` over the
-        funnel's ``file_relation``, so the declaration gate and the rewrite see
+        owner's ``duckdb_utils.file_relation`` (``file_schema``), so the declaration gate and the rewrite see
         the same columns (``pq.read_schema`` cannot open a URL, and a second
         branch for it is how the remote repair used to strip unasked)."""
         import geoparquet_io.core.check_fixes as cf
+        import geoparquet_io.core.duckdb_utils as du
         from geoparquet_io.core.common import get_parquet_metadata
         from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 
         queries: list[str] = []
-        real = cf.query_schema
+        real = du.query_schema
 
         def spy(con, query):
             queries.append(query)
             return real(con, query)
 
-        monkeypatch.setattr(cf, "query_schema", spy)
+        monkeypatch.setattr(du, "query_schema", spy)
         metadata = get_parquet_metadata(declarable)[0]
         geo = sanitized_carried_geo(metadata)
 

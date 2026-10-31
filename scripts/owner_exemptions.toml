@@ -101,10 +101,6 @@ reason = "permanent: ArcGIS JSON error-body code 500 marks page pressure (halve 
 # PROJJSON, GeoJSON data), not a report; a new report in one of them is not
 # caught, which is the price of not listing 60 serializer lines one by one.
 [[G1.json_dumps]]
-path = "geoparquet_io/core/add/bbox_metadata.py"
-count = "*"
-reason = "metadata serialization, not a report: geo block (and its debug dump)"
-[[G1.json_dumps]]
 path = "geoparquet_io/core/add/stac_metadata.py"
 count = "*"
 reason = "metadata serialization, not a report: stac-geoparquet footer payload"
@@ -183,7 +179,7 @@ reason = "metadata serialization, not a report: PROJJSON literal for SQL"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/write_strategies/duckdb_kv.py"
 count = "*"
-reason = "metadata serialization, not a report: geo block and PROJJSON for SQL"
+reason = "metadata serialization, not a report: PROJJSON for SQL"
 
 # A geometry column chosen outside core/geometry_detection.py (#1367 concept 7).
 # Seed baseline recorded when the arm was created (#1392 pass 3): counts only

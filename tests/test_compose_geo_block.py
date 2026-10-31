@@ -343,3 +343,29 @@ def test_edges_and_column_edges_that_agree_are_one_answer():
         _table(), version="1.1", edges="spherical", column_edges={"geometry": "spherical"}
     )
     assert block["columns"]["geometry"]["edges"] == "spherical"
+
+
+def test_the_primarys_declared_entry_fills_gaps_and_the_carried_entry_wins():
+    """One rule for every declared entry, the primary's included (audit 2, finding F)."""
+    projected = {"id": {"authority": "EPSG", "code": 3857}}
+    info = {"secondary": [], "metadata": {"geometry": {"crs": projected, "geometry_types": ["X"]}}}
+    no_crs = copy.deepcopy(CARRIED)
+    del no_crs["columns"]["geometry"]["crs"]
+    filled = _compose(_table(geo=no_crs), describe=True, version="1.1", geometry_info=info)
+    assert filled["columns"]["geometry"]["crs"] == projected
+    assert filled["columns"]["geometry"]["geometry_types"] == ["Point"]  # carried wins
+    asked = _compose(
+        _table(geo=no_crs), describe=True, version="1.1", geometry_info=info, crs="OGC:CRS84"
+    )
+    assert asked["columns"]["geometry"]["crs"] == "OGC:CRS84"  # an option wins
+
+
+def test_the_self_evident_bbox_shortcut_is_the_owners():
+    """The write funnels' "skip the probe" test is asked of the owner (audit 2, finding E)."""
+    from geoparquet_io.core import write_funnels
+    from geoparquet_io.core.geo_metadata import may_hold_a_self_evident_bbox
+
+    assert may_hold_a_self_evident_bbox(None)
+    assert may_hold_a_self_evident_bbox(["id", "bbox", "geometry"])
+    assert not may_hold_a_self_evident_bbox(["id", "geometry"])
+    assert "SELF_EVIDENT_BBOX_COLUMN" not in vars(write_funnels)

@@ -32,8 +32,8 @@ from geoparquet_io.core.duckdb_metadata import get_kv_metadata, get_schema_info
 from geoparquet_io.core.duckdb_utils import (
     as_wkb_sql,
     fetch_one,
+    file_schema,
     get_duckdb_connection,
-    query_schema,
     quote_identifier,
     register_arrow,
     sql_literal,
@@ -66,7 +66,6 @@ from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.parquet_footer import patch_or_rewrite
 from geoparquet_io.core.parquet_writer import (
     WriteOptions,
-    carried_geoparquet_version,
     resolve_output_geoparquet_version,
 )
 from geoparquet_io.core.remote import (
@@ -162,13 +161,6 @@ def _edges_columns_to_drop(
     return {geom_col}
 
 
-def _carried_block_version(metadata: dict) -> str:
-    """The version a block edit keeps: the carried one (1.0 stays 1.0), else the facade's."""
-    return carried_geoparquet_version(
-        metadata, preserve_input=True
-    ) or resolve_output_geoparquet_version(None)
-
-
 def _retarget_carried_geo(source, metadata: dict, geom_col: str, target_crs: str, con) -> dict:
     """``metadata`` with its ``geo`` block composed for ``target_crs``.
 
@@ -192,7 +184,9 @@ def _retarget_carried_geo(source, metadata: dict, geom_col: str, target_crs: str
         source,
         GeoBlockOptions(
             geometry_column=geom_col,
-            version=_carried_block_version(metadata),
+            version=resolve_output_geoparquet_version(
+                None, original_metadata=metadata, preserve_input=True
+            ),
             covering=None,
             crs=parse_crs_string_to_projjson(target_crs, con),
             column_edges={geom_col: PLANAR} if planar else None,
@@ -367,21 +361,6 @@ def _warn_carried_bbox_structs(input_path: str, bbox_col: str | None) -> None:
         )
 
 
-def _footer_schema(raw_path: str) -> pa.Schema:
-    """The file's Arrow schema as its bytes are, read without GeoParquet conversion.
-
-    DuckDB's GeoParquet reader rejects the ``crs: null`` this module repairs,
-    so the probe reads the columns as stored (geometry as a BLOB), which is all
-    the composer's covering gates look at. Works for a remote file too.
-    """
-    con = get_duckdb_connection(load_spatial=False, load_httpfs=needs_httpfs(raw_path))
-    try:
-        con.execute("SET enable_geoparquet_conversion = false")
-        return query_schema(con, f"SELECT * FROM read_parquet({sql_path(raw_path)})")
-    finally:
-        con.close()
-
-
 def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, str | None]:
     """Strip an explicit ``crs: null`` so the file presents as default OGC:CRS84.
 
@@ -414,14 +393,16 @@ def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, 
         for name, col in (geo_meta.get("columns") or {}).items()
         if entry_crs_is_unknown(col)
     }
-    schema = _footer_schema(raw_path)
+    schema = file_schema(raw_path, geoparquet_conversion=False)
     primary = primary_geometry_column(schema, geo=geo_meta)
     if primary is not None:
         geo_meta = compose_geo_block(
             SchemaSource(schema, metadata),
             GeoBlockOptions(
                 geometry_column=primary,
-                version=_carried_block_version(metadata),
+                version=resolve_output_geoparquet_version(
+                    None, original_metadata=metadata, preserve_input=True
+                ),
                 covering=None,
                 column_crs=unknown,
             ),

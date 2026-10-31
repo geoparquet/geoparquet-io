@@ -44,6 +44,7 @@ from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
     QuerySource,
     compose_geo_block,
+    geo_key_value,
     geometry_stats_of,
     geometry_types_of,
     sanitized_carried_geo,
@@ -448,7 +449,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             )
 
         copy_options = _build_copy_options(
-            codec, row_group_rows, json.dumps(geo_meta), extra_kv_metadata
+            codec, row_group_rows, geo_key_value(geo_meta), extra_kv_metadata
         )
         copy_query = f"COPY ({final_query}) TO {sql_path(local_path)} ({', '.join(copy_options)})"
 

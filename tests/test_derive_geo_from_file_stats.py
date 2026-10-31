@@ -100,3 +100,7 @@ def test_derive_v2_geo_metadata_describes_a_native_geography_column(tmp_path):
     assert block is not None
     assert block["primary_column"] == "geometry"
     assert block["columns"]["geometry"]["edges"] == "spherical"
+    # The data's edges are a fact about the column, not a request: the block
+    # implies no orientation (#1367 T3e audit 2, finding A -- a regression the
+    # `edges=` spelling introduced, undone).
+    assert "orientation" not in block["columns"]["geometry"]

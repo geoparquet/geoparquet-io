@@ -948,9 +948,9 @@ def _decode_geo_value(raw):
 def _encode_geo_value(geo_dict: dict, like):
     """Re-encode ``geo_dict`` in the same form (bytes/str/dict) as ``like``."""
     if isinstance(like, bytes):
-        return json.dumps(geo_dict).encode("utf-8")
+        return geo_key_value(geo_dict).encode("utf-8")
     if isinstance(like, str):
-        return json.dumps(geo_dict)
+        return geo_key_value(geo_dict)
     return geo_dict
 
 
@@ -1350,8 +1350,15 @@ class GeoBlockOptions:
     ``covering_provenance`` is the KV metadata whose block says which column
     the primary's covering names, for a source that carries no block of its
     own (a table DuckDB built from a query, #953); a carried block wins.
-    ``describe`` makes the block a description even with a ``version``: the
-    version is then only the facade's answer for a source that declares none.
+    ``describe`` makes the block a description of a table, not a file's
+    block, even with a ``version`` (which is then only the facade's answer for
+    a source that declares none). It is not a version switch: beyond keeping
+    the declared version, a description records ``crs`` and ``edges`` as
+    declared -- no output CRS rule, no mapping of edges to the version, no
+    implied orientation -- so the write at the other end decides those. The
+    gates run either way. A block that is written (a repair, a patch) is never
+    a description: it takes ``version`` from the facade's repair policy
+    (``resolve_output_geoparquet_version(..., preserve_input=True)``).
     ``primary_column`` relabels the block's primary (a repair of DuckDB's
     first-column pick); otherwise the carried primary stays, or
     ``geometry_column`` is named. ``geometry_column`` is the column the
@@ -1442,12 +1449,20 @@ class _Secondaries:
     other: dict
 
 
-def _secondary_inputs(geo_meta: dict, geometry_info: Mapping | None, primary: str) -> _Secondaries:
-    """Step 2's secondary entries, and what each declares for the later steps.
+def _secondary_inputs(
+    geo_meta: dict, geometry_info: Mapping | None, primary: str, described: bool
+) -> _Secondaries:
+    """Step 2's secondary entries, and what each column's declared entry says for the steps.
 
-    Only what the carried entry does not already say is an input: the
-    carried keys win, so a caller that has resolved something for a column is
-    not overwritten.
+    One rule for every column ``geometry_info`` declares: only what the
+    carried entry does not already say is an input (the carried keys win), and
+    an option the caller set wins over it. The primary's declared entry is an
+    input to a *description* only (a stream's or a read's block, which no
+    later step re-measures): a write decides its primary's CRS and stats
+    itself, and a declared entry handed down the write path describes the
+    input, not the output (a forced-2D write, a rewrite of stale stats). The
+    primary's declared ``encoding`` and other keys are never inputs: step 3
+    decides its encoding.
     """
     found = _Secondaries({}, {}, {}, {})
     if not geometry_info:
@@ -1463,18 +1478,25 @@ def _secondary_inputs(geo_meta: dict, geometry_info: Mapping | None, primary: st
         declared = declared_by_col.get(column) or {}
         if "encoding" not in entry:
             entry["encoding"] = declared.get("encoding") or "WKB"
-        if declares_edges(declared) and not declares_edges(entry):
-            # A value outside the vocabulary says nothing (#1288).
-            if edges_of(declared) in EDGES:
-                found.edges[column] = edges_of(declared)
-        if "crs" in declared and "crs" not in entry:
-            found.crs[column] = declared["crs"]
-        stats = {k: declared[k] for k in ("bbox", "geometry_types") if k in declared}
-        stats = {k: v for k, v in stats.items() if k not in entry}
-        if stats:
-            found.stats[column] = stats
+        _declared_gaps(found, column, entry, declared)
         found.other[column] = {k: v for k, v in declared.items() if k not in _STEP_KEYS}
+    if described and isinstance(declared_by_col.get(primary), Mapping):
+        _declared_gaps(found, primary, columns[primary], declared_by_col[primary])
     return found
+
+
+def _declared_gaps(found: _Secondaries, column: str, entry: dict, declared: Mapping) -> None:
+    """``declared``'s edges, crs and stats where the carried ``entry`` says nothing."""
+    if declares_edges(declared) and not declares_edges(entry):
+        # A value outside the vocabulary says nothing (#1288).
+        if edges_of(declared) in EDGES:
+            found.edges[column] = edges_of(declared)
+    if "crs" in declared and "crs" not in entry:
+        found.crs[column] = declared["crs"]
+    stats = {k: declared[k] for k in ("bbox", "geometry_types") if k in declared}
+    stats = {k: v for k, v in stats.items() if k not in entry}
+    if stats:
+        found.stats[column] = stats
 
 
 def _merge_custom_metadata(geo_meta: dict, col_meta: dict, custom_metadata, verbose) -> None:
@@ -1631,7 +1653,9 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
         geo_meta.setdefault("primary_column", primary)
     geo_meta.setdefault("columns", {})
     col_meta = geo_meta["columns"].setdefault(primary, {})
-    secondaries = _secondary_inputs(geo_meta, options.geometry_info, primary)
+    secondaries = _secondary_inputs(geo_meta, options.geometry_info, primary, described)
+    if options.crs is not KEEP_CRS:
+        secondaries.crs.pop(primary, None)  # the caller's CRS wins over the declared one
     # Step 3.
     col_meta["encoding"] = _primary_encoding(options, col_meta)
     # Step 4. A description (``version=None``) records the requested edges as
@@ -1867,21 +1891,48 @@ def row_group_geometry_stats(chunks, *, geographic: bool) -> GeometryStats:
     return merged_geometry_stats(parts, geographic=geographic)
 
 
+def _non_finite_message(column: str, example: str | None = None) -> str:
+    """The one sentence for a located geometry with an infinite coordinate (#1165).
+
+    ``example`` names the offending value where the caller has one; the SQL
+    struct expression raises it from inside a query, where it has none.
+    """
+    where = f", {example}," if example else ","
+    return (
+        f"Column '{column}' holds a geometry with a non-finite (infinite) coordinate"
+        f"{where} so its bounds cannot be measured. Fix or remove that geometry and "
+        "try again."
+    )
+
+
 def _non_finite_error(column: str, example: str) -> Exception:
     from geoparquet_io.core.exceptions import GeometryError
 
-    return GeometryError(
-        f"Column '{column}' holds a geometry with a non-finite (infinite) coordinate, "
-        f"{example}, so its bounds cannot be measured. Fix or remove that geometry and "
-        "try again."
-    )
+    return GeometryError(_non_finite_message(column, example))
+
+
+def _located_sql(x0: str, y0: str, x1: str, y1: str) -> str:
+    """The SQL rule for "this envelope is a location": not NaN, not inverted.
+
+    The SQL twin of the Arrow kernel's ``_located``. NaN is no location:
+    Arrow compares it false, but DuckDB orders it last and calls
+    ``NaN <= NaN`` true, so it is said explicitly. A NULL or EMPTY geometry
+    (an absent or inverted envelope) is not located either.
+    """
+    no_nan = " AND ".join(f"NOT isnan({v})" for v in (x0, y0, x1, y1))
+    return f"({no_nan} AND {x0} <= {x1} AND {y0} <= {y1})"
+
+
+def _finite_sql(*envelope: str) -> str:
+    """The SQL rule for a located envelope whose bounds can be measured."""
+    return " AND ".join(f"isfinite({v})" for v in envelope)
 
 
 # -- DuckDB ------------------------------------------------------------------
 
 
-def _envelope_columns(read) -> tuple[str, str] | None:
-    """``(type expression, the four envelope expressions)`` of one row, or None.
+def _envelope_columns(read) -> tuple[str, list[str]]:
+    """``(type expression, the four envelope expressions)`` of one row.
 
     ``read`` is the owner's :class:`~geoparquet_io.core.geometry_detection.GeometryRead`.
     The type expression is NULL where SQL cannot name the type (a GeoArrow
@@ -1893,11 +1944,11 @@ def _envelope_columns(read) -> tuple[str, str] | None:
         # A GeoArrow EMPTY carries NaN coordinates instead of none.
         xmin_e, ymin_e = (f"nullif({e}, 'NaN'::DOUBLE)" for e in (xmin_e, ymin_e))
         xmax_e, ymax_e = (f"nullif({e}, 'NaN'::DOUBLE)" for e in (xmax_e, ymax_e))
-        return "NULL::VARCHAR", f"{xmin_e}, {ymin_e}, {xmax_e}, {ymax_e}"
+        return "NULL::VARCHAR", [xmin_e, ymin_e, xmax_e, ymax_e]
     g = read.shape_expr
     return (
         f"ST_GeometryType({g}) || {zm_suffix_sql(g)}",
-        f"ST_XMin({g}), ST_YMin({g}), ST_XMax({g}), ST_YMax({g})",
+        [f"ST_{axis}({g})" for axis in ("XMin", "YMin", "XMax", "YMax")],
     )
 
 
@@ -1919,7 +1970,7 @@ def _located_rows_sql(con, query: str, geometry_column: str, bbox_column: str | 
     if bbox_column is not None:
         type_expr, env = (
             "NULL::VARCHAR",
-            ", ".join(f"{quoted}.{f}" for f in ("xmin", "ymin", "xmax", "ymax")),
+            [f"{quoted}.{f}" for f in ("xmin", "ymin", "xmax", "ymax")],
         )
         geom = "NULL::GEOMETRY"
     else:
@@ -1928,14 +1979,14 @@ def _located_rows_sql(con, query: str, geometry_column: str, bbox_column: str | 
         geom = "NULL::GEOMETRY" if read.kind == "geoarrow" else read.shape_expr
     return f"""
         SELECT * FROM (
-            SELECT {type_expr} AS __t, {env}, {geom} AS __g
+            SELECT {type_expr} AS __t, {", ".join(env)}, {geom} AS __g
             FROM ({query})
         ) AS __m(__t, __x0, __y0, __x1, __y1, __g)
-        WHERE __x0 <= __x1 AND __y0 <= __y1
+        WHERE {_located_sql("__x0", "__y0", "__x1", "__y1")}
     """
 
 
-_FINITE_SQL = "isfinite(__x0) AND isfinite(__y0) AND isfinite(__x1) AND isfinite(__y1)"
+_FINITE_SQL = _finite_sql("__x0", "__y0", "__x1", "__y1")
 
 
 def _query_stats(
@@ -2177,31 +2228,28 @@ def bbox_struct_array(table: pa.Table, geometry_column: str, struct_type: pa.Dat
     )
 
 
-def bbox_struct_sql(geometry_sql: str, column: str, envelope: Sequence[str] | None = None) -> str:
+def bbox_struct_sql(geometry_sql: str, column: str, read=None) -> str:
     """SQL for each row's bbox struct of a GEOMETRY expression: the SQL twin of
-    :func:`bbox_struct_array`, with its one degenerate-geometry rule.
+    :func:`bbox_struct_array`, with the stats path's one degenerate-geometry rule.
 
-    A NULL or EMPTY geometry (an inverted or absent envelope) is a NULL struct,
-    and a located geometry with an infinite coordinate stops the query with the
-    error the stats owner raises (#1165). ``envelope`` is the four
-    ``(xmin, ymin, xmax, ymax)`` expressions when the geometry is not a
-    GEOMETRY DuckDB measures with ``ST_XMin`` (a GeoArrow coordinate struct);
-    ``column`` names it in the error.
+    A NULL or EMPTY geometry (an inverted, absent or NaN envelope:
+    :func:`_located_sql`) is a NULL struct, and a located geometry with an
+    infinite coordinate stops the query with the stats owner's error
+    (:func:`_non_finite_message`, #1165). ``read`` is the owner's
+    :class:`~geoparquet_io.core.geometry_detection.GeometryRead` of a column
+    DuckDB does not measure with ``ST_XMin`` (a GeoArrow coordinate struct);
+    its envelope is the stats path's (``_envelope_columns``). ``column`` names
+    the column in the error.
     """
-    if envelope is None:
+    if read is not None and read.kind == "geoarrow":
+        _, envelope = _envelope_columns(read)
+    else:
         envelope = [f"ST_{axis}({geometry_sql})" for axis in ("XMin", "YMin", "XMax", "YMax")]
     x0, y0, x1, y1 = envelope
-    message = sql_literal(
-        f"Column '{column}' holds a geometry with a non-finite (infinite) coordinate, "
-        "so its bounds cannot be measured. Fix or remove that geometry and try again."
-    )
-    finite = " AND ".join(f"isfinite({v})" for v in envelope)
-    # NaN is no location (Arrow compares it false; DuckDB orders it last and
-    # calls NaN <= NaN true, so it is said explicitly).
-    no_nan = " AND ".join(f"NOT isnan({v})" for v in envelope)
+    message = sql_literal(_non_finite_message(column))
     return f"""(CASE
-        WHEN ({no_nan} AND {x0} <= {x1} AND {y0} <= {y1}) IS NOT TRUE THEN NULL
-        WHEN NOT ({finite}) THEN error({message})
+        WHEN {_located_sql(x0, y0, x1, y1)} IS NOT TRUE THEN NULL
+        WHEN NOT ({_finite_sql(*envelope)}) THEN error({message})
         ELSE STRUCT_PACK(xmin := {x0}, ymin := {y0}, xmax := {x1}, ymax := {y1})
     END)"""
 
@@ -2586,6 +2634,17 @@ def carried_covering_as_provenance(
     present = set(column_names)
     carried = {key: entry for key, entry in covering.items() if _covering_column(entry) in present}
     return carried or None
+
+
+def may_hold_a_self_evident_bbox(output_columns: Collection[str] | None) -> bool:
+    """Whether an output with these column names could carry a bbox column
+    :func:`bbox_column_to_declare` declares by its name alone.
+
+    ``None`` (the columns are not known) could. A write that knows its output
+    names asks this to skip the schema probe the declare step would otherwise
+    run; the name rule stays here, beside the gate it shortcuts.
+    """
+    return output_columns is None or SELF_EVIDENT_BBOX_COLUMN in output_columns
 
 
 def bbox_column_to_declare(

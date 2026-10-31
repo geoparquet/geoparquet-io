@@ -23,8 +23,8 @@ This module owns:
 * the key's readers and writers on a column entry (:func:`edges_of`,
   :func:`declared_edges`, :func:`declares_edges`, :func:`set_edges`, which
   omits planar, :func:`state_edges` for a report, :func:`without_edges`) and the
-  strip/restore pair a rewrite runs on a block (:func:`strip_edges`,
-  :func:`restore_edges`);
+  strip a rewrite runs on a block (:func:`strip_edges`; the composer puts the
+  data's edges back);
 * the point a planar-only operation (a cell key) takes for non-planar
   geometry (:func:`representative_point_sql`).
 
@@ -304,24 +304,6 @@ def carry_edges(
         if isinstance(entry, dict):
             set_edges(entry, edges)
     return geo
-
-
-def restore_edges(geo: Mapping | None, edges_by_col: Mapping[str, str]) -> bool:
-    """Set each column's ``edges`` in the decoded block ``geo``, in place.
-
-    The restore half of a rewrite through DuckDB, which regenerates a block
-    without ``edges`` (#588). Only columns the block describes are touched.
-    ``edges_by_col`` is already mapped to the block's version. Returns whether
-    anything changed.
-    """
-    changed = False
-    columns = (geo or {}).get("columns") or {}
-    for name, edges in edges_by_col.items():
-        entry = columns.get(name)
-        if isinstance(entry, dict) and edges_of(entry) != edges:
-            set_edges(entry, edges)
-            changed = True
-    return changed
 
 
 # ---------------------------------------------------------------------------

@@ -70,6 +70,7 @@ from geoparquet_io.core.geojson_datetimes import DatetimeRead, plan_datetime_rea
 from geoparquet_io.core.geometry_detection import (
     BUILT_GEOMETRY_COLUMN,
     STANDARD_GEOMETRY_NAMES,
+    GeometryRead,
     primary_geometry_column,
     resolve_geometry_read,
 )
@@ -1758,11 +1759,7 @@ def _build_conversion_query(
     quoted_bbox = quote_identifier(existing_bbox_col) if existing_bbox_col else None
 
     geoarrow_native = encoding.lower() not in {"wkb", "wkt"}
-    if geoarrow_native:
-        xmin_e, ymin_e, xmax_e, ymax_e, cx_e, cy_e = _geoarrow_coord_exprs(quoted_geom, encoding)
-        envelope = (xmin_e, ymin_e, xmax_e, ymax_e)
-    else:
-        envelope = None
+    read = GeometryRead.for_geoarrow(geom_column, encoding) if geoarrow_native else None
 
     exclude_cols = []
     if existing_bbox_col and skip_bbox:
@@ -1795,7 +1792,7 @@ def _build_conversion_query(
         # caller either preserves it or, for 2.0, skips the bbox.)
         base_select = f"""
             SELECT *,
-                {bbox_struct_sql(quoted_geom, geom_column, envelope)} AS {quote_identifier(bbox_name)}
+                {bbox_struct_sql(quoted_geom, geom_column, read)} AS {quote_identifier(bbox_name)}
             FROM {table_expr}
         """
 
@@ -1808,6 +1805,7 @@ def _build_conversion_query(
     # Native encodings key on centroid coordinates, which are NULL for a
     # geometry with no coordinates — ST_Hilbert returns NULL rather than
     # failing, so those rows only need the flag to pin them last.
+    _, _, _, _, cx_e, cy_e = _geoarrow_coord_exprs(quoted_geom, encoding)
     return base_select, _hilbert_order_by(
         bounds, f"{cx_e} IS NULL OR {cy_e} IS NULL", f"{cx_e}, {cy_e}"
     )
@@ -2346,6 +2344,23 @@ def _carry_input_kv_metadata(arrow_table, input_file: str, verbose: bool):
     return arrow_table.replace_schema_metadata(metadata)
 
 
+def _described_read(arrow_table, geometry_column, input_edges, detected_crs):
+    """``arrow_table`` with the block a read describes it by (see the call site)."""
+    geo = compose_geo_block(
+        SchemaSource(arrow_table.schema),
+        GeoBlockOptions(
+            geometry_column=geometry_column,
+            version=version_to_describe(arrow_table.schema),
+            describe=True,
+            covering=None,
+            column_edges={geometry_column: input_edges} if input_edges else None,
+            crs=KEEP_CRS if detected_crs is None else detected_crs,
+            stats={geometry_column: {"geometry_types": []}},
+        ),
+    )
+    return with_geo_block(arrow_table, geo)
+
+
 @uses_aws_profile
 def read_spatial_to_arrow(
     input_file,
@@ -2586,19 +2601,7 @@ def read_spatial_to_arrow(
         # ``geometry_types`` "not known"): the write funnels compose again from
         # the data.
         if geometry_column in arrow_table.column_names:
-            geo = compose_geo_block(
-                SchemaSource(arrow_table.schema),
-                GeoBlockOptions(
-                    geometry_column=geometry_column,
-                    version=version_to_describe(arrow_table.schema),
-                    describe=True,
-                    covering=None,
-                    edges=input_edges,
-                    crs=KEEP_CRS if detected_crs is None else detected_crs,
-                    stats={geometry_column: {"geometry_types": []}},
-                ),
-            )
-            arrow_table = with_geo_block(arrow_table, geo)
+            arrow_table = _described_read(arrow_table, geometry_column, input_edges, detected_crs)
         if is_parquet:
             arrow_table = _carry_input_kv_metadata(arrow_table, input_file, verbose)
         return arrow_table, detected_crs, geometry_column

@@ -11,8 +11,8 @@ from geoparquet_io.core.bbox_structure import bbox_covering_column_for
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_metadata import get_file_metadata
 from geoparquet_io.core.duckdb_utils import (
-    get_duckdb_connection,
-    query_schema,
+    file_relation,
+    file_schema,
     quote_identifier,
     uses_aws_profile,
 )
@@ -37,11 +37,7 @@ from geoparquet_io.core.parquet_writer import (
     resolve_output_geoparquet_version,
     resolve_row_group_rows_for_rewrite,
 )
-from geoparquet_io.core.remote import (
-    needs_httpfs,
-)
 from geoparquet_io.core.write_funnels import (
-    file_relation,
     rewrite_file_through_funnel,
     rewrite_footer_kv,
     staged_replacement,
@@ -142,37 +138,20 @@ def fix_compression(
     return {"fix_applied": "Re-compressed with ZSTD", "success": True}
 
 
-def _arrow_schema_of(parquet_file: str):
-    """*parquet_file*'s Arrow schema, read the same way for a local and a remote file.
-
-    DuckDB's schema probe (``duckdb_utils.query_schema``) over the one spelling
-    of a whole-file read (``write_funnels.file_relation``, which the ``COPY``
-    fixes here read through too). ``pq.read_schema`` cannot open a URL, and a
-    second branch for one is how the remote repair came to strip the member
-    the local one supplied.
-    """
-    url = resolve_file_url(parquet_file)
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
-    try:
-        return query_schema(con, f"SELECT * FROM {file_relation(url)}")
-    finally:
-        con.close()
-
-
 def _repaired_cover_block(parquet_file, original_metadata, geo_meta, verbose):
     """The block a bbox-less covering repair writes, and the column it declared.
 
     Composed, not edited: ``compose_geo_block`` over the file's schema and its
-    own block, a description (the declared version is kept), with the default
+    own block, at the version the repair policy keeps (``preserve_input``), with the default
     covering request -- so a declarable bbox column gets the missing member
     and an h3/s2/a5/quadkey/kdtree entry beside it is kept, and every other
     bbox-less covering goes to the composer's gate. The footer patch and its
     fallback get this one block (``patch_or_rewrite``), so they cannot answer
     differently for one file. A remote file is asked the same question through
-    DuckDB's schema probe (:func:`_arrow_schema_of`); the primary is the
+    DuckDB's schema probe (``duckdb_utils.file_schema``); the primary is the
     resolver's (``geometry_detection.primary_geometry_column``).
     """
-    schema = _arrow_schema_of(parquet_file)
+    schema = file_schema(resolve_file_url(parquet_file))
     primary = require_geometry_column(
         primary_geometry_column(schema, geo=geo_meta, verbose=verbose), parquet_file
     )
@@ -180,8 +159,9 @@ def _repaired_cover_block(parquet_file, original_metadata, geo_meta, verbose):
         SchemaSource(schema, original_metadata),
         GeoBlockOptions(
             geometry_column=primary,
-            describe=True,
-            version=resolve_output_geoparquet_version(None, original_metadata=original_metadata),
+            version=resolve_output_geoparquet_version(
+                None, original_metadata=original_metadata, preserve_input=True
+            ),
             verbose=verbose,
         ),
     )

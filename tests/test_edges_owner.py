@@ -171,7 +171,7 @@ def test_the_request_predicates(edges, planar_request, orientation):
     assert owner.implied_orientation(edges) == orientation
 
 
-def test_strip_and_restore():
+def test_strip_edges():
     geo = {
         "columns": {
             "g": {"encoding": "WKB", "edges": "spherical"},
@@ -185,10 +185,6 @@ def test_strip_and_restore():
         "h": {"encoding": "WKB", "edges": "planar"},  # planar is the truth already
         "k": {"encoding": "WKB", "edges": "vincenty"},  # not named: kept
     }
-    assert owner.restore_edges(geo, {"g": "spherical", "absent": "spherical"}) is True
-    assert geo["columns"]["g"] == {"encoding": "WKB", "edges": "spherical"}
-    assert owner.restore_edges(geo, {"g": "spherical"}) is False
-    assert owner.restore_edges(None, {"g": "spherical"}) is False
 
 
 def test_the_key_readers():

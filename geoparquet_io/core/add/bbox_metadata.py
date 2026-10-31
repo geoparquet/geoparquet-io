@@ -16,7 +16,6 @@ are not supported for in-place metadata modification.
 """
 
 import functools
-import json
 from typing import TYPE_CHECKING
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
@@ -31,6 +30,7 @@ from geoparquet_io.core.geo_metadata import (
     compose_geo_block,
     covering_supported,
     declared_version,
+    geo_key_value,
     sanitized_carried_geo,
     with_geo_key,
 )
@@ -160,7 +160,7 @@ def add_bbox_metadata_table(
         )
 
     geo_meta = compose_geo_block(
-        SchemaSource(table.schema, {b"geo": json.dumps(geo_meta).encode("utf-8")}),
+        SchemaSource(table.schema, with_geo_key(None, geo_meta)),
         GeoBlockOptions(geometry_column=str(geom_col), covering=bbox_column),
     )
 
@@ -329,13 +329,13 @@ def add_bbox_metadata(
     # composer creates a missing or non-object ``columns`` entry and runs every
     # covering gate, so the one key this command writes is the owner's answer.
     geo_meta = compose_geo_block(
-        SchemaSource(schema, {b"geo": json.dumps(geo_meta).encode("utf-8")}),
+        SchemaSource(schema, with_geo_key(None, geo_meta)),
         GeoBlockOptions(geometry_column=primary_col, covering=target_column, verbose=verbose),
     )
 
     if verbose:
         debug("\nUpdated geo metadata:")
-        debug(json.dumps(geo_meta, indent=2))
+        debug(geo_key_value(geo_meta))
 
     # One footer key does not need the data decoded. Patching the footer copies
     # every page verbatim, so the compression level, the encodings, the bloom
@@ -346,7 +346,7 @@ def add_bbox_metadata(
     # key; a race is never answered with one (`patch_or_rewrite`).
     patch_or_rewrite(
         parquet_file,
-        {"geo": json.dumps(geo_meta)},
+        {"geo": geo_key_value(geo_meta)},
         output_file=output_file,
         rewrite=functools.partial(rewrite_footer_kv, verbose=verbose),
         verbose=verbose,

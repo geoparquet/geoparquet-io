@@ -87,15 +87,14 @@ from geoparquet_io.core.geo_metadata import (
     DETECT_BBOX_COLUMN,
     GEOPARQUET_VERSIONS,
     KEEP_CRS,
-    SELF_EVIDENT_BBOX_COLUMN,
     GeoBlockOptions,
     QuerySource,
     SchemaSource,
     compose_geo_block,
     composes_a_covering,
-    declared_version,
     geo_key_value,
     is_geoparquet_1x,
+    may_hold_a_self_evident_bbox,
     prune_geo_metadata_to_columns,
     read_raw_geo,
     sanitized_carried_geo,
@@ -141,7 +140,6 @@ from geoparquet_io.core.parquet_writer import (
     resolve_row_group_rows_for_table,
     sized_stream,
     without_geometry_dictionary,
-    writable_geoparquet_version,
     write_arrow_table,
 )
 from geoparquet_io.core.remote import (
@@ -468,9 +466,12 @@ def _restored_geo_block(
     columns = geo_meta.get("columns") or {}
     if primary is None or not isinstance(columns.get(primary), dict):
         return geo_meta
-    version = writable_geoparquet_version(declared_version(geo_meta), preserve_input=True)
+    carried = with_geo_key(None, geo_meta)
+    version = resolve_output_geoparquet_version(
+        None, original_metadata=carried, preserve_input=True
+    )
     return compose_geo_block(
-        SchemaSource(written_schema, with_geo_key(None, geo_meta)),
+        SchemaSource(written_schema, carried),
         GeoBlockOptions(
             geometry_column=primary,
             version=version,
@@ -967,15 +968,6 @@ def staged_replacement(destination: str) -> Iterator[str]:
             shutil.copymode(destination, staged)
 
 
-def file_relation(url: str) -> str:
-    """The one ``read_parquet`` spelling a whole-file rewrite reads its input through.
-
-    ``hive_partitioning=false``: a file under a ``key=value`` directory is one
-    file, not a partition whose key would become a column of the rewrite.
-    """
-    return f"read_parquet({sql_path(url)}, hive_partitioning=false)"
-
-
 def rewrite_file_through_funnel(
     source: str,
     destination: str,
@@ -1182,7 +1174,7 @@ def _fast_path_options(
     Output columns known to hold no conventional ``bbox`` settle the declare
     step without a schema probe.
     """
-    detect = output_columns is None or SELF_EVIDENT_BBOX_COLUMN in output_columns
+    detect = may_hold_a_self_evident_bbox(output_columns)
     return GeoBlockOptions(
         geometry_column=geometry_column,
         version=effective_version,
@@ -1259,7 +1251,7 @@ def _fast_path_geo_decision(
     """
     if effective_version != "2.0" or not geometry_column:
         return None, False
-    detect = output_columns is None or SELF_EVIDENT_BBOX_COLUMN in output_columns
+    detect = may_hold_a_self_evident_bbox(output_columns)
     # No block to carry: DuckDB writes its own, which declares no covering. A
     # conventional bbox column the output carries is declared by every other
     # write (the composer's rule), so that write takes the rewrite, which

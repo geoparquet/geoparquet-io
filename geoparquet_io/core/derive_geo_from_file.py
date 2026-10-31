@@ -260,7 +260,9 @@ def derive_secondary_geometry_info(
     return {"primary": primary_column, "secondary": secondary, "metadata": metadata}
 
 
-def _with_primary_column(raw_geo: bytes, primary_column: str | None, schema=None) -> dict | None:
+def _with_primary_column(
+    raw_geo: bytes, primary_column: str | None, schema: pa.Schema
+) -> dict | None:
     """``raw_geo`` composed to name ``primary_column``, or None if it already does.
 
     None too when the block cannot be read or does not describe
@@ -275,7 +277,7 @@ def _with_primary_column(raw_geo: bytes, primary_column: str | None, schema=None
     if primary_column not in geo["columns"] or geo.get("primary_column") == primary_column:
         return None
     return compose_geo_block(
-        SchemaSource(schema if schema is not None else pa.schema([]), {b"geo": raw_geo}),
+        SchemaSource(schema, {b"geo": raw_geo}),
         GeoBlockOptions(
             geometry_column=primary_column,
             primary_column=primary_column,
@@ -342,8 +344,9 @@ def derive_v2_geo_metadata(
             geo={"primary_column": primary_column} if primary_column else None,
         )
         # Each column's entry is what its logical type and statistics say: the
-        # primary's goes in as the composer's crs, edges and stats, the
-        # secondaries' as their declared metadata. No covering: none is
+        # primary's goes in as the composer's crs and stats and as the data's
+        # edges (``column_edges``: a fact, not a request, so no orientation);
+        # the secondaries' as their declared metadata. No covering: none is
         # derivable from a logical type.
         declared = columns[primary]
         secondary = [name for name in columns if name != primary]
@@ -353,7 +356,7 @@ def derive_v2_geo_metadata(
                 geometry_column=primary,
                 version="2.0",
                 covering=None,
-                edges=edges_of(declared) if declares_edges(declared) else None,
+                column_edges={primary: edges_of(declared)} if declares_edges(declared) else None,
                 crs=declared["crs"] if "crs" in declared else KEEP_CRS,
                 stats={primary: {k: declared.get(k) for k in ("bbox", "geometry_types")}},
                 geometry_info={"secondary": secondary, "metadata": columns},

@@ -530,10 +530,17 @@ class GeometryRead:
     kind: str
     duckdb_type: str = ""
     flat: bool = False
+    encoding: str | None = None
 
     @classmethod
     def for_type(cls, column: str, duckdb_type: str | None, *, flat: bool = False) -> GeometryRead:
         return cls(column, _read_kind(duckdb_type), duckdb_type or "", flat)
+
+    @classmethod
+    def for_geoarrow(cls, column: str, encoding: str) -> GeometryRead:
+        """A GeoArrow column whose native encoding the ``geo`` block already names
+        (``point`` ... ``multipolygon``), so no DuckDB type has to be probed."""
+        return cls(column, "geoarrow", encoding=encoding.lower())
 
     @property
     def readable(self) -> bool:
@@ -636,6 +643,8 @@ class GeometryRead:
         ``geoarrow`` column, from its coordinate struct's list depth; else None."""
         if self.kind != "geoarrow":
             return None
+        if self.encoding is not None:
+            return self.encoding
         return _GEOARROW_ENCODING_BY_DEPTH[_geoarrow_struct_depth(self.duckdb_type) or 0]
 
     def _geoarrow_point_expr(self) -> str:
