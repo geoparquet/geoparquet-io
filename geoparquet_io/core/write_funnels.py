@@ -991,6 +991,19 @@ def _copy_row_groups(pf: pq.ParquetFile, writer: pq.ParquetWriter, row_group_row
         writer.write_table(pa.Table.from_batches([batch]), row_group_size=row_group_rows)
 
 
+def _footer_keys(pf: pq.ParquetFile) -> dict[bytes, bytes]:
+    """*pf*'s footer keys, in the order its Arrow schema lists them.
+
+    The footer wins over the Arrow schema's view of it: a key appended after
+    the writer opened is in the footer only (#913), and goes last. The order
+    is the schema's so that the regenerated ``ARROW:schema`` comes out as the
+    one the file already had.
+    """
+    keys = dict(pf.schema_arrow.metadata or {})
+    keys.update(pf.metadata.metadata or {})
+    return keys
+
+
 def rewrite_footer_kv(
     source: str,
     destination: str,
@@ -1050,7 +1063,7 @@ def rewrite_footer_kv(
                 # to roughly the whole compressed file instead of one row group.
                 pf = stack.enter_context(pq.ParquetFile(handle, pre_buffer=False))
                 metadata = output_schema_metadata(
-                    _carried_with_updates(pf.metadata.metadata, updates), None
+                    _carried_with_updates(_footer_keys(pf), updates), None
                 )
                 schema = pf.schema_arrow.with_metadata(metadata)
                 if verbose:
