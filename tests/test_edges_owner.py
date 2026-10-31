@@ -15,7 +15,10 @@ Three layers, each failing first (see the T3d record):
 
 from __future__ import annotations
 
+import struct
+
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
@@ -47,13 +50,35 @@ from tests._defrag_fixtures import footer_geo, geo_block, polygon_wkb, write_wit
     ],
 )
 def test_the_version_gate(edges, version, expected):
-    assert owner.edges_for_version(edges, version) == expected
+    from geoparquet_io.core.geo_metadata import is_geoparquet_1x
+
+    assert owner.edges_for_version(edges, is_geoparquet_1x(version)) == expected
 
 
 @pytest.mark.parametrize("version", ["1.1.0", "2.0.0", None])
 def test_the_version_gate_refuses_an_unknown_value_once(version):
+    from geoparquet_io.core.geo_metadata import is_geoparquet_1x
+
     with pytest.raises(InvalidParameterError, match="Unknown edges 'spherikal'"):
-        owner.edges_for_version("spherikal", version)
+        owner.edges_for_version("spherikal", is_geoparquet_1x(version))
+
+
+@pytest.mark.parametrize(
+    "version",
+    [None, "", "1", "1.", "1.0", "1.0.0", "1.1.0", "1.0.0-beta.1", "2.0", "2.0.0", "3.0", "x.y"],
+)
+def test_one_1x_answer_for_every_version(version):
+    """The edges gate, the write facade and ``validate`` give one answer, a
+    missing version included: not 1.x, so all five values are allowed."""
+    from geoparquet_io.core.geo_metadata import is_geoparquet_1x
+    from geoparquet_io.core.parquet_writer import writable_geoparquet_version
+    from geoparquet_io.core.validate import _check_edges_valid
+
+    is_1x = writable_geoparquet_version(version) == "1.1"
+    assert is_geoparquet_1x(version) is is_1x
+    assert owner.edges_allowed(is_1x) == (owner.GEOPARQUET_1X_EDGES if is_1x else owner.EDGES)
+    check = _check_edges_valid({"edges": "vincenty"}, "geometry", version)
+    assert (check.status.name == "PASSED") is not is_1x
 
 
 @pytest.mark.parametrize(
@@ -167,7 +192,9 @@ def test_the_representative_point_of_a_polar_cap_is_the_pole():
 GEOGRAPHIC = {"id": {"authority": "EPSG", "code": 4326}}
 PROJECTED = {"id": {"authority": "EPSG", "code": 3857}}
 CRS_KINDS = {"geographic": GEOGRAPHIC, "projected": PROJECTED}
-DECLARED = ["planar", "spherical", "vincenty"]
+#: ``spherikal`` is the divergent input: sort hilbert carried the typo through
+#: verbatim where every other path dropped it (a typo says nothing, #1288).
+DECLARED = ["planar", "spherical", "vincenty", "spherikal"]
 VERSIONS = ["1.0", "1.1", "2.0"]
 RINGS = [
     [(10.0, 10.0), (20.0, 10.0), (20.0, 20.0), (10.0, 20.0)],
@@ -251,13 +278,10 @@ EXPECTED_BLOCK = {
     ("vincenty", "1.0"): "spherical",
     ("vincenty", "1.1"): "spherical",
     ("vincenty", "2.0"): "vincenty",
+    ("spherikal", "1.0"): "planar",
+    ("spherikal", "1.1"): "planar",
+    ("spherikal", "2.0"): "planar",
 }
-
-#: The paths that spell a planar declaration out (``"edges": "planar"``) where
-#: the others leave the key out, which the spec reads the same. A disagreement
-#: between copies that is not on #1367's approved list, so its bytes are kept
-#: and it is pinned here rather than hidden by the normalisation below.
-PLANAR_SPELLED_OUT = {"sort-hilbert", "pipe"}
 
 
 def _expected(declared: str, version: str, crs_kind: str) -> tuple[str, object]:
@@ -284,7 +308,71 @@ def test_every_write_path_writes_the_same_edges(tmp_path, declared, version, crs
         seen[name] = (block_edges or "planar", native)
 
     assert seen == dict.fromkeys(PATHS, _expected(declared, version, crs_kind))
-    assert spelled_out == (PLANAR_SPELLED_OUT if declared == "planar" else set())
+    # One spell-or-omit rule (``edges.set_edges``): planar is the spec default,
+    # said by leaving the key out. sort hilbert and the pipe used to spell it.
+    assert spelled_out == set()
+
+
+# ---------------------------------------------------------------------------
+# The GeoArrow carrier: one reader, one writer, every value
+# ---------------------------------------------------------------------------
+
+GEOARROW_ALGORITHMS = ["spherical", "vincenty", "thomas", "andoyer", "karney"]
+
+
+@pytest.mark.parametrize("edges", GEOARROW_ALGORITHMS)
+def test_every_algorithm_survives_the_geoarrow_round_trip(edges):
+    """The writers set an edge type only for ``spherical``, so an ellipsoidal
+    column came out a planar GeoArrow type (native_wkb_type, the 2.0 rebuild,
+    a secondary's entry). Now the owner writes and reads all five."""
+    import geoarrow.pyarrow as ga
+
+    from geoparquet_io.core.arrow_geo_metadata import (
+        _process_geometry_column_for_version,
+        table_geometry_info,
+    )
+    from geoparquet_io.core.geoarrow_encoding import native_wkb_type
+
+    edge_type = owner.geoarrow_edge_type(edges)
+    assert edge_type == getattr(ga.EdgeType, edges.upper())
+    assert owner.geoarrow_type_edges(native_wkb_type(None, edges)) == edges
+
+    typed = ga.wkb().with_edge_type(edge_type)
+    wkb = polygon_wkb(RINGS[0])
+    column = pa.ExtensionArray.from_storage(typed, pa.array([wkb], pa.binary()))
+    table = pa.table({"geometry": column, "second": column})
+    rebuilt = _process_geometry_column_for_version(table, "geometry", "2.0", None, False)
+    assert owner.geoarrow_type_edges(rebuilt.schema.field("geometry").type) == edges
+    info = table_geometry_info(table, "geometry")
+    assert owner.edges_of(info["metadata"]["second"]) == edges
+
+
+@pytest.mark.parametrize("edges", [None, "planar", "spherikal"])
+def test_planar_and_a_typo_are_a_planar_geoarrow_type(edges):
+    import geoarrow.pyarrow as ga
+
+    assert owner.geoarrow_edge_type(edges) == ga.EdgeType.PLANAR
+
+
+def test_the_geoarrow_reader_takes_either_carrier():
+    import geoarrow.pyarrow as ga
+
+    assert owner.geoarrow_type_edges(ga.wkb().with_edge_type(ga.EdgeType.KARNEY)) == "karney"
+    assert owner.geoarrow_type_edges(pa.binary(), {"edges": "Vincenty"}) == "vincenty"
+    assert owner.geoarrow_type_edges(pa.binary(), {}) is None
+    assert owner.geoarrow_type_edges(pa.binary()) is None
+
+
+@pytest.mark.parametrize(
+    ("value", "kept"), [("planar", False), (None, False), ("spherical", True), ("karney", True)]
+)
+def test_set_edges_omits_planar(value, kept):
+    entry = {"edges": "spherical"}
+    owner.set_edges(entry, value)
+    assert ("edges" in entry) is kept
+    report = {}
+    owner.state_edges(report, value)
+    assert report == {"edges": value}
 
 
 # ---------------------------------------------------------------------------
@@ -394,3 +482,34 @@ def test_1293_a_polar_point_keys_to_the_edge_row(lat):
 
     edge = 89.0 if lat > 0 else -89.0
     assert _lat_lon_to_quadkey(lat, 10.0, 12) == mercantile.quadkey(mercantile.tile(10.0, edge, 12))
+
+
+CELL_CLI = {
+    "quadkey": ["--resolution", "8"],
+    "h3": ["--resolution", "5"],
+    "s2": ["--level", "10"],
+    "a5": ["--resolution", "5"],
+}
+
+
+@pytest.mark.parametrize("op", sorted(CELL_CLI))
+def test_1293_every_cell_path_keys_a_spherical_line_alike(op, tmp_path):
+    """The table, the CLI file path and a stdin stream give one cell: the stream
+    is keyed from its own block, the way quadkey's always was."""
+    import pyarrow.ipc as ipc
+
+    wkb = struct.pack("<BII", 1, 2, 2) + b"".join(struct.pack("<2d", x, y) for x, y in ARC)
+    src = write_with_geo(
+        tmp_path / "arc.parquet",
+        pa.table({"geometry": pa.array([wkb], pa.binary())}),
+        geo_block("1.1.0", ["LineString"], edges="spherical"),
+    )
+    column = CELL_OPS[op][1]
+    expected = _cell(op, _line_table([ARC_MIDPOINT], "planar"))
+
+    _cli(["add", op, str(src), str(tmp_path / "file.parquet"), *CELL_CLI[op]])
+    assert pq.read_table(tmp_path / "file.parquet").column(column).to_pylist() == expected
+
+    stream = _cli(["extract", "geoparquet", str(src), "-"]).stdout_bytes
+    out = _cli(["add", op, "-", "-", *CELL_CLI[op]], input=stream).stdout_bytes
+    assert ipc.open_stream(out).read_all().column(column).to_pylist() == expected

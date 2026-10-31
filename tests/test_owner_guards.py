@@ -1549,6 +1549,79 @@ def _edges_key_access(node: ast.AST) -> bool:
     return False
 
 
+#: The owner's constant names: a dict literal may name a field with one of
+#: these (or ``None``) without deciding anything.
+_EDGE_CONSTANTS = frozenset({"PLANAR", "SPHERICAL", "VINCENTY", "THOMAS", "ANDOYER", "KARNEY"})
+#: Literal text of a Parquet GEOGRAPHY type's edges, built or parsed by hand.
+_LOGICAL_TYPE_EDGES_TEXT = ("GEOGRAPHY(", "algorithm=")
+
+
+def _computes_a_value(node: ast.AST | None) -> bool:
+    """A dict value that is an expression, not a field-type table entry or a name."""
+    if node is None or isinstance(node, (ast.Constant, ast.Tuple, ast.Lambda)):
+        return False
+    return not (isinstance(node, ast.Name) and node.id in _EDGE_CONSTANTS)
+
+
+def _edges_key_written(node: ast.AST) -> bool:
+    """``{"edges": e}`` (so ``d.update({"edges": e})`` too) and ``dict(edges=e)``:
+    the key written past ``set_edges``'s spell-or-omit rule."""
+    if isinstance(node, ast.Dict):
+        return any(
+            _is_edges_key(k) and _computes_a_value(v)
+            for k, v in zip(node.keys, node.values, strict=True)
+        )
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "dict":
+        return any(kw.arg == _EDGES_KEY for kw in node.keywords)
+    return False
+
+
+def _names_edges(node: ast.AST) -> bool:
+    name = node.id if isinstance(node, ast.Name) else getattr(node, "attr", "")
+    return "edge" in name.lower() or "algorithm" in name.lower()
+
+
+def _edge_type_access(node: ast.AST) -> bool:
+    """``ga.EdgeType.SPHERICAL``, ``ga.EdgeType[e.upper()]``, ``t.edge_type``, and a
+    case fold of an edges value (``edges.lower() == x``): the GeoArrow carrier and
+    the vocabulary's case, which the owner's reader, writer and fold hold."""
+    if isinstance(node, ast.Attribute):
+        return node.attr == "edge_type" or _is_edge_type_enum(node.value)
+    if isinstance(node, ast.Subscript):
+        return _is_edge_type_enum(node.value)
+    if isinstance(node, ast.Compare):
+        return any(_is_case_fold_of_edges(n) for n in (node.left, *node.comparators))
+    return False
+
+
+def _is_edge_type_enum(node: ast.AST) -> bool:
+    return (isinstance(node, ast.Attribute) and node.attr == "EdgeType") or (
+        isinstance(node, ast.Name) and node.id == "EdgeType"
+    )
+
+
+def _is_case_fold_of_edges(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"lower", "upper", "casefold"}
+        and _names_edges(node.func.value)
+    )
+
+
+def _logical_type_edges_text(node: ast.AST) -> bool:
+    """``f"GEOGRAPHY(OGC:CRS84, {alg})"``, ``f"algorithm={a}"``, an
+    ``algorithm=(\\w+)`` pattern: a GEOGRAPHY type's edges built or parsed by hand."""
+    if isinstance(node, ast.JoinedStr):
+        text = "".join(v.value for v in node.values if isinstance(v, ast.Constant))
+        return any(part in text for part in _LOGICAL_TYPE_EDGES_TEXT)
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and "algorithm=(" in node.value
+    )
+
+
 def _find_edges(m: _Module) -> Iterator[Hit]:
     """An ``edges`` decision outside ``core/edges.py`` (#1367 concept 6): a
     string that *is* an edges value (``"spherical"``, ``"planar"``, an
@@ -1562,14 +1635,25 @@ def _find_edges(m: _Module) -> Iterator[Hit]:
     version gate duplicating ``validate.py``'s, and a carried-metadata fallback
     that counted a typo as non-planar where the file reader ignored it.
 
-    A dict literal's ``"edges"`` key is not a hit: it names the field in a
-    report or a field-type table without deciding anything about it.
+    The first audit added the shapes that passed it at 0: any case of a value
+    (``"SPHERICAL"``); a dict literal's ``"edges"`` key holding an expression,
+    ``.update`` with one and ``dict(edges=...)`` (a writer past ``set_edges``);
+    ``ga.EdgeType`` members and ``.edge_type`` (the GeoArrow carrier's four
+    hand-built writers and second reader); a case fold of an edges value; and a
+    GEOGRAPHY type's ``algorithm=`` text built in an f-string or parsed with a
+    pattern. A dict literal naming the field with ``None``, a constant, an owner
+    constant or a field-type table entry (a tuple, a lambda) is not a hit.
     """
     for node in m.strings():
-        if node.value in _EDGE_NAMES:
+        if node.value.lower() in _EDGE_NAMES:
             yield m.hit(node)
     for node in ast.walk(m.tree):
-        if _edges_key_access(node):
+        if (
+            _edges_key_access(node)
+            or _edges_key_written(node)
+            or _edge_type_access(node)
+            or _logical_type_edges_text(node)
+        ):
             yield m.hit(node)
 
 
@@ -3193,6 +3277,18 @@ EDGES_SHAPES = {
     "key test": 'def f(col):\n    return "edges" in col\n',
     "key filter": 'def f(d):\n    return {k: v for k, v in d.items() if k != "edges"}\n',
     "f-string part": 'def f(n):\n    return f"{n}" + "karney"\n',
+    # The first audit's shapes, each passing the arm at 0 before it.
+    "dict literal key": 'def f(e):\n    return {"edges": e}\n',
+    "dict update": 'def f(d, e):\n    d.update({"edges": e})\n',
+    "dict call": "def f(e):\n    return dict(edges=e)\n",
+    "geography f-string": 'def f(alg):\n    return f"GEOGRAPHY(OGC:CRS84, {alg})"\n',
+    "algorithm f-string": 'def f(a):\n    return f"algorithm={a}"\n',
+    "algorithm regex": 'import re\n\nPAT = re.compile(r"algorithm=(\\w+)")\n',
+    "case fold compare": "def f(edges, x):\n    return edges.lower() == x\n",
+    "uppercase literal": 'ALL = ("SPHERICAL",)\n',
+    "edge type member": "import geoarrow.pyarrow as ga\n\nT = ga.EdgeType.SPHERICAL\n",
+    "edge type subscript": "import geoarrow.pyarrow as ga\n\n\ndef f(e):\n    return ga.EdgeType[e.upper()]\n",
+    "edge type read": "def f(t):\n    return t.edge_type.name.lower()\n",
 }
 
 
