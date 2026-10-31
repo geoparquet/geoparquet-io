@@ -466,11 +466,15 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
     # interpolation lets a crafted column name inject arbitrary SQL into the
     # projection (#918).
     #
-    # `original_metadata=None`: don't preserve old metadata with bbox covering.
-    # The CRS still survives, from `input_file` -- `gp_version` above answers
-    # the version question from the same file, but a native-geo-only input keeps
-    # its CRS only in the Parquet logical type, so without the witness the
-    # rewrite restates whatever DuckDB read and declares nothing (#1001).
+    # The input's footer keys go to the funnel like every other rewrite's, and
+    # the funnel decides which survive: every sidecar key and `epoch` do, and
+    # the covering over the column this drops does not -- it is pruned with the
+    # column (`_prune_metadata_to_output_columns`). Passing nothing here used to
+    # drop every key but `geo` (#1015). The CRS also survives from `input_file`
+    # -- `gp_version` above answers the version question from the same file, and
+    # a native-geo-only input keeps its CRS only in the Parquet logical type
+    # (#1001).
+    original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
     _rewrite_through_staging(
         parquet_file,
         output_file,
@@ -478,6 +482,7 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
         verbose=verbose,
         profile=profile,
         geoparquet_version=gp_version,
+        original_metadata=original_metadata,
     )
 
     return {"fix_applied": f"Removed bbox column '{bbox_column_name}'", "success": True}

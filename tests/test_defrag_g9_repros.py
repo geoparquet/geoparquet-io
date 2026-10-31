@@ -125,12 +125,13 @@ def test_982_add_quadkey_survives_a_malformed_geo_block(tmp_path, malformed):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="#1015")
 def test_1015_check_bbox_fix_keeps_sidecar_keys(tmp_path):
-    """Expected to fail: before ``[collection, fiboa, geo]``, after ``[geo]``.
+    """Failed with ``[geo]`` for ``[collection, fiboa, geo]`` (fixed in T2d).
 
-    ``check_fixes.fix_bbox_removal`` passes ``original_metadata=None``, so the
-    bbox-removal rewrite of a 2.0 file drops every file-level key but ``geo``.
+    ``check_fixes.fix_bbox_removal`` passed ``original_metadata=None``, so the
+    bbox-removal rewrite of a 2.0 file dropped every file-level key but ``geo``.
+    It now hands the funnel the input's keys like every other rewrite; the
+    covering over the dropped column goes with the column, and ``epoch`` stays.
     """
     geo = geo_block(version="2.0.0", epoch=2020.5)
     src = write_with_geo(
@@ -143,6 +144,9 @@ def test_1015_check_bbox_fix_keeps_sidecar_keys(tmp_path):
     kv = footer_kv(out)
     for key, value in SIDECAR_KEYS.items():
         assert kv.get(key) == value, f"{key!r} dropped: {sorted(kv)}"
+    column = json.loads(kv[b"geo"])["columns"]["geometry"]
+    assert column.get("epoch") == 2020.5, column
+    assert "covering" not in column, column
 
 
 # ---------------------------------------------------------------------------
