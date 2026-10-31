@@ -30,6 +30,13 @@ deletes the entry and lowers the number in the same commit.
 The self-tests at the bottom (G12) plant each banned pattern in a synthetic tree
 and assert the check fails on it: a guard that cannot fail protects nothing
 (#946, #970).
+
+Every check here reads source through ``tests/_guard_scan.py``: a file is
+parsed once per process and walked once (its node list and parent map kept),
+and each module's ``_Module`` is built once and shared by every arm and every
+root tuple that includes it. An arm whose shapes are all of a few node types
+iterates only those (``_Module.of``); each arm still runs on its own, in the
+worker that runs its test.
 """
 
 from __future__ import annotations
@@ -42,7 +49,7 @@ import subprocess
 import sys
 import tomllib
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from http import HTTPStatus
@@ -51,6 +58,7 @@ from pathlib import Path
 import pytest
 
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
+from tests._guard_scan import Source, parse, walk, walk_scope
 from tests._precommit_hook import core_tree, hook_entry
 
 REPO = Path(__file__).resolve().parents[1]
@@ -164,28 +172,34 @@ def _docstring_nodes(tree: ast.Module) -> set[int]:
     """ids of string constants that are bare statements: docstrings and prose."""
     return {
         id(node.value)
-        for node in ast.walk(tree)
+        for node in walk(tree)
         if isinstance(node, ast.Expr)
         and isinstance(node.value, ast.Constant)
         and isinstance(node.value.value, str)
     }
 
 
-def _scopes(tree: ast.Module) -> dict[int, str]:
-    """id(node) -> dotted name of the innermost enclosing def or class."""
+def _scopes(tree: ast.Module, parents: dict[int, ast.AST]) -> dict[int, str]:
+    """id(node) -> dotted name of the innermost enclosing def or class (a def or
+    class maps to its own name). One pass over the shared scan's breadth-first
+    node list: a parent is always named before its children. (The context and
+    operator singletons, ``ast.Load()`` and the like, are shared by every tree,
+    so their one recorded parent may come later; they are named when it does.)"""
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
     names: dict[int, str] = {}
-
-    def visit(node: ast.AST, prefix: str) -> None:
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                inner = f"{prefix}.{child.name}" if prefix else child.name
-                names[id(child)] = inner
-                visit(child, inner)
-            else:
-                names[id(child)] = prefix or "<module>"
-                visit(child, prefix)
-
-    visit(tree, "")
+    for node in walk(tree):
+        if node is tree:
+            continue
+        up = parents[id(node)]
+        prefix = "" if up is tree else names.get(id(up))
+        if prefix is None:
+            continue
+        if not isinstance(up, defs) and prefix == "<module>":
+            prefix = ""
+        if isinstance(node, defs):
+            names[id(node)] = f"{prefix}.{node.name}" if prefix else node.name
+        else:
+            names[id(node)] = prefix or "<module>"
     return names
 
 
@@ -197,7 +211,7 @@ def _imports(tree: ast.Module) -> dict[str, str]:
     (``import json as j`` -> ``j: json``; ``from json import loads as l`` ->
     ``l: json.loads``)."""
     bound: dict[str, str] = {}
-    for node in ast.walk(tree):
+    for node in walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.asname:
@@ -214,7 +228,7 @@ def _imports(tree: ast.Module) -> dict[str, str]:
 def _bindings(tree: ast.AST) -> dict[str, list[ast.AST]]:
     """Name -> every value assigned to it by ``NAME = value`` anywhere."""
     bound: dict[str, list[ast.AST]] = {}
-    for node in ast.walk(tree):
+    for node in walk(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name):
@@ -231,11 +245,12 @@ class _Module:
     lines: list[str]
     docstrings: set[int]
     scope: dict[int, str]
+    #: id(node) -> parent, from the shared scan's one walk (tests/_guard_scan.py).
+    parents: dict[int, ast.AST]
 
     def __post_init__(self) -> None:
         self.imports = _imports(self.tree)
         self.bindings = _bindings(self.tree)
-        self.parents = {id(c): p for p in ast.walk(self.tree) for c in ast.iter_child_nodes(p)}
 
     def local_bindings(self, node: ast.AST) -> dict[str, list[ast.AST]]:
         """The assignments of the function enclosing *node* (the module's at
@@ -250,13 +265,21 @@ class _Module:
             cache[id(up)] = _bindings(up)
         return cache[id(up)]
 
+    def of(self, types: tuple[type, ...]) -> list[ast.AST]:
+        """The module's nodes of *types*, in walk order, kept per type tuple:
+        an arm whose shapes are all of a few node types skips every other node."""
+        cache = self.__dict__.setdefault("_of", {})
+        if types not in cache:
+            cache[types] = [n for n in walk(self.tree) if isinstance(n, types)]
+        return cache[types]
+
     def hit(self, node: ast.AST, name: str | None = None) -> Hit:
         lineno = getattr(node, "lineno", 1)
         return Hit(self.path, lineno, name or self.scope[id(node)], self.lines[lineno - 1])
 
     def strings(self) -> Iterator[ast.Constant]:
         """String constants in code (f-string parts included), never prose."""
-        for node in ast.walk(self.tree):
+        for node in walk(self.tree):
             if (
                 isinstance(node, ast.Constant)
                 and isinstance(node.value, str)
@@ -370,7 +393,7 @@ def _find_geo_parse(m: _Module) -> Iterator[Hit]:
     #1120 and #1169: each new reader parsed the key itself instead of calling
     the owner's parse-and-sanitize.
     """
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if m.calls(node, "json.loads") and any(_geo_bound(m, a) for a in node.args):
             yield m.hit(node)
 
@@ -390,7 +413,7 @@ def _find_set_memory_limit(m: _Module) -> Iterator[Hit]:
     for node in m.strings():
         if _MEMORY_SETTING.search(node.value):
             yield m.hit(node)
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if (
             isinstance(node, ast.keyword)
             and node.arg == "config"
@@ -410,7 +433,7 @@ def _find_sql_escape(m: _Module) -> Iterator[Hit]:
     escaping is not idempotent and a second copy escapes twice (#718).
     """
     escapes = {("'", "''"), ('"', '""')}
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if not (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -440,7 +463,7 @@ def _find_sql_escape_hand_quote(m: _Module) -> Iterator[Hit]:
     'b'``) is not even one quoted span (#1367 T1d+T1e audit 2, finding 4).
     """
     name = "_escape_sql_string"
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if isinstance(node, ast.ImportFrom) and any(a.name == name for a in node.names):
             yield m.hit(node)
         elif isinstance(node, ast.Attribute) and node.attr == name:
@@ -497,7 +520,7 @@ def _find_duckdb_version(m: _Module) -> Iterator[Hit]:
     Would have caught the three private DuckDB-version gates of #1357, #1358
     and #1360, each deciding "is this 2.0" its own way.
     """
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if isinstance(node, ast.ImportFrom) and node.module == "duckdb":
             if any(alias.name == "__version__" for alias in node.names):
                 yield m.hit(node)
@@ -547,7 +570,7 @@ def _owner_module(repo: Path) -> ast.Module | None:
     for root in (repo, REPO):
         owner = root / _HTTP_OWNER_PATH
         if owner.is_file():
-            return ast.parse(owner.read_text(encoding="utf-8"))
+            return parse(owner).tree
     return None
 
 
@@ -623,10 +646,11 @@ def _call_name(call: ast.Call) -> str | None:
     return None
 
 
-def _does_http(scope: ast.AST) -> bool:
+def _does_http(scope: ast.AST, nodes: Iterable[ast.AST] | None = None) -> bool:
     """The code names an HTTP library, calls a verb on a client-like receiver,
-    opens a client, or hands a URL to a call."""
-    for sub in ast.walk(scope):
+    opens a client, or hands a URL to a call. (*nodes*: ``ast.walk(scope)``,
+    when the caller already has it.)"""
+    for sub in ast.walk(scope) if nodes is None else nodes:
         if isinstance(sub, ast.Name) and sub.id in _HTTP_NAMES:
             return True
         if isinstance(sub, ast.Attribute) and sub.attr in _HTTP_NAMES:
@@ -647,20 +671,21 @@ def _does_http(scope: ast.AST) -> bool:
     return False
 
 
-def _helpers(m: _Module) -> tuple[set[str], set[str]]:
+def _helpers(m: _Module, subtree: Callable[[ast.AST], list[ast.AST]]) -> tuple[set[str], set[str]]:
     """Module functions that wait, and module functions that make a request:
-    a call to one stands for the wait or the request it hides."""
+    a call to one stands for the wait or the request it hides. (*subtree*:
+    ``list(ast.walk(node))``, remembered by the caller.)"""
     waits, requests = set(), set()
-    for node in ast.walk(m.tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if any(_is_sleep(c) for c in ast.walk(node)):
-                waits.add(node.name)
-            if _does_http(node) or _calls_a_verb(node):
-                requests.add(node.name)
+    for node in m.of((ast.FunctionDef, ast.AsyncFunctionDef)):
+        nodes = subtree(node)
+        if any(_is_sleep(c) for c in nodes):
+            waits.add(node.name)
+        if _does_http(node, nodes) or _calls_a_verb(node, nodes):
+            requests.add(node.name)
     return waits, requests
 
 
-def _calls_a_verb(node: ast.AST) -> bool:
+def _calls_a_verb(node: ast.AST, nodes: Iterable[ast.AST] | None = None) -> bool:
     """An HTTP verb (``.get``, ``.post`` ...) on any receiver with a string
     first argument: in code that also waits in a loop, ``c.get('u')`` is a
     request whatever ``c`` is called. Only used beside a wait, where
@@ -671,7 +696,7 @@ def _calls_a_verb(node: ast.AST) -> bool:
         and c.func.attr in _HTTP_VERBS
         and c.args
         and isinstance(c.args[0], (ast.Constant, ast.JoinedStr, ast.Name))
-        for c in ast.walk(node)
+        for c in (ast.walk(node) if nodes is None else nodes)
     )
 
 
@@ -686,21 +711,32 @@ def _find_retry_loop(m: _Module) -> Iterator[Hit]:
     classification. Would have caught the WFS, ArcGIS and CARTO retry loops
     that #1367's T4a folded into ``core/http_retry.py``.
     """
-    waits, requests = _helpers(m)
+    walked: dict[int, list[ast.AST]] = {}
+
+    def subtree(node: ast.AST) -> list[ast.AST]:
+        """``ast.walk(node)``, once per node: each loop and function is asked
+        about several times (helper, recursion, wait, request)."""
+        if id(node) not in walked:
+            walked[id(node)] = list(ast.walk(node))
+        return walked[id(node)]
+
+    waits, requests = _helpers(m, subtree)
 
     def waits_in(node: ast.AST) -> bool:
         return any(
             _is_sleep(c) or (isinstance(c, ast.Call) and _call_name(c) in waits)
-            for c in ast.walk(node)
+            for c in subtree(node)
         )
 
     def requests_in(node: ast.AST) -> bool:
-        return _does_http(node) or any(
-            isinstance(c, ast.Call) and _call_name(c) in requests for c in ast.walk(node)
+        nodes = subtree(node)
+        return _does_http(node, nodes) or any(
+            isinstance(c, ast.Call) and _call_name(c) in requests for c in nodes
         )
 
     flagged: set[int] = set()
-    for node in ast.walk(m.tree):  # breadth-first: an outer loop before its inner ones
+    loops_and_functions = (ast.For, ast.While, ast.AsyncFor, ast.FunctionDef, ast.AsyncFunctionDef)
+    for node in m.of(loops_and_functions):  # breadth-first: an outer loop before its inner ones
         if isinstance(node, (ast.For, ast.While, ast.AsyncFor)):
             up = m.parents.get(id(node))
             while up is not None and id(up) not in flagged:
@@ -710,7 +746,7 @@ def _find_retry_loop(m: _Module) -> Iterator[Hit]:
                 yield m.hit(node)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             recursive = any(
-                isinstance(c, ast.Call) and _call_name(c) == node.name for c in ast.walk(node)
+                isinstance(c, ast.Call) and _call_name(c) == node.name for c in subtree(node)
             )
             if recursive and waits_in(node) and requests_in(node):
                 yield m.hit(node)
@@ -729,7 +765,7 @@ def _find_retry_constants(m: _Module, repo: Path) -> Iterator[Hit]:
     copy that drifts when the owner changes.
     """
     _, owner_timeouts = _owner_surface(repo)
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if isinstance(node, ast.Assign):
             targets, value = node.targets, node.value
         elif isinstance(node, ast.AnnAssign):
@@ -766,7 +802,7 @@ def _find_retry_param_defaults(m: _Module) -> Iterator[Hit]:
     constant imported from the owner, and a ``timeout=`` naming a caller's
     ``*_TIMEOUT`` budget.
     """
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         args = node.args
@@ -827,7 +863,7 @@ def _find_retry_status_sets(m: _Module) -> Iterator[Hit]:
     error wording, not retry policy, and are not flagged.
     A private ``{408, 429}`` is a second classification (T4a residue, #1367).
     """
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if isinstance(node, (ast.Set, ast.Tuple, ast.List)) and node.elts:
             if _status_set(m, node):
                 yield m.hit(node)
@@ -869,7 +905,7 @@ def _find_retry_after(m: _Module) -> Iterator[Hit]:
     httpx headers are case-insensitive, so ``"retry-after"`` is the same read.
     """
     inside: set[int] = set()
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if isinstance(node, ast.BinOp) and id(node) not in inside:
             value = m.const(node)
             if isinstance(value, str) and "retry-after" in value.lower():
@@ -902,7 +938,7 @@ def _find_retry_wrappers(m: _Module, repo: Path) -> Iterator[Hit]:
             isinstance(c, ast.Call) and _call_name(c) in owner_functions for c in ast.walk(node)
         )
 
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             body = [
                 s
@@ -952,7 +988,7 @@ def _find_json_dumps(m: _Module) -> Iterator[Hit]:
     that serialize the geo block and other footer metadata are allowed per
     file in the exemptions (``count = "*"``): that is metadata, not a report.
     """
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if m.calls(node, "json.dumps", "json.dump"):
             yield m.hit(node)
 
@@ -1003,7 +1039,7 @@ def _find_row_group_policy(m: _Module) -> Iterator[Hit]:
     in the streaming strategy, the input's average in ``add bbox-metadata``.
     """
     strings = {id(node) for node in m.strings()}
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if _row_group_policy_node(node, strings):
             yield m.hit(node)
 
@@ -1133,6 +1169,21 @@ def _is_short_version(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and node.value in _SHORT_VERSIONS
 
 
+#: Every node type an output-version shape can flag; the walk visits only these.
+_OUTPUT_VERSION_TYPES = (
+    ast.BoolOp,
+    ast.Subscript,
+    ast.Call,
+    ast.Assign,
+    ast.AnnAssign,
+    ast.arguments,
+    ast.Compare,
+    ast.Dict,
+    ast.IfExp,
+    ast.If,
+)
+
+
 def _find_output_version(m: _Module) -> Iterator[Hit]:
     """An output GeoParquet version decided outside ``parquet_writer`` (#1367 concept 1).
 
@@ -1170,7 +1221,7 @@ def _find_output_version(m: _Module) -> Iterator[Hit]:
     comparisons of the declared version pass. A copy that compares under a
     bare ``version`` name is not caught by this shape.
     """
-    for node in ast.walk(m.tree):
+    for node in m.of(_OUTPUT_VERSION_TYPES):
         if _output_version_node(m, node) and not _in_geo_block_literal(m, node):
             yield m.hit(node)
 
@@ -1342,7 +1393,7 @@ def _remote_scheme_names(repo: Path) -> frozenset[str]:
         from geoparquet_io.core.remote import REMOTE_SCHEMES
 
         return frozenset(REMOTE_SCHEMES)
-    for node in ast.walk(ast.parse(owner.read_text(encoding="utf-8"))):
+    for node in walk(parse(owner).tree):
         if (
             isinstance(node, ast.Assign)
             and any(isinstance(t, ast.Name) and t.id == "REMOTE_SCHEMES" for t in node.targets)
@@ -1381,7 +1432,7 @@ def _find_scheme_test(m: _Module, repo: Path) -> Iterator[Hit]:
     that disagreed over ``s3a://``/``gcs://`` (PR #1387 review).
     """
     names = _remote_scheme_names(repo)
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if isinstance(node, ast.Compare):
             literal = isinstance(node.left, ast.Constant) and node.left.value == "://"
             if literal and any(isinstance(op, _MEMBERSHIP_OPS) for op in node.ops):
@@ -1437,7 +1488,7 @@ def _find_overwrite_check(m: _Module) -> Iterator[Hit]:
             for n in ast.walk(node)
         )
 
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if isinstance(node, (ast.If, ast.IfExp)) and existence(node.test) and switch(node.test):
             yield m.hit(node)
 
@@ -1514,7 +1565,7 @@ def _find_geometry_stats(m: _Module) -> Iterator[Hit]:
     an aliased subquery, a fold indexing by position (``min(b[0] for ...)``),
     and a hand-written loop with ``if v < lo: lo = v``.
     """
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if id(node) in m.docstrings or isinstance(m.parents.get(id(node)), ast.JoinedStr):
             continue
         template = _string_template(node)
@@ -1699,6 +1750,21 @@ def _planar_cell_key(m: _Module, node: ast.AST) -> bool:
     return "ST_Centroid(" in text
 
 
+#: Every node type an edges shape can flag; the walk visits only these.
+_EDGES_TYPES = (
+    ast.Subscript,
+    ast.Call,
+    ast.Compare,
+    ast.Dict,
+    ast.Attribute,
+    ast.JoinedStr,
+    ast.Constant,
+    ast.BoolOp,
+    ast.ImportFrom,
+    ast.BinOp,
+)
+
+
 def _find_edges(m: _Module) -> Iterator[Hit]:
     """An ``edges`` decision outside ``core/edges.py`` (#1367 concept 6): a
     string that *is* an edges value (``"spherical"``, ``"planar"``, an
@@ -1732,7 +1798,7 @@ def _find_edges(m: _Module) -> Iterator[Hit]:
     for node in m.strings():
         if node.value.lower() in _EDGE_NAMES:
             yield m.hit(node)
-    for node in ast.walk(m.tree):
+    for node in m.of(_EDGES_TYPES):
         if (
             _edges_key_access(node)
             or _edges_key_written(node)
@@ -1813,7 +1879,7 @@ def _find_footer_patch(m: _Module) -> Iterator[Hit]:
       that rewrites without asking whether the footer could be patched. Callers
       hand it to ``patch_or_rewrite`` as a reference.
     """
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if isinstance(node, ast.ImportFrom) and node.module == _FOOTER_PATCH_OWNER_MODULE:
             for alias in node.names:
                 if alias.name in _FOOTER_PATCH_PRIVATE | _FOOTER_PATCH_REFUSALS:
@@ -2219,10 +2285,30 @@ def _find_geometry_identity(m: _Module) -> Iterator[Hit]:
             yield m.hit(found)
 
 
+#: Every node type a geometry-identity shape can flag (each shape below answers
+#: nothing for any other type), so the walk visits only these.
+_GEOMETRY_IDENTITY_TYPES = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.BoolOp,
+    ast.Call,
+    ast.Assign,
+    ast.AnnAssign,
+    ast.Compare,
+    ast.IfExp,
+    ast.List,
+    ast.Tuple,
+    ast.Set,
+    ast.Subscript,
+    ast.Constant,
+    ast.JoinedStr,
+)
+
+
 def _geometry_identity_nodes(m: _Module) -> Iterator[ast.AST]:
     """Every node one of the geometry-identity shapes flags (may repeat)."""
     wkb_owner = _owns(m.path, _WKB_CODEC_OWNERS)
-    for node in ast.walk(m.tree):
+    for node in m.of(_GEOMETRY_IDENTITY_TYPES):
         yield from (*_any_param_default(node), *_fallback_returns(node))
         for shaped in (
             _literal_column_default(node),
@@ -2310,7 +2396,7 @@ def _says_column(name: str) -> bool:
 def _column_targets(m: _Module) -> set[tuple[int, str]]:
     """``(loop id, target)`` for each ``for``/comprehension target that iterates columns."""
     found: set[tuple[int, str]] = set()
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if isinstance(node, (ast.For, ast.comprehension)):
             source = ast.unparse(node.iter)
             if _COLUMN_SOURCE.search(source) and not _NOT_COLUMNISH.search(source):
@@ -2700,6 +2786,19 @@ def _schema_walk_owners() -> tuple[str, ...]:
     return tuple(table.get("modules", ()))
 
 
+#: Every node type a column-fold shape can flag; the walk visits only these.
+_COLUMN_FOLD_TYPES = (
+    ast.While,
+    ast.For,
+    ast.DictComp,
+    ast.Subscript,
+    ast.Call,
+    ast.BinOp,
+    ast.Compare,
+    ast.Constant,
+)
+
+
 def _find_column_fold(m: _Module) -> Iterator[Hit]:
     """A case fold applied to a column name, or a hand-written name suffixer or
     lookup map, outside ``core/column_selection.py`` (#1367 concept 12).
@@ -2737,7 +2836,8 @@ def _find_column_fold(m: _Module) -> Iterator[Hit]:
     ``%`` or ``.format``, and a lookup keyed by a fold held in a variable first.
     """
     targets = _column_targets(m)
-    for node in ast.walk(m.tree):
+    walk_owner = _owns(m.path, _schema_walk_owners())
+    for node in m.of(_COLUMN_FOLD_TYPES):
         if (
             _suffix_loop(m, node)
             or _fold_method_on_column(m, node, targets)
@@ -2745,7 +2845,7 @@ def _find_column_fold(m: _Module) -> Iterator[Hit]:
             or _ascii_fold_table(node)
             or _fold_keyed(node)
             or _exact_column_compare(m, node, targets)
-            or (not _owns(m.path, _schema_walk_owners()) and _schema_listing_walk(m, node))
+            or (not walk_owner and _schema_listing_walk(m, node))
         ):
             yield m.hit(node)
         elif (
@@ -2808,26 +2908,35 @@ def _is_copy_call(node: ast.AST) -> bool:
     return False
 
 
-def _walk_scope(scope: ast.AST) -> Iterator[ast.AST]:
-    """``ast.walk`` of one scope's own code: nested functions are scopes of their own."""
-    stack = list(ast.iter_child_nodes(scope))
-    while stack:
-        node = stack.pop()
-        yield node
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            stack.extend(ast.iter_child_nodes(node))
+def _scope_assignments(scope: ast.AST) -> list[ast.AST]:
+    """The ``=``, annotated and ``:=`` assignments of ``scope``'s own code, in
+    :func:`walk_scope` order; kept on the scope (each checker pass asks again)."""
+    cached = getattr(scope, "_guard_assignments", None)
+    if cached is None:
+        cached = [
+            node
+            for node in walk_scope(scope)
+            if isinstance(node, ast.Assign)
+            or (isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None)
+        ]
+        scope._guard_assignments = cached
+    return cached
 
 
 def _bound_names(scope: ast.AST, pred) -> set[str]:
     """Local names some assignment in ``scope`` binds to a value ``pred`` accepts."""
     names: set[str] = set()
+    assignments = _scope_assignments(scope)
     for _ in range(3):  # a fixpoint over alias chains, order-blind on purpose
-        for node in _walk_scope(scope):
-            if isinstance(node, ast.Assign) and pred(node.value, names):
-                names |= {t.id for t in node.targets if isinstance(t, ast.Name)}
-            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
-                if pred(node.value, names) and isinstance(node.target, ast.Name):
-                    names.add(node.target.id)
+        before = len(names)
+        for node in assignments:
+            if isinstance(node, ast.Assign):
+                if pred(node.value, names):
+                    names |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+            elif pred(node.value, names) and isinstance(node.target, ast.Name):
+                names.add(node.target.id)
+        if len(names) == before:
+            break  # a pass that binds nothing new: the next would not either
     return names
 
 
@@ -2946,7 +3055,7 @@ def _loop_entry_names(scope: ast.AST, aliases: set[str]) -> set[str]:
     """Loop targets that are a block's column entries: ``for c in cols.values()``
     and the value of ``for name, c in cols.items()``."""
     names: set[str] = set()
-    for node in _walk_scope(scope):
+    for node in walk_scope(scope):
         if not isinstance(node, (ast.For, ast.AsyncFor)) or not isinstance(node.iter, ast.Call):
             continue
         func = node.iter.func
@@ -2978,7 +3087,7 @@ def _params(scope: ast.AST) -> set[str]:
 def _keyed_stores(scope: ast.AST) -> dict[str, list[tuple[str, ast.AST]]]:
     """Each local name's string-keyed subscript stores in ``scope``: ``x["k"] = v``."""
     found: dict[str, list[tuple[str, ast.AST]]] = {}
-    for node in _walk_scope(scope):
+    for node in walk_scope(scope):
         for target in _store_targets(node):
             if (
                 isinstance(target, ast.Subscript)
@@ -3007,7 +3116,7 @@ def _restated_blocks(scope: ast.AST) -> Iterator[ast.AST]:
 
 def _block_edits(tree: ast.AST) -> Iterator[ast.AST]:
     """The nodes that edit a ``geo`` block outside the composer, scope by scope."""
-    scopes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    scopes = [n for n in walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
     for scope in [tree, *scopes]:
         seed = _entry_params(scope)
         aliases = seed | _bound_names(
@@ -3025,7 +3134,7 @@ def _block_edits(tree: ast.AST) -> Iterator[ast.AST]:
             _bound_names(scope, lambda value, names: isinstance(value, ast.DictComp)) & block_names
         )
         yield from _restated_blocks(scope)
-        for node in _walk_scope(scope):
+        for node in walk_scope(scope):
             if _edits_by_store(node, aliases, copies) or _edits_by_call(node, aliases):
                 yield node
             elif isinstance(node, ast.Dict) and node.keys and node.keys[0] is None:
@@ -3036,7 +3145,14 @@ def _block_edits(tree: ast.AST) -> Iterator[ast.AST]:
 def _entry_key_owners() -> dict[str, frozenset[str]]:
     """``[G1.geo_compose_entry_key_owners]`` of the one exemptions file: the
     modules that own one key of a column entry and apply its rule for the
-    composer. An edit of THAT key there is the composer's delegated step."""
+    composer. An edit of THAT key there is the composer's delegated step.
+    Read once per version of the file (the arm asks once per module)."""
+    stat = EXEMPTIONS_FILE.stat()
+    return _entry_key_owners_of(stat.st_mtime_ns, stat.st_size)
+
+
+@functools.lru_cache(maxsize=4)
+def _entry_key_owners_of(_mtime_ns: int, _size: int) -> dict[str, frozenset[str]]:
     table = load_exemptions().get("G1", {}).get("geo_compose_entry_key_owners", {})
     return {path: frozenset(keys) for path, keys in table.items()}
 
@@ -3110,7 +3226,7 @@ def _find_geo_compose(m: _Module) -> Iterator[Hit]:
             seen.add(id(node))
             if _edited_key(m, node) not in owned:
                 yield m.hit(node)
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if id(node) in seen:
             continue
         if isinstance(node, ast.Dict):
@@ -3167,7 +3283,7 @@ def _directory_parameter_builds_path(m: _Module, name: ast.Name) -> bool:
     call = m.parents.get(id(name))
     if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
         return False
-    for function in ast.walk(m.tree):
+    for function in walk(m.tree):
         if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         if function.name != call.func.id:
@@ -3218,7 +3334,7 @@ def _find_staging(m: _Module) -> Iterator[Hit]:
     (DuckDB's spill dir, tippecanoe's ``TMPDIR``) and a self-deleting probe
     file are not hits.
     """
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if not isinstance(node, ast.Call):
             continue
         name = m.dotted(node.func)
@@ -3325,20 +3441,16 @@ def _find_crs(m: _Module) -> Iterator[Hit]:
 
     # Track explicit entry bindings within their own lexical scope. Iterating
     # columns/items for block validation or display is deliberately not this shape.
-    parents = {
-        child: parent for parent in ast.walk(m.tree) for child in ast.iter_child_nodes(parent)
-    }
-
     def scope(node):
-        while node in parents:
-            node = parents[node]
+        while id(node) in m.parents:
+            node = m.parents[id(node)]
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
                 return node
         return m.tree
 
     bindings = {
         (scope(node), target.id)
-        for node in ast.walk(m.tree)
+        for node in walk(m.tree)
         if isinstance(node, ast.Assign) and direct_entry(node.value)
         for target in node.targets
         if isinstance(target, ast.Name)
@@ -3349,7 +3461,7 @@ def _find_crs(m: _Module) -> Iterator[Hit]:
             isinstance(node, ast.Name) and (scope(node), node.id) in bindings
         )
 
-    for node in ast.walk(m.tree):
+    for node in walk(m.tree):
         if isinstance(node, ast.Compare) and any(
             crs_literal(v) for v in [node.left, *node.comparators]
         ):
@@ -3453,24 +3565,29 @@ ARMS = {
 }
 
 
-@functools.lru_cache(maxsize=8)
+def _module(repo: Path, source: Path) -> _Module:
+    """One module, built once per process from the shared scan's parse and walk:
+    every arm, and every root tuple that includes it, reads the same object."""
+    return _module_of(source.relative_to(repo).as_posix(), parse(source))
+
+
+@functools.lru_cache(maxsize=4096)
+def _module_of(relative: str, parsed: Source) -> _Module:
+    return _Module(
+        relative,
+        parsed.tree,
+        parsed.lines,
+        _docstring_nodes(parsed.tree),
+        _scopes(parsed.tree, parsed.parents),
+        parsed.parents,
+    )
+
+
 def _modules(repo: Path, roots: tuple[str, ...]) -> tuple[_Module, ...]:
-    """Every module under *roots*, parsed once per tree (each arm walks them all)."""
-    found = []
-    for root in roots:
-        for source in sorted((repo / root).rglob("*.py")):
-            text = source.read_text(encoding="utf-8")
-            tree = ast.parse(text)
-            found.append(
-                _Module(
-                    source.relative_to(repo).as_posix(),
-                    tree,
-                    text.splitlines(),
-                    _docstring_nodes(tree),
-                    _scopes(tree),
-                )
-            )
-    return tuple(found)
+    """Every module under *roots* (each arm walks them all; each is parsed once)."""
+    return tuple(
+        _module(repo, source) for root in roots for source in sorted((repo / root).rglob("*.py"))
+    )
 
 
 def arm_hits(repo: Path, arm_name: str) -> list[Hit]:
@@ -3737,7 +3854,7 @@ def _ast_identifiers(path: Path) -> set[str]:
     def/class names, parameters, import aliases and keyword arguments. Text in
     comments, strings and docstrings does not count."""
     found: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+    for node in walk(parse(path).tree):
         if isinstance(node, ast.Name):
             found.add(node.id)
         elif isinstance(node, ast.Attribute):
@@ -5941,9 +6058,9 @@ def test_g12_pylint_missing_fails(tmp_path):
 
 def cap__owner_only_reads(path: Path, root: Path = REPO) -> list[str]:
     """``.core_geometry`` reads and ``hasattr``/``getattr(duckdb, ...)`` feature probes."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = parse(path).tree
     found = []
-    for node in ast.walk(tree):
+    for node in walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "core_geometry":
             found.append(f"{path.relative_to(root).as_posix()}:{node.lineno} core_geometry")
         elif (
@@ -5994,7 +6111,7 @@ size_SET_OWNERS = {PACKAGE / "core" / "duckdb_utils.py", PACKAGE / "core" / "mem
 def size__size_function_defs(tree: ast.AST) -> list[int]:
     return [
         node.lineno
-        for node in ast.walk(tree)
+        for node in walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name.lstrip("_").startswith(
             ("parse_size", "format_size", "format_memory_limit", "displayed_size", "nudged_size")
@@ -6006,7 +6123,7 @@ def size__size_regexes(tree: ast.AST) -> list[int]:
     """``re.compile`` of a pattern that spells a size unit (``KiB``, ``MB``...)."""
     return [
         node.lineno
-        for node in ast.walk(tree)
+        for node in walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "compile"
@@ -6021,12 +6138,12 @@ def size__set_memory_limit_literals(tree: ast.AST) -> list[int]:
     """String literals that issue ``SET memory_limit`` (docstrings that mention it do not)."""
     docstrings = {
         id(node.value)
-        for node in ast.walk(tree)
+        for node in walk(tree)
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
     }
     return [
         node.lineno
-        for node in ast.walk(tree)
+        for node in walk(tree)
         if isinstance(node, ast.Constant)
         and isinstance(node.value, str)
         and id(node) not in docstrings
@@ -6037,7 +6154,7 @@ def size__set_memory_limit_literals(tree: ast.AST) -> list[int]:
 def size__violations(root: Path = PACKAGE) -> list[str]:
     found = []
     for path in sorted(root.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = parse(path).tree
         rel = path.relative_to(root).as_posix()
         if path.resolve() != size_SIZING.resolve():
             found += [f"{rel}:{n} size parser/formatter" for n in size__size_function_defs(tree)]
@@ -6085,10 +6202,10 @@ size_SETTING_PRIMITIVES = {
 
 def size__limit_setters(path: Path, root: Path) -> set[str]:
     """``path:function`` for every function that SETs ``memory_limit`` or ``threads``."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = parse(path).tree
     docstrings = {
         id(node.value)
-        for node in ast.walk(tree)
+        for node in walk(tree)
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
     }
 
@@ -6121,7 +6238,7 @@ def size__limit_setters(path: Path, root: Path) -> set[str]:
     rel = path.relative_to(root).as_posix()
     return {
         f"{rel}:{func.name}"
-        for func in ast.walk(tree)
+        for func in walk(tree)
         if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef))
         and any(sets_a_limit(node) for node in ast.walk(func))
     }
@@ -6196,14 +6313,14 @@ query__GEO_TYPE_OWNERS = frozenset(
 def query__docstring_ids(tree: ast.AST) -> set[int]:
     return {
         id(node.value)
-        for node in ast.walk(tree)
+        for node in walk(tree)
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
     }
 
 
 def query__string_literals(tree: ast.AST, skip: set[int] = frozenset()):
     docstrings = query__docstring_ids(tree)
-    for node in ast.walk(tree):
+    for node in walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             if id(node) not in docstrings and id(node) not in skip:
                 yield node
@@ -6212,7 +6329,7 @@ def query__string_literals(tree: ast.AST, skip: set[int] = frozenset()):
 def query__owner_function_nodes(tree: ast.AST, names: frozenset[str]) -> set[int]:
     return {
         id(sub)
-        for func in ast.walk(tree)
+        for func in walk(tree)
         if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) and func.name in names
         for sub in ast.walk(func)
     }
@@ -6220,7 +6337,7 @@ def query__owner_function_nodes(tree: ast.AST, names: frozenset[str]) -> set[int
 
 def query__modules(root: Path):
     for path in sorted(root.rglob("*.py")):
-        yield path.relative_to(root.parent).as_posix(), ast.parse(path.read_text(encoding="utf-8"))
+        yield path.relative_to(root.parent).as_posix(), parse(path).tree
 
 
 def query__probe_counts(root: Path = PACKAGE) -> Counter:
@@ -6252,7 +6369,7 @@ query__MEMBERSHIP = (ast.In, ast.NotIn)  # codespell:ignore
 def query__prefix_or_substring_tests(tree: ast.AST, wanted) -> int:
     """``x.startswith(c)`` / ``x.endswith(c)`` / ``c in x`` with a constant ``c`` in ``wanted``."""
     found = 0
-    for node in ast.walk(tree):
+    for node in walk(tree):
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -6276,8 +6393,7 @@ def query__native_counts(root: Path = PACKAGE) -> Counter:
         )
         counts[rel] += query__prefix_or_substring_tests(tree, query__FAMILIES.__contains__)
         if any(
-            isinstance(n, ast.FunctionDef) and n.name == "_is_geography_column"
-            for n in ast.walk(tree)
+            isinstance(n, ast.FunctionDef) and n.name == "_is_geography_column" for n in walk(tree)
         ):
             counts[f"{rel}::_is_geography_column"] += 1
     return +counts
@@ -6287,7 +6403,7 @@ def query__owner_names(tree: ast.AST) -> set[str]:
     """The geo-type owners' names in this module, ``import ... as`` aliases included."""
     return query__GEO_TYPE_OWNERS | {
         alias.asname
-        for node in ast.walk(tree)
+        for node in walk(tree)
         if isinstance(node, ast.ImportFrom)
         for alias in node.names
         if alias.name in query__GEO_TYPE_OWNERS and alias.asname
@@ -6298,7 +6414,7 @@ def query__owner_answers(tree: ast.AST, owners: set[str]) -> set[str]:
     """Names bound straight from a geo-type owner call (``parsed = parse_duckdb_geo_type(t)``)."""
     return {
         target.id
-        for node in ast.walk(tree)
+        for node in walk(tree)
         if isinstance(node, ast.Assign) and query__is_owner_call(node.value, owners, set())
         for target in node.targets
         if isinstance(target, ast.Name)
@@ -6321,7 +6437,7 @@ def query__duckdb_geo_type_checks(tree: ast.AST) -> int:
     owners = query__owner_names(tree)
     answers = query__owner_answers(tree, owners)
     found = query__prefix_or_substring_tests(tree, "GEOMETRY".__eq__)
-    for node in ast.walk(tree):
+    for node in walk(tree):
         if not isinstance(node, ast.Compare) or not any(
             isinstance(op, (ast.Eq, ast.NotEq)) for op in node.ops
         ):
@@ -6512,11 +6628,13 @@ def exception__exception_params(func: ast.FunctionDef | ast.AsyncFunctionDef) ->
     return names
 
 
+@functools.lru_cache(maxsize=1)
 def exception__gpio_error_names() -> frozenset[str]:
-    """Names of ``GeoParquetError`` and every subclass defined in the package."""
+    """Names of ``GeoParquetError`` and every subclass defined in the package.
+    Read on first use, not at import: collecting this module parses nothing."""
     bases: dict[str, set[str]] = {}
     for path in PACKAGE.rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        for node in walk(parse(path).tree):
             if isinstance(node, ast.ClassDef):
                 bases.setdefault(node.name, set()).update(
                     b.id if isinstance(b, ast.Name) else b.attr
@@ -6534,19 +6652,16 @@ def exception__gpio_error_names() -> frozenset[str]:
     return frozenset(known)
 
 
-exception__GPIO_ERRORS = exception__gpio_error_names()
-
-
 def exception__is_gpio_error(handler_type: ast.expr | None) -> bool:
     """Whether an ``except`` clause names only gpio error classes."""
     if handler_type is None:
         return False
     nodes = handler_type.elts if isinstance(handler_type, ast.Tuple) else [handler_type]
     names = [n.id if isinstance(n, ast.Name) else getattr(n, "attr", "") for n in nodes]
-    return bool(names) and all(name in exception__GPIO_ERRORS for name in names)
+    return bool(names) and all(name in exception__gpio_error_names() for name in names)
 
 
-def exception_unsanitized_reports(source: str) -> list[tuple[str, int]]:
+def exception_unsanitized_reports(source: str | ast.Module) -> list[tuple[str, int]]:
     """``(enclosing function, line)`` for each raw-exception report in ``source``.
 
     Two shapes: an ``except ... as e`` body that reports ``e``, and a function
@@ -6554,7 +6669,7 @@ def exception_unsanitized_reports(source: str) -> list[tuple[str, int]]:
     outside any ``except`` body -- the helper that builds a ``ClickException``
     from ``exc.reason`` is invisible to the first shape.
     """
-    tree = ast.parse(source)
+    tree = ast.parse(source) if isinstance(source, str) else source
     found: list[tuple[str, int]] = []
 
     def visit(node: ast.AST, scope: str) -> None:
@@ -6634,7 +6749,7 @@ def _find_native_probe(m):
     for n in query__string_literals(m.tree):
         if query__NATIVE_PROBE.search(n.value):
             yield m.hit(n)
-    for n in ast.walk(m.tree):
+    for n in walk(m.tree):
         if isinstance(n, ast.FunctionDef) and n.name == "_is_geography_column":
             yield m.hit(n)
         if isinstance(n, (ast.Call, ast.Compare)):
@@ -6660,13 +6775,13 @@ def _find_geo_type_probe(m):
 
 
 def _find_raw_exception(m):
-    for scope, line in exception_unsanitized_reports("\n".join(m.lines)):
+    for scope, line in exception_unsanitized_reports(m.tree):
         yield Hit(m.path, line, scope, m.lines[line - 1])
 
 
 def _find_spatial_filter(m):
     docstrings = _docstring_nodes(m.tree)
-    for n in ast.walk(m.tree):
+    for n in walk(m.tree):
         if (
             isinstance(n, ast.Constant)
             and isinstance(n.value, str)
