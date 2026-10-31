@@ -24,6 +24,11 @@ WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "tests.yml"
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 
 LANE_MARKERS = {"slow", "network", "meta", "integration", "corpus"}
+SLOW_INTEGRATION_MODULES = {
+    "tests/e2e/test_journeys.py": test_journeys,
+    "tests/test_pipe_integration.py": test_pipe_integration,
+    "tests/test_geoparquet_corpus.py": test_geoparquet_corpus,
+}
 
 # `-m "a and not b"`, `-m 'a and not b'`, or a bare `-m network`.
 _SELECTION = re.compile(r"-m\s+(?:\"([^\"]+)\"|'([^']+)'|(?!-)(\S+))")
@@ -141,7 +146,7 @@ def test_each_journey_lands_in_exactly_one_ci_job():
         )
 
 
-@pytest.mark.parametrize("module", [test_journeys, test_pipe_integration, test_geoparquet_corpus])
+@pytest.mark.parametrize("module", SLOW_INTEGRATION_MODULES.values())
 def test_whole_pipeline_modules_run_in_slow_lane(module):
     """Whole-pipeline checks are slow to bound the fast matrix (#1402)."""
     marks = module.pytestmark
@@ -151,6 +156,36 @@ def test_whole_pipeline_modules_run_in_slow_lane(module):
     assert "slow" in names, f"{module.__name__} must remain slow (#1402)"
     assert not selects("not slow and not network and not meta", names)
     assert selects("(slow or meta) and not network", names)
+
+
+def test_only_policy_modules_carry_slow_and_integration_marks():
+    """Moving another integration module to slow requires a policy-list edit."""
+    for path in sorted((PROJECT_ROOT / "tests").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        names = set()
+        for statement in tree.body:
+            if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            if not any(
+                isinstance(target, ast.Name) and target.id == "pytestmark" for target in targets
+            ):
+                continue
+            for node in ast.walk(statement.value):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Attribute)
+                    and node.value.attr == "mark"
+                    and isinstance(node.value.value, ast.Name)
+                    and node.value.value.id == "pytest"
+                ):
+                    names.add(node.attr)
+        if {"slow", "integration"} <= names:
+            relative = path.relative_to(PROJECT_ROOT).as_posix()
+            assert relative in SLOW_INTEGRATION_MODULES, (
+                f"{relative} has module-level slow and integration marks; "
+                "update SLOW_INTEGRATION_MODULES deliberately to change lane policy (#1402)"
+            )
 
 
 def test_plain_integration_tests_still_run_in_fast_lane():

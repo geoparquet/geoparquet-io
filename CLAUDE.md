@@ -219,7 +219,7 @@ The fast lane runs `uv run pytest -n auto -m "not slow and not network and not m
 Whole-pipeline journeys, subprocess pipelines, corpus checks, and all docs
 examples are slow by policy (#1402), keeping each fast CI leg under 20 minutes.
 Run the slow lane with `uv run pytest -n 4 -m "(slow or meta) and not network"`;
-CI runs it on one Ubuntu leg. Run docs locally with
+CI runs it on three OS legs: Ubuntu, macOS, and Windows. Run docs locally with
 `uv run pytest docs/guide -m "not network"`, and network tests separately with
 `uv run pytest -m network`.
 
