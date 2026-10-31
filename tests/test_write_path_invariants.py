@@ -81,19 +81,22 @@ GEOMETRY_FREE = {"aggregate_h3_none"}
 #: geometry branch from here on; it does not show the T2c change.
 SIDECAR_REFERENCE = {"aggregate_h3_none": "aggregate_h3_polygon"}
 
-_PASSTHROUGH = (
-    "#1367: metadata-only rewrite keeps the input's SNAPPY pages and 10,000-row "
-    "groups instead of the facade's ZSTD/49,152"
-)
+#: Metadata-only commands: a footer patch, not a write. Their pages are the
+#: input's, byte for byte, so on the codec, row-group and level axes they are
+#: held to the input, not to the facade (the lead's policy for #1367 T2d: only a
+#: footer that cannot be patched is rewritten, and that rewrite goes through the
+#: funnel and takes the facade's policy). This matrix runs the patchable cell
+#: only. The unpatchable cell -- the facade's codec and row groups, every
+#: metadata-only command -- is owned by tests/test_patch_or_rewrite.py's table
+#: (``test_an_unpatchable_footer_rewrites_through_the_funnel_keeping_the_same_keys``),
+#: so it is not repeated here.
+METADATA_ONLY = {"check_bbox_fix", "add_bbox_metadata"}
+#: The invariants a footer patch answers by passing the input's pages through.
+LAYOUT_INVARIANTS = {"codec", "row_groups", "level"}
+
 _EPOCH = "#1367: the rewrite rebuilds the geo block without the input's epoch"
 #: (path, invariant) -> reason, for every cell that fails on the base (3185269f).
 XFAIL = {
-    ("check_bbox_fix", "codec"): _PASSTHROUGH,
-    ("add_bbox_metadata", "codec"): _PASSTHROUGH,
-    ("check_bbox_fix", "row_groups"): _PASSTHROUGH,
-    ("add_bbox_metadata", "row_groups"): _PASSTHROUGH,
-    ("check_bbox_fix", "level"): _PASSTHROUGH,
-    ("add_bbox_metadata", "level"): _PASSTHROUGH,
     ("convert_geoparquet", "epoch"): _EPOCH,
     **{(f"table_write_{s}", "epoch"): _EPOCH for s in STRATEGIES},
 }
@@ -260,6 +263,19 @@ def _reference_sizes(path: Path, tmp: Path) -> dict[tuple[str, int], int]:
 # ---------------------------------------------------------------------------
 
 
+def _data_section(path: Path) -> bytes:
+    """Every byte below the footer: the pages a footer patch copies verbatim."""
+    raw = path.read_bytes()
+    footer_length = int.from_bytes(raw[-8:-4], "little")
+    return raw[: len(raw) - 8 - footer_length]
+
+
+def _check_pages_passed_through(path: Path, source: Path, _tmp: Path) -> None:
+    assert _data_section(path) == _data_section(source), (
+        f"{path.name}: a metadata-only command re-encoded the input's pages"
+    )
+
+
 def _check_codec(path: Path, _source: Path, _tmp: Path) -> None:
     codecs = {(c.path_in_schema, c.compression) for c in _columns(path)}
     assert {codec for _, codec in codecs} == {"ZSTD"}, sorted(codecs)
@@ -341,6 +357,9 @@ def test_write_path_invariant(path, invariant, outputs, source, tmp_path):
         reference = outputs[SIDECAR_REFERENCE[path]]
         keys = set(footer_kv(outputs[path])) - {b"geo"}
         assert keys == set(footer_kv(reference)) - {b"geo"}, sorted(keys)
+        return
+    if path in METADATA_ONLY and invariant in LAYOUT_INVARIANTS:
+        _check_pages_passed_through(outputs[path], source, tmp_path)
         return
     INVARIANTS[invariant](outputs[path], source, tmp_path)
 

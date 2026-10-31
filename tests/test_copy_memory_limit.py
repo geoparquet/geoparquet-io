@@ -614,27 +614,33 @@ class TestDirectCopyMemoryLimit:
     def test_bbox_metadata_rewrite_fallback_is_memory_bounded(self, monkeypatch, places_v11_file):
         """The full-file rewrite behind an unpatchable footer is bounded too.
 
-        It is the query funnel's write now, so the bound is the funnel's: the
-        duckdb-kv strategy wraps its COPY in ``scoped_write_memory_limit``.
+        It is the funnel's one footer rewrite (``write_funnels.rewrite_footer_kv``),
+        which streams one row group at a time through pyarrow and opens no
+        DuckDB connection: never a whole-file read (#1155). Its peak memory is
+        measured in tests/test_v2_zm_geo_metadata.py.
         """
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core import write_funnels
         from geoparquet_io.core.add import bbox_metadata as bm
         from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
-        from geoparquet_io.core.write_strategies import duckdb_kv
 
         def refuse(*args, **kwargs):
             raise FooterPatchUnsupported("forced for the test")
 
-        monkeypatch.setattr(bm, "patch_footer_kv", refuse)
-        monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
-        seen = []
-        self._spy_scoped_limit(monkeypatch, duckdb_kv, seen)
+        def unbounded(*args, **kwargs):
+            raise AssertionError("the fallback read the whole file")
+
+        def no_duckdb(*args, **kwargs):
+            raise AssertionError("the fallback opened a DuckDB connection")
+
+        monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
+        monkeypatch.setattr(pq, "read_table", unbounded)
+        monkeypatch.setattr(write_funnels, "get_duckdb_connection", no_duckdb)
 
         bm.add_bbox_metadata(places_v11_file)
 
-        ((memory_limit_arg, during, _threads),) = seen
-        assert memory_limit_arg is None
-        limit_bytes = parse_size_string(during)
-        assert limit_bytes is not None and limit_bytes <= 5 * GIB
+        assert b"covering" in pq.read_metadata(places_v11_file).metadata[b"geo"]
 
 
 class TestDirectCopyRegressions:

@@ -175,7 +175,7 @@ def test_a_planar_output_keeps_duckdbs_statistics(tmp_path):
 def test_the_mzm_merged_patch_carries_the_geodesic_box(tmp_path):
     """The #1270 single patch and the #1272 box land together."""
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
-    from geoparquet_io.core.parquet_footer import patch_footer
+    from geoparquet_io.core.parquet_footer import _patch_footer_file
 
     source = tmp_path / "xym.parquet"
     con = get_duckdb_connection(load_spatial=True)
@@ -186,7 +186,7 @@ def test_the_mzm_merged_patch_carries_the_geodesic_box(tmp_path):
         )
     finally:
         con.close()
-    patch_footer(str(source), geography={"geometry": "spherical"})
+    _patch_footer_file(str(source), geography={"geometry": "spherical"})
     out = tmp_path / "out.parquet"
     convert_to_geoparquet(str(source), str(out), skip_hilbert=True, geoparquet_version="2.0")
 
@@ -254,7 +254,7 @@ def _duckdb_v2(path: Path, wkt: str) -> None:
 )
 def test_the_declared_orientation_decides_the_interior(tmp_path, orientation, expected):
     """A clockwise square is the square unoriented, and the rest of the globe if ccw."""
-    from geoparquet_io.core.parquet_footer import patch_footer_kv
+    from geoparquet_io.core.parquet_footer import _patch_footer_file
     from geoparquet_io.core.write_funnels import apply_nonplanar_edges
 
     path = tmp_path / "square.parquet"
@@ -262,7 +262,7 @@ def test_the_declared_orientation_decides_the_interior(tmp_path, orientation, ex
     if orientation:
         geo = geo_block(path)
         geo["columns"]["geometry"]["orientation"] = orientation
-        patch_footer_kv(str(path), {"geo": json.dumps(geo)})
+        _patch_footer_file(str(path), {"geo": json.dumps(geo)})
 
     apply_nonplanar_edges({"geometry": "spherical"}, str(path))
 

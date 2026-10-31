@@ -530,7 +530,11 @@ class TestFixSpatialOrdering:
             fix_spatial_ordering(target, target, verbose=False)
 
         assert seen, "hilbert_order was never called"
-        assert os.path.dirname(os.path.abspath(seen[0])) == os.path.abspath(temp_output_dir)
+        # Staged in a directory beside the target (``atomic_write``), so the
+        # swap is a rename on one filesystem.
+        staging_dir = os.path.dirname(os.path.abspath(seen[0]))
+        assert os.path.dirname(staging_dir) == os.path.abspath(temp_output_dir)
+        assert os.path.basename(staging_dir).startswith(".gpio-stage-")
         assert_places_output_is_sound(target, version="1.0", covering=False)
 
     def test_an_aliased_output_path_is_still_an_in_place_fix(
@@ -559,7 +563,7 @@ class TestFixSpatialOrdering:
         """A move that fails must not take the only good copy of the data with it.
 
         The whole destructive step is the ``os.replace()`` inside
-        ``_staged_output``, so if it raises, the original -- never unlinked --
+        ``write_funnels.staged_replacement``, so if it raises, the original -- never unlinked --
         is exactly as it was. Under ``--fix --no-backup`` there is no ``.bak``
         to fall back on, and a direct caller of this function has no ``.bak``
         concept at all.
@@ -583,7 +587,7 @@ class TestFixSpatialOrdering:
 
         assert os.path.exists(target), "the in-place fix destroyed the original file"
         assert Path(target).read_bytes() == original_bytes
-        assert list(Path(temp_output_dir).glob(".gpio-fix-*")) == []
+        assert list(Path(temp_output_dir).glob(".gpio-stage-*")) == []
         assert_places_output_is_sound(target, version="1.0", covering=False)
 
 

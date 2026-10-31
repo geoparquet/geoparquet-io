@@ -580,7 +580,9 @@ def add_stac_metadata_cmd(
 
     With no OUTPUT the file is modified in place. Either way only the footer is
     rewritten: every page below it is copied verbatim, so the compression level,
-    the encodings, the bloom filters and the row order are all preserved.
+    the encodings, the bloom filters and the row order are all preserved. A
+    footer that cannot be patched falls back, with a warning, to a rewrite at
+    gpio's default codec and row groups.
     """
     with _activate_s3(ctx):
         add_stac_metadata_impl(

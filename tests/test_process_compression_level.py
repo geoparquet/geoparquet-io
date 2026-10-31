@@ -11,7 +11,8 @@ So the process group resolves an unset ZSTD level to 9, and every other
 command keeps 15.
 
 The second is that an unset level must reach pyarrow as a number at all.
-``_rewrite_writer_kwargs`` used to omit the key, which is not "the default" --
+A pyarrow writer's kwargs (``resolve_codec(...).pyarrow_kwargs()``, which the
+streaming simplify writer and the funnel's footer rewrite use) used to omit the key, which is not "the default" --
 it is pyarrow's own ZSTD default of 1, 14 levels below what the funnel writes
 from the same data. These tests fail if either default drifts, in either
 direction.
@@ -35,7 +36,6 @@ from geoparquet_io.core.compression import (
     resolve_codec,
     resolve_process_compression_level,
 )
-from geoparquet_io.core.derive_geo_from_file import _rewrite_writer_kwargs
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS, ParquetWriteSettings
 
 requires_coarsen = pytest.mark.skipif(
@@ -161,6 +161,11 @@ class TestGlobalDefaultIsUnchanged:
         assert caplog.text == ""
 
 
+def _rewrite_writer_kwargs(codec, level):
+    """The pyarrow writer kwargs the owner hands every pyarrow writer."""
+    return resolve_codec(codec, level, context="write").pyarrow_kwargs()
+
+
 class TestRewriteWriterKwargs:
     """An unset level must not fall through to pyarrow's own default of 1."""
 
@@ -227,28 +232,28 @@ class TestVecorelMetadataRewriteCodec:
     """
 
     def test_the_requested_codec_reaches_the_rewrite(self, tmp_path, monkeypatch):
+        """The key is a footer patch; the codec matters on its fallback, the
+        funnel's one rewrite, which must be handed the command's codec."""
         import geoparquet_io.core.add.geometry_metrics as gm
-        import geoparquet_io.core.duckdb_utils as du
+        from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
 
         src = tmp_path / "in.parquet"
         pq.write_table(pa.table({"id": ["a"]}), str(src), compression="GZIP")
         seen: dict = {}
 
-        def fake_write(con, query, out, **kwargs):
+        def refuse(*args, **kwargs):
+            raise FooterPatchUnsupported("forced for the test")
+
+        def fake_rewrite(source, destination, updates, **kwargs):
             seen.update(kwargs)
-            pq.write_table(pa.table({"id": ["a"]}), out, compression="GZIP")
 
-        class FakeCon:
-            def close(self):
-                pass
+        monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
+        monkeypatch.setattr(gm, "rewrite_footer_kv", fake_rewrite)
+        from geoparquet_io.core.parquet_writer import WriteOptions
 
-        monkeypatch.setattr(gm, "write_parquet_with_metadata", fake_write)
-        monkeypatch.setattr(du, "get_duckdb_connection", lambda **k: FakeCon())
-        gm._add_vecorel_metadata_to_file(
-            str(src), False, None, compression="GZIP", compression_level=None
-        )
-        assert seen["compression"] == "GZIP"
-        assert seen["compression_level"] is None
+        gm._add_vecorel_metadata_to_file(str(src), False, WriteOptions(compression="GZIP"))
+        assert seen["write"].compression == "GZIP"
+        assert seen["write"].compression_level is None
 
 
 class TestHelpTextNamesTheRightDefault:

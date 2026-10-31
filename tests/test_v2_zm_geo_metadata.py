@@ -103,35 +103,48 @@ def test_repair_preserves_lz4_codec_and_row_groups(zm_source, tmp_path):
     assert codecs <= {"LZ4", "LZ4_RAW"}, f"LZ4 silently rewritten: {codecs}"
 
 
-def test_rewrite_keeps_row_group_structure_when_unspecified(tmp_path):
-    """With row_group_rows=None the rewrite must mirror the file's own layout."""
+def test_rewrite_takes_the_facades_row_groups_when_unspecified(tmp_path):
+    """Unset ``row_group_rows`` is the facade's count, not the file's own layout.
+
+    The funnel's repairs always pass the count they wrote; a user file that
+    reached the fallback takes the facade's default like any other write.
+    """
     import pyarrow as pa
 
-    from geoparquet_io.core.derive_geo_from_file import _rewrite_file_with_geo_metadata
+    from geoparquet_io.core.parquet_writer import WriteOptions
+    from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
-    path = tmp_path / "plain.parquet"
-    pq.write_table(pa.table({"a": list(range(30))}), str(path), row_group_size=10)
-    assert pq.ParquetFile(str(path)).metadata.num_row_groups == 3
+    path = str(tmp_path / "plain.parquet")
+    pq.write_table(pa.table({"a": list(range(30))}), path, row_group_size=10)
+    assert pq.ParquetFile(path).metadata.num_row_groups == 3
 
-    _rewrite_file_with_geo_metadata(str(path), {"version": "2.0.0"}, "ZSTD", None, None)
-    assert pq.ParquetFile(str(path)).metadata.num_row_groups == 3
+    rewrite_footer_kv(path, path, {"geo": json.dumps({"version": "2.0.0"})})
+    assert pq.ParquetFile(path).metadata.num_row_groups == 1
+
+    rewrite_footer_kv(
+        path, path, {"geo": json.dumps({"version": "2.0.0"})}, write=WriteOptions(row_group_rows=10)
+    )
+    assert pq.ParquetFile(path).metadata.num_row_groups == 3
 
 
 def test_rewrite_preserves_lz4_codec_unit(tmp_path):
     """``resolve_codec`` keeps the normalized 'LZ4' name callers actually pass."""
     import pyarrow as pa
 
-    from geoparquet_io.core.derive_geo_from_file import _rewrite_file_with_geo_metadata
+    from geoparquet_io.core.parquet_writer import WriteOptions
+    from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
-    path = tmp_path / "plain.parquet"
-    pq.write_table(pa.table({"a": [1, 2, 3]}), str(path), compression="lz4")
+    path = str(tmp_path / "plain.parquet")
+    pq.write_table(pa.table({"a": [1, 2, 3]}), path, compression="lz4")
 
-    _rewrite_file_with_geo_metadata(str(path), {"version": "2.0.0"}, "LZ4", None, None)
-    codec = pq.ParquetFile(str(path)).metadata.row_group(0).column(0).compression
+    rewrite_footer_kv(
+        path, path, {"geo": json.dumps({"version": "2.0.0"})}, write=WriteOptions(compression="LZ4")
+    )
+    codec = pq.ParquetFile(path).metadata.row_group(0).column(0).compression
     assert codec in ("LZ4", "LZ4_RAW"), codec
 
 
-@pytest.mark.parametrize("row_group_rows", [None, 10], ids=["mirror", "explicit"])
+@pytest.mark.parametrize("row_group_rows", [None, 10], ids=["default", "explicit"])
 def test_rewrite_streams_instead_of_reading_whole_file(tmp_path, monkeypatch, row_group_rows):
     """The rewrite must never materialize the whole file in memory (#1155).
 
@@ -142,7 +155,8 @@ def test_rewrite_streams_instead_of_reading_whole_file(tmp_path, monkeypatch, ro
     """
     import pyarrow as pa
 
-    from geoparquet_io.core.derive_geo_from_file import _rewrite_file_with_geo_metadata
+    from geoparquet_io.core.parquet_writer import WriteOptions
+    from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
     path = tmp_path / "plain.parquet"
     pq.write_table(pa.table({"a": list(range(20))}), str(path), row_group_size=10)
@@ -151,7 +165,12 @@ def test_rewrite_streams_instead_of_reading_whole_file(tmp_path, monkeypatch, ro
         raise AssertionError("pq.read_table must not run on the rewrite path (#1155)")
 
     monkeypatch.setattr(pq, "read_table", boom)
-    _rewrite_file_with_geo_metadata(str(path), {"version": "2.0.0"}, "ZSTD", None, row_group_rows)
+    rewrite_footer_kv(
+        str(path),
+        str(path),
+        {"geo": json.dumps({"version": "2.0.0"})},
+        write=WriteOptions(row_group_rows=row_group_rows),
+    )
 
     with pq.ParquetFile(str(path)) as pf:
         assert pf.metadata.num_rows == 20
@@ -164,9 +183,10 @@ _MEASURE_REWRITE = """
 import json, sys
 import pyarrow as pa
 import pyarrow.parquet as pq
-from geoparquet_io.core.derive_geo_from_file import _rewrite_file_with_geo_metadata
+from geoparquet_io.core.parquet_writer import WriteOptions
+from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
-path, rows = sys.argv[1], sys.argv[2]
+path, rows = sys.argv[1], int(sys.argv[2])
 peaks = []
 real_write_table = pq.ParquetWriter.write_table
 
@@ -188,21 +208,19 @@ def read_row_group_one_thread(self, i, columns=None, use_threads=True, use_panda
 
 pq.ParquetFile.read_row_group = read_row_group_one_thread
 baseline = pa.total_allocated_bytes()
-_rewrite_file_with_geo_metadata(
-    path, {"version": "2.0.0"}, "ZSTD", None, None if rows == "none" else int(rows)
-)
+rewrite_footer_kv(path, path, {"geo": json.dumps({"version": "2.0.0"})}, write=WriteOptions(row_group_rows=rows))
 print(json.dumps({"writes": len(peaks), "growth": max(peaks) - baseline if peaks else 0}))
 """
 
 
-@pytest.mark.parametrize("row_group_rows", [None, 4_000], ids=["mirror", "explicit"])
-def test_rewrite_memory_is_bounded_by_a_row_group(tmp_path, row_group_rows):
+def test_rewrite_memory_is_bounded_by_a_row_group(tmp_path):
     """Peak Arrow memory during the rewrite stays near one row group (#1155).
 
     Forbidding ``pq.read_table`` is not enough: with pyarrow's default
     ``pre_buffer=True`` the explicit-``row_group_rows`` branch (``iter_batches``,
     the default convert path) kept every column chunk it had read cached until
-    the file closed, so memory grew to the whole compressed file.
+    the file closed, so memory grew to the whole compressed file. The funnel's
+    repairs always pass their count, which is the case measured.
 
     Measured in a subprocess: ``pa.total_allocated_bytes()`` is process-wide, so
     inside a shared test worker another test's leftover threads made it flaky.
@@ -227,7 +245,7 @@ def test_rewrite_memory_is_bounded_by_a_row_group(tmp_path, row_group_rows):
             writer.write_table(pa.table({"blob": blob}), row_group_size=rows)
 
     measured = subprocess.run(
-        [sys.executable, "-c", _MEASURE_REWRITE, path, str(row_group_rows or "none")],
+        [sys.executable, "-c", _MEASURE_REWRITE, path, str(rows)],
         capture_output=True,
         text=True,
         check=True,
@@ -240,30 +258,6 @@ def test_rewrite_memory_is_bounded_by_a_row_group(tmp_path, row_group_rows):
         f"rewrite grew Arrow memory by {result['growth'] / 1e6:.1f} MB; "
         f"one row group is {one_group / 1e6:.1f} MB"
     )
-
-
-def test_rewrite_preserves_uneven_row_group_boundaries(tmp_path):
-    """With no explicit size the rewrite mirrors each existing group exactly,
-    not a re-chunk at the largest group's size."""
-    import pyarrow as pa
-
-    from geoparquet_io.core.derive_geo_from_file import _rewrite_file_with_geo_metadata
-
-    path = tmp_path / "uneven.parquet"
-    schema = pa.schema([("a", pa.int64())])
-    with pq.ParquetWriter(str(path), schema) as writer:
-        for n in (3, 10, 5):
-            writer.write_table(pa.table({"a": list(range(n))}, schema=schema))
-
-    _rewrite_file_with_geo_metadata(str(path), {"version": "2.0.0"}, "ZSTD", None, None)
-
-    pf = pq.ParquetFile(str(path))
-    groups = [pf.metadata.row_group(i).num_rows for i in range(pf.metadata.num_row_groups)]
-    assert groups == [3, 10, 5], groups
-    assert b"geo" in pf.metadata.metadata
-
-
-# --- Primary-column choice for multi-geometry repairs (todo 047-C6) ---
 
 
 def test_repair_uses_real_primary_column_not_alphabetical(tmp_path):

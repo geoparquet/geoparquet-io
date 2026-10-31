@@ -11,11 +11,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from geoparquet_io.core.bbox_structure import bbox_shaped_struct_columns, check_bbox_structure
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.compression import codec_from_footer, resolve_codec
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
     apply_target_crs_to_geo_meta,
     entry_crs_is_unknown,
@@ -53,6 +52,7 @@ from geoparquet_io.core.geo_metadata import (
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, info, success, warn
+from geoparquet_io.core.parquet_footer import patch_or_rewrite
 from geoparquet_io.core.parquet_writer import WriteOptions, resolve_output_geoparquet_version
 from geoparquet_io.core.remote import (
     needs_httpfs,
@@ -62,7 +62,11 @@ from geoparquet_io.core.remote import (
 )
 from geoparquet_io.core.stream_io import write_output
 from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file, should_stream_output
-from geoparquet_io.core.write_funnels import collect_nonplanar_edges, write_parquet_with_metadata
+from geoparquet_io.core.write_funnels import (
+    collect_nonplanar_edges,
+    rewrite_footer_kv,
+    write_parquet_with_metadata,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -384,29 +388,15 @@ def _warn_carried_bbox_structs(input_path: str, bbox_col: str | None) -> None:
         )
 
 
-def _row_group_compression(parquet_file: pq.ParquetFile) -> dict:
-    """ParquetWriter codec kwargs that keep the file's first-column codec.
-
-    Preserves the input codec so the sanitized copy isn't silently re-encoded to
-    a different (e.g. larger) compression; an empty file, or a codec gpio does
-    not write, gets the default. Parquet records no level, so the owner's
-    default level for the codec is written rather than pyarrow's ZSTD 1.
-    """
-    md = parquet_file.metadata
-    footer_codec = None
-    if md.num_row_groups > 0 and md.row_group(0).num_columns > 0:
-        footer_codec = md.row_group(0).column(0).compression
-    return codec_from_footer(footer_codec, None).pyarrow_kwargs()
-
-
 def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, str | None]:
     """Strip an explicit ``crs: null`` so the file presents as default OGC:CRS84.
 
     DuckDB's GeoParquet reader rejects ``crs: null`` outright, so for the
-    ``assume_crs84`` path we rewrite the geo metadata (no coordinate change) to a
-    temp file and read from that instead. The rewrite streams row group by row
-    group so memory stays bounded — the rest of reproject is built to handle
-    larger-than-RAM files and a whole-file load would defeat that.
+    ``assume_crs84`` path the ``geo`` key is rewritten (no coordinate change)
+    into a temp copy that is read instead. The copy is a footer patch, every
+    page copied verbatim; a footer that cannot be patched falls back to the
+    funnel's streaming rewrite (``patch_or_rewrite``), so memory stays bounded
+    either way -- the rest of reproject is built for larger-than-RAM files.
 
     ``raw_path`` must be the *unescaped* path/URL (it is handed to PyArrow, not
     SQL).
@@ -418,32 +408,27 @@ def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, 
     if not geoparquet_crs_is_null(raw_path):
         return raw_path, None
 
-    parquet_file = pq.ParquetFile(raw_path)
     # The footer wins over the Arrow schema's view of it: a `geo` key appended
     # after the writer opened is in the footer only, and the guard above read
     # the footer to decide this file needs the rewrite (#913).
-    metadata = dict(parquet_file.schema_arrow.metadata or {})
-    metadata.update(
-        (k, v) for k, v in (parquet_file.metadata.metadata or {}).items() if k != b"ARROW:schema"
-    )
-    geo_meta = sanitized_carried_geo(metadata, source=str(raw_path))
+    geo_meta = sanitized_carried_geo_of_file(raw_path)
     for col in geo_meta.get("columns", {}).values():
         if entry_crs_is_unknown(col):
             col.pop("crs", None)
-    metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
-    new_schema = parquet_file.schema_arrow.with_metadata(metadata)
 
     # mkstemp creates the file atomically with 0600 perms (it holds a full copy
-    # of the user's data) and a collision-free name.
+    # of the user's data) and a collision-free name. Only the `geo` key
+    # changes, so the copy is a footer patch: every page is the input's.
     fd, temp_path = tempfile.mkstemp(suffix=".parquet", prefix="gpio_assume_crs84_")
     os.close(fd)
     try:
-        writer = pq.ParquetWriter(temp_path, new_schema, **_row_group_compression(parquet_file))
-        try:
-            for i in range(parquet_file.num_row_groups):
-                writer.write_table(parquet_file.read_row_group(i))
-        finally:
-            writer.close()
+        patch_or_rewrite(
+            raw_path,
+            {"geo": json.dumps(geo_meta)},
+            output_file=temp_path,
+            rewrite=rewrite_footer_kv,
+            verbose=verbose,
+        )
     except BaseException:
         # Self-clean on any failure after creation so we never orphan the copy.
         Path(temp_path).unlink(missing_ok=True)

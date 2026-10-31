@@ -17,14 +17,11 @@ import json
 import struct
 from pathlib import Path
 
-import duckdb
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.add import bbox_metadata
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata
 from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
-from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
 
 GEO_NO_COVERING = json.dumps(
@@ -157,7 +154,7 @@ def test_a_footer_it_cannot_patch_falls_back_to_the_rewrite(zstd15_file, monkeyp
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("planted")
 
-    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
     before = _data_section(zstd15_file)
 
     add_bbox_metadata(str(zstd15_file))
@@ -192,7 +189,7 @@ def test_the_fallback_on_a_native_file_writes_one_geo_entry(tmp_path, monkeypatc
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("planted")
 
-    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
 
     add_bbox_metadata(str(path))
 
@@ -217,26 +214,15 @@ def test_the_fallback_on_a_native_file_writes_one_geo_entry(tmp_path, monkeypatc
     assert logical.startswith("GeometryType"), "the native GEOMETRY type was lost"
 
 
-def _is_closed(conn) -> bool:
-    try:
-        conn.execute("SELECT 1")
-    except duckdb.ConnectionException:
-        return True
-    return False
+def test_a_failed_rewrite_leaves_the_input_and_no_staging_debris(zstd15_file, monkeypatch):
+    """#1244's other half: a failed fallback leaves the input as it was.
 
-
-def test_a_failed_rewrite_closes_its_connection(zstd15_file, monkeypatch):
-    """#1244: the fallback closed its DuckDB connection only after a successful COPY.
-
-    A failed write also leaves the input as it was and no staging debris
-    beside it: the funnel writes into ``atomic_write``'s staging directory.
+    The rewrite writes into ``atomic_write``'s staging directory beside the
+    file and only a finished one is swapped in, so a write that dies part-way
+    leaves nothing next to the input. (#1244's leaked connection has no
+    successor: the fallback, ``write_funnels.rewrite_footer_kv``, streams with
+    pyarrow and opens none.)
     """
-    opened = []
-
-    def spy(*args, **kwargs):
-        conn = get_duckdb_connection(*args, **kwargs)
-        opened.append(conn)
-        return conn
 
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("planted")
@@ -244,33 +230,31 @@ def test_a_failed_rewrite_closes_its_connection(zstd15_file, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("planted failure")
 
-    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
-    monkeypatch.setattr(bbox_metadata, "get_duckdb_connection", spy)
-    monkeypatch.setattr(bbox_metadata, "write_parquet_with_metadata", boom)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
+    monkeypatch.setattr("geoparquet_io.core.write_funnels.sized_stream", boom)
     before = zstd15_file.read_bytes()
 
-    with pytest.raises(GeoParquetError, match="planted failure"):
+    # The funnel's own error, unwrapped: the fallback is the funnel's rewrite
+    # (`write_funnels.rewrite_footer_kv`), not this command's (#1367 T2d).
+    with pytest.raises(RuntimeError, match="planted failure"):
         add_bbox_metadata(str(zstd15_file))
 
-    assert len(opened) == 1
-    assert _is_closed(opened[0]), "the rewrite leaked its DuckDB connection"
     assert zstd15_file.read_bytes() == before
     assert sorted(p.name for p in zstd15_file.parent.iterdir()) == [zstd15_file.name]
 
 
-def test_a_verbose_fallback_reports_what_it_preserves(zstd15_file, monkeypatch, caplog):
-    """The verbose rewrite logs the properties it carries and the query it writes."""
+def test_a_verbose_fallback_reports_the_keys_it_writes(zstd15_file, monkeypatch, caplog):
+    """The verbose rewrite logs the footer keys it writes."""
 
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("planted")
 
-    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
 
     with caplog.at_level("DEBUG", logger="geoparquet_io"):
         add_bbox_metadata(str(zstd15_file), verbose=True)
 
-    assert "Preserving file properties" in caplog.text
-    assert "-- Query:" in caplog.text
+    assert "Rewriting with footer keys: ['geo']" in caplog.text, caplog.text
     geo = json.loads(pq.read_metadata(str(zstd15_file)).metadata[b"geo"])
     assert "covering" in geo["columns"]["geometry"]
 
@@ -281,7 +265,7 @@ def test_the_fallback_keeps_sidecar_keys_but_not_the_inputs_arrow_and_pandas_blo
     """The fallback is a write like any other: its footer keys are the facade's.
 
     It used to carry every input key verbatim, the input's ``pandas`` block and
-    ``ARROW:schema`` included, which describe the input's rows and are dropped
+    ``ARROW:schema`` included (pyarrow writes the output's own ``ARROW:schema``), which describe the input's rows and are dropped
     by every other gpio write (``output_schema_metadata``, #710, #1268). A
     sidecar key such as ``stac:collection`` still survives (#690, #756), and a
     1.1 file's geometry stays plain WKB rather than turning native (#712).
@@ -313,17 +297,19 @@ def test_the_fallback_keeps_sidecar_keys_but_not_the_inputs_arrow_and_pandas_blo
     )
     pq.write_table(table, path)
     assert b"pandas" in pq.read_metadata(path).metadata
+    input_arrow_schema = pq.read_metadata(path).metadata[b"ARROW:schema"]
 
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("planted")
 
-    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
 
     add_bbox_metadata(str(path))
 
     keys = pq.read_metadata(path).metadata
     assert b"pandas" not in keys, "the input's pandas block was carried verbatim"
-    assert b"ARROW:schema" not in keys, "the input's ARROW:schema was carried verbatim"
+    # pyarrow writes the output's own ARROW:schema; the input's is not carried.
+    assert keys.get(b"ARROW:schema") != input_arrow_schema, "the input's ARROW:schema was carried"
     assert json.loads(keys[b"stac:collection"]) == {"id": "c"}
     written = json.loads(keys[b"geo"])
     assert written["columns"]["geometry"]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]

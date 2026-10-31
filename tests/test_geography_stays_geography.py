@@ -221,7 +221,7 @@ def test_an_ellipsoidal_algorithm_is_kept_verbatim(rows, tmp_path):
     """
     import geoarrow.pyarrow as ga
 
-    from geoparquet_io.core.parquet_footer import patch_footer_kv
+    from geoparquet_io.core.parquet_footer import _patch_footer_file
 
     source = tmp_path / "in.parquet"
     write_native_geo_only(source, rows, {"geometry": (2, ga.wkb())})
@@ -232,7 +232,7 @@ def test_an_ellipsoidal_algorithm_is_kept_verbatim(rows, tmp_path):
             "geometry": {"encoding": "WKB", "geometry_types": ["Polygon"], "edges": "vincenty"}
         },
     }
-    patch_footer_kv(str(source), {"geo": json.dumps(geo)})
+    _patch_footer_file(str(source), {"geo": json.dumps(geo)})
 
     out = _run_path("add-bbox", source, tmp_path / "out.parquet")
 
@@ -377,7 +377,7 @@ def test_an_unpatchable_footer_falls_back_to_the_block_rewrite(duckdb_v2, monkey
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("refused for the test")
 
-    monkeypatch.setattr(write_funnels, "patch_footer", refuse)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
     write_funnels.apply_nonplanar_edges({"geometry": "spherical"}, str(duckdb_v2))
 
     assert _edges_in_geo_block(duckdb_v2) == "spherical"
@@ -392,10 +392,10 @@ def test_a_race_propagates_without_a_rewrite(duckdb_v2, monkeypatch):
     def race(*args, **kwargs):
         raise FooterPatchRaced("changed for the test")
 
-    monkeypatch.setattr(write_funnels, "patch_footer", race)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", race)
     monkeypatch.setattr(
         write_funnels,
-        "_rewrite_file_with_geo_metadata",
+        "rewrite_footer_kv",
         lambda *a, **k: pytest.fail("a raced patch must not fall back to a rewrite"),
     )
     with pytest.raises(FooterPatchRaced):
@@ -405,9 +405,9 @@ def test_a_race_propagates_without_a_rewrite(duckdb_v2, monkeypatch):
 def test_a_geo_key_less_output_is_carried_by_the_logical_type(duckdb_v2, caplog):
     """Parquet-geo-only: the GEOGRAPHY type is the one carrier, and it is enough."""
     from geoparquet_io.core import write_funnels
-    from geoparquet_io.core.parquet_footer import patch_footer_kv
+    from geoparquet_io.core.parquet_footer import _patch_footer_file
 
-    patch_footer_kv(str(duckdb_v2), {"geo": None})
+    _patch_footer_file(str(duckdb_v2), {"geo": None})
     write_funnels.apply_nonplanar_edges({"geometry": "spherical"}, str(duckdb_v2), verbose=True)
 
     assert native_geo_edges(duckdb_v2) == SPHERICAL

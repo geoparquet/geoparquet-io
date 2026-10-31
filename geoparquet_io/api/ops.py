@@ -131,7 +131,9 @@ def add_stac_metadata(
 
     Only the footer is rewritten; every page below it is copied verbatim, so
     the compression codec and level, the encodings, the bloom filters, the page
-    index, the row-group boundaries and the row order are all preserved.
+    index, the row-group boundaries and the row order are all preserved. A
+    footer that cannot be patched falls back, with a warning, to gpio's one
+    metadata-only rewrite, at the facade's codec and row groups.
 
     Args:
         parquet_file: Path to a local Parquet file. Modified in place unless

@@ -565,7 +565,7 @@ def v2_with_illegal_secondary_covering(tmp_path) -> Path:
     file: declaring it on the 1.1 source instead would let the conversion strip
     it, and the fixture would then prove nothing.
     """
-    from geoparquet_io.core.parquet_footer import patch_footer_kv
+    from geoparquet_io.core.parquet_footer import _patch_footer_file
     from tests.fixtures.multi_geometry import create_multi_geometry_with_secondary_bbox
 
     source = tmp_path / "multi_11.parquet"
@@ -595,7 +595,7 @@ def v2_with_illegal_secondary_covering(tmp_path) -> Path:
         "bbox": {axis: ["boundary_extent", axis] for axis in ("xmin", "ymin", "xmax", "ymax")}
     }
     target = tmp_path / "multi_20_declared.parquet"
-    patch_footer_kv(str(v2), {"geo": json.dumps(geo)}, output_file=str(target))
+    _patch_footer_file(str(v2), {"geo": json.dumps(geo)}, output_file=str(target))
 
     assert set(spec_failures(target)) == {"covering_bbox_structure_boundary"}, (
         "the fixture must carry exactly the defect under test"

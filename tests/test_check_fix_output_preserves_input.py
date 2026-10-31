@@ -161,7 +161,7 @@ def _run(*args: str, input: str | None = None):
 
 
 def _assert_nothing_left_behind(tmp_path: Path) -> None:
-    assert list(tmp_path.glob(".gpio-fix-*")) == [], "a staging file was left behind"
+    assert list(tmp_path.glob(".gpio-stage-*")) == [], "a staging file was left behind"
     assert list(tmp_path.glob("*.tmp")) == [], "a staging file was left behind"
 
 
@@ -315,7 +315,7 @@ class TestPlaceResult:
         assert output.read_bytes() == b"already in place"
 
     def test_a_failed_placement_leaves_an_existing_output_intact(self, tmp_path, monkeypatch):
-        """The swap is ``_staged_output``'s: a move that dies mid-way touches nothing."""
+        """The swap is ``write_funnels.staged_replacement``'s: a move that dies mid-way touches nothing."""
         scratch = tmp_path / "scratch.parquet"
         scratch.write_bytes(b"a rewrite")
         output = tmp_path / "output.parquet"

@@ -8,21 +8,19 @@ The file path patches the footer in place and copies the data pages verbatim
 (`core/parquet_footer.py`, #1141). It used to re-encode the whole file with a
 DuckDB COPY, which a Parquet file's own metadata cannot make exact: the
 compression *level* is not recorded anywhere, so a file written above the
-default came back inflated. That rewrite is still here as the fallback for a
-footer that cannot be read.
+default came back inflated. A footer that cannot be read still falls back to a
+rewrite, the funnel's (`parquet_footer.patch_or_rewrite`).
 
 Note: This operation only supports local files. Remote URLs (S3, GCS, Azure)
 are not supported for in-place metadata modification.
 """
 
+import functools
 import json
 from typing import TYPE_CHECKING
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
-from geoparquet_io.core.check_parquet_structure import get_compression_info
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.compression import codec_from_footer
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
@@ -32,13 +30,12 @@ from geoparquet_io.core.geo_metadata import (
     sanitized_carried_geo,
 )
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
-from geoparquet_io.core.logging_config import debug, success, warn
-from geoparquet_io.core.parquet_footer import FooterPatchUnsupported, patch_footer_kv
+from geoparquet_io.core.logging_config import debug, success
+from geoparquet_io.core.parquet_footer import patch_or_rewrite
 from geoparquet_io.core.parquet_writer import declared_geoparquet_version
 from geoparquet_io.core.remote import is_remote_url
 from geoparquet_io.core.streaming import find_geometry_column_from_table
-from geoparquet_io.core.write_funnels import write_parquet_with_metadata
-from geoparquet_io.core.write_strategies.base import atomic_write
+from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -242,8 +239,9 @@ def add_bbox_metadata(
     The work is proportional to the footer rather than to the file.
 
     A footer that cannot be read -- an encrypted one, or a thrift structure
-    this does not recognise -- falls back to a full DuckDB rewrite, which is
-    what this command did before and which does re-encode the data.
+    this does not recognise -- falls back to the funnel's rewrite
+    (``write_funnels.rewrite_footer_kv``), which re-encodes the data at the
+    facade's codec and row groups and keeps every sidecar key.
 
     Note: Only local files are supported. Remote URLs will raise an error.
 
@@ -275,10 +273,10 @@ def add_bbox_metadata(
                 "Download the file locally, modify it, then upload."
             )
 
-    # RAW path throughout: the metadata helpers each escape their own argument
-    # (pre-escaping here sent ``bm''s.parquet`` on to pyarrow, issue #718), and
-    # the SQL below escapes at the point of interpolation via ``sql_path``.
-    read_url = resolve_file_url(parquet_file, verbose)
+    # Refuse a missing input by name before anything reads it. RAW path
+    # throughout: the metadata helpers each escape their own argument
+    # (pre-escaping here sent ``bm''s.parquet`` on to pyarrow, issue #718).
+    resolve_file_url(parquet_file, verbose)
 
     # The schema is read before the detection gates below, because an explicit
     # ``bbox_column`` is checked against it instead of against detection.
@@ -358,73 +356,16 @@ def add_bbox_metadata(
     # One footer key does not need the data decoded. Patching the footer copies
     # every page verbatim, so the compression level, the encodings, the bloom
     # filters, the page index, the row-group boundaries and the row order are
-    # all kept by construction rather than by re-derivation (#1141). The
-    # rewrite below stays as the fallback for a footer that cannot be read.
-    try:
-        patch_footer_kv(
-            parquet_file,
-            {"geo": json.dumps(geo_meta)},
-            output_file=output_file,
-            verbose=verbose,
-        )
-    except FooterPatchUnsupported as exc:
-        warn(f"{exc}. Falling back to a rewrite, which re-encodes the data.")
-        _rewrite_with_geo(parquet_file, read_url, output_file, geo_meta, primary_col, verbose)
+    # all kept by construction rather than by re-derivation (#1141). A footer
+    # that cannot be read falls back to the funnel's rewrite, which takes the
+    # facade's codec and row groups (approved change 3) and keeps every sidecar
+    # key; a race is never answered with one (`patch_or_rewrite`).
+    patch_or_rewrite(
+        parquet_file,
+        {"geo": json.dumps(geo_meta)},
+        output_file=output_file,
+        rewrite=functools.partial(rewrite_footer_kv, verbose=verbose),
+        verbose=verbose,
+    )
 
     success(f"Added bbox covering metadata for column '{target_column}'")
-
-
-def _rewrite_with_geo(
-    parquet_file: str,
-    read_url: str,
-    output_file: str,
-    geo_meta: dict,
-    primary_col: str,
-    verbose: bool,
-) -> None:
-    """Re-encode the file through the query funnel, carrying the amended `geo` block.
-
-    The fallback for a file whose footer cannot be patched. It decodes and
-    re-encodes every page, which is why it cannot preserve the compression
-    level -- Parquet does not record it, so the file's codec comes back at the
-    owner's default level for it (``codec_from_footer``) -- and why it writes
-    the facade's row groups rather than the input's (approved change 3).
-
-    It is ``write_funnels.write_parquet_with_metadata``'s write, not one of its
-    own: the funnel decides the row-group count, the output version (from the
-    input file, so a native 2.0 input stays native and a 1.x one stays WKB,
-    #712), the one ``geo`` key (#1225) and the footer keys, which drop the
-    input's ``pandas`` and ``ARROW:schema`` the way every other write does
-    (``parquet_writer.output_schema_metadata``) and keep its sidecar keys
-    (#700, #756). The destination is staged beside itself by
-    ``atomic_write`` and replaced once the connection reading the input has
-    closed, so an in-place rewrite never writes over the file it reads.
-    """
-    compression_info = get_compression_info(parquet_file, primary_col)
-    codec = codec_from_footer(compression_info[primary_col], None)
-    metadata, _ = get_parquet_metadata(parquet_file)
-    original_metadata = {**(metadata or {}), b"geo": json.dumps(geo_meta).encode("utf-8")}
-
-    if verbose:
-        debug("\nPreserving file properties:")
-        debug(f"Compression: {codec.name}")
-        debug(f"Existing metadata keys: {[bytes(key).decode() for key in original_metadata]}")
-
-    try:
-        with atomic_write(output_file) as staged:
-            # The connection is closed on every exit, a failed step included
-            # (#1244), and before atomic_write moves the result into place.
-            with get_duckdb_connection() as conn:
-                write_parquet_with_metadata(
-                    conn,
-                    f"SELECT * FROM {sql_path(read_url)}",
-                    staged,
-                    original_metadata=original_metadata,
-                    compression=codec.name,
-                    compression_level=codec.level,
-                    verbose=verbose,
-                    show_sql=verbose,
-                    input_file=parquet_file,
-                )
-    except Exception as e:
-        raise GeoParquetError(f"Failed to update metadata: {str(e)}") from e

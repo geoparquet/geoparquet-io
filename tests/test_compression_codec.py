@@ -1052,11 +1052,17 @@ def _table_write(strategy: str):
 
 
 def _geo_rewrite(out: Path, level):
-    """derive_geo_from_file's pyarrow rewrite, the V2 repair's fallback."""
-    from geoparquet_io.core.derive_geo_from_file import _rewrite_file_with_geo_metadata
+    """The funnel's one footer rewrite, every footer patch's fallback."""
+    from geoparquet_io.core.parquet_writer import WriteOptions
+    from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
     pq.write_table(_plain_table(), str(out), compression="snappy")
-    _rewrite_file_with_geo_metadata(str(out), {"version": "2.0.0"}, "ZSTD", level, None)
+    rewrite_footer_kv(
+        str(out),
+        str(out),
+        {"geo": '{"version": "2.0.0"}'},
+        write=WriteOptions(compression="ZSTD", compression_level=level),
+    )
 
 
 LEVEL_SITES = {

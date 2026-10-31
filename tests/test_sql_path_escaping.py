@@ -722,7 +722,7 @@ class TestBboxMetadataFallbackPath:
         def refuse(*args, **kwargs):
             raise FooterPatchUnsupported("planted")
 
-        monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+        monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
         bbox_metadata.add_bbox_metadata(path)
 
         written = json.loads(pq.read_metadata(path).metadata[b"geo"])

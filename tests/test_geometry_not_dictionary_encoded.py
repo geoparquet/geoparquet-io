@@ -169,7 +169,7 @@ class TestOtherArrowWriters:
         assert DICT in _encodings(out, "name")
 
     def test_geo_metadata_rewrite(self, tmp_path):
-        from geoparquet_io.core.derive_geo_from_file import _rewrite_file_with_geo_metadata
+        from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
         geo = {
             "version": "1.1.0",
@@ -179,7 +179,7 @@ class TestOtherArrowWriters:
         out = tmp_path / "out.parquet"
         pq.write_table(_table(), out)
         assert DICT in _encodings(out, "geometry")  # pyarrow's own default
-        _rewrite_file_with_geo_metadata(str(out), geo)
+        rewrite_footer_kv(str(out), str(out), {"geo": json.dumps(geo)})
         assert DICT not in _encodings(out, "geometry")
         assert DICT in _encodings(out, "name")
 
@@ -361,7 +361,6 @@ _FACADE_CALLS = {"without_geometry_dictionary", "get_pyarrow_kwargs"}
 _EXEMPT = {
     ("core/add/kdtree.py", "add_kdtree_table"): "scratch copy, read back by DuckDB",
     ("core/streaming.py", "read_stdin_to_temp_file"): "scratch copy of stdin, read by DuckDB",
-    ("core/reproject.py", "_sanitize_null_crs_file"): "scratch copy, read back by DuckDB",
     ("core/arcgis.py", "_stream_features_to_parquet"): "scratch file, rewritten by a second pass",
     ("api/ops.py", "convert_to_geojson"): "scratch copy of the input table",
     ("api/ops.py", "_file_round_trip"): "scratch copy of the input table",

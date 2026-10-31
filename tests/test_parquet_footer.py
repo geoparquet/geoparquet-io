@@ -1,4 +1,4 @@
-"""`patch_footer_kv` edits the footer and copies the data bytes verbatim (#1141).
+"""`_patch_footer_file` edits the footer and copies the data bytes verbatim (#1141).
 
 The oracle throughout is the file itself: everything below the footer must come
 out byte for byte identical, and patching a file with no changes at all must
@@ -29,12 +29,12 @@ from geoparquet_io.core.parquet_footer import (
     _encode_kv_list,
     _field_header,
     _patch_footer,
+    _patch_footer_file,
     _read_metadata_or_refuse,
     _read_varint,
     _rewrite_kv_field,
     _struct_fields,
     _verify_data_untouched,
-    patch_footer_kv,
 )
 
 GEO = json.dumps(
@@ -144,7 +144,7 @@ class TestTheDataIsNeverTouched:
 
     def test_bytes_below_the_footer_are_identical(self, geo_file, tmp_path):
         before = _data_section(geo_file)
-        patch_footer_kv(str(geo_file), {"geo": GEO, "extra": "x"})
+        _patch_footer_file(str(geo_file), {"geo": GEO, "extra": "x"})
 
         assert _data_section(geo_file) == before
 
@@ -152,7 +152,7 @@ class TestTheDataIsNeverTouched:
         """The regression: a rewrite came back at DuckDB's default level."""
         before = geo_file.stat().st_size
         added = json.dumps({"covering": {"bbox": {"xmin": ["bbox", "xmin"]}}})
-        patch_footer_kv(str(geo_file), {"covering-ish": added})
+        _patch_footer_file(str(geo_file), {"covering-ish": added})
 
         grew_by = geo_file.stat().st_size - before
         assert grew_by < 2 * len(added), (
@@ -168,7 +168,7 @@ class TestTheDataIsNeverTouched:
                 f"FROM parquet_metadata('{geo_file.as_posix()}') ORDER BY 1, 2"
             )
             before = conn.execute(query).fetchall()
-            patch_footer_kv(str(geo_file), {"geo": GEO, "note": "x"})
+            _patch_footer_file(str(geo_file), {"geo": GEO, "note": "x"})
             assert conn.execute(query).fetchall() == before
         finally:
             conn.close()
@@ -178,7 +178,7 @@ class TestTheDataIsNeverTouched:
         try:
             query = f"SELECT count(*), sum(id) FROM '{geo_file.as_posix()}'"
             before = fetch_one(conn.execute(query))
-            patch_footer_kv(str(geo_file), {"geo": GEO, "note": "x"})
+            _patch_footer_file(str(geo_file), {"geo": GEO, "note": "x"})
             assert fetch_one(conn.execute(query)) == before
         finally:
             conn.close()
@@ -188,7 +188,7 @@ class TestTheDataIsNeverTouched:
         """The strongest oracle for the thrift surgery: only field 5 is re-encoded."""
         path = request.getfixturevalue(fixture)
         before = path.read_bytes()
-        patch_footer_kv(str(path), {})
+        _patch_footer_file(str(path), {})
 
         assert path.read_bytes() == before
 
@@ -197,7 +197,7 @@ class TestTheKeys:
     def test_adds_a_key_to_a_file_that_has_none(self, keyless_file):
         before = _data_section(keyless_file)
 
-        patch_footer_kv(str(keyless_file), {"geo": GEO})
+        _patch_footer_file(str(keyless_file), {"geo": GEO})
 
         assert pq.read_metadata(str(keyless_file)).metadata[b"geo"] == GEO.encode()
         assert _data_section(keyless_file) == before
@@ -212,23 +212,23 @@ class TestTheKeys:
         ids_before = [field.field_id for field in fields]
         assert 5 not in ids_before and max(ids_before) > 5, "fixture does not exercise the insert"
 
-        patch_footer_kv(str(keyless_file), {"geo": GEO})
+        _patch_footer_file(str(keyless_file), {"geo": GEO})
 
         ids_after = [field.field_id for field in _struct_fields(_footer(keyless_file))[0]]
         assert ids_after == sorted(ids_before + [5])
 
     def test_keeps_every_other_key(self, arrow_file):
-        patch_footer_kv(str(arrow_file), {"stac:collection": "places"})
+        _patch_footer_file(str(arrow_file), {"stac:collection": "places"})
 
         metadata = pq.read_metadata(str(arrow_file)).metadata
         assert metadata[b"stac:collection"] == b"places"
         assert b"ARROW:schema" in metadata, "a colon in a key used to break the rewrite (#756)"
 
     def test_none_removes_a_key(self, geo_file):
-        patch_footer_kv(str(geo_file), {"gone": "soon"})
+        _patch_footer_file(str(geo_file), {"gone": "soon"})
         assert b"gone" in _keys(geo_file)
 
-        patch_footer_kv(str(geo_file), {"gone": None})
+        _patch_footer_file(str(geo_file), {"gone": None})
         assert b"gone" not in _keys(geo_file)
         assert b"geo" in _keys(geo_file)
 
@@ -236,7 +236,7 @@ class TestTheKeys:
         before = keyless_file.read_bytes()
         inode = keyless_file.stat().st_ino
 
-        patch_footer_kv(str(keyless_file), {"absent": None})
+        _patch_footer_file(str(keyless_file), {"absent": None})
 
         assert keyless_file.read_bytes() == before
         assert keyless_file.stat().st_ino == inode, (
@@ -248,7 +248,7 @@ class TestTheKeys:
         path = _write_geoparquet(tmp_path / "twice.parquet", duplicate_geo=True)
         assert _keys(path).count(b"geo") == 2, "fixture must start with the key twice"
 
-        patch_footer_kv(str(path), {"geo": GEO})
+        _patch_footer_file(str(path), {"geo": GEO})
 
         assert _keys(path) == [b"geo"]
         assert pq.read_metadata(str(path)).metadata[b"geo"] == GEO.encode()
@@ -257,13 +257,13 @@ class TestTheKeys:
         path = _write_geoparquet(tmp_path / "twice.parquet", duplicate_geo=True)
         before = _entries(path)
 
-        patch_footer_kv(str(path), {"unrelated": "x"})
+        _patch_footer_file(str(path), {"unrelated": "x"})
 
         assert _entries(path) == before + [(b"unrelated", b"x")]
 
     def test_more_than_fifteen_keys(self, arrow_file):
         """A list of 15 or more needs the long header and a varint count."""
-        patch_footer_kv(str(arrow_file), {f"k{i}": f"v{i}" for i in range(20)})
+        _patch_footer_file(str(arrow_file), {f"k{i}": f"v{i}" for i in range(20)})
 
         metadata = pq.read_metadata(str(arrow_file)).metadata
         assert metadata[b"k19"] == b"v19"
@@ -276,7 +276,7 @@ class TestTheFileOnDisk:
         """Staging goes through mkstemp, which creates 0600."""
         geo_file.chmod(0o644)
 
-        patch_footer_kv(str(geo_file), {"geo": GEO, "note": "x"})
+        _patch_footer_file(str(geo_file), {"geo": GEO, "note": "x"})
 
         assert geo_file.stat().st_mode & 0o777 == 0o644
 
@@ -285,7 +285,7 @@ class TestTheFileOnDisk:
         destination.write_bytes(b"placeholder")
         destination.chmod(0o640)
 
-        patch_footer_kv(str(geo_file), {"geo": GEO}, output_file=str(destination))
+        _patch_footer_file(str(geo_file), {"geo": GEO}, output_file=str(destination))
 
         assert destination.stat().st_mode & 0o777 == 0o640
 
@@ -316,7 +316,7 @@ class TestAnInputThatChangesUnderTheCall:
         not_parquet.write_bytes(b"not a parquet file at all")
 
         with pytest.raises(FooterPatchUnsupported) as caught:
-            patch_footer_kv(str(not_parquet), {"note": "x"})
+            _patch_footer_file(str(not_parquet), {"note": "x"})
 
         assert not isinstance(caught.value, FooterPatchRaced)
 
@@ -331,7 +331,7 @@ class TestAnInputThatChangesUnderTheCall:
         monkeypatch.setattr(parquet_footer, "_copy_below_footer", copy_then_let_another_writer_land)
 
         with pytest.raises(FooterPatchRaced, match="changed while it was being copied"):
-            patch_footer_kv(str(geo_file), {"note": "x"})
+            _patch_footer_file(str(geo_file), {"note": "x"})
 
         assert geo_file.read_bytes() == other.read_bytes(), "the other writer's file was clobbered"
 
@@ -352,7 +352,7 @@ class TestAnInputThatChangesUnderTheCall:
         monkeypatch.setattr(parquet_footer, "_inherit_mode", inherit_then_let_another_writer_land)
 
         with pytest.raises(FooterPatchRaced, match="changed while it was being copied"):
-            patch_footer_kv(str(geo_file), {"note": "x"})
+            _patch_footer_file(str(geo_file), {"note": "x"})
 
         assert geo_file.read_bytes() == other.read_bytes(), "the other writer's file was clobbered"
 
@@ -418,7 +418,7 @@ class TestTheGuards:
         path.write_bytes(b"PAR1")
 
         with pytest.raises(FooterPatchUnsupported, match="too short"):
-            patch_footer_kv(str(path), {"geo": GEO})
+            _patch_footer_file(str(path), {"geo": GEO})
 
     def test_a_source_that_ends_before_its_footer(self):
         with pytest.raises(FooterPatchUnsupported, match="ended before its footer"):
@@ -464,14 +464,14 @@ class TestRefusals:
         geo_file.write_bytes(encrypted)
 
         with pytest.raises(FooterPatchUnsupported, match="encrypted"):
-            patch_footer_kv(str(geo_file), {"geo": GEO})
+            _patch_footer_file(str(geo_file), {"geo": GEO})
 
     def test_a_file_that_is_not_parquet(self, tmp_path):
         path = tmp_path / "not.parquet"
         path.write_bytes(b"PAR1" + b"\x00" * 64)
 
         with pytest.raises(FooterPatchUnsupported):
-            patch_footer_kv(str(path), {"geo": GEO})
+            _patch_footer_file(str(path), {"geo": GEO})
 
     def test_a_refusal_leaves_the_destination_alone(self, geo_file, tmp_path):
         destination = tmp_path / "out.parquet"
@@ -479,7 +479,7 @@ class TestRefusals:
         geo_file.write_bytes(geo_file.read_bytes()[:-4] + b"PARE")
 
         with pytest.raises(FooterPatchUnsupported):
-            patch_footer_kv(str(geo_file), {"geo": GEO}, output_file=str(destination))
+            _patch_footer_file(str(geo_file), {"geo": GEO}, output_file=str(destination))
 
         assert destination.read_bytes() == b"untouched"
 
@@ -489,7 +489,7 @@ class TestRefusals:
         geo_file.write_bytes(bytes(raw))
 
         with pytest.raises(FooterPatchUnsupported, match="longer than the file"):
-            patch_footer_kv(str(geo_file), {"geo": GEO})
+            _patch_footer_file(str(geo_file), {"geo": GEO})
 
 
 class TestOutputFile:
@@ -497,7 +497,7 @@ class TestOutputFile:
         destination = tmp_path / "out.parquet"
         before = geo_file.read_bytes()
 
-        patch_footer_kv(str(geo_file), {"geo": GEO, "note": "x"}, output_file=str(destination))
+        _patch_footer_file(str(geo_file), {"geo": GEO, "note": "x"}, output_file=str(destination))
 
         assert geo_file.read_bytes() == before
         assert pq.read_metadata(str(destination)).metadata[b"note"] == b"x"
@@ -564,14 +564,14 @@ class TestTheEmbeddedArrowSchema:
         table = pa.table({"a": [1, 2, 3]}).replace_schema_metadata({b"geo": b'{"v":"before"}'})
         pq.write_table(table, str(path))
 
-        patch_footer_kv(str(path), {"geo": '{"v":"after"}'})
+        _patch_footer_file(str(path), {"geo": '{"v":"after"}'})
 
         assert pq.read_metadata(str(path)).metadata[b"geo"] == b'{"v":"after"}'
         assert pq.read_table(str(path)).schema.metadata[b"geo"] == b'{"v":"after"}'
         assert pq.ParquetFile(str(path)).schema_arrow.metadata[b"geo"] == b'{"v":"after"}'
 
     def test_a_new_key_is_visible_to_pyarrow(self, arrow_file):
-        patch_footer_kv(str(arrow_file), {"stac-geoparquet": "{}"})
+        _patch_footer_file(str(arrow_file), {"stac-geoparquet": "{}"})
 
         assert pq.read_table(str(arrow_file)).schema.metadata[b"stac-geoparquet"] == b"{}"
 
@@ -580,7 +580,7 @@ class TestTheEmbeddedArrowSchema:
         table = pa.table({"a": [1]}).replace_schema_metadata({b"gone": b"soon"})
         pq.write_table(table, str(path))
 
-        patch_footer_kv(str(path), {"gone": None})
+        _patch_footer_file(str(path), {"gone": None})
 
         assert b"gone" not in pq.read_metadata(str(path)).metadata
         assert not (pq.read_table(str(path)).schema.metadata or {})
@@ -598,7 +598,7 @@ class TestTheEmbeddedArrowSchema:
         )
         pq.write_table(table, str(path))
 
-        patch_footer_kv(str(path), {"geo": GEO})
+        _patch_footer_file(str(path), {"geo": GEO})
 
         after = pq.read_table(str(path))
         assert after.schema.types == table.schema.types
@@ -608,14 +608,14 @@ class TestTheEmbeddedArrowSchema:
         """DuckDB writes no `ARROW:schema`, so there is nothing to reconcile."""
         assert b"ARROW:schema" not in pq.read_metadata(str(geo_file)).metadata
 
-        patch_footer_kv(str(geo_file), {"note": "x"})
+        _patch_footer_file(str(geo_file), {"note": "x"})
 
         assert b"ARROW:schema" not in pq.read_metadata(str(geo_file)).metadata
 
     def test_a_caller_setting_the_blob_itself_is_not_second_guessed(self, arrow_file):
         blob = pq.read_metadata(str(arrow_file)).metadata[b"ARROW:schema"]
 
-        patch_footer_kv(str(arrow_file), {"ARROW:schema": blob, "note": "x"})
+        _patch_footer_file(str(arrow_file), {"ARROW:schema": blob, "note": "x"})
 
         metadata = pq.read_metadata(str(arrow_file)).metadata
         assert metadata[b"ARROW:schema"] == blob
@@ -628,7 +628,7 @@ class TestTheEmbeddedArrowSchema:
         )
         before, inode = path.read_bytes(), path.stat().st_ino
 
-        patch_footer_kv(str(path), {"geo": GEO})
+        _patch_footer_file(str(path), {"geo": GEO})
 
         assert path.read_bytes() == before
         assert path.stat().st_ino == inode

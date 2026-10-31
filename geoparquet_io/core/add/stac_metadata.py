@@ -38,14 +38,15 @@ the compression codec *and level*, the encodings, the bloom filters, the page
 index, the row-group boundaries and the row order all come out as they went
 in. The file is still copied once, byte for byte, to a staged file that
 replaces the original -- so it costs a sequential read and write and needs
-room for a second copy -- but nothing is decoded or re-encoded. Unlike ``add bbox-metadata`` there is no DuckDB rewrite behind it -- a footer
-that cannot be patched is reported rather than re-encoded, because re-encoding
-to add a key that is not the ``geo`` block would cost the file's compression
-level to buy nothing.
+room for a second copy -- but nothing is decoded or re-encoded. A footer that
+cannot be patched falls back, after a warning, to the funnel's rewrite at the
+facade's codec and row groups, as every other footer write does
+(``parquet_footer.patch_or_rewrite``).
 
 Note: only local files. A remote URL is refused rather than downloaded.
 """
 
+import functools
 import json
 import os
 from pathlib import Path
@@ -56,8 +57,9 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import handle_output_overwrite, is_same_file_path
 from geoparquet_io.core.logging_config import debug, success, warn
-from geoparquet_io.core.parquet_footer import FooterPatchUnsupported, patch_footer_kv
+from geoparquet_io.core.parquet_footer import patch_or_rewrite
 from geoparquet_io.core.remote import is_remote_url
+from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -371,7 +373,7 @@ def _existing_payload(parquet_file: str) -> "tuple[dict | None, list[str]]":
     pandas, geopandas, the kind of reader most likely to read this value back
     -- resolves metadata from that copy when the file carries one. Merging
     against whichever copy an Arrow reader would see is what keeps both copies
-    in agreement once :func:`patch_footer_kv` has updated them (see
+    in agreement once the footer patch has updated them (see
     ``core/parquet_footer.py``'s ``_arrow_schema_in_step``).
 
     The plain entry is read too: a file another tool patched at the Parquet
@@ -431,7 +433,7 @@ def add_stac_metadata(
         GeoParquetError: If a path is remote, the output exists and
             ``overwrite`` was not given, the Collection or version is refused,
             the input already carries a ``stac-geoparquet`` key that is not
-            valid JSON, or the footer cannot be patched.
+            valid JSON, or the file changed while it was being patched.
     """
     payload = stac_geoparquet_metadata(collection, version)
     _serialized(payload)  # refuse a non-JSON Collection before opening anything
@@ -455,18 +457,12 @@ def add_stac_metadata(
     if verbose:
         debug(f"stac-geoparquet payload:\n{json.dumps(payload, indent=2)}")
 
-    try:
-        patch_footer_kv(
-            parquet_file,
-            {STAC_GEOPARQUET_KEY: serialized},
-            output_file=destination,
-            verbose=verbose,
-        )
-    except FooterPatchUnsupported as exc:
-        raise GeoParquetError(
-            f"Cannot write the stac-geoparquet key into {parquet_file}: {exc}.\n"
-            "Rewriting the file to add one footer key would cost its compression "
-            "level, so gpio stops here instead."
-        ) from exc
+    patch_or_rewrite(
+        parquet_file,
+        {STAC_GEOPARQUET_KEY: serialized},
+        output_file=destination,
+        rewrite=functools.partial(rewrite_footer_kv, verbose=verbose),
+        verbose=verbose,
+    )
 
     success(_summary(payload, added))
