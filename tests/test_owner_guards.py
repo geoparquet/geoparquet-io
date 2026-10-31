@@ -49,12 +49,8 @@ from pathlib import Path
 
 import pytest
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
-
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
+from scripts.toml_utils import load_toml
 from tests._precommit_hook import core_tree, hook_entry
 
 REPO = Path(__file__).resolve().parents[1]
@@ -105,8 +101,7 @@ EXPECTED_COUNTS = {
 
 
 def load_exemptions(path: Path = EXEMPTIONS_FILE) -> dict:
-    with path.open("rb") as fh:
-        return tomllib.load(fh)
+    return load_toml(path)
 
 
 # ---------------------------------------------------------------------------
@@ -3557,8 +3552,7 @@ _BANNED = re.compile(r"^`(?P<api>[^`]+)` is banned")
 
 
 def _pyproject() -> dict:
-    with (REPO / "pyproject.toml").open("rb") as fh:
-        return tomllib.load(fh)
+    return load_toml(REPO / "pyproject.toml")
 
 
 def tid251_hits(repo: Path, target: Path, config: Path = REPO / "pyproject.toml") -> list[Hit]:

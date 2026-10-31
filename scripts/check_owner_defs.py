@@ -47,10 +47,10 @@ from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
+if __name__ == "__main__" and not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.toml_utils import load_toml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_EXEMPTIONS = Path("scripts") / "owner_exemptions.toml"
@@ -66,8 +66,7 @@ class Definition:
 
 
 def load_table(exemptions_file: Path) -> dict:
-    with exemptions_file.open("rb") as fh:
-        return tomllib.load(fh).get("G2", {})
+    return load_toml(exemptions_file).get("G2", {})
 
 
 def _owners(table: dict) -> dict[str, tuple[str, ...]]:
