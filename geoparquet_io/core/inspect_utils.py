@@ -65,6 +65,7 @@ from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.metadata_utils import (
     extract_bbox_from_row_group_stats,
 )
+from geoparquet_io.core.parquet_schema import root_schema_index
 from geoparquet_io.core.parquet_writer import declared_geoparquet_version
 from geoparquet_io.core.remote import is_remote_url, needs_httpfs
 from geoparquet_io.core.sizing import format_size
@@ -336,9 +337,9 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
     # The primary column is the owner's answer (#1367); its logical type, when
     # it has a native one, is the file's Parquet geo type.
     geometry_column = primary_geometry_column(parquet_file, geo=geo_meta, con=con)
-    for col in schema_info:
-        if col.get("name", "") != geometry_column or geometry_column not in geo_columns:
-            continue
+    index = root_schema_index(schema_info, geometry_column)
+    if index is not None and geometry_column in geo_columns:
+        col = schema_info[index]
         parquet_type = geo_columns[geometry_column]
         logical_type = col.get("logical_type") or ""
         geom_details = parse_geometry_logical_type(logical_type) if logical_type else None

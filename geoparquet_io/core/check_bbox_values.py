@@ -60,6 +60,7 @@ from geoparquet_io.core.check_verdict import (
     could_not_run,
     worst,
 )
+from geoparquet_io.core.column_selection import has_column
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet, is_geographic_crs
 from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.duckdb_utils import (
@@ -715,7 +716,8 @@ def _row_source(schema_info, raw_url: str) -> tuple[str, str]:
     took the name.
     """
     path = sql_path(raw_url)
-    if root_schema_index(schema_info, _ROW_NUMBER_COLUMN) is not None:
+    root_names = [column["name"] for column in root_schema_columns(schema_info)]
+    if has_column(root_names, _ROW_NUMBER_COLUMN):
         return f"read_parquet({path})", "row_number() OVER () - 1"
     return f"read_parquet({path}, file_row_number=true)", quote_identifier(_ROW_NUMBER_COLUMN)
 

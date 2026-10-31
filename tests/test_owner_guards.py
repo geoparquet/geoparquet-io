@@ -2441,6 +2441,27 @@ def _is_parameter(m: _Module, node: ast.Name) -> bool:
     )
 
 
+def _iterates_column_source(m: _Module, node: ast.AST) -> bool:
+    """Whether *node* is a loop target over columns: a name that says so, a
+    column collection (``table.column_names``, ``schema.names``) or the
+    ``.items()`` of one."""
+    if not isinstance(node, ast.Name):
+        return False
+    for loop in _enclosing_loops(m, node):
+        target = loop.target
+        if isinstance(target, ast.Tuple) and target.elts:
+            target = target.elts[0]
+        if not (isinstance(target, ast.Name) and target.id == node.id):
+            continue
+        source = loop.iter
+        if isinstance(source, ast.Call) and isinstance(source.func, ast.Attribute):
+            if source.func.attr in {"items", "keys", "values"}:
+                source = source.func.value
+        if _COLUMN_SOURCE.search(ast.unparse(loop.iter)) or _is_column_collection(source):
+            return True
+    return False
+
+
 def _is_user_name(m: _Module, node: ast.AST, targets) -> bool:
     """A name the user typed: a parameter called like one, or the target of a
     loop over a list the user supplied. Resolved geometry names are not here."""
@@ -2468,7 +2489,11 @@ def _is_column_collection(node: ast.AST) -> bool:
 def _reads_a_name(node: ast.AST) -> bool:
     """``col.get("name")`` / ``col["name"]``: the name a schema entry carries."""
     if isinstance(node, ast.Subscript):
-        return isinstance(node.slice, ast.Constant) and node.slice.value == "name"
+        return (
+            isinstance(node.slice, ast.Constant)
+            and node.slice.value == "name"
+            and bool(re.search(r"col|field", _ident(node.value), re.IGNORECASE))
+        )
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -2511,11 +2536,13 @@ def _exact_column_compare(m: _Module, node: ast.AST, targets) -> bool:
             if _is_user_name(m, left, targets) and _is_column_collection(right):
                 return True
             # ``[c for c in schema_cols if c not in exclude_list]``: the user's list
-            if _is_user_list(right) and _loop_source_matches(m, left, _COLUMN_SOURCE):
+            if _is_user_list(right) and _iterates_column_source(m, left):
                 return True
         elif isinstance(op, (ast.Eq, ast.NotEq)):
-            if (_reads_a_name(left) and _is_user_name(m, right, targets)) or (
-                _reads_a_name(right) and _is_user_name(m, left, targets)
+            # ``col.get("name") == x`` / ``!= x``: a flat walk of the schema listing
+            # by name, which a nested field of that name shadows (``root_schema_index``)
+            if (_reads_a_name(left) and isinstance(right, (ast.Name, ast.Attribute))) or (
+                _reads_a_name(right) and isinstance(left, (ast.Name, ast.Attribute))
             ):
                 return True
     return False
@@ -2680,7 +2707,7 @@ ARMS = {
     "footer_patch": Arm(_find_footer_patch, ("geoparquet_io/core/parquet_footer.py",)),
     "column_fold": Arm(
         _find_column_fold,
-        ("geoparquet_io/core/column_selection.py",),
+        ("geoparquet_io/core/column_selection.py", "geoparquet_io/core/parquet_schema.py"),
     ),
     "geometry_identity": Arm(
         _find_geometry_identity, ("geoparquet_io/core/geometry_detection.py",)
@@ -4711,6 +4738,25 @@ COLUMN_FOLD_SHAPES = {
         '    return [col for col in schema_info if col.get("name") == column_name]\n'
     ),
     "parameter named column": ("def f(table, column):\n    return column in table.column_names\n"),
+    "exclusion over table.column_names": (
+        "def f(table, exclude_columns):\n"
+        "    return [c for c in table.column_names if c not in exclude_columns]\n"
+    ),
+    "exclusion over schema.names": (
+        "def f(schema, exclude_list):\n    return [c for c in schema.names if c not in exclude_list]\n"
+    ),
+    "exclusion over a dict's items": (
+        "def f(edges_by_col, exclude_list):\n"
+        "    return {k: v for k, v in edges_by_col.items() if k not in exclude_list}\n"
+    ),
+    "name-read inequality continue": (
+        "def f(schema_info, geom_col):\n    for col in schema_info:\n"
+        '        if col.get("name") != geom_col:\n            continue\n        return col\n'
+    ),
+    "name-read equality walk": (
+        "def f(schema_info, geom_col):\n    for col in schema_info:\n"
+        '        if col.get("name") == geom_col:\n            return col\n'
+    ),
     "type-named loop target": (
         "def f(columns):\n    for col_type in columns:\n        yield col_type.lower()\n"
     ),

@@ -4,6 +4,7 @@ This module contains the business logic for inspecting GeoParquet files,
 including summary, preview (head/tail), statistics, and metadata operations.
 """
 
+from geoparquet_io.core.column_selection import same_column
 from geoparquet_io.core.duckdb_metadata import get_compression_stats, get_usable_columns
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
@@ -50,7 +51,8 @@ def _build_columns_info(usable_columns: list[dict], primary_geom_col: str | None
         {
             "name": col["name"],
             "type": col["type"],
-            "is_geometry": col["name"] == primary_geom_col,
+            "is_geometry": primary_geom_col is not None
+            and same_column(col["name"], primary_geom_col),
         }
         for col in usable_columns
     ]

@@ -3385,9 +3385,9 @@ def _schema_crs_for_consistency(schema_info: list, geom_col: str) -> Any:
     Conservative, but never a silent false PASS.
     """
 
-    for col in schema_info:
-        if col.get("name") != geom_col:
-            continue
+    index = root_schema_index(schema_info, geom_col)
+    if index is not None:
+        col = schema_info[index]
         parsed = parse_geometry_logical_type(col.get("logical_type") or "")
         if not (parsed and "crs" in parsed):
             return CRS_ABSENT
@@ -3460,9 +3460,9 @@ def _schema_crs_display(schema_crs: Any) -> str:
 def _edges_schema_facts(schema_info: list, geom_col: str) -> tuple[bool, bool, str | None]:
     """Return (is_geography, is_planar_geometry, schema_algorithm) for a column."""
 
-    for col in schema_info:
-        if col.get("name") != geom_col:
-            continue
+    index = root_schema_index(schema_info, geom_col)
+    if index is not None:
+        col = schema_info[index]
         logical_type = col.get("logical_type") or ""
         kind = native_geo_type(logical_type)
         if kind == "GEOGRAPHY":
