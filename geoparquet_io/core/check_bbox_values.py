@@ -60,6 +60,7 @@ from geoparquet_io.core.check_verdict import (
     could_not_run,
     worst,
 )
+from geoparquet_io.core.column_selection import named_entries
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet, is_geographic_crs
 from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.duckdb_utils import (
@@ -234,8 +235,7 @@ def _bbox_field_types(schema_info, bbox_column: str) -> set[str]:
     """The lower-cased types of the bbox struct's direct children."""
     return {
         str(child.get("type", "")).lower()
-        for index, column in enumerate(schema_info)
-        if column.get("name") == bbox_column
+        for index in named_entries(schema_info, bbox_column)
         for child in schema_direct_children(schema_info, index)
     }
 

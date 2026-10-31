@@ -55,6 +55,7 @@ __all__ = [
     "has_column",
     "join_column_list",
     "matching_columns",
+    "named_entries",
     "reject_blank_column_entries",
     "resolve_columns_against_schema",
     "same_column",
@@ -111,6 +112,18 @@ def find_column(name: str, columns: Iterable[str], *, option_name: str = "column
     return found[0] if found else None
 
 
+def named_entries(schema_info: list[dict], name: str) -> list[int]:
+    """Indexes of the rows of a depth-first schema listing whose ``name`` is ``name``.
+
+    For code that walks :func:`~geoparquet_io.core.duckdb_metadata.get_schema_info`
+    rows by a name it already holds (a declared bbox or geometry column). Exact on
+    purpose, and not :func:`find_column`: the listing carries nested children, so
+    two entries may share a name -- or differ only in case -- without being the
+    twins of one top-level column.
+    """
+    return [index for index, col in enumerate(schema_info) if col.get("name") == name]
+
+
 def has_column(columns: Iterable[str], name: str) -> bool:
     """Whether ``name`` is a column, as DuckDB would resolve it (a case twin counts)."""
     return bool(matching_columns(name, columns))
@@ -164,10 +177,10 @@ def exclude_columns(
 
     The one guard behind every ``--exclude-cols`` that drops columns from a
     table already in hand (``extract``'s Arrow path, ArcGIS, Carto). Names are
-    resolved against the schema (:func:`resolve_columns_against_schema`: exact
-    first, then a unique folded match; one that is absent or ambiguous raises),
-    so a case slip is an error rather than a filter that silently matches
-    nothing (#991).
+    resolved against the schema by :func:`find_column`'s rule
+    (:func:`resolve_columns_against_schema`: one column folds to the name; a name
+    that is absent, or that two case twins both fit, raises), so a case slip is
+    an error rather than a filter that silently matches nothing (#991).
 
     ``protect`` names a column the output requires (the geometry, on a path that
     writes GeoParquet): asking to drop it warns once and keeps it.

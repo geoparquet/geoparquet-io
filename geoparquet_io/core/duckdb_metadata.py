@@ -19,6 +19,7 @@ from typing import Any, Literal
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.column_selection import named_entries
 from geoparquet_io.core.crs_utils import (
     _projjson_from_authority,
     column_is_geographic,
@@ -912,9 +913,9 @@ def native_geo_type(logical_type: object) -> str | None:
 
 def is_native_geo_column(schema_info: list[dict] | None, column: str) -> str | None:
     """:func:`native_geo_type` of ``column`` in :func:`get_schema_info` rows; None if absent."""
-    for col in schema_info or []:
-        if col.get("name") == column:
-            return native_geo_type(col.get("logical_type"))
+    rows = schema_info or []
+    for index in named_entries(rows, column):
+        return native_geo_type(rows[index].get("logical_type"))
     return None
 
 

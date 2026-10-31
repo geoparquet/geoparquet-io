@@ -20,7 +20,7 @@ again.
 import json
 from typing import Literal, TypedDict, cast
 
-from geoparquet_io.core.column_selection import matching_columns, unique_name
+from geoparquet_io.core.column_selection import matching_columns, named_entries, unique_name
 from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.geo_metadata import (
@@ -106,10 +106,8 @@ def _schema_struct_children(
     flat ``parquet_schema()`` listing is depth-first, so a nested child's own
     children must not be read as siblings.
     """
-    for index, col in enumerate(schema_info):
-        if col.get("name") != column_name:
-            continue
-        if (col.get("num_children") or 0) < 1:
+    for index in named_entries(schema_info, column_name):
+        if (schema_info[index].get("num_children") or 0) < 1:
             return None
         children = schema_direct_children(schema_info, index)
         return [c.get("name", "") for c in children], [str(c.get("type", "")) for c in children]

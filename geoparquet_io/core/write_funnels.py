@@ -47,6 +47,7 @@ from geoparquet_io.core.arrow_geo_metadata import (
     nonplanar_edges_from_schema,
     with_planar_edge_types,
 )
+from geoparquet_io.core.column_selection import has_column
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
     _wrap_query_with_crs,
@@ -1841,7 +1842,7 @@ def _edges_to_restore(
     """
     edges_by_col = declared_nonplanar_edges(input_file, original_metadata)
     if exclude_columns:
-        edges_by_col = {k: v for k, v in edges_by_col.items() if k not in exclude_columns}
+        edges_by_col = {k: v for k, v in edges_by_col.items() if not has_column(exclude_columns, k)}
     return edges_by_col
 
 

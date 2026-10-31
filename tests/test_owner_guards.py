@@ -2261,7 +2261,14 @@ _ARROW_NAME_LISTS = frozenset({"names", "column_names"})
 #: A parameter that carries a column name the user typed. Geometry names are
 #: resolved by ``geometry_detection`` before they are tested, so they are not here.
 _USER_COLUMN_NAME = re.compile(
-    r"(column_name|bbox_column|bbox_column_name|requested|requested_col)"
+    r"(column|column_name|requested\w*|include_\w+|exclude_\w+|bbox_column(_name)?)"
+)
+#: A list of column names the user supplied (``--include-cols``, ``--columns``).
+_USER_LIST = re.compile(r"(requested\w*|include_\w+|exclude_\w+|column_list|bbox_column_names)")
+#: A variable that holds a list of column names.
+_COLUMN_COLLECTION = re.compile(
+    r"(columns?|cols|names|schema|fields?|exclude|include)(_list)?$",
+    re.IGNORECASE,
 )
 #: SQL that folds a column: ``lower(name)``, ``UPPER(column_name)``.
 _SQL_FOLD = re.compile(r"\b(lower|upper)\(\s*\"?\w*(col|field|name)", re.IGNORECASE)
@@ -2306,9 +2313,12 @@ def _column_targets(m: _Module) -> set[tuple[int, str]]:
         if isinstance(node, (ast.For, ast.comprehension)):
             source = ast.unparse(node.iter)
             if _COLUMN_SOURCE.search(source) and not _NOT_COLUMNISH.search(source):
-                for name in ast.walk(node.target):
-                    if isinstance(name, ast.Name):
-                        found.add((id(node), name.id))
+                # ``for name, col_type in schema_rows`` hands the name first.
+                target = node.target
+                if isinstance(target, ast.Tuple) and target.elts:
+                    target = target.elts[0]
+                if isinstance(target, ast.Name):
+                    found.add((id(node), target.id))
     return found
 
 
@@ -2404,18 +2414,111 @@ def _fold_keyed(node: ast.AST) -> bool:
     )
 
 
-def _exact_arrow_membership(node: ast.AST) -> bool:
-    """``bbox_column_name in schema.names`` / ``column not in table.column_names``:
-    a case-sensitive test of a name a user typed. A literal on the left is the
-    code's own name, not the user's."""
-    if not isinstance(node, ast.Compare) or isinstance(node.left, ast.Constant):
+def _loop_source_matches(m: _Module, node: ast.AST, pattern: re.Pattern) -> bool:
+    """Whether *node* is the target of a loop whose iterable's identifier matches *pattern*."""
+    if not isinstance(node, ast.Name):
         return False
-    return any(
-        isinstance(op, (ast.In, ast.NotIn))  # codespell:ignore
-        and isinstance(right, ast.Attribute)
-        and right.attr in _ARROW_NAME_LISTS
-        for op, right in zip(node.ops, node.comparators, strict=True)
-    ) and bool(_USER_COLUMN_NAME.fullmatch(_ident(node.left)))
+    for loop in _enclosing_loops(m, node):
+        target = loop.target
+        if isinstance(target, ast.Tuple) and target.elts:
+            target = target.elts[0]
+        if isinstance(target, ast.Name) and target.id == node.id:
+            if pattern.search(_ident(_root(loop.iter)) or ast.unparse(loop.iter)):
+                return True
+    return False
+
+
+def _is_parameter(m: _Module, node: ast.Name) -> bool:
+    """Whether *node* names a parameter of its function (not a loop variable)."""
+    func = _enclosing_function(m, node)
+    if func is None or node.id not in {
+        a.arg for a in ast.walk(func.args) if isinstance(a, ast.arg)
+    }:
+        return False
+    return not any(
+        isinstance(loop.target, ast.Name) and loop.target.id == node.id
+        for loop in _enclosing_loops(m, node)
+    )
+
+
+def _is_user_name(m: _Module, node: ast.AST, targets) -> bool:
+    """A name the user typed: a parameter called like one, or the target of a
+    loop over a list the user supplied. Resolved geometry names are not here."""
+    if not isinstance(node, ast.Name):
+        return False
+    return (
+        bool(_USER_COLUMN_NAME.fullmatch(node.id)) and _is_parameter(m, node)
+    ) or _loop_source_matches(m, node, _USER_LIST)
+
+
+def _is_user_list(node: ast.AST) -> bool:
+    return isinstance(node, (ast.Name, ast.Attribute)) and bool(_USER_LIST.fullmatch(_ident(node)))
+
+
+def _is_column_collection(node: ast.AST) -> bool:
+    """``schema.names``, ``table.column_names``, ``existing_columns``,
+    ``exclude_list``: a list of column names."""
+    if isinstance(node, ast.Attribute) and node.attr in _ARROW_NAME_LISTS:
+        return True
+    return isinstance(node, (ast.Name, ast.Attribute)) and bool(
+        _COLUMN_COLLECTION.search(_ident(node))
+    )
+
+
+def _reads_a_name(node: ast.AST) -> bool:
+    """``col.get("name")`` / ``col["name"]``: the name a schema entry carries."""
+    if isinstance(node, ast.Subscript):
+        return isinstance(node.slice, ast.Constant) and node.slice.value == "name"
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and bool(node.args)
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "name"
+    )
+
+
+def _is_set_of_columns(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and _ident(node.func) in {"set", "frozenset"}
+        and len(node.args) == 1
+        and _is_column_collection(node.args[0])
+    )
+
+
+def _is_set_of_user_columns(node: ast.AST) -> bool:
+    return _is_set_of_columns(node) and _is_user_list(node.args[0])
+
+
+def _exact_column_compare(m: _Module, node: ast.AST, targets) -> bool:
+    """A case-sensitive test of a name a user typed against a schema or a column
+    list: ``col not in table.column_names``, ``c not in exclude_list``,
+    ``col.get("name") == column_name``, ``set(requested) - set(all_columns)``.
+    A literal on the left is the code's own name, not the user's."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Sub):
+        return (
+            _is_set_of_columns(node.left)
+            and _is_set_of_columns(node.right)
+            and (_is_set_of_user_columns(node.left) or _is_set_of_user_columns(node.right))
+        )
+    if not isinstance(node, ast.Compare):
+        return False
+    operands = [node.left, *node.comparators]
+    for op, left, right in zip(node.ops, operands[:-1], operands[1:], strict=True):
+        if isinstance(op, (ast.In, ast.NotIn)):  # codespell:ignore
+            if _is_user_name(m, left, targets) and _is_column_collection(right):
+                return True
+            # ``[c for c in schema_cols if c not in exclude_list]``: the user's list
+            if _is_user_list(right) and _loop_source_matches(m, left, _COLUMN_SOURCE):
+                return True
+        elif isinstance(op, (ast.Eq, ast.NotEq)):
+            if (_reads_a_name(left) and _is_user_name(m, right, targets)) or (
+                _reads_a_name(right) and _is_user_name(m, left, targets)
+            ):
+                return True
+    return False
 
 
 def _str_method_fold(node: ast.AST) -> bool:
@@ -2474,10 +2577,12 @@ def _fold_method_on_column(m: _Module, node: ast.AST, targets) -> bool:
         return False
     if _says_column(_ident(node.func.value)) or _says_column(_ident(root)):
         return True
-    if not isinstance(root, ast.Name) or _NOT_COLUMNISH.search(root.id):
+    if not isinstance(root, ast.Name):
         return False
     if any((id(loop), root.id) in targets for loop in _enclosing_loops(m, node)):
         return True
+    if _NOT_COLUMNISH.search(root.id):
+        return False
     return root.id in _BARE_NAMES and _function_deals_in_columns(m, node)
 
 
@@ -2517,7 +2622,7 @@ def _find_column_fold(m: _Module) -> Iterator[Hit]:
             or _str_method_fold(node)
             or _ascii_fold_table(node)
             or _fold_keyed(node)
-            or _exact_arrow_membership(node)
+            or _exact_column_compare(m, node, targets)
         ):
             yield m.hit(node)
         elif (
@@ -4585,7 +4690,32 @@ COLUMN_FOLD_SHAPES = {
     "exact table membership": (
         "def f(table, column_name):\n    return column_name not in table.column_names\n"
     ),
+    # The second audit's shapes (#1395): the membership tests this PR routed away.
+    "loop target not in schema.names": (
+        "def f(table, column_list):\n    for col in column_list:\n"
+        "        if col not in table.column_names:\n            raise ValueError(col)\n"
+    ),
+    "loop target not in a column list": (
+        "def f(existing_columns, column_list):\n    for col in column_list:\n"
+        "        if col not in existing_columns:\n            raise ValueError(col)\n"
+    ),
+    "set difference": (
+        "def f(requested_cols, all_columns):\n    return set(requested_cols) - set(all_columns)\n"
+    ),
+    "comprehension filtered by exclusion": (
+        "def f(all_schema_cols, exclude_list):\n"
+        "    return [c for c in all_schema_cols if c not in exclude_list]\n"
+    ),
+    "schema name equals the typed name": (
+        "def f(schema_info, column_name):\n"
+        '    return [col for col in schema_info if col.get("name") == column_name]\n'
+    ),
+    "parameter named column": ("def f(table, column):\n    return column in table.column_names\n"),
+    "type-named loop target": (
+        "def f(columns):\n    for col_type in columns:\n        yield col_type.lower()\n"
+    ),
 }
+
 
 COLUMN_FOLD_NEAR_MISSES = {
     "a type": "def f(col_type):\n    return col_type.upper()\n",
@@ -4594,6 +4724,12 @@ COLUMN_FOLD_NEAR_MISSES = {
     "a name that says nothing": "def f(name):\n    return name.lower()\n",
     "a one-shot suffix": 'def f(prefix, v):\n    base = f"{prefix}_{v}"\n    return base in {"a"}\n',
     "a loop over plain names": "def f(items):\n    return [i.lower() for i in items]\n",
+    "a resolved geometry name": (
+        "def f(table, geometry_column):\n    return geometry_column in table.column_names\n"
+    ),
+    "a type unpacked beside a name": (
+        "def f(schema_rows):\n    return [(n, col_type.upper()) for n, col_type in schema_rows]\n"
+    ),
     "an exact membership on a literal": ("def f(schema):\n    return 'id' in schema.names\n"),
     "a table's own name": "def f(table):\n    return table.name.lower()\n",
     "sql lower of a path": 'Q = "SELECT lower(path) FROM t"\n',

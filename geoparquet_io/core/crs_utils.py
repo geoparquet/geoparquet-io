@@ -12,6 +12,7 @@ from functools import lru_cache
 from typing import Any
 
 from geoparquet_io.core.bbox_parse import BBox
+from geoparquet_io.core.column_selection import named_entries
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     fetch_one,
@@ -892,9 +893,7 @@ def _block_omits_requested_column(
     from geoparquet_io.core.duckdb_metadata import get_schema_info
     from geoparquet_io.core.parquet_schema import root_schema_columns
 
-    return any(
-        col["name"] == requested for col in root_schema_columns(get_schema_info(parquet_file))
-    )
+    return bool(named_entries(root_schema_columns(get_schema_info(parquet_file)), requested))
 
 
 def _native_type_crs_value(parquet_file, column: str | None = None):
