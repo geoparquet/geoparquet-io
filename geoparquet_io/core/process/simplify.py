@@ -764,7 +764,7 @@ def _simplify_file_in_memory(
         output_parquet,
         geometry_column=kwargs["geometry_column"],
         verbose=kwargs["verbose"],
-        **write.funnel_kwargs(exclude=("memory_limit",)),
+        **write.funnel_kwargs(),
     )
 
 

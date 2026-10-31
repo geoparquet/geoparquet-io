@@ -1569,7 +1569,7 @@ def _execute_bigquery_extraction(
                     geometry_column=final_geom_col,
                     verbose=verbose,
                     edges=final_edges,
-                    **write.funnel_kwargs(exclude=("memory_limit",)),
+                    **write.funnel_kwargs(),
                 )
             else:
                 # No geometry: plain Parquet through the geometry-free funnel,
@@ -1583,7 +1583,7 @@ def _execute_bigquery_extraction(
                     result,
                     output_parquet,
                     verbose=verbose,
-                    **write.funnel_kwargs(exclude=("memory_limit", "geoparquet_version")),
+                    **write.funnel_kwargs(),
                 )
 
             success(f"Extracted {row_count:,} rows to {output_parquet}")

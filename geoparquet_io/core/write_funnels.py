@@ -1702,9 +1702,14 @@ def write_geoparquet_table(
     profile: str | None = None,
     edges: str | None = None,
     geo_bbox: list[float] | None = None,
+    memory_limit: str | None = None,
 ) -> None:
     """
     Write a PyArrow Table to a GeoParquet file with proper metadata.
+
+    ``memory_limit`` is accepted so a ``WriteOptions`` expands here whole
+    (``**write.funnel_kwargs()``); the table is written by pyarrow, with no
+    DuckDB statement to bound, so it is not used.
 
     This is the table-centric version for writing GeoParquet files.
     It applies proper GeoParquet metadata and handles compression settings.
@@ -1843,8 +1848,15 @@ def write_plain_parquet_table(
     row_group_rows: int | None = None,
     verbose: bool = False,
     profile: str | None = None,
+    geoparquet_version: str | None = None,
+    memory_limit: str | None = None,
 ) -> None:
     """Write a PyArrow Table that has no geometry, as plain Parquet.
+
+    ``geoparquet_version`` and ``memory_limit`` are accepted so a
+    ``WriteOptions`` expands here whole (``**write.funnel_kwargs()``) and are
+    not used: no ``geo`` key is written, so there is no version to choose, and
+    pyarrow writes the table, so there is no DuckDB statement to bound.
 
     The geometry-free sibling of :func:`write_geoparquet_table`, for outputs
     that have no geometry by request -- ``process aggregate`` and

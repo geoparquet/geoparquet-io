@@ -1184,12 +1184,10 @@ class WriteOptions:
         """
         return replace(self, profile=None, memory_limit=None) != WriteOptions()
 
-    def funnel_kwargs(self, *, exclude: tuple[str, ...] = ()) -> dict[str, Any]:
+    def funnel_kwargs(self) -> dict[str, Any]:
         """The keywords every funnel takes, for ``funnel(..., **options.funnel_kwargs())``.
 
-        ``exclude`` names the fields a narrower funnel does not take: the Arrow
-        table funnels write through pyarrow, so there is no DuckDB
-        ``memory_limit`` to bound, and the plain-Parquet funnel has no
-        ``geoparquet_version``.
+        Every funnel accepts all seven, including the Arrow-table ones, which
+        accept and ignore the fields that do not apply to them.
         """
-        return {f.name: getattr(self, f.name) for f in fields(self) if f.name not in exclude}
+        return {f.name: getattr(self, f.name) for f in fields(self)}

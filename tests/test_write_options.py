@@ -195,3 +195,28 @@ def test_piped_reproject_honours_the_write_flags(points_file, tmp_path):
 )
 def test_sets_output_layout_names_the_byte_shaping_options(options, expected):
     assert options.sets_output_layout() is expected
+
+
+def test_the_table_funnels_take_the_whole_value(tmp_path):
+    """No per-site exclusions: both Arrow-table funnels accept all seven fields."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.write_funnels import write_geoparquet_table, write_plain_parquet_table
+
+    full = WriteOptions(
+        compression="zstd", row_group_rows=10, geoparquet_version="1.1", memory_limit="1GB"
+    )
+    write_plain_parquet_table(
+        pa.table({"a": [1, 2]}), str(tmp_path / "p.parquet"), **full.funnel_kwargs()
+    )
+    assert pq.ParquetFile(tmp_path / "p.parquet").metadata.num_rows == 2
+    shapely = pytest.importorskip("shapely")
+    geoms = shapely.to_wkb([shapely.Point(0, 0)]).tolist()
+    write_geoparquet_table(
+        pa.table({"geometry": geoms}),
+        str(tmp_path / "g.parquet"),
+        geometry_column="geometry",
+        **full.funnel_kwargs(),
+    )
+    assert b"geo" in pq.ParquetFile(tmp_path / "g.parquet").schema_arrow.metadata
