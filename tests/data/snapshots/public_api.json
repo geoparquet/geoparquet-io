@@ -460,6 +460,7 @@
     "bbox_column_to_declare",
     "bbox_covering_problem",
     "bbox_field_order_is_covering_legal",
+    "bbox_struct_array",
     "bbox_struct_child_names_match",
     "bbox_xy",
     "bboxless_covering_columns",
@@ -468,11 +469,11 @@
     "carried_column_name",
     "carried_covering_as_provenance",
     "carried_version",
+    "compose_carried_geo",
     "compose_geo_block",
     "covering_lacks_bbox",
     "covering_supported",
     "declared_version",
-    "gate_carried_covering",
     "geoarrow_dimension",
     "geoarrow_primary_encoding",
     "geoarrow_wkb_codes",
@@ -502,6 +503,7 @@
     "strip_nonplanar_edges",
     "strip_orientation",
     "strip_unsupported_covering",
+    "with_geo_block",
     "zm_suffix_sql"
   ],
   "geoparquet_io.core.geometry_detection": [

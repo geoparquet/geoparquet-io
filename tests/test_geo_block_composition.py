@@ -4,9 +4,12 @@
 for one input and one requested version every write path declares the same
 block: ``convert geoparquet``, ``extract``, ``sort hilbert``, ``process
 simplify`` (tolerance 0, so the data is unchanged), the Arrow IPC stream
-(``extract ... -`` into ``convert geoparquet -``) and ``Table.write`` with each
-of the four strategies. Each cell compares the decoded block (key order is not
-part of the comparison) against ``convert geoparquet``'s.
+(``extract ... -`` persisted with ``pq.write_table``) and ``Table.write`` with
+each of the four strategies. Each cell compares the decoded block (key order is
+not part of the comparison) against ``extract``'s. On the integration tip
+c4d9aeb2 nineteen cells disagreed (streaming ``Table.write`` declared no bbox,
+streamed ``simplify`` dropped a spherical column's bbox, the stream kept a 1.0
+input's block un-upgraded); T3e routed each to the composer's rule.
 
 Source kinds: a 1.1 file declaring a covering over its bbox struct and a
 projected CRS; a 1.0 file with an undeclared conventional ``bbox`` column; a
@@ -141,39 +144,11 @@ SKIP = {
     **{(k, v, "stream"): "the stream takes no version" for k in SOURCES for v in VERSIONS[1:]},
 }
 
-_STREAMING_BBOX = (
-    "#1367: Table.write with the streaming strategy declares no bbox (the table "
-    "entry point never measures one); kept byte-identical, recorded for the lead"
-)
-_SIMPLIFY_SPHERICAL_BBOX = (
-    "#1367: process simplify drops the bbox of a spherical-edges column the other "
-    "paths declare; kept byte-identical, recorded for the lead"
-)
-_STREAM_UPGRADE = (
-    "#1367: the Arrow IPC stream carries the input block as it is, so a 1.0 input's "
-    "conventional bbox column is not declared as the other paths declare it"
-)
-_CONVERT_V2 = (
-    "#1367: convert --geoparquet-version 2.0 declares no covering over the bbox "
-    "column the other paths declare (and re-resolves a projected CRS through DuckDB)"
-)
-#: (source, version, path) -> reason: every cell that disagrees with ``extract``
-#: on the integration tip c4d9aeb2. Each is a disagreement between composers'
-#: callers that is not on the approved-change list, so T3e keeps the bytes.
-XFAIL: dict[tuple[str, str, str], str] = {
-    **{
-        (k, v, "table_write_streaming"): _STREAMING_BBOX
-        for k in SOURCES
-        if k != "spherical"
-        for v in VERSIONS
-    },
-    **{("spherical", v, "simplify"): _SIMPLIFY_SPHERICAL_BBOX for v in ("auto", "1.0", "1.1")},
-    ("bare_bbox_1_0", "auto", "stream"): _STREAM_UPGRADE,
-    **{
-        (k, "2.0", "convert_geoparquet"): _CONVERT_V2
-        for k in ("covered_projected", "bare_bbox_1_0", "geojson")
-    },
-}
+#: ``convert`` at 2.0 drops the input's bbox column ("not needed for native geo
+#: types": a data decision, not the block's), and re-resolves the CRS from the
+#: native type, so its PROJJSON is the same CRS spelled by another PROJ.
+#: The block is compared on what the composer's rule says for those columns.
+CONVERT_DROPS_BBOX = {(k, "2.0", "convert_geoparquet") for k in SOURCES}
 
 
 def _cases():
@@ -182,13 +157,7 @@ def _cases():
             for path_name in PATHS:
                 if (kind, version, path_name) in SKIP:
                     continue
-                marks = []
-                reason = XFAIL.get((kind, version, path_name))
-                if reason:
-                    marks.append(pytest.mark.xfail(strict=True, reason=reason))
-                yield pytest.param(
-                    kind, version, path_name, marks=marks, id=f"{kind}-{version}-{path_name}"
-                )
+                yield pytest.param(kind, version, path_name, id=f"{kind}-{version}-{path_name}")
 
 
 @pytest.mark.parametrize(("kind", "version", "path_name"), list(_cases()))
@@ -197,7 +166,27 @@ def test_every_path_declares_the_same_block(
 ):
     out = _run(path_name, sources[kind], tmp_path / "out.parquet", version)
     got, want = _geo(out), references[(kind, version)]
+    if (kind, version, path_name) in CONVERT_DROPS_BBOX:
+        got, want = _without_dropped_bbox(out, got, want)
     assert got == want, _diff(got, want)
+
+
+def _without_dropped_bbox(out: Path, got: dict, want: dict) -> tuple[dict, dict]:
+    """``(got, want)`` with what convert's 2.0 data decision changes taken out.
+
+    The output has no bbox column, so the composer declares no covering over
+    one; and the CRS is compared as the CRS it names, not its PROJJSON text.
+    """
+    from geoparquet_io.core.crs_utils import crs_authority_code
+
+    assert "bbox" not in pq.read_schema(str(out)).names
+    got, want = json.loads(json.dumps(got)), json.loads(json.dumps(want))
+    for block in (got, want):
+        entry = block["columns"][block["primary_column"]]
+        entry.pop("covering", None)
+        if "crs" in entry:
+            entry["crs"] = crs_authority_code(entry["crs"])
+    return got, want
 
 
 def _diff(got, want, prefix="") -> str:

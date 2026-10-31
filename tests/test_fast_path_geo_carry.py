@@ -378,7 +378,9 @@ class TestTheCarryDeclines:
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
         from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
-        thin = self._metadata({"encoding": "WKB", "geometry_types": ["Polygon"]})
+        thin = self._metadata(
+            {"encoding": "WKB", "geometry_types": ["Polygon"], "bbox": [0, 0, 1, 1]}
+        )
         con = get_duckdb_connection(load_spatial=True)
         try:
             carried = _geo_block_to_carry_on_fast_path(
@@ -405,7 +407,12 @@ class TestTheCarryDeclines:
                 raise AssertionError("the composer probed the query anyway")
 
         metadata = self._metadata(
-            {"encoding": "WKB", "geometry_types": ["Polygon"], "epoch": 2020.5}
+            {
+                "encoding": "WKB",
+                "geometry_types": ["Polygon"],
+                "bbox": [0, 0, 1, 1],
+                "epoch": 2020.5,
+            }
         )
         carried = _geo_block_to_carry_on_fast_path(
             metadata,
@@ -542,6 +549,7 @@ class TestTheCarriedBlockGoesThroughTheCrsRule:
                         "geometry": {
                             "encoding": "WKB",
                             "geometry_types": ["Polygon"],
+                            "bbox": [0, 0, 1, 1],
                             "crs": None,
                         }
                     },
@@ -643,3 +651,26 @@ class TestTheDecisionIsNotAskedWhenTheRewriteIsAlreadyDecided:
 
         assert self._decisions_for(monkeypatch, v2_epoch_orientation_bbox, out, "2.0") == 1
         assert "covering" in _geo(out)["columns"]["geometry"]
+
+
+def test_a_carried_2_0_block_without_a_bbox_gets_one_measured(fields_v2_file, tmp_path):
+    """HANDOFFS row 69: a 2.0 block that says more than DuckDB's but has no file
+    ``bbox`` is not shipped without one; the rewrite measures it from the data."""
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.geo_metadata import geometry_stats_of
+
+    table = pq.read_table(str(fields_v2_file))
+    metadata = dict(table.schema.metadata)
+    geo = json.loads(metadata[b"geo"])
+    geo["columns"]["geometry"].pop("bbox", None)
+    geo["columns"]["geometry"]["epoch"] = 2020.5
+    metadata[b"geo"] = json.dumps(geo).encode()
+    source = tmp_path / "no_file_bbox.parquet"
+    pq.write_table(table.replace_schema_metadata(metadata), str(source))
+    out = tmp_path / "out.parquet"
+    _sort(source, out)
+
+    column = _geo(out)["columns"]["geometry"]
+    assert column["epoch"] == 2020.5
+    assert column["bbox"] == pytest.approx(geometry_stats_of(str(out), "geometry").bbox)

@@ -24,9 +24,11 @@ from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
+    GeoBlockOptions,
+    SchemaSource,
     _bbox_claimed_by_another_column,
     arrow_bbox_covering_problem,
-    build_bbox_covering,
+    compose_geo_block,
     covering_supported,
     declared_version,
     sanitized_carried_geo,
@@ -45,7 +47,7 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
 
-def require_geo_metadata_for_covering(geo_meta: object, source: str | None = None) -> dict:
+def require_geo_metadata_for_cover(geo_meta: object, source: str | None = None) -> dict:
     """Refuse an input that carries no usable GeoParquet metadata (#713).
 
     A file with no `geo` key is not GeoParquet, and adding covering metadata
@@ -143,9 +145,7 @@ def add_bbox_metadata_table(
     # Same refusal as the file path: a table with no usable `geo` block has
     # nothing describing the geometry column, and the skeleton this used to
     # invent claimed GeoParquet 1.1.0 while failing five of its own spec checks.
-    geo_meta = require_geo_metadata_for_covering(geo_meta)
-    if not isinstance(geo_meta.get("columns"), dict):
-        geo_meta["columns"] = {}
+    geo_meta = require_geo_metadata_for_cover(geo_meta)
 
     # 'covering' was introduced in GeoParquet 1.1. This path exists solely to
     # write that key, so a 1.0 table gets a clear error naming the conflict
@@ -158,11 +158,10 @@ def add_bbox_metadata_table(
             f"Write the table at 1.1 first (e.g. write(..., geoparquet_version='1.1'))."
         )
 
-    geo_col_meta = geo_meta["columns"].get(str(geom_col))
-    if not isinstance(geo_col_meta, dict):
-        geo_col_meta = {}
-        geo_meta["columns"][str(geom_col)] = geo_col_meta
-    geo_col_meta["covering"] = {"bbox": build_bbox_covering(bbox_column)}
+    geo_meta = compose_geo_block(
+        SchemaSource(table.schema, {b"geo": json.dumps(geo_meta).encode("utf-8")}),
+        GeoBlockOptions(geometry_column=str(geom_col), covering=bbox_column),
+    )
 
     # Metadata-only change, not a cast
     schema_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
@@ -306,7 +305,7 @@ def add_bbox_metadata(
                 _cannot_declare_message(bbox_info["covering_problem"], parquet_file)
             )
 
-    geo_meta = require_geo_metadata_for_covering(geo_meta, parquet_file)
+    geo_meta = require_geo_metadata_for_cover(geo_meta, parquet_file)
 
     # 'covering' was introduced in GeoParquet 1.1. Unlike the write paths — where
     # covering is an implicit side effect of writing a bbox column and is simply
@@ -326,17 +325,13 @@ def add_bbox_metadata(
         primary_geometry_column(parquet_file, verbose=verbose), parquet_file
     )
 
-    # Update or create the columns section. A `columns` value that is not an
-    # object is as unusable as a missing one, so replace it rather than indexing
-    # into it.
-    if not isinstance(geo_meta.get("columns"), dict):
-        geo_meta["columns"] = {}
-
-    if primary_col not in geo_meta["columns"]:
-        geo_meta["columns"][primary_col] = {}
-
-    # Add bbox covering metadata
-    geo_meta["columns"][primary_col]["covering"] = {"bbox": build_bbox_covering(target_column)}
+    # The block is re-composed with the covering declared on the primary: the
+    # composer creates a missing or non-object ``columns`` entry and runs every
+    # covering gate, so the one key this command writes is the owner's answer.
+    geo_meta = compose_geo_block(
+        SchemaSource(schema, {b"geo": json.dumps(geo_meta).encode("utf-8")}),
+        GeoBlockOptions(geometry_column=primary_col, covering=target_column, verbose=verbose),
+    )
 
     if verbose:
         debug("\nUpdated geo metadata:")

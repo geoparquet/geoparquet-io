@@ -43,8 +43,8 @@ from geoparquet_io.core.geo_metadata import (
     ArrowTableSource,
     GeoBlockOptions,
     backfill_derived_stats,
+    compose_carried_geo,
     compose_geo_block,
-    gate_carried_covering,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
 )
@@ -54,7 +54,7 @@ from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
 )
 from geoparquet_io.core.logging_config import progress, warn
-from geoparquet_io.core.parquet_writer import WriteOptions
+from geoparquet_io.core.parquet_writer import WriteOptions, resolve_output_geoparquet_version
 from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.streaming import (
     apply_geoarrow_extension_type,
@@ -413,14 +413,17 @@ def _write_stream_output(
     # actually being written. Without the backfill the stream omits
     # `geometry_types`, which GeoParquet 1.1 requires and which DuckDB refuses to
     # read a file without; without the prune the orphan entry has none either.
-    # ... and then run the two covering gates every file write runs. A stream is
+    # ... and then compose the block as every file write does. A stream is
     # read and persisted exactly like a file gpio wrote, so a covering the
     # pruning has just emptied of its bbox member -- or one declared over a
-    # struct the spec forbids -- is no more writable here than there (#1172).
+    # struct the spec forbids -- is no more writable here than there (#1172),
+    # and a 1.0 input upgrades and declares its bbox column as a file does.
     if original_metadata:
         original_metadata = prune_geo_metadata_to_columns(original_metadata, table.column_names)
         original_metadata = backfill_derived_stats(original_metadata, table)
-        original_metadata = gate_carried_covering(original_metadata, table.schema)
+        # A stream takes no version option: auto mode, the facade's answer.
+        version = resolve_output_geoparquet_version(None, original_metadata=original_metadata)
+        original_metadata = compose_carried_geo(original_metadata, table.schema, version)
         table = apply_metadata_to_table(table, original_metadata)
 
     write_arrow_stream(table)

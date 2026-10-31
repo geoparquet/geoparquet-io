@@ -19,10 +19,17 @@ from __future__ import annotations
 
 import gc
 
+import pyarrow as pa
+
 from geoparquet_io.core.admin_datasets import resolve_admin_dataset
 from geoparquet_io.core.duckdb_utils import as_wkb_sql, quote_identifier, register_arrow, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.geo_metadata import (
+    bbox_column_to_declare,
+    bbox_struct_array,
+    sanitized_carried_geo,
+)
 from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.process.aggregate.common import PCT_CELL_FUNC, geometry_to_geom_expr
 from geoparquet_io.core.process.aggregate.grid_common import (
@@ -195,6 +202,14 @@ def build_level_sql(con, info: AggregateInfo, source_sql: str, level: int | str)
     return build_grid_rollup_sql(info, source_sql, int(level))
 
 
+def with_input_bbox(table: pa.Table, bbox_field: pa.Field | None) -> pa.Table:
+    """``table`` with ``bbox_field``'s column rebuilt over its ``geometry`` (#1121)."""
+    if bbox_field is None or bbox_field.name in table.column_names:
+        return table
+    column = bbox_struct_array(table, "geometry", bbox_field.type)
+    return table.append_column(bbox_field, column)
+
+
 def rollup_table(
     table,
     level: int | str,
@@ -217,7 +232,14 @@ def rollup_table(
         info = detect_aggregate_info(con, "__overview_input", cell_column, scheme)
         level = validate_level(info, level)
         sql = build_level_sql(con, info, "SELECT * FROM __overview_input", level)
-        return con.sql(sql).arrow().read_all()
+        # The input's bbox column comes along, rebuilt over the parent cells (#1121).
+        bbox_field = None
+        if info.out_geometry != "none":
+            name = bbox_column_to_declare(
+                table.schema, sanitized_carried_geo(table.schema.metadata)
+            )
+            bbox_field = table.schema.field(name) if name else None
+        return with_input_bbox(con.sql(sql).arrow().read_all(), bbox_field)
     finally:
         con.close()
         # Release GDAL/spatial native handles before the next spatial connection

@@ -35,7 +35,6 @@ from geoparquet_io.core.edges import (
 )
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
-    KEEP_CRS,
     GeoBlockOptions,
     SchemaSource,
     _bbox_claimed_by_another_column,
@@ -583,6 +582,7 @@ def _apply_geoparquet_metadata(
     edges: str | None = None,
     geometry_info: dict | None = None,
     geo_bbox: list[float] | None = None,
+    geo_types: list[str] | None = None,
 ):
     """
     Apply GeoParquet metadata to an Arrow Table based on version.
@@ -616,6 +616,9 @@ def _apply_geoparquet_metadata(
             knows the data crosses the antimeridian passes the RFC 7946 5.2
             wrap form (xmin > xmax) here, which cannot be recovered from
             per-geometry extents alone.
+        geo_types: Pre-computed ``geometry_types`` for the primary column (a
+            caller that measured rows this table does not hold, such as the
+            union over an overview's levels), declared by the composer.
 
     Returns:
         pa.Table: Table with GeoParquet metadata applied
@@ -763,7 +766,8 @@ def _apply_geoparquet_metadata(
     # step 2 has retyped it. One owner call measures whatever is missing, in one
     # pass when both are.
     need_types = "geometry_types" not in geo_meta["columns"][geometry_column]
-    measured: dict = {}
+    measured: dict = {} if geo_types is None else {"geometry_types": geo_types}
+    need_types = need_types and geo_types is None
     if geo_bbox:
         measured["bbox"] = geo_bbox
         if need_types:
@@ -861,44 +865,3 @@ def _normalize_arrow_large_types(table):
 
     new_schema = pa.schema(new_fields, metadata=table.schema.metadata)
     return table.cast(new_schema)
-
-
-def describe_wkb_geometry(
-    table, geometry_column: str, crs: dict | str | None = None, edges: str | None = None
-):
-    """Attach a ``geo`` block naming ``geometry_column`` to a table that has none.
-
-    A table built in memory from a query (``gpio.convert()``'s read) holds bare
-    WKB with no schema metadata, so nothing downstream can tell the column is
-    geometry or what CRS it is in: DuckDB reads it back as ``BLOB``, and the
-    CRS-aware cell indexes take projected metres for degrees (#1222). This gives
-    it the same self-description a table read from a GeoParquet file carries.
-
-    The block is a description, not an output decision: the write funnels
-    rebuild ``geo`` (types, bbox, version) from the data at write time. It
-    declares GeoParquet 1.1, which is what auto mode writes for a WKB table, and
-    an empty ``geometry_types`` (the spec's "not known"). ``crs`` is the source's
-    CRS as PROJJSON. ``None`` means the default (OGC:CRS84) and leaves the key
-    out, as the spec spells it. ``edges`` is the source's declared edge
-    interpretation (e.g. ``"spherical"``); ``None`` or ``"planar"`` leaves the
-    key out (planar is the spec default). Dropping it would let the write read
-    great-circle edges as straight lines over the same bytes (#1287).
-
-    A table that already has a ``geo`` key is returned unchanged.
-    """
-    metadata = dict(table.schema.metadata or {})
-    if b"geo" in metadata or geometry_column not in table.column_names:
-        return table
-
-    geo = compose_geo_block(
-        SchemaSource(table.schema),
-        GeoBlockOptions(
-            geometry_column=geometry_column,
-            covering=None,
-            edges=edges,
-            crs=KEEP_CRS if crs is None else crs,
-            stats={geometry_column: {"geometry_types": []}},
-        ),
-    )
-    metadata[b"geo"] = json.dumps(geo).encode("utf-8")
-    return table.replace_schema_metadata(metadata)

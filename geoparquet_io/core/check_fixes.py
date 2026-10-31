@@ -192,14 +192,14 @@ def _supply_or_strip_bbox_member(parquet_file, geo_meta, verbose):
 
 
 @uses_aws_profile
-def fix_bboxless_covering(parquet_file, output_file, verbose=False, profile=None):
+def fix_bboxless_cover(parquet_file, output_file, verbose=False, profile=None):
     """Repair a ``covering`` that carries no ``bbox`` member.
 
     The repair for the #954 shape in a file already published: a ``covering``
     whose only members are gpio's own index entries (h3/s2/a5/quadkey/kdtree).
     The spec defines no encoding but ``bbox``, and geopandas indexes
     ``covering["bbox"]`` unguarded, so such a file does not open at all -- which
-    is why ``check spec`` fails it (``_check_covering_has_bbox``) and why there
+    is why ``check spec`` fails it (``_check_cover_has_bbox``) and why there
     has to be something for ``--fix`` to do about it (#1173).
 
     Dropping is the repair for a file with nothing to declare. A file whose
@@ -504,7 +504,7 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geopa
     return {"fix_applied": "Optimized row groups", "success": True}
 
 
-def _apply_covering_fix(check_results, current_file, temp_files, verbose, profile):
+def _apply_cover_fix(check_results, current_file, temp_files, verbose, profile):
     """Drop a covering with no bbox member, before anything else reads the block.
 
     First, so the rest of the chain works from a file whose `geo` block is one
@@ -524,7 +524,7 @@ def _apply_covering_fix(check_results, current_file, temp_files, verbose, profil
     os.unlink(temp_file)
     temp_files.append(temp_file)
 
-    summary = fix_bboxless_covering(current_file, temp_file, verbose, profile)
+    summary = fix_bboxless_cover(current_file, temp_file, verbose, profile)
     if summary["fix_applied"] is None:
         # The check and the repair disagree about this file; keep the input.
         return current_file, []
@@ -725,7 +725,7 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
 
     try:
         # Step 0: Drop a covering the spec does not allow (#1173)
-        current_file, fixes = _apply_covering_fix(
+        current_file, fixes = _apply_cover_fix(
             check_results, current_file, temp_files, verbose, profile
         )
         fixes_applied.extend(fixes)

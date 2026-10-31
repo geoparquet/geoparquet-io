@@ -800,7 +800,7 @@ def _check_version_known(geo_meta: dict) -> ValidationCheck:
     )
 
 
-def _columns_declaring_covering(geo_meta: dict) -> list[str]:
+def _columns_declaring_cover(geo_meta: dict) -> list[str]:
     """Names of geometry columns whose metadata declares the 'covering' key (added in 1.1).
 
     A ``columns`` that is not an object declares no columns, so it declares no
@@ -836,7 +836,7 @@ def _check_version_features(parquet_file: str, geo_meta: dict) -> ValidationChec
         return _result(CheckStatus.SKIPPED, "version is not a string; feature check not applicable")
     if not version.startswith("1."):
         return _result(CheckStatus.PASSED, "version permits declared features")
-    covering_cols = _columns_declaring_covering(geo_meta)
+    covering_cols = _columns_declaring_cover(geo_meta)
     if covering_cols and not _version_at_least(version, 1, 1):
         return _result(
             CheckStatus.FAILED,
@@ -1806,14 +1806,14 @@ def _short(value: Any) -> str:
     return _CONTROL_CHARS.sub("", _SHORT.repr(value))
 
 
-def _covering_verdict(check_name: str, status: CheckStatus, message: str) -> ValidationCheck:
+def _cover_verdict(check_name: str, status: CheckStatus, message: str) -> ValidationCheck:
     """A ``geoparquet_1_1`` verdict for one of the four covering.bbox checks."""
     return ValidationCheck(
         name=check_name, status=status, message=message, category="geoparquet_1_1"
     )
 
 
-def _declares_bbox_covering(col_meta: dict) -> bool:
+def _declares_bbox_cover(col_meta: dict) -> bool:
     """``covering`` is an object with a ``bbox`` key.
 
     A string ``covering`` satisfies ``"bbox" in covering`` too (#1062);
@@ -1825,7 +1825,7 @@ def _declares_bbox_covering(col_meta: dict) -> bool:
 
 
 @dataclass(frozen=True)
-class _BboxCoveringRef:
+class _BboxCoverRef:
     """What a column's ``covering.bbox`` says, parsed once for the four checks."""
 
     declared: bool
@@ -1836,18 +1836,18 @@ class _BboxCoveringRef:
     problem: str | None = None
 
 
-def _resolve_bbox_covering(col_meta: dict) -> _BboxCoveringRef:
+def _resolve_bbox_cover(col_meta: dict) -> _BboxCoverRef:
     """Parse ``covering.bbox`` without indexing anything whose shape is unproven.
 
     A value whose *type* is wrong is recorded as a problem and never indexed:
     a string path passes every length test and reads character-wise, which is
     how a verdict once named a column ``"b"`` the file never mentions (#1062).
     """
-    if not _declares_bbox_covering(col_meta):
-        return _BboxCoveringRef(declared=False)
+    if not _declares_bbox_cover(col_meta):
+        return _BboxCoverRef(declared=False)
     paths = col_meta["covering"]["bbox"]
     if not isinstance(paths, dict):
-        return _BboxCoveringRef(
+        return _BboxCoverRef(
             declared=True,
             problem=f"covering bbox must be an object of [column, field] paths "
             f"(found: {_short(paths)})",
@@ -1859,15 +1859,15 @@ def _resolve_bbox_covering(col_meta: dict) -> _BboxCoveringRef:
             if "xmin" not in paths
             else f"its xmin must be a path array [column, field] (found: {_short(xmin)})"
         )
-        return _BboxCoveringRef(
+        return _BboxCoverRef(
             declared=True,
             paths=paths,
             problem=f"cannot determine bbox column name from covering: {detail}",
         )
-    return _BboxCoveringRef(declared=True, paths=paths, column=xmin[0])
+    return _BboxCoverRef(declared=True, paths=paths, column=xmin[0])
 
 
-def _covering_bbox_column(
+def _cover_bbox_column(
     col_meta: dict, check_name: str, schema_info: list
 ) -> tuple[str, int] | ValidationCheck:
     """``(column, root schema index)`` the covering points at, or the verdict that stops the check.
@@ -1875,18 +1875,18 @@ def _covering_bbox_column(
     The three column-resolving checks share this prologue so a shape guard
     cannot be dropped from one of them.
     """
-    ref = _resolve_bbox_covering(col_meta)
+    ref = _resolve_bbox_cover(col_meta)
     if not ref.declared:
-        return _covering_verdict(check_name, CheckStatus.SKIPPED, "no bbox covering defined")
+        return _cover_verdict(check_name, CheckStatus.SKIPPED, "no bbox covering defined")
     if ref.problem is not None or ref.column is None:
-        return _covering_verdict(check_name, CheckStatus.FAILED, ref.problem or "")
+        return _cover_verdict(check_name, CheckStatus.FAILED, ref.problem or "")
     index = root_schema_index(schema_info, ref.column)
     if index is None:
         return _bbox_column_missing(check_name, ref.column, schema_info)
     return ref.column, index
 
 
-def _check_covering_is_object(col_meta: dict, col_name: str) -> ValidationCheck:
+def _check_cover_is_object(col_meta: dict, col_name: str) -> ValidationCheck:
     """Check 1.1-1: optional 'covering' must be an object if present."""
     covering = col_meta.get("covering")
 
@@ -1909,7 +1909,7 @@ def _check_covering_is_object(col_meta: dict, col_name: str) -> ValidationCheck:
     )
 
 
-def _check_covering_has_bbox(col_meta: dict, col_name: str) -> ValidationCheck:
+def _check_cover_has_bbox(col_meta: dict, col_name: str) -> ValidationCheck:
     """Check 1.1-1b: a 'covering' object must carry the 'bbox' encoding.
 
     GeoParquet 1.1, ``covering``: "The keys of the 'covering' object MUST be a
@@ -1930,24 +1930,24 @@ def _check_covering_has_bbox(col_meta: dict, col_name: str) -> ValidationCheck:
     The test itself is ``geo_metadata.covering_lacks_bbox``, the one definition
     of the illegal shape, shared with the write gate
     (``strip_bboxless_covering``) and the ``--fix`` repair
-    (``check_fixes.fix_bboxless_covering``) so that what gpio refuses to write,
+    (``check_fixes.fix_bboxless_cover``) so that what gpio refuses to write,
     what it fails here, and what it repairs cannot drift apart.
     """
     check_name = f"covering_has_bbox_{col_name}"
     covering = col_meta.get("covering")
 
     if covering is None:
-        return _covering_verdict(check_name, CheckStatus.SKIPPED, "no covering defined")
+        return _cover_verdict(check_name, CheckStatus.SKIPPED, "no covering defined")
     if not isinstance(covering, dict):
         # covering_is_object reports a covering of the wrong type; one defect
         # gets one verdict.
-        return _covering_verdict(check_name, CheckStatus.SKIPPED, "covering is not an object")
+        return _cover_verdict(check_name, CheckStatus.SKIPPED, "covering is not an object")
     if not covering_lacks_bbox(col_meta):
-        return _covering_verdict(
+        return _cover_verdict(
             check_name, CheckStatus.PASSED, 'covering declares the "bbox" encoding'
         )
 
-    return _covering_verdict(
+    return _cover_verdict(
         check_name,
         CheckStatus.FAILED,
         f'column "{col_name}" covering has no "bbox" member, the only encoding the spec '
@@ -1956,26 +1956,26 @@ def _check_covering_has_bbox(col_meta: dict, col_name: str) -> ValidationCheck:
     )
 
 
-def _check_covering_bbox_paths(col_meta: dict, col_name: str) -> ValidationCheck:
+def _check_cover_bbox_paths(col_meta: dict, col_name: str) -> ValidationCheck:
     """Check 1.1-2: covering 'bbox' encoding must have valid xmin/ymin/xmax/ymax paths."""
     check_name = f"covering_bbox_paths_{col_name}"
-    ref = _resolve_bbox_covering(col_meta)
+    ref = _resolve_bbox_cover(col_meta)
     if not ref.declared:
-        return _covering_verdict(check_name, CheckStatus.SKIPPED, "no bbox covering defined")
+        return _cover_verdict(check_name, CheckStatus.SKIPPED, "no bbox covering defined")
     if ref.paths is None:
-        return _covering_verdict(check_name, CheckStatus.FAILED, ref.problem or "")
+        return _cover_verdict(check_name, CheckStatus.FAILED, ref.problem or "")
 
     required_keys = ["xmin", "ymin", "xmax", "ymax"]
     missing = [k for k in required_keys if k not in ref.paths]
     if missing:
-        return _covering_verdict(
+        return _cover_verdict(
             check_name, CheckStatus.FAILED, f"covering bbox missing required paths: {missing}"
         )
 
     for key in required_keys:
         path = ref.paths[key]
         if not is_covering_path(path):
-            return _covering_verdict(
+            return _cover_verdict(
                 check_name,
                 CheckStatus.FAILED,
                 f"covering bbox {key} must be a path array [column, field] (found: {_short(path)})",
@@ -1983,7 +1983,7 @@ def _check_covering_bbox_paths(col_meta: dict, col_name: str) -> ValidationCheck
 
     wrong_field = [k for k in required_keys if ref.paths[k][1] != k]
     if wrong_field:
-        return _covering_verdict(
+        return _cover_verdict(
             check_name,
             CheckStatus.FAILED,
             f"covering bbox path field must equal its key: {wrong_field}",
@@ -1991,13 +1991,13 @@ def _check_covering_bbox_paths(col_meta: dict, col_name: str) -> ValidationCheck
 
     columns = sorted({ref.paths[k][0] for k in required_keys})
     if len(columns) > 1:
-        return _covering_verdict(
+        return _cover_verdict(
             check_name,
             CheckStatus.FAILED,
             f"covering bbox paths must name a single column (found: {columns})",
         )
 
-    return _covering_verdict(
+    return _cover_verdict(
         check_name, CheckStatus.PASSED, "covering bbox has valid xmin/ymin/xmax/ymax paths"
     )
 
@@ -2019,17 +2019,17 @@ def _bbox_column_missing(check_name: str, bbox_col_name: str, schema_info: list)
     )
 
 
-def _check_covering_bbox_column_exists(
+def _check_cover_bbox_column_exists(
     col_meta: dict, col_name: str, schema_info: list
 ) -> ValidationCheck:
     """Check 1.1-3: covering bbox column must exist at root of schema."""
     check_name = f"covering_bbox_column_exists_{col_name}"
-    resolved = _covering_bbox_column(col_meta, check_name, schema_info)
+    resolved = _cover_bbox_column(col_meta, check_name, schema_info)
     if isinstance(resolved, ValidationCheck):
         return resolved
     bbox_col_name, _ = resolved
 
-    return _covering_verdict(
+    return _cover_verdict(
         check_name, CheckStatus.PASSED, f'bbox column "{bbox_col_name}" exists at schema root'
     )
 
@@ -2044,13 +2044,13 @@ def _check_covering_bbox_column_exists(
 _BBOX_FIELDS = {len(order): list(order) for order in BBOX_COVERING_FIELD_ORDERS}
 
 
-def _check_covering_bbox_structure(
+def _check_cover_bbox_structure(
     col_meta: dict, col_name: str, schema_info: list
 ) -> ValidationCheck:
     """Check 1.1-4/5: covering bbox column is a struct of xmin/ymin/xmax/ymax or
     xmin/ymin/zmin/xmax/ymax/zmax, in that order."""
     check_name = f"covering_bbox_structure_{col_name}"
-    resolved = _covering_bbox_column(col_meta, check_name, schema_info)
+    resolved = _cover_bbox_column(col_meta, check_name, schema_info)
     if isinstance(resolved, ValidationCheck):
         return resolved
     _, index = resolved
@@ -2058,26 +2058,26 @@ def _check_covering_bbox_structure(
     found_fields = [c.get("name") for c in schema_direct_children(schema_info, index)]
 
     if found_fields != _BBOX_FIELDS.get(len(found_fields)):
-        return _covering_verdict(
+        return _cover_verdict(
             check_name,
             CheckStatus.FAILED,
             f"bbox column fields must be {_BBOX_FIELDS[4]} or {_BBOX_FIELDS[6]}, "
             f"in that order (found: {found_fields})",
         )
 
-    return _covering_verdict(
+    return _cover_verdict(
         check_name,
         CheckStatus.PASSED,
         f"bbox column has valid structure with {'/'.join(found_fields)}",
     )
 
 
-def _check_covering_bbox_field_types(
+def _check_cover_bbox_field_types(
     col_meta: dict, col_name: str, schema_info: list
 ) -> ValidationCheck:
     """Check 1.1-6/7: covering bbox fields must be FLOAT or DOUBLE and same type."""
     check_name = f"covering_bbox_field_types_{col_name}"
-    resolved = _covering_bbox_column(col_meta, check_name, schema_info)
+    resolved = _cover_bbox_column(col_meta, check_name, schema_info)
     if isinstance(resolved, ValidationCheck):
         return resolved
     _, index = resolved
@@ -2092,20 +2092,20 @@ def _check_covering_bbox_field_types(
     # Check if all types are valid
     invalid_types = field_types - valid_types
     if invalid_types:
-        return _covering_verdict(
+        return _cover_verdict(
             check_name,
             CheckStatus.FAILED,
             f"bbox fields must be FLOAT or DOUBLE (found: {invalid_types})",
         )
 
     if len(field_types) > 1:
-        return _covering_verdict(
+        return _cover_verdict(
             check_name,
             CheckStatus.FAILED,
             f"bbox fields must all use the same type (found: {field_types})",
         )
 
-    return _covering_verdict(
+    return _cover_verdict(
         check_name, CheckStatus.PASSED, f"bbox fields have valid type: {field_types}"
     )
 
@@ -4590,19 +4590,19 @@ def _run_geoparquet_checks(
     covering_checks_apply = _version_at_least(geo_version, 1, 1)
     if covering_checks_apply:
         for col_name, col_meta in columns.items():
-            checks.append(_check_covering_is_object(col_meta, col_name))
+            checks.append(_check_cover_is_object(col_meta, col_name))
             # A covering that is an object but has no `bbox` member is the one
             # defect the four path/column/struct/type checks below cannot see:
             # they skip a column that declares no bbox covering, so the file
             # passed clean while geopandas could not open it (#1173).
-            checks.append(_check_covering_has_bbox(col_meta, col_name))
+            checks.append(_check_cover_has_bbox(col_meta, col_name))
 
             # Only run bbox covering checks if covering is defined
-            if _declares_bbox_covering(col_meta):
-                checks.append(_check_covering_bbox_paths(col_meta, col_name))
-                checks.append(_check_covering_bbox_column_exists(col_meta, col_name, schema_info))
-                checks.append(_check_covering_bbox_structure(col_meta, col_name, schema_info))
-                checks.append(_check_covering_bbox_field_types(col_meta, col_name, schema_info))
+            if _declares_bbox_cover(col_meta):
+                checks.append(_check_cover_bbox_paths(col_meta, col_name))
+                checks.append(_check_cover_bbox_column_exists(col_meta, col_name, schema_info))
+                checks.append(_check_cover_bbox_structure(col_meta, col_name, schema_info))
+                checks.append(_check_cover_bbox_field_types(col_meta, col_name, schema_info))
 
     # File extension check applies to 1.1+
     if _version_at_least(geo_version, 1, 1):

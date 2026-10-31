@@ -2251,6 +2251,31 @@ def _dict_str_keys(node: ast.Dict) -> set[str]:
     return {k.value for k in node.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)}
 
 
+def _subscript_keys(node: ast.AST) -> list[ast.AST]:
+    """The subscripts of ``a[k1][k2]...``, outermost base first."""
+    keys = []
+    while isinstance(node, ast.Subscript):
+        keys.append(node.slice)
+        node = node.value
+    return keys[::-1]
+
+
+def _mutates_a_column_entry(node: ast.AST) -> bool:
+    """``x["columns"][col][key] = ...`` (or augmented, annotated, ``del``)."""
+    if isinstance(node, (ast.Assign, ast.Delete)):
+        targets = node.targets
+    elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+        targets = [node.target]
+    else:
+        return False
+    for target in targets:
+        keys = _subscript_keys(target)
+        for i, key in enumerate(keys):
+            if isinstance(key, ast.Constant) and key.value == "columns" and len(keys) - i >= 3:
+                return True
+    return False
+
+
 def _find_geo_compose(m: _Module) -> Iterator[Hit]:
     """A ``geo`` block composed outside ``geo_metadata.compose_geo_block`` (#1367
     concept 4): a dict literal naming ``"version"`` beside ``"columns"``, or beside
@@ -2263,9 +2288,17 @@ def _find_geo_compose(m: _Module) -> Iterator[Hit]:
     (``"1.0.0"``, ``"1.1.0"``, ``"2.0.0"``) and its own subset of the gates.
     A report dict that only *mentions* a version and a primary column (``inspect``'s
     summaries) has neither ``columns`` nor a splat, and is not a hit.
+
+    Also a block mutated after composition: an assignment (or ``del``) to
+    ``block["columns"][col][key]``. Would have caught ``overview_file``'s
+    ``geometry_types`` patch, the streaming schema's, and ``add bbox-metadata``'s
+    hand-set ``covering`` -- each a second composer writing one key the owner
+    never gated.
     """
     for node in ast.walk(m.tree):
-        if isinstance(node, ast.Dict):
+        if _mutates_a_column_entry(node):
+            yield m.hit(node)
+        elif isinstance(node, ast.Dict):
             keys = _dict_str_keys(node)
             splat = any(k is None for k in node.keys)
             if "version" in keys and ("columns" in keys or ("primary_column" in keys and splat)):
@@ -3648,11 +3681,15 @@ def test_g12_g2_fails_an_entry_whose_count_is_off(tmp_path):
         ("_bbox_covering_metadata", True),
         ("_covering_for", True),
         ("build_bbox_covering", True),
-        ("check_bbox_covering", False),
-        ("_has_covering", False),
+        ("check_bbox_covering", True),
+        ("_has_covering", True),
+        ("_check_cover_bbox_paths", False),
     ],
 )
 def test_g12_g2_the_covering_family_is_the_builders(tmp_path, name, flagged):
+    """Every ``*covering*`` name is the owners' since T3e (HANDOFFS row 16):
+    the checks elsewhere were renamed ``*cover*``, so a new covering helper
+    outside geo_metadata/bbox_structure is a copy of the composer's rule."""
     repo = _g2_tree(tmp_path, {"m.py": f"def {name}(x):\n    return x\n"})
     assert (_run_owner_defs("--repo", str(repo)).returncode == 1) is flagged
 
@@ -3821,6 +3858,11 @@ G1_AUDIT_SHAPES = [
         "dict(version=..., columns=...)",
         "def block(g):\n    return dict(version='1.0.0', primary_column=g, columns={})\n",
     ),
+    (
+        "geo_compose",
+        "a composed block patched after the fact",
+        'def patch(geo, g, types):\n    geo["columns"][g]["geometry_types"] = types\n',
+    ),
 ]
 
 #: Shapes close to the above that are not the pattern.
@@ -3854,6 +3896,12 @@ G1_AUDIT_NEAR_MISSES = [
         "sql_escape_hand_quote",
         "a subscript of another call",
         "def q(p):\n    return str(p)[1:-1]\n",
+    ),
+    (
+        "geo_compose",
+        "a read of a column entry's key, and a write one level up",
+        'def types(geo, g):\n    t = geo["columns"][g]["geometry_types"]\n'
+        '    geo["columns"][g] = {}\n    return t\n',
     ),
 ]
 

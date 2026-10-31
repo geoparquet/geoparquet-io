@@ -298,12 +298,11 @@ reason = "the GeoJSON properties column's type (unnest a STRUCT), not a geometry
 "version_for_*" = ["geoparquet_io/core/parquet_writer.py"]
 "_version_of_*" = ["geoparquet_io/core/parquet_writer.py"]
 "*version_upgrade*" = ["geoparquet_io/core/parquet_writer.py"]
-# Covering *builders* only. The wider *covering* also caught 19 checks,
-# predicates, lookups and repairs that read a covering and are not copies of
-# build_bbox_covering (T0b audit), so the family is narrowed to the builder shapes.
-"build_*covering*" = ["geoparquet_io/core/geo_metadata.py", "geoparquet_io/core/bbox_structure.py"]
-"*covering_for" = ["geoparquet_io/core/geo_metadata.py", "geoparquet_io/core/bbox_structure.py"]
-"*covering_metadata" = ["geoparquet_io/core/geo_metadata.py", "geoparquet_io/core/bbox_structure.py"]
+# Every covering name: the composer (geo_metadata) and the covering lookups
+# (bbox_structure) own them. The checks, predicates and repairs that read a
+# covering elsewhere are named for what they check (``*cover*``), so the T0b
+# narrowing to builder shapes is gone (#1367 T3e, HANDOFFS row 16).
+"*covering*" = ["geoparquet_io/core/geo_metadata.py", "geoparquet_io/core/bbox_structure.py"]
 "parse_size*" = ["geoparquet_io/core/sizing.py"]
 "format_size*" = ["geoparquet_io/core/sizing.py"]
 # atomic_write lives in write_strategies/base.py until T2f moves it to

@@ -763,7 +763,7 @@ def covering_lacks_bbox(col_meta: object) -> bool:
 
     The one definition of the illegal shape, shared by the write gate
     (:func:`strip_bboxless_covering`), the read-side verdict
-    (``validate._check_covering_has_bbox``) and the ``check --fix`` repair, so
+    (``validate._check_cover_has_bbox``) and the ``check --fix`` repair, so
     what gpio refuses to write, what it fails, and what it drops cannot drift
     apart (#954, #1173).
 
@@ -987,24 +987,23 @@ def _rewrite_geo_metadata(metadata: dict | None, rewrite) -> dict | None:
     return result
 
 
-def gate_carried_covering(
-    metadata: dict | None, schema: pa.Schema, verbose: bool = False
+def compose_carried_geo(
+    metadata: dict | None, schema: pa.Schema, version: str, verbose: bool = False
 ) -> dict | None:
-    """The covering gates, on a Parquet KV ``metadata`` dict and an output schema.
+    """A Parquet KV ``metadata`` dict with its carried block composed for ``schema``.
 
-    The composer's, in the order every write path runs them, for a path that carries the input's
-    whole block forward instead of rebuilding it: the Arrow IPC stream
-    ``gpio ... -`` writes to stdout.
+    For a path that carries the input's whole block forward instead of
+    rebuilding it: the Arrow IPC stream ``gpio ... -`` writes to stdout. A
+    stream is read and persisted exactly like the file a gpio write makes --
+    ``pq.write_table`` of one is how it becomes that file -- so its block is a
+    write block at the output ``version`` the caller resolved: every covering
+    gate in the composer's order (``gpio extract geoparquet f.parquet -
+    --exclude-cols bbox`` used to stream a covering with only a spatial-index
+    entry left, the shape ``geopandas.read_parquet`` cannot open, #954/#1172),
+    and a conventional bbox column declared as every file write declares it.
 
-    A stream is read and persisted exactly like the file a gpio write makes, and
-    ``pq.write_table`` of one is how it becomes that file -- but it reached
-    neither gate, so ``gpio extract geoparquet f.parquet - --exclude-cols bbox``
-    streamed a covering whose only remaining member was a spatial-index entry,
-    the shape ``geopandas.read_parquet`` cannot open (#954/#1172).
-
-    The carried block is composed as a description (its own version, no
-    covering requested) over ``schema``, so it meets the composer's gates in
-    the composer's order. Returns a copy; the input is never mutated.
+    A block that names no primary column it describes is left as it is.
+    Returns a copy; the input is never mutated.
     """
 
     def _compose(geo: dict) -> dict:
@@ -1013,7 +1012,7 @@ def gate_carried_covering(
             return geo
         return compose_geo_block(
             SchemaSource(schema, {b"geo": json.dumps(geo).encode("utf-8")}),
-            GeoBlockOptions(geometry_column=primary, covering=None, verbose=verbose),
+            GeoBlockOptions(geometry_column=primary, version=version, verbose=verbose),
         )
 
     return _rewrite_geo_metadata(metadata, _compose)
@@ -1914,6 +1913,56 @@ def _arrow_envelopes(table: pa.Table, geometry_column: str, bbox_column: str | N
         return None
     box = ga.box(ga.as_wkb(storage)).storage
     return (storage, *(pc.struct_field(box, f) for f in ("xmin", "ymin", "xmax", "ymax")))
+
+
+def with_geo_block(table: pa.Table, geo: dict) -> pa.Table:
+    """``table`` with ``geo`` as its schema's ``geo`` key, every other key kept."""
+    metadata = dict(table.schema.metadata or {})
+    metadata[b"geo"] = json.dumps(geo).encode("utf-8")
+    return table.replace_schema_metadata(metadata)
+
+
+def bbox_struct_array(table: pa.Table, geometry_column: str, struct_type: pa.DataType):
+    """Each row's bbox of ``geometry_column`` as a bbox struct of ``struct_type``.
+
+    The per-row half of the stats owner: the envelope the file ``bbox`` folds,
+    one per row, in the field order and child types ``struct_type`` names (the
+    input's own bbox column, for a write that rebuilds the column over new
+    geometry). A NULL or EMPTY geometry is a NULL struct. A float32 child is
+    rounded outward, so the box never shrinks past the geometry.
+    """
+    import geoarrow.pyarrow as ga
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    from geoparquet_io.core.optional_deps import load_module
+
+    np = load_module("numpy")
+
+    wkb = ga.as_wkb(table.column(geometry_column)).combine_chunks()
+    storage = wkb.storage if isinstance(wkb, pa.ExtensionArray) else wkb
+    box = ga.box(ga.as_wkb(storage)).storage
+    corners = {
+        f: pc.struct_field(box, f).to_numpy(zero_copy_only=False) for f in _BBOX_STRUCT_FIELDS
+    }
+    located = np.isfinite(corners["xmin"]) & (corners["xmin"] <= corners["xmax"])
+    located &= pc.is_valid(storage).to_numpy(zero_copy_only=False)
+    children = []
+    for field in struct_type:
+        values = np.where(located, corners[field.name], 0.0)
+        if pa.types.is_float32(field.type):
+            cast = values.astype(np.float32)
+            toward = np.float32(-np.inf) if field.name.endswith("min") else np.float32(np.inf)
+            short = (
+                cast.astype(np.float64) > values
+                if field.name.endswith("min")
+                else (cast.astype(np.float64) < values)
+            )
+            values = np.where(short, np.nextafter(cast, toward), cast)
+        children.append(pa.array(values, type=field.type))
+    return pa.StructArray.from_arrays(
+        children, fields=list(struct_type), mask=pa.array(~located) if not located.all() else None
+    )
 
 
 def _arrow_stats(

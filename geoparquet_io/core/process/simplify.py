@@ -33,6 +33,7 @@ from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
     GeometryStats,
     SchemaSource,
+    bbox_struct_array,
     compose_geo_block,
     geometry_stats_of,
     merged_geometry_stats,
@@ -54,7 +55,11 @@ from geoparquet_io.core.parquet_writer import (
     without_geometry_dictionary,
 )
 from geoparquet_io.core.remote import is_remote_url
-from geoparquet_io.core.write_funnels import table_nonplanar_edges, write_geoparquet_table
+from geoparquet_io.core.write_funnels import (
+    apply_nonplanar_edges,
+    table_nonplanar_edges,
+    write_geoparquet_table,
+)
 
 #: Above this row count, coverage mode's whole-column materialization gets a
 #: memory warning (plain mode processes chunk by chunk).
@@ -332,67 +337,23 @@ def _coverage_out(
     return shapely.from_wkb(out_wkb), out_wkb
 
 
-def _row_bounds(shapely, np, n_rows: int, geoms: Any, idx: Any) -> Any:
-    """Per-row ``(n, 4)`` bounds of the simplified geometries; NaN rows for nulls."""
-    bounds = np.full((n_rows, 4), np.nan)
-    if len(idx):
-        bounds[idx] = shapely.bounds(geoms)
-    return bounds
+def _refresh_bbox_column(table: pa.Table, geom_col: str) -> pa.Table:
+    """Rebuild a declared bbox covering column over ``geom_col``'s simplified data.
 
-
-def _refresh_bbox_covering(table: pa.Table, geom_col: str, bounds=None) -> pa.Table:
-    """Recompute a declared bbox covering column from ``geom_col``'s data.
-
-    ``bounds`` is the per-row ``(n, 4)`` array the simplify step already
-    computed (:func:`_row_bounds`); when omitted it is re-derived from the
-    column's WKB. The covering lookup is the owner module's
-    (:func:`bbox_covering_column_for`): a partial or dangling covering is
-    not a declaration and must not be rewritten.
+    The covering lookup is the owner module's (:func:`bbox_covering_column_for`):
+    a partial or dangling covering is not a declaration and must not be
+    rewritten. The rows are built by the stats owner
+    (:func:`~geoparquet_io.core.geo_metadata.bbox_struct_array`) in the
+    column's own struct type.
     """
-    shapely = load_module("shapely")
-
-    np = load_module("numpy")
     geo = sanitized_carried_geo(table.schema.metadata)
     bbox_col = bbox_covering_column_for(geo, geom_col)
     if bbox_col is None or bbox_col not in table.column_names:
         return table
-    if bounds is None:
-        wkb = np.array(table.column(geom_col).to_pylist(), dtype=object)
-        bounds = shapely.bounds(shapely.from_wkb(wkb))  # (n, 4); NaN rows for nulls
-    null_mask = np.isnan(bounds[:, 0])
-    bounds = np.nan_to_num(bounds)  # children under a null parent still need values
-    struct_type = table.schema.field(bbox_col).type
-    bound_idx = {"xmin": 0, "ymin": 1, "xmax": 2, "ymax": 3}
-    children = []
-    for field in struct_type:
-        values = bounds[:, bound_idx[field.name]]
-        if pa.types.is_float32(field.type):
-            # Rounding to nearest float32 can shrink the box past the geometry
-            # and make a spatial filter skip the row; round outward instead.
-            cast = values.astype(np.float32)
-            if field.name.endswith("min"):
-                cast = np.where(
-                    cast.astype(np.float64) > values,
-                    np.nextafter(cast, np.float32(-np.inf)),
-                    cast,
-                )
-            else:
-                cast = np.where(
-                    cast.astype(np.float64) < values,
-                    np.nextafter(cast, np.float32(np.inf)),
-                    cast,
-                )
-            values = cast
-        children.append(pa.array(values, type=field.type))
-    struct = pa.StructArray.from_arrays(
-        children,
-        fields=list(struct_type),
-        mask=pa.array(null_mask) if null_mask.any() else None,
-    )
+    field = table.schema.field(bbox_col)
+    struct = bbox_struct_array(table, geom_col, field.type)
     debug(f"Recomputed bbox covering column '{bbox_col}' from simplified geometry")
-    return table.set_column(
-        table.column_names.index(bbox_col), table.schema.field(bbox_col), struct
-    )
+    return table.set_column(table.column_names.index(bbox_col), field, struct)
 
 
 def _with_stripped_geo(table: pa.Table, geometry_column: str) -> pa.Table:
@@ -482,11 +443,9 @@ def simplify_table(
             inverse=inverse,
         )
 
-    shapely = load_module("shapely")
     np = load_module("numpy")
     collapsed = 0
     flag_parts: list = []
-    bounds_parts: list = []
     if coverage:
         if table.num_rows > _COVERAGE_WARN_ROWS:
             warn(
@@ -496,7 +455,6 @@ def simplify_table(
         new_values, collapsed, flags, geoms, idx = run(column)
         chunks = [pa.array(new_values, type=column.type)]
         flag_parts.append(flags)
-        bounds_parts.append(_row_bounds(shapely, np, len(flags), geoms, idx))
     else:
         chunks = []
         for chunk in column.chunks:
@@ -504,7 +462,6 @@ def simplify_table(
             collapsed += n
             flag_parts.append(flags)
             chunks.append(pa.array(values, type=column.type))
-            bounds_parts.append(_row_bounds(shapely, np, len(flags), geoms, idx))
     empty_flags = np.concatenate(flag_parts) if flag_parts else np.zeros(0, dtype=bool)
     if collapsed:
         warn(f"{collapsed} geometries collapsed to empty at tolerance {tolerance}")
@@ -513,14 +470,12 @@ def simplify_table(
         table.schema.field(geom_col),
         pa.chunked_array(chunks, type=column.type),
     )
-    row_bounds = np.concatenate(bounds_parts) if bounds_parts else np.empty((0, 4))
     if drop_empty and empty_flags.any():
         keep = ~empty_flags
         result = result.filter(pa.array(keep))
-        row_bounds = row_bounds[keep]
         info(f"dropped {int(empty_flags.sum())} empty geometries")
     result = _with_carried_edges(_with_stripped_geo(result, geom_col), geom_col, declared_edges)
-    return _refresh_bbox_covering(result, geom_col, bounds=row_bounds)
+    return _refresh_bbox_column(result, geom_col)
 
 
 #: Output versions the streaming writer can produce faithfully: plain WKB
@@ -603,8 +558,6 @@ def _simplify_file_streaming(
     """Stream-simplify batch by batch: memory is bounded by one row group."""
     from geoparquet_io.core.remote import remote_write_context, upload_if_remote
 
-    shapely = load_module("shapely")
-    np = load_module("numpy")
     schema = pf.schema_arrow
     if drop_columns:
         schema = pa.schema(
@@ -665,13 +618,11 @@ def _simplify_file_streaming(
                 table.schema.field(geom_col),
                 pa.chunked_array([pa.array(values, type=pa.binary())]),
             )
-            row_bounds = _row_bounds(shapely, np, len(empty_flags), geoms, idx)
             if drop_empty and empty_flags.any():
                 keep = ~empty_flags
                 table = table.filter(pa.array(keep))
                 dropped += int(empty_flags.sum())
-                row_bounds = row_bounds[keep]
-            table = _refresh_bbox_covering(table, geom_col, bounds=row_bounds)
+            table = _refresh_bbox_column(table, geom_col)
             batch_stats.append(geometry_stats_of(table, geom_col))
             yield table
 
@@ -720,6 +671,19 @@ def _simplify_file_streaming(
         finally:
             if not is_remote and os.path.exists(write_target):
                 os.remove(write_target)
+        # A non-planar column's block bbox is the geodesic bound over the
+        # written rows, which the zero-row footer table cannot give: the funnel
+        # computes it from the real file, as for every other write.
+        nonplanar = table_nonplanar_edges(schema.empty_table(), geom_col, None)
+        if nonplanar:
+            apply_nonplanar_edges(
+                nonplanar,
+                actual_output,
+                compression=write.compression,
+                compression_level=write.compression_level,
+                row_group_rows=write.row_group_rows,
+                verbose=verbose,
+            )
         if is_remote:
             upload_if_remote(actual_output, output_parquet, is_directory=False, verbose=verbose)
     if collapsed:

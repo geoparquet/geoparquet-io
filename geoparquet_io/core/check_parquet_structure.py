@@ -780,7 +780,7 @@ def check_metadata_and_bbox(
         }
 
 
-def check_covering_encoding(
+def check_cover_encoding(
     parquet_file, verbose=False, return_results=False, quiet=False, geo_meta=None
 ):
     """A declared ``covering`` must carry the ``bbox`` encoding, the only one defined.
@@ -790,7 +790,7 @@ def check_covering_encoding(
     earlier) carry a ``covering`` whose only members are gpio's own index
     entries, and most of them have no bbox column at all. ``check bbox --fix``
     adds or removes a column; the repair here is the metadata-only
-    :func:`geoparquet_io.core.check_fixes.fix_bboxless_covering`, so the two
+    :func:`geoparquet_io.core.check_fixes.fix_bboxless_cover`, so the two
     verdicts stay separate rather than one answering for the other.
 
     Version-agnostic, like the write gate it mirrors: ``covering`` is a 1.1 key,
@@ -844,7 +844,7 @@ def check_bbox(
 ):
     """``gpio check bbox``: the bbox column and metadata, a usable covering, and the values.
 
-    :func:`check_metadata_and_bbox`, :func:`check_covering_encoding` and -- when
+    :func:`check_metadata_and_bbox`, :func:`check_cover_encoding` and -- when
     ``verify_rows`` or ``all_rows`` asks for it -- the row-by-row comparison of
     each bbox with its geometry (:mod:`~geoparquet_io.core.check_bbox_values`),
     judged together, each issue keeping its own check's severity: a covering
@@ -867,7 +867,7 @@ def check_bbox(
     bbox = check_metadata_and_bbox(
         parquet_file, verbose, return_results=True, quiet=quiet, geo_meta=geo_meta
     )
-    covering = check_covering_encoding(
+    covering = check_cover_encoding(
         parquet_file, verbose, return_results=True, quiet=quiet, geo_meta=geo_meta
     )
     values = None
@@ -1093,7 +1093,7 @@ def check_all(
     bbox_result = check_metadata_and_bbox(
         parquet_file, verbose, return_results=True, quiet=quiet, geo_meta=geo_meta
     )
-    covering_result = check_covering_encoding(
+    covering_result = check_cover_encoding(
         parquet_file, verbose, return_results=True, quiet=quiet, geo_meta=geo_meta
     )
     compression_result = check_compression(parquet_file, verbose, return_results=True, quiet=quiet)

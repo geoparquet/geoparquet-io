@@ -55,9 +55,11 @@ def _assert_footer_matches_column(path):
     pf = pq.ParquetFile(path)
     assert meta["levels"][-1]["row_group_end"] == pf.metadata.num_row_groups - 1
     start = 0
+    # The leaf index, not the Arrow field's: a struct column (a bbox) has four leaves.
+    leaf = [pf.schema.column(i).path for i in range(len(pf.schema))].index("level")
     for k, lv in enumerate(meta["levels"]):
         for rg in range(start, lv["row_group_end"] + 1):
-            column = pf.metadata.row_group(rg).column(pf.schema_arrow.get_field_index("level"))
+            column = pf.metadata.row_group(rg).column(leaf)
             assert (column.statistics.min, column.statistics.max) == (k, k)
         start = lv["row_group_end"] + 1
 
@@ -242,12 +244,15 @@ class TestGeoLevels:
             pq.read_metadata(lv.path).num_rows for lv in levels
         )
 
-    def test_a_base_with_a_bbox_column_the_rollup_dropped_still_assembles(self, tmp_path, cells):
+    def test_a_base_with_a_bbox_column_keeps_it_on_every_level(self, tmp_path, cells):
+        """#1121: the rollup rebuilds the base's bbox column, and the block declares it."""
         with_bbox = tmp_path / "cells_bbox.parquet"
         read(str(cells)).add_bbox().write(str(with_bbox))
         out = tmp_path / "ov.parquet"
         write_overview_file(self._ladder(tmp_path, with_bbox), str(out))
-        assert "bbox" not in pq.read_schema(out).names
+        assert "bbox" in pq.read_schema(out).names
+        geo = json.loads(pq.read_schema(out).metadata[b"geo"])
+        assert "bbox" in geo["columns"][geo["primary_column"]]["covering"]
         _assert_footer_matches_column(out)
 
 

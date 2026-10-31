@@ -1372,6 +1372,7 @@ def test_fast_path_carry_drops_a_wrong_typed_value_before_writing_it():
             "geometry": {
                 "encoding": "WKB",
                 "geometry_types": ["Point"],
+                "bbox": [0, 0, 1, 1],
                 "crs": 42,
                 "orientation": "counterclockwise",
             }
@@ -1822,7 +1823,7 @@ def test_check_spec_reports_a_malformed_block_instead_of_crashing(col, case, blo
 def test_check_spec_columns_guard_does_not_hide_a_declared_covering(bad, tmp_path):
     """The 1.1-only 'covering' check must survive a non-object `columns` (#968).
 
-    It crashed at `_columns_declaring_covering` with
+    It crashed at `_columns_declaring_cover` with
     `'list' object has no attribute 'items'` before reaching any of the checks
     that would have told the user what was wrong.
     """

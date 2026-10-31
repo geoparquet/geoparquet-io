@@ -680,7 +680,7 @@ def _plain_copy_to(
     return pending_v2_geo
 
 
-def _custom_covering_survives(covering, original_metadata, geometry_column, output_columns) -> bool:
+def _custom_cover_survives(covering, original_metadata, geometry_column, output_columns) -> bool:
     """Whether a ``custom_metadata`` covering can outlive the #954 gate.
 
     Conservative: it survives if it brings its own ``bbox`` member, if the
@@ -1093,8 +1093,10 @@ def rewrite_footer_kv(
 # to write it verbatim. When a caller invalidated the derived stats (reproject,
 # a row filter, a multi-file merge) they are stripped, and only the rewrite path
 # can recompute them — so we fall back to it rather than ship a thinner block
-# than DuckDB would have generated.
-_REQUIRED_CARRIED_GEO_FIELDS = ("encoding", "geometry_types")
+# than DuckDB would have generated. ``bbox`` too: DuckDB's own block carries
+# the file bbox, and a carried block without one would ship a 2.0 file with no
+# file bbox at all; the rewrite measures it from the data (HANDOFFS row 69).
+_REQUIRED_CARRIED_GEO_FIELDS = ("encoding", "geometry_types", "bbox")
 
 # Column keys DuckDB's own `GEOPARQUET_VERSION 'V2'` block already writes. A
 # carried block is only worth substituting when it says something more than
@@ -1139,6 +1141,15 @@ def _geo_block_to_carry_on_fast_path(
         output_columns=output_columns,
     )
     return carried
+
+
+def _fresh_block_declares_a_bbox(con, query: str, geometry_column: str, verbose: bool) -> bool:
+    """Whether the composer, with no carried block, declares a bbox covering for ``query``."""
+    block = compose_geo_block(
+        QuerySource(con, query),
+        GeoBlockOptions(geometry_column=geometry_column, version="2.0", verbose=verbose),
+    )
+    return "covering" in block["columns"][geometry_column]
 
 
 def _fast_path_geo_decision(
@@ -1207,10 +1218,18 @@ def _fast_path_geo_decision(
     """
     if effective_version != "2.0" or not geometry_column:
         return None, False
-    # DuckDB's own 2.0 block omits `crs`, which reads as OGC:CRS84. An unknown
-    # CRS with no carried block to say so takes the rewrite, which writes
-    # `crs: null` (#1276).
-    no_block = (None, is_unknown_type_crs(input_crs))
+    detect = output_columns is None or SELF_EVIDENT_BBOX_COLUMN in output_columns
+    # No block to carry: DuckDB writes its own, which declares no covering. A
+    # conventional bbox column the output carries is declared by every other
+    # write (the composer's rule), so that write takes the rewrite, which
+    # composes it. Otherwise DuckDB's own 2.0 block omits `crs`, which reads as
+    # OGC:CRS84: an unknown CRS takes the rewrite, which writes `crs: null`
+    # (#1276).
+    no_block = (
+        None,
+        is_unknown_type_crs(input_crs)
+        or (detect and _fresh_block_declares_a_bbox(con, query, geometry_column, verbose)),
+    )
     if not original_metadata:
         return no_block
 
@@ -1243,7 +1262,6 @@ def _fast_path_geo_decision(
     # derived covering is the whole difference between the two paths -- and
     # every covering gate over every column (#1035/#1172/#954). Output columns
     # known to hold no `bbox` settle the declare without a schema probe.
-    detect = output_columns is None or SELF_EVIDENT_BBOX_COLUMN in output_columns
     carried = compose_geo_block(
         QuerySource(con, query, original_metadata),
         GeoBlockOptions(
@@ -1554,7 +1572,7 @@ def write_parquet_with_metadata(
     # with no bbox member to stand beside is dropped by every write path, so
     # forcing the single-threaded rewrite would only buy the fast path's output.
     if custom_metadata and "covering" in custom_metadata:
-        if _custom_covering_survives(
+        if _custom_cover_survives(
             custom_metadata["covering"], original_metadata, geometry_column, output_columns
         ):
             rewrite_needed = True

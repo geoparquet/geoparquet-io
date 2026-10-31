@@ -400,7 +400,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             geo_meta,
             use_native_geometry,
             native_crs,
-            precomputed_geom_types,
             writer_kwargs,
             verbose,
             extra_kv_metadata=extra_kv_metadata,
@@ -479,7 +478,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         geo_meta: dict | None,
         use_native_geometry: bool,
         native_crs: dict[str, dict | None],
-        precomputed_geom_types: list[str],
         writer_kwargs: dict,
         verbose: bool,
         extra_kv_metadata: dict[str, str] | None = None,
@@ -512,7 +510,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             geo_meta=geo_meta,
             use_native_geometry=use_native_geometry,
             native_crs=native_crs,
-            geom_types=precomputed_geom_types,
             verbose=verbose,
             extra_kv_metadata=extra_kv_metadata,
             geoarrow_target_type=geoarrow_target_type,
@@ -564,7 +561,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             geo_meta=geo_meta,
             use_native_geometry=use_native_geometry,
             native_crs=native_crs,
-            geom_types=[],
             verbose=verbose,
             extra_kv_metadata=extra_kv_metadata,
             geoarrow_target_type=geoarrow_target_type,
@@ -728,8 +724,13 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         geoarrow_encoding = None
 
         geom_types: list[str] = []
+        measured: dict = {}
         if should_add_geo_metadata:
-            geom_types = geometry_types_of(table, geometry_column, verbose=verbose)
+            # The bbox and types in one owner scan, as the in-memory path
+            # measures them: the table entry point used to declare no bbox.
+            stats = geometry_stats_of(table, geometry_column, verbose=verbose)
+            geom_types = stats.geometry_types
+            measured = {"bbox": stats.bbox, "geometry_types": geom_types}
 
             if geoarrow_native:
                 from geoparquet_io.core.geoarrow_encoding import determine_geoarrow_target_type
@@ -767,7 +768,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 custom_metadata=custom_metadata,
                 encoding=geoarrow_encoding or "WKB",
                 crs=input_crs,
-                stats={geometry_column: {"geometry_types": geom_types}},
+                stats={geometry_column: measured or {"geometry_types": geom_types}},
                 geometry_info=geometry_info,
                 verbose=verbose,
             ),
@@ -786,7 +787,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             geo_meta=geo_meta,
             use_native_geometry=use_native_geometry,
             native_crs=native_crs,
-            geom_types=geo_meta["columns"][geometry_column]["geometry_types"] if geo_meta else [],
             verbose=verbose,
             extra_kv_metadata=extra_kv_metadata,
             geoarrow_target_type=geoarrow_target_type,
@@ -832,7 +832,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         geo_meta: dict | None,
         use_native_geometry: bool,
         native_crs: dict[str, dict | None],
-        geom_types: list[str],
         verbose: bool,
         extra_kv_metadata: dict[str, str] | None = None,
         geoarrow_target_type=None,
@@ -899,8 +898,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         schema = canonicalize_wkb_fields(schema, geo_columns, native_columns=native_columns)
 
         if geo_meta is not None:
-            if "geometry_types" not in geo_meta["columns"].get(geometry_column, {}):
-                geo_meta["columns"][geometry_column]["geometry_types"] = geom_types
+            # The composer measured ``geometry_types``; the block is written as composed.
             schema_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
 
         if extra_kv_metadata:

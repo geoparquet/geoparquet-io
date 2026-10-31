@@ -615,7 +615,7 @@ def format_parquet_geo_metadata(
         )
 
 
-def _is_bbox_covering_paths(cover_info: dict) -> bool:
+def _is_bbox_cover_paths(cover_info: dict) -> bool:
     """Every bbox key present and each a ``[column, field]`` path."""
     return all(is_covering_path(cover_info.get(k)) for k in ("xmin", "ymin", "xmax", "ymax"))
 
@@ -749,7 +749,7 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
                     for cover_type, cover_info in covering.items():
                         if cover_type == "bbox" and isinstance(cover_info, dict):
                             # Format bbox covering more concisely
-                            if _is_bbox_covering_paths(cover_info):
+                            if _is_bbox_cover_paths(cover_info):
                                 # All bbox components present and well-formed
                                 bbox_col = cover_info["xmin"][0]
                                 console.print("      bbox:")

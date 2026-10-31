@@ -9,7 +9,6 @@ from pathlib import Path
 
 import duckdb
 
-from geoparquet_io.core.arrow_geo_metadata import describe_wkb_geometry
 from geoparquet_io.core.bbox_structure import check_bbox_structure, resolve_bbox_name
 from geoparquet_io.core.common import should_skip_bbox
 from geoparquet_io.core.crs_utils import (
@@ -54,12 +53,17 @@ from geoparquet_io.core.file_utils import (
     validate_output_path,
 )
 from geoparquet_io.core.geo_metadata import (
+    KEEP_CRS,
+    GeoBlockOptions,
     QuerySource,
+    SchemaSource,
     bbox_xy,
     bounds_of,
     build_bbox_covering,
+    compose_geo_block,
     sanitized_carried_geo_of_file,
     split_zm_suffix,
+    with_geo_block,
 )
 from geoparquet_io.core.geojson_datetimes import DatetimeRead, plan_datetime_read
 from geoparquet_io.core.geometry_detection import (
@@ -2589,9 +2593,21 @@ def read_spatial_to_arrow(
         # is the geometry, what CRS it is in and which edges it declares, so every
         # Table method that passes the Arrow table down to core sees what a
         # read() table shows (#1222) and the write keeps spherical edges (#1287).
-        arrow_table = describe_wkb_geometry(
-            arrow_table, geometry_column, detected_crs, edges=input_edges
-        )
+        # A description, not an output decision (``version=None``, no covering,
+        # ``geometry_types`` "not known"): the write funnels compose again from
+        # the data.
+        if geometry_column in arrow_table.column_names:
+            geo = compose_geo_block(
+                SchemaSource(arrow_table.schema),
+                GeoBlockOptions(
+                    geometry_column=geometry_column,
+                    covering=None,
+                    edges=input_edges,
+                    crs=KEEP_CRS if detected_crs is None else detected_crs,
+                    stats={geometry_column: {"geometry_types": []}},
+                ),
+            )
+            arrow_table = with_geo_block(arrow_table, geo)
         if is_parquet:
             arrow_table = _carry_input_kv_metadata(arrow_table, input_file, verbose)
         return arrow_table, detected_crs, geometry_column
