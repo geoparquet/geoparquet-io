@@ -3504,7 +3504,7 @@ def wfs_to_table(
         # The bbox is in the requested CRS, but the geometries are in the CRS the
         # server actually returned. When those differ, align the bbox to the
         # geometries' CRS so the filter doesn't drop valid rows (issue #499).
-        filter_bbox = bbox
+        filter_bbox: tuple[float, float, float, float] = bbox
         if server_crs and not _crs_matches(server_crs, crs):
             filter_bbox = _reproject_bbox_for_local_filter(bbox, crs, server_crs)
         filter_sql = _build_local_bbox_filter(filter_bbox, "geometry")
