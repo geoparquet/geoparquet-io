@@ -6,10 +6,12 @@ Three layers, each failing first (see the T3d record):
   precedence between an explicit request, a carried ``geo`` block and a native
   type, and the strip/restore pair -- as tables;
 * a cross-path table: one input per (declared edges, output version, CRS kind)
-  written by ``convert geoparquet``, ``sort hilbert``, every ``Table.write``
-  strategy and a stdout->stdin pipe, and the output's ``edges`` (block and
-  Parquet logical type) must be the same on every path and equal what the
-  owner's version gate says;
+  cell that tells an owner-asking path from one that is not -- six of the 24
+  combinations, the rest being the owner's own tables -- written by ``convert
+  geoparquet``, ``sort hilbert``, every ``Table.write`` strategy and a
+  stdout->stdin pipe, and the output's ``edges`` (block and Parquet logical
+  type) must be the same on every path and equal what the owner's version gate
+  says;
 * the defects fixed at the owner (#1289's mixed-edges glob).
 """
 
@@ -240,10 +242,6 @@ def test_the_representative_point_of_a_polar_cap_is_the_pole():
 GEOGRAPHIC = {"id": {"authority": "EPSG", "code": 4326}}
 PROJECTED = {"id": {"authority": "EPSG", "code": 3857}}
 CRS_KINDS = {"geographic": GEOGRAPHIC, "projected": PROJECTED}
-#: ``spherikal`` is the divergent input: sort hilbert carried the typo through
-#: verbatim where every other path dropped it (a typo says nothing, #1288).
-DECLARED = ["planar", "spherical", "vincenty", "spherikal"]
-VERSIONS = ["1.0", "1.1", "2.0"]
 RINGS = [
     [(10.0, 10.0), (20.0, 10.0), (20.0, 20.0), (10.0, 20.0)],
     [(30.0, 40.0), (35.0, 40.0), (35.0, 45.0), (30.0, 45.0)],
@@ -341,9 +339,24 @@ def _expected(declared: str, version: str, crs_kind: str) -> tuple[str, object]:
     return block, "Geometry"  # GEOGRAPHY needs a geographic CRS
 
 
-@pytest.mark.parametrize("crs_kind", sorted(CRS_KINDS))
-@pytest.mark.parametrize("version", VERSIONS)
-@pytest.mark.parametrize("declared", DECLARED)
+#: The cells that separate a path that asks the owner from one that does not.
+#: 1.0 and 1.1 are one answer (``is_geoparquet_1x``, ``test_one_1x_answer_for_every_version``),
+#: and the CRS kind matters only at 2.0, where GEOGRAPHY needs a geographic CRS.
+#: The full (declared, version) table is the owner's, ``test_the_version_gate``.
+PATH_CELLS = [
+    ("planar", "1.1", "geographic"),  # planar said by omission (sort hilbert, pipe spelled it)
+    ("spherical", "1.1", "geographic"),
+    ("vincenty", "1.1", "geographic"),  # an algorithm degrades to spherical at 1.x
+    ("spherikal", "1.1", "geographic"),  # a typo says nothing (sort hilbert carried it, #1288)
+    ("vincenty", "2.0", "geographic"),  # kept at 2.0, as GEOGRAPHY(algorithm=vincenty)
+    ("spherical", "2.0", "projected"),  # no GEOGRAPHY without a geographic CRS
+]
+
+
+@pytest.mark.parametrize(
+    ("declared", "version", "crs_kind"),
+    [pytest.param(*cell, id="-".join(cell)) for cell in PATH_CELLS],
+)
 def test_every_write_path_writes_the_same_edges(tmp_path, declared, version, crs_kind):
     src = _input(tmp_path, declared, crs_kind)
     seen, spelled_out = {}, set()

@@ -3053,26 +3053,9 @@ class TestOpsPartition:
         return sorted(f.name for f in files)
 
     # -- each function writes partitions from a bare pa.Table ---------------
-
-    def test_partition_by_h3(self, arrow_table, tmp_path):
-        stats = ops.partition_by_h3(arrow_table, tmp_path / "out", resolution=2)
-
-        assert stats["file_count"] > 0
-        assert self._partition_names(tmp_path / "out")
-
-    def test_partition_by_a5(self, arrow_table, tmp_path):
-        stats = ops.partition_by_a5(arrow_table, tmp_path / "out", resolution=4)
-
-        assert stats["file_count"] > 0
-        assert self._partition_names(tmp_path / "out")
-
-    def test_partition_by_quadkey(self, arrow_table, tmp_path):
-        stats = ops.partition_by_quadkey(
-            arrow_table, tmp_path / "out", resolution=13, partition_resolution=3
-        )
-
-        assert stats["file_count"] > 0
-        assert self._partition_names(tmp_path / "out")
+    # h3, a5 and quadkey writing partitions from a bare table (with the same
+    # arguments) are ``test_every_partitioner_returns_the_same_stats_dict``'s
+    # cells, which also hold the ``Table`` method to the same count.
 
     def test_partition_by_kdtree(self, arrow_table, tmp_path):
         result = ops.partition_by_kdtree(arrow_table, tmp_path / "out", iterations=2)

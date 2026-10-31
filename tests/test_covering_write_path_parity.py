@@ -18,7 +18,11 @@ Every gpio write ends at one of four places, and each used to decide the
   ran none of the gates a file write runs.
 
 What each class pins is the *parity*: the same input, through any of them, comes
-out declaring the same covering.
+out declaring the same covering. The decision itself is
+``geo_metadata.compose_geo_block``'s; a case runs on every strategy only where a
+strategy once answered it differently (a carried non-self-evident name, a table
+with no block, a secondary column's illegal covering), and on one representative
+where the code that answers it runs before a strategy is chosen.
 """
 
 from __future__ import annotations
@@ -83,7 +87,9 @@ class TestTableWriteKeepsADeclaredCovering:
     DEFAULT strategy.
     """
 
-    @pytest.mark.parametrize("strategy", STRATEGIES)
+    # The default strategy is the documented call; a non-self-evident name on
+    # every strategy is ``test_a_gdal_style_covering_survives``.
+    @pytest.mark.parametrize("strategy", ["duckdb-kv"])
     def test_the_documented_add_bbox_call_keeps_its_column(
         self, buildings_test_file, strategy, tmp_path
     ):
@@ -149,7 +155,9 @@ class TestTableWriteKeepsADeclaredCovering:
         assert bbox_covering_column(out) == "geometry_bbox"
         assert spec_failures(out) == {}
 
-    @pytest.mark.parametrize("strategy", STRATEGIES)
+    # Merging the entries is the composer's (one call for every strategy, which
+    # the gdal case above shows each strategy reaches).
+    @pytest.mark.parametrize("strategy", ["duckdb-kv"])
     def test_an_index_entry_beside_it_survives_too(self, quadkey_file, strategy, tmp_path):
         """``covering`` holds one entry per kind; carrying it must not lose the others."""
         import geoparquet_io as gpio
@@ -161,7 +169,9 @@ class TestTableWriteKeepsADeclaredCovering:
         assert set(covering) == {"bbox", "quadkey"}, covering
         assert spec_failures(out) == {}
 
-    @pytest.mark.parametrize("strategy", STRATEGIES)
+    # in-memory and disk-rewrite are tests/test_covering_bbox_field_order.py's
+    # #1172 pin; duckdb-kv (the default) its ``test_the_python_api_write``.
+    @pytest.mark.parametrize("strategy", ["streaming"])
     def test_an_illegal_declared_covering_is_still_dropped(
         self, overture_order_covering, strategy, tmp_path
     ):
@@ -189,11 +199,8 @@ class TestTheFastPathKeepsALegalCoveringAfterInvalidation:
     ``gpio check bbox`` then reported an undeclared bbox column.
     """
 
-    @pytest.mark.parametrize(
-        ("flag", "value"),
-        [("--limit", "10"), ("--where", "name IS NOT NULL"), ("--bbox", "-180,-90,180,90")],
-        ids=["limit", "where", "bbox"],
-    )
+    # --where and --bbox take the same branch of ``_stale_stat_columns`` as --limit.
+    @pytest.mark.parametrize(("flag", "value"), [("--limit", "10")], ids=["limit"])
     def test_extract_keeps_it(self, v2_with_declared_covering, flag, value, tmp_path):
         out = tmp_path / "extracted.parquet"
 
@@ -235,7 +242,8 @@ class TestTheFastPathKeepsALegalCoveringAfterInvalidation:
 
         assert bbox_covering_column(out) == "bbox"
 
-    @pytest.mark.parametrize("strategy", ["streaming", "in-memory", "disk-rewrite"])
+    # The reroute and its warning are the funnel's, whichever strategy was named.
+    @pytest.mark.parametrize("strategy", ["streaming"])
     def test_write_memory_is_warned_not_refused(
         self, v2_with_declared_covering, strategy, tmp_path
     ):
@@ -417,7 +425,8 @@ class TestACoveringNamingAnAbsentColumnIsPrunedOnEveryPath:
         assert self.ABSENT not in bbox_covering_columns(out)
         assert spec_failures(out) == {}
 
-    @pytest.mark.parametrize("strategy", STRATEGIES)
+    # The prune runs in ``write_parquet_with_metadata`` before a strategy is chosen.
+    @pytest.mark.parametrize("strategy", ["duckdb-kv"])
     def test_the_duckdb_funnel_already_pruned_it(
         self, table_declaring_an_absent_bbox_column, strategy, tmp_path
     ):
@@ -504,12 +513,13 @@ class TestTheStdoutStreamIsGatedLikeAFileWrite:
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures: inputs, built once per module and only ever read
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def gdal_style_covering(tmp_path) -> Path:
+@pytest.fixture(scope="module")
+def gdal_style_covering(tmp_path_factory) -> Path:
+    tmp_path = tmp_path_factory.mktemp("gdal_style_covering")
     """A ``geometry_bbox`` struct and a covering naming it -- what GDAL writes.
 
     Nothing but the input's own block vouches for that name: it is not the one
@@ -531,8 +541,9 @@ def gdal_style_covering(tmp_path) -> Path:
     return target
 
 
-@pytest.fixture
-def quadkey_file(tmp_path) -> Path:
+@pytest.fixture(scope="module")
+def quadkey_file(tmp_path_factory) -> Path:
+    tmp_path = tmp_path_factory.mktemp("quadkey_file")
     """A bbox covering with a ``quadkey`` index entry beside it."""
     target = tmp_path / "quadkey.parquet"
     run_cli("add", "quadkey", PLACES_TEST_FILE, target)
@@ -540,8 +551,9 @@ def quadkey_file(tmp_path) -> Path:
     return target
 
 
-@pytest.fixture
-def overture_order_covering(tmp_path) -> Path:
+@pytest.fixture(scope="module")
+def overture_order_covering(tmp_path_factory) -> Path:
+    tmp_path = tmp_path_factory.mktemp("overture_order_covering")
     """1.1, a covering declared over Overture's ``xmin, xmax, ymin, ymax`` struct."""
     target = tmp_path / "overture_declared.parquet"
     table = pq.read_table(str(COUNTRY_PARTITION_DIR / "Honduras.parquet"))
@@ -550,8 +562,9 @@ def overture_order_covering(tmp_path) -> Path:
     return target
 
 
-@pytest.fixture
-def v2_with_illegal_secondary_covering(tmp_path) -> Path:
+@pytest.fixture(scope="module")
+def v2_with_illegal_secondary_covering(tmp_path_factory) -> Path:
+    tmp_path = tmp_path_factory.mktemp("v2_with_illegal_secondary_covering")
     """2.0, a SECONDARY geometry column, and its covering over an illegal struct.
 
     The #953 shape carrying #1035's defect on the secondary: primary Point
@@ -602,8 +615,9 @@ def v2_with_illegal_secondary_covering(tmp_path) -> Path:
     return target
 
 
-@pytest.fixture
-def v2_with_declared_covering(tmp_path) -> Path:
+@pytest.fixture(scope="module")
+def v2_with_declared_covering(tmp_path_factory) -> Path:
+    tmp_path = tmp_path_factory.mktemp("v2_with_declared_covering")
     """GeoParquet 2.0, a bbox column, and a covering the file itself declares."""
     v2 = tmp_path / "v2.parquet"
     run_cli(

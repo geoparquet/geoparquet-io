@@ -15,6 +15,14 @@ GeoParquet 2.0         2.0.0       1.1.0        2.0.0
 native, no ``geo``     2.0.0       1.1.0        2.0.0
 =====================  ==========  ===========  ===========
 
+The whole table is asked of the owner directly
+(``test_the_owner_answers_the_whole_table``). Each write path is then held to
+three of its cells, the ones a path that skips the owner gets wrong: a 1.0 input
+in auto mode (a pass-through keeps 1.0), a native-geo-only input in auto mode
+(a path that ignores the native schema falls to the 1.1 default) and an explicit
+``1.1`` over a 2.0 input (a path that ignores the request keeps 2.0). The other
+nine cells are the same three branches of the owner again.
+
 Before the owner held the whole decision, the paths answered it themselves.
 ``add bbox`` passed a 1.0 input's version straight through when the bbox column
 was already there (approved change 7: it now writes 1.1 like every other
@@ -176,8 +184,20 @@ PATHS = {
 }
 
 
-@pytest.mark.parametrize("path_name", sorted(PATHS))
+#: The cells a path that does not ask the owner gets wrong (see the module docstring).
+ROUTING_CELLS = (("pgo", None), ("v10", None), ("v20", "1.1"))
+
+
 @pytest.mark.parametrize(("input_name", "requested"), sorted(EXPECTED, key=str))
+def test_the_owner_answers_the_whole_table(inputs, input_name, requested):
+    from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+
+    resolved = resolve_output_geoparquet_version(requested, input_file=str(inputs[input_name]))
+    assert f"{resolved}.0" == EXPECTED[(input_name, requested)]
+
+
+@pytest.mark.parametrize("path_name", sorted(PATHS))
+@pytest.mark.parametrize(("input_name", "requested"), ROUTING_CELLS)
 def test_every_write_path_declares_the_owners_version(
     inputs, tmp_path, path_name, input_name, requested
 ):

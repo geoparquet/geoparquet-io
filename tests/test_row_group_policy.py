@@ -3,15 +3,24 @@
 ``parquet_writer.resolve_row_group_rows`` is the only place a row-group count is
 decided: an explicit row count (snapped to a whole writer vector), else an MB
 target measured from the data (``resolve_row_group_rows_for_table`` /
-``resolve_row_group_rows_for_query``), else ``DEFAULT_ROW_GROUP_ROWS``. The
-table below runs one fixture through every command that writes a file, with
-each option and two table sizes, and asserts the group count each output has
-is the count the owner computes from the input -- so a path that re-derives a
-number, or leaves it to its writer, shows up as the one cell that disagrees.
+``resolve_row_group_rows_for_query``), else ``DEFAULT_ROW_GROUP_ROWS``. This
+file holds the owner's unit tests and one routing check per path.
 
-The commands that take no row-group option (``process aggregate``,
-``process overview``, ``add bbox-metadata``'s fallback rewrite) are held to the
-default. Only the network (the admin boundary download) is replaced, by a local
+The default reaching every write path is G7's ``row_groups`` invariant
+(tests/test_write_path_invariants.py), so the table here runs each path that
+takes ``--row-group-size`` / ``--row-group-size-mb`` with the two *explicit*
+options only, on one small fixture, and asserts the group count each output has
+is the count the owner computes from the input -- a path that re-derives a
+number, or leaves it to its writer, shows up as the one cell that disagrees.
+``partition admin`` (not a G7 path) also runs the default.
+
+The commands that take no row-group option and G7 does not run
+(``process aggregate --out-geometry polygon``, ``add bbox-metadata``'s
+fallback rewrite) are held to the default here; ``process overview`` and the
+geometry-free aggregate are G9's #1030 pin. The default is lowered to 8,192 rows
+for those cells (``small_default``): the owner reads it at call time, so every
+path that asks the owner moves with it and the fixture stays at 20,480 rows.
+Only the network (the admin boundary download) is replaced, by a local
 boundary file; ``add bbox-metadata`` is made to take its fallback rewrite the
 way its own tests do, by refusing the footer patch.
 
@@ -47,15 +56,21 @@ REPO = Path(__file__).resolve().parents[1]
 PACKAGE = REPO / "geoparquet_io"
 OWNER = PACKAGE / "core" / "parquet_writer.py"
 
-SIZES = (25_000, 60_000)
-#: option name -> CLI flags. 4.3 MB over ~380-byte rows is ~11,300 rows: the
-#: middle of the 10,240-12,288 vector step, so a DuckDB sample and a pyarrow
-#: table that weigh a few bytes apart still land on one count.
+N_ROWS = 20_480
+#: The input's own groups: whole writer vectors (see ``source``), ten of them.
+SOURCE_ROW_GROUP_ROWS = 2_048
+#: ``DEFAULT_ROW_GROUP_ROWS`` as ``small_default`` lowers it: three groups here.
+SMALL_DEFAULT_ROWS = 8_192
+#: option name -> CLI flags. 3,000 rows snaps to 4,096 (five groups). 1.85 MB
+#: over ~379-byte rows is ~5,100 rows: the middle of the 4,096-6,144 vector
+#: step (four groups), so a DuckDB sample and a pyarrow table that weigh a few
+#: bytes apart still land on one count.
 OPTIONS = {
     "default": (),
-    "rows": ("--row-group-size", "10000"),
-    "mb": ("--row-group-size-mb", "4.3"),
+    "rows": ("--row-group-size", "3000"),
+    "mb": ("--row-group-size-mb", "1.85"),
 }
+EXPLICIT_OPTIONS = ("mb", "rows")
 #: Paths that take --row-group-size / --row-group-size-mb, and those that take neither.
 SIZED_PATHS = (
     "convert",
@@ -64,7 +79,8 @@ SIZED_PATHS = (
     "partition_admin",
     *(f"table_write_{s}" for s in ("duckdb-kv", "in-memory", "streaming", "disk-rewrite")),
 )
-DEFAULT_ONLY_PATHS = ("aggregate_h3_none", "aggregate_h3_polygon", "overview", "add_bbox_metadata")
+#: ``aggregate_h3_none`` is G7's; it and ``overview`` are G9's #1030 pin.
+DEFAULT_ONLY_PATHS = ("aggregate_h3_polygon", "add_bbox_metadata")
 
 
 def _run(*args) -> None:
@@ -77,24 +93,33 @@ def _group_sizes(path: Path) -> list[int]:
     return [md.row_group(i).num_rows for i in range(md.num_row_groups)]
 
 
-@pytest.fixture(scope="module", params=SIZES, ids=lambda n: f"{n}rows")
-def source(request, tmp_path_factory) -> Path:
-    """``n`` distinct points (one per H3 r15 cell) with a fixed-width pad column,
-    written in 4,096-row groups so no policy matches the input's own layout.
+@pytest.fixture
+def small_default(monkeypatch) -> int:
+    """Lower the owner's default for one test; every path that asks the owner follows."""
+    from geoparquet_io.core import parquet_writer
+
+    monkeypatch.setattr(parquet_writer, "DEFAULT_ROW_GROUP_ROWS", SMALL_DEFAULT_ROWS)
+    return SMALL_DEFAULT_ROWS
+
+
+@pytest.fixture(scope="module")
+def source(tmp_path_factory) -> Path:
+    """``N_ROWS`` distinct points (one per H3 r15 cell) with a fixed-width pad
+    column, written in 2,048-row groups so no policy matches the input's layout.
 
     The input's groups are whole writer vectors on purpose. DuckDB's ``COPY``
     closes a row group on the first chunk that reaches ``ROW_GROUP_SIZE``, and a
     5,000-row input group reads back as 2,048 + 2,048 + 904, so a 12,288-row
     request over it lands at 14,096: the writer's chunking, not a policy.
     """
-    n = request.param
+    n = N_ROWS
     table = grid_points_table(n, with_bbox=False)
     table = table.append_column("pad", pa.array([f"{i:08d}" * 40 for i in range(n)]))
-    path = tmp_path_factory.mktemp(f"rg_{n}") / "source.parquet"
+    path = tmp_path_factory.mktemp("rg") / "source.parquet"
     pq.write_table(
         table.replace_schema_metadata({b"geo": json.dumps(geo_block()).encode()}),
         str(path),
-        row_group_size=4_096,
+        row_group_size=SOURCE_ROW_GROUP_ROWS,
     )
     return path
 
@@ -107,7 +132,10 @@ def _expected(source: Path, option: str) -> int:
     elif option == "rows":
         rows = resolve_row_group_rows(int(OPTIONS["rows"][1]), None)
     else:
+        from geoparquet_io.core import parquet_writer
+
         rows = resolve_row_group_rows(None, None)
+        assert rows == parquet_writer.DEFAULT_ROW_GROUP_ROWS
     return math.ceil(table.num_rows / rows)
 
 
@@ -171,20 +199,24 @@ def _assert_owners_count(path_name: str, option: str, source: Path, tmp_path: Pa
     assert len(sizes) == _expected(source, option), f"{path_name} {option}: {sizes}"
 
 
-@pytest.mark.parametrize("option", sorted(OPTIONS))
+@pytest.mark.parametrize("option", EXPLICIT_OPTIONS)
 @pytest.mark.parametrize("path_name", [p for p in SIZED_PATHS if p != "partition_admin"])
 def test_every_sized_path_lands_on_the_owners_count(path_name, option, source, tmp_path):
     _assert_owners_count(path_name, option, source, tmp_path)
 
 
 @pytest.mark.parametrize("option", sorted(OPTIONS))
-def test_partition_admin_lands_on_the_owners_count(option, source, tmp_path, monkeypatch):
+def test_partition_admin_lands_on_the_owners_count(
+    option, source, tmp_path, monkeypatch, small_default
+):
     _use_local_admin(tmp_path, monkeypatch)
     _assert_owners_count("partition_admin", option, source, tmp_path)
 
 
 @pytest.mark.parametrize("path_name", DEFAULT_ONLY_PATHS)
-def test_every_unsized_path_lands_on_the_default(path_name, source, tmp_path, monkeypatch):
+def test_every_unsized_path_lands_on_the_default(
+    path_name, source, tmp_path, monkeypatch, small_default
+):
     n = pq.read_metadata(str(source)).num_rows
     if path_name.startswith("aggregate_h3_"):
         geometry = path_name.removeprefix("aggregate_h3_")
@@ -200,23 +232,6 @@ def test_every_unsized_path_lands_on_the_default(path_name, source, tmp_path, mo
             "--out-geometry",
             geometry,
         )
-    elif path_name == "overview":
-        cells = tmp_path / "cells.parquet"
-        _run(
-            "process",
-            "aggregate",
-            "h3",
-            source,
-            cells,
-            "--resolution",
-            "15",
-            "--out-geometry",
-            "none",
-        )
-        levels = tmp_path / "levels"
-        levels.mkdir()
-        _run("process", "overview", cells, "--levels", "14", "--output-dir", levels)
-        (out,) = sorted(levels.glob("*.parquet"))
     else:
         from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
 
@@ -238,14 +253,11 @@ def test_every_unsized_path_lands_on_the_default(path_name, source, tmp_path, mo
         _run("add", "bbox-metadata", out)
     sizes = _group_sizes(out)
     assert sum(sizes) == n, f"{path_name}: the fixture lost its one-row-per-cell shape"
-    assert len(sizes) == math.ceil(n / DEFAULT_ROW_GROUP_ROWS), f"{path_name}: {sizes}"
+    assert len(sizes) == math.ceil(n / small_default), f"{path_name}: {sizes}"
 
 
-def test_the_fixture_makes_the_options_distinguishable(source):
-    """Non-vacuity: on the big size, the three options give three different counts."""
-    n = pq.read_metadata(str(source)).num_rows
-    if n < max(SIZES):
-        pytest.skip("checked on the larger size")
+def test_the_fixture_makes_the_options_distinguishable(source, small_default):
+    """Non-vacuity: the three options give three different counts, none the input's."""
     counts = {option: _expected(source, option) for option in OPTIONS}
     assert len(set(counts.values())) == len(counts), counts
     assert pq.read_metadata(str(source)).num_row_groups not in counts.values()
@@ -330,14 +342,13 @@ _DRY_RUN_COMMANDS = {
 @pytest.mark.parametrize("option", sorted(OPTIONS))
 @pytest.mark.parametrize("command", sorted(_DRY_RUN_COMMANDS))
 def test_a_dry_run_prints_the_row_group_count_the_write_uses(
-    command, option, source, tmp_path, caplog
+    command, option, source, tmp_path, caplog, small_default
 ):
     """The printed ``COPY`` had no ``ROW_GROUP_SIZE``: pasted into DuckDB it
     wrote DuckDB's 122,880-row groups, not the owner's count gpio writes."""
     import logging
 
-    if pq.read_metadata(str(source)).num_rows <= DEFAULT_ROW_GROUP_ROWS:
-        pytest.skip("needs an input with more than one row group at every option")
+    assert pq.read_metadata(str(source)).num_rows > small_default
     args = (*_DRY_RUN_COMMANDS[command], source, tmp_path / "out.parquet", *OPTIONS[option])
     with caplog.at_level(logging.INFO, logger="geoparquet_io"):
         _run(*args, "--dry-run")

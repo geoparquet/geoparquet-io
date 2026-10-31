@@ -1726,19 +1726,9 @@ class TestNativeGeometryCrsAcrossStrategies:
     catches it.
     """
 
-    @pytest.mark.parametrize("strategy", ALL_STRATEGIES)
-    @pytest.mark.parametrize("version", NATIVE_VERSIONS)
-    def test_primary_crs_reaches_the_logical_type(self, strategy, version, tmp_path):
-        """The issue's reproducer: one projected geometry column, no ``input_crs``."""
-        source = _projected_source(tmp_path, secondary=False)
-        out = str(tmp_path / f"{strategy}_{version}.parquet")
-
-        _write_via_query(source, out, version, strategy)
-
-        assert _type_crs(out) == {"geometry": ("EPSG", 3857)}
-        if version == "2.0":
-            assert _block_crs(out) == {"geometry": ("EPSG", 3857)}
-        assert _failed_checks(out) == []
+    # The one-column reproducer is ``test_each_column_takes_its_own_crs``'s
+    # primary: the same projected column, the same assertions on it, beside a
+    # secondary with a CRS of its own.
 
     @pytest.mark.parametrize("strategy", ALL_STRATEGIES)
     @pytest.mark.parametrize("version", NATIVE_VERSIONS)

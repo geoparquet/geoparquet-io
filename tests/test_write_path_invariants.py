@@ -27,10 +27,13 @@ reference and thousands away from the other level.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
+import os
 import shutil
 import struct
+import time
 from pathlib import Path
 
 import pyarrow as pa
@@ -40,6 +43,7 @@ from click.testing import CliRunner
 
 import geoparquet_io as gpio
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core import parquet_writer
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS, resolve_row_group_rows
 from tests._defrag_fixtures import (
     EPOCH,
@@ -51,7 +55,15 @@ from tests._defrag_fixtures import (
 )
 from tests.native_geo_probes import projjson
 
-N_ROWS = 60_000
+#: The facade's default row-group count, lowered for this module only (see the
+#: ``outputs`` fixture): every path that takes the owner's default lands on it,
+#: and a path that hard-codes 49,152 or a writer's own default (DuckDB's
+#: 122,880, pyarrow's 1,048,576) does not. 4,096 is two whole writer vectors,
+#: so the DuckDB ``COPY`` paths land on it exactly.
+G7_DEFAULT_ROW_GROUP_ROWS = 4_096
+N_ROWS = 12_000
+#: The input's own groups: neither one group nor the facade's.
+SOURCE_ROW_GROUP_ROWS = 1_000
 #: ITRF2014 geographic 2D: a dynamic datum, not an ensemble, so an ``epoch`` on
 #: it is one ``check spec`` accepts (an epoch on CRS84's WGS 84 ensemble fails).
 DYNAMIC_CRS_EPSG = 9000
@@ -147,9 +159,7 @@ def _run_cli(name: str, src: Path, out_dir: Path) -> Path:
     return out
 
 
-@pytest.fixture(scope="module")
-def source(tmp_path_factory) -> Path:
-    path = tmp_path_factory.mktemp("g7") / "source.parquet"
+def _write_source(path: Path) -> Path:
     table = grid_points_table(N_ROWS)
     geometry = table["geometry"].to_pylist()
     geometry[-1] = struct.pack("<BII", 1, 3, 0)  # POLYGON EMPTY still declares its type.
@@ -172,22 +182,81 @@ def source(tmp_path_factory) -> Path:
         ),
         extra_kv=SIDECAR_KEYS,
         compression="snappy",
-        row_group_size=10_000,
+        row_group_size=SOURCE_ROW_GROUP_ROWS,
     )
     return path
 
 
-@pytest.fixture(scope="module")
-def outputs(source, tmp_path_factory) -> dict[str, Path]:
-    out_dir = tmp_path_factory.mktemp("g7_out")
-    result = {
-        name: _run_cli(name, source, out_dir) for name in (*CLI_PATHS, *SIDECAR_REFERENCE.values())
-    }
-    for strategy in STRATEGIES:
-        out = out_dir / f"table_write_{strategy}.parquet"
-        gpio.read(str(source)).write(str(out), write_strategy=strategy)
-        result[f"table_write_{strategy}"] = out
+def _write_outputs(source: Path, out_dir: Path) -> dict[str, Path]:
+    """Every path's output, written with the owner's default lowered.
+
+    The owner reads ``DEFAULT_ROW_GROUP_ROWS`` at call time, so lowering it
+    here moves every path that asks the owner, and only those. That keeps the
+    fixture at 12,000 rows instead of the 60,000 the real default needs.
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(parquet_writer, "DEFAULT_ROW_GROUP_ROWS", G7_DEFAULT_ROW_GROUP_ROWS)
+        result = {
+            name: _run_cli(name, source, out_dir)
+            for name in (*CLI_PATHS, *SIDECAR_REFERENCE.values())
+        }
+        for strategy in STRATEGIES:
+            out = out_dir / f"table_write_{strategy}.parquet"
+            gpio.read(str(source)).write(str(out), write_strategy=strategy)
+            result[f"table_write_{strategy}"] = out
     return result
+
+
+@contextlib.contextmanager
+def _session_lock(path: Path):
+    """A lock every xdist worker of one session shares (``mkdir`` is atomic)."""
+    while True:
+        try:
+            path.mkdir()
+            break
+        except FileExistsError:
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        path.rmdir()
+
+
+@pytest.fixture(scope="module")
+def _g7(tmp_path_factory) -> tuple[Path, dict[str, Path]]:
+    """The source and every output, written once per test session.
+
+    Each xdist worker that runs a cell used to write all thirteen outputs
+    itself; the first one to get here now writes them into the session's shared
+    temporary directory and the others read them.
+    """
+    if not os.environ.get("PYTEST_XDIST_WORKER"):
+        root = tmp_path_factory.mktemp("g7")
+        (root / "out").mkdir()
+        source = _write_source(root / "source.parquet")
+        return source, _write_outputs(source, root / "out")
+
+    root = tmp_path_factory.getbasetemp().parent / "g7_shared"
+    manifest = root / "outputs.json"
+    with _session_lock(root.with_name("g7_shared.lock")):
+        if not manifest.exists():
+            shutil.rmtree(root, ignore_errors=True)
+            (root / "out").mkdir(parents=True)
+            source = _write_source(root / "source.parquet")
+            written = _write_outputs(source, root / "out")
+            manifest.write_text(json.dumps({k: str(v) for k, v in written.items()}))
+    outputs = {name: Path(p) for name, p in json.loads(manifest.read_text()).items()}
+    return root / "source.parquet", outputs
+
+
+@pytest.fixture(scope="module")
+def source(_g7) -> Path:
+    return _g7[0]
+
+
+@pytest.fixture(scope="module")
+def outputs(_g7) -> dict[str, Path]:
+    return _g7[1]
 
 
 # ---------------------------------------------------------------------------
@@ -294,8 +363,8 @@ def _check_codec(path: Path, _source: Path, _tmp: Path) -> None:
 
 def _check_row_groups(path: Path, _source: Path, _tmp: Path) -> None:
     md = pq.ParquetFile(str(path)).metadata
-    rows_per_group = resolve_row_group_rows(None, None)
-    assert rows_per_group == DEFAULT_ROW_GROUP_ROWS
+    assert resolve_row_group_rows(None, None) == DEFAULT_ROW_GROUP_ROWS
+    rows_per_group = G7_DEFAULT_ROW_GROUP_ROWS
     expected = math.ceil(md.num_rows / rows_per_group)
     actual = [md.row_group(r).num_rows for r in range(md.num_row_groups)]
     assert md.num_row_groups == expected, f"{md.num_rows} rows in groups of {actual}"
@@ -398,8 +467,8 @@ def test_geometry_free_output_carries_no_geo_key(path, outputs):
 def test_the_fixture_makes_every_invariant_observable(source):
     """Non-vacuity: the input differs from the facade's policy on every axis."""
     md = pq.ParquetFile(str(source)).metadata
-    assert md.num_rows > DEFAULT_ROW_GROUP_ROWS
-    assert md.num_row_groups != math.ceil(md.num_rows / DEFAULT_ROW_GROUP_ROWS)
+    assert md.num_rows > G7_DEFAULT_ROW_GROUP_ROWS
+    assert md.num_row_groups != math.ceil(md.num_rows / G7_DEFAULT_ROW_GROUP_ROWS)
     assert {c.compression for c in _columns(source)} == {"SNAPPY"}
     column = _primary_column_meta(source)
     assert column["epoch"] == EPOCH and column["edges"] == EDGES
