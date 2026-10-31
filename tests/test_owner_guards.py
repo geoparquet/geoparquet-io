@@ -1441,11 +1441,37 @@ def _find_overwrite_check(m: _Module) -> Iterator[Hit]:
 #: string literal is read as a template, an f-string's ``{...}`` parts as ``{}``.
 _STATS_AGGREGATE = re.compile(
     r"(?is)\bST_Extent_Agg\b"
-    r"|\b(?:min|max)\s*\(\s*ST_[XYZ](?:min|max)\s*\("
+    r"|\b(?:min|max)\s*\(\s*ST_[XYZ](?:min|max)?\s*\("
     r"|\b(?:min|max)\s*\(\s*(?:\{\}|\"?\w+\"?)\.\"?[xyz](?:min|max)\"?\s*\)"
     r"|\bST_GeometryType\b.*\b(?:DISTINCT|GROUP\s+BY)\b"
     r"|\b(?:DISTINCT|GROUP\s+BY)\b.*\bST_GeometryType\b"
+    r"|\b(?:list|array_agg)\s*\(\s*ST_GeometryType\b"
 )
+
+#: The bbox fields a Python-side fold reads off each row group / batch / file.
+_BBOX_FIELDS = frozenset({"xmin", "ymin", "xmax", "ymax", "zmin", "zmax"})
+
+
+def _reads_a_bbox_field(node: ast.AST) -> bool:
+    """``b["xmin"]`` or ``b.xmin``: one bbox field of one element."""
+    if isinstance(node, ast.Subscript):
+        key = node.slice
+        return isinstance(key, ast.Constant) and key.value in _BBOX_FIELDS
+    return isinstance(node, ast.Attribute) and node.attr in _BBOX_FIELDS
+
+
+def _is_python_stats_fold(node: ast.AST) -> bool:
+    """``min(b["xmin"] for b in boxes)`` / ``max(s.ymax for s in stats)``, or
+    ``pc.min_max(...)``: a fold of extents written in Python."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Attribute) and func.attr == "min_max":
+        return True
+    if not (isinstance(func, ast.Name) and func.id in ("min", "max") and len(node.args) == 1):
+        return False
+    arg = node.args[0]
+    return isinstance(arg, (ast.GeneratorExp, ast.ListComp)) and _reads_a_bbox_field(arg.elt)
 
 
 def _string_template(node: ast.AST) -> str | None:
@@ -1462,9 +1488,12 @@ def _string_template(node: ast.AST) -> str | None:
 
 def _find_geometry_stats(m: _Module) -> Iterator[Hit]:
     """A geometry-stats or bounds aggregate outside ``core/geo_metadata.py``:
-    ``ST_Extent_Agg``, ``MIN``/``MAX`` of ``ST_XMin``..``ST_YMax`` or of a bbox
-    struct's ``.xmin``..``.ymax``, or ``ST_GeometryType`` under ``DISTINCT`` /
-    ``GROUP BY``.
+    ``ST_Extent_Agg``, ``MIN``/``MAX`` of ``ST_XMin``..``ST_YMax``, of
+    ``ST_X``/``ST_Y`` or of a bbox struct's ``.xmin``..``.ymax``, or
+    ``ST_GeometryType`` under ``DISTINCT`` / ``GROUP BY`` / ``list(`` /
+    ``array_agg(``; and the same fold in Python -- ``min``/``max`` over a
+    comprehension of a bbox field (``min(b["xmin"] for b in boxes)``) or
+    ``pc.min_max``.
 
     ``geo_metadata.geometry_stats_of`` / ``bounds_of`` / ``geometry_types_of``
     are the one stats routine with one degenerate-geometry policy. Would have
@@ -1473,12 +1502,20 @@ def _find_geometry_stats(m: _Module) -> Iterator[Hit]:
     antimeridian, and the non-finite coordinate that one of them let through
     as ``Infinity`` while another died on it (#236, #1165). A per-row
     ``ST_XMin(g)`` building a bbox *column* is not an aggregate and passes.
+
+    Not seen (named so a reviewer looks for them): an aggregate whose
+    expression is interpolated from another string (``MIN({x})`` with
+    ``x = "ST_XMin(g)"``), one assembled by concatenation, ``MIN(xmin)`` over
+    an aliased subquery, a fold indexing by position (``min(b[0] for ...)``),
+    and a hand-written loop with ``if v < lo: lo = v``.
     """
     for node in ast.walk(m.tree):
         if id(node) in m.docstrings or isinstance(m.parents.get(id(node)), ast.JoinedStr):
             continue
         template = _string_template(node)
         if template is not None and _STATS_AGGREGATE.search(template):
+            yield m.hit(node)
+        elif _is_python_stats_fold(node):
             yield m.hit(node)
 
 
@@ -2321,6 +2358,13 @@ STATS_SHAPES = {
     "FILTER on the aggregate": 'Q = "SELECT MIN(ST_XMin(g)) FILTER (WHERE NOT ST_IsEmpty(g)) FROM t"\n',
     "distinct types": 'def q(c):\n    return f"SELECT DISTINCT ST_GeometryType({c}) FROM t"\n',
     "types grouped": 'Q = "SELECT ST_GeometryType(g), COUNT(*) FROM t GROUP BY 1"\n',
+    "aggregate over point coordinates": 'Q = "SELECT MIN(ST_X(g)), 1 FROM t"\n',
+    "types listed": 'Q = "SELECT list(ST_GeometryType(g)) FROM t"\n',
+    "python fold over row-group dicts": (
+        'def extent(boxes):\n    return min(b["xmin"] for b in boxes)\n'
+    ),
+    "python fold over attributes": "def top(stats):\n    return max([s.ymax for s in stats])\n",
+    "pyarrow min_max": "def lo(pc, arr):\n    return pc.min_max(arr)\n",
 }
 #: ...and the per-row and probe shapes it must leave alone.
 STATS_NEAR_MISSES = {
@@ -2329,6 +2373,8 @@ STATS_NEAR_MISSES = {
     "first-row type probe": 'Q = "SELECT ST_GeometryType(g) FROM t WHERE g IS NOT NULL LIMIT 1"\n',
     "window over part extents": 'Q = "SELECT lo, max(hi) OVER (ORDER BY lo) FROM parts"\n',
     "prose": 'def f():\n    """Uses MIN(ST_XMin(g)) through the owner."""\n',
+    "python min of plain numbers": "def lo(values):\n    return min(v for v in values)\n",
+    "python min of a non-bbox field": 'def first(rows):\n    return min(r["id"] for r in rows)\n',
 }
 
 
