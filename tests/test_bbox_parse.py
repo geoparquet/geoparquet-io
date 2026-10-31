@@ -389,3 +389,22 @@ def test_partition_wrap_note_follows_the_predicate(geographic, noted):
 
     assert bool(_combined_bbox_wrap_note([170.0, 0.0, -170.0, 1.0], geographic)) is noted
     assert _combined_bbox_wrap_note([500000.0, 0.0, 400000.0, 1.0], geographic) == ""
+
+
+def test_aggregate_bbox_center_asks_the_one_wrap_rule():
+    """grid_common's per-row centre reads a wrap through crosses_antimeridian_sql."""
+    import duckdb
+
+    from geoparquet_io.core.process.aggregate.grid_common import _bbox_center_lon_sql
+
+    sql = _bbox_center_lon_sql("b", None)  # no CRS: geographic (OGC:CRS84)
+    rows = {
+        (179.0, -179.0): 180.0,  # the wrap: centre on the antimeridian, not lon 0
+        (10.0, 20.0): 15.0,
+        (200.0, 190.0): 195.0,  # reversed but no longitude: not a wrap, plain midpoint
+    }
+    for (xmin, xmax), centre in rows.items():
+        got = duckdb.sql(
+            f"SELECT {sql} FROM (SELECT {{'xmin': {xmin}::DOUBLE, 'xmax': {xmax}::DOUBLE}} AS b)"
+        ).fetchall()[0][0]
+        assert got == pytest.approx(centre)

@@ -18,6 +18,7 @@ import duckdb
 import pyarrow as pa
 
 from geoparquet_io.core.arrow_geo_metadata import _detect_bbox_column_from_table
+from geoparquet_io.core.bbox_parse import crosses_antimeridian_sql
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.compression import resolve_process_compression_level
 from geoparquet_io.core.crs_utils import (
@@ -306,7 +307,8 @@ def _bbox_center_lon_sql(qbox: str, source_crs) -> str:
         return plain
     shifted = f"(({qbox}.xmin + {qbox}.xmax + 360.0) / 2.0)"
     wrapped = f"CASE WHEN {shifted} > 180.0 THEN {shifted} - 360.0 ELSE {shifted} END"
-    return f"CASE WHEN {qbox}.xmin > {qbox}.xmax THEN {wrapped} ELSE {plain} END"
+    crosses = crosses_antimeridian_sql(f"{qbox}.xmin", f"{qbox}.xmax", geographic=True)
+    return f"CASE WHEN {crosses} THEN {wrapped} ELSE {plain} END"
 
 
 def bucket_point_expr(

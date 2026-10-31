@@ -561,6 +561,21 @@ class TestWrapIsVisibleWhereTheValuesArePrinted:
         assert check.status == CheckStatus.PASSED, check.message
         assert "antimeridian" in check.message
 
+    def test_native_geo_statistics_wrap_note_needs_a_geographic_crs(
+        self, antimeridian_file, tmp_path, monkeypatch
+    ):
+        """The note asks BBox.crosses_antimeridian with the column's CRS: an
+        inverted aggregate on a projected file is not a wrap, so no note."""
+        monkeypatch.setattr(
+            "geoparquet_io.core.duckdb_metadata.get_native_geo_stats_by_row_group",
+            lambda *a, **k: [_chunk(175.0, 0.0, -175.0, 5.0)],
+        )
+        projected = _rewrite_geo(antimeridian_file, tmp_path / "utm.parquet", crs=UTM_33N)
+        check = _check_native_geo_statistics(str(projected), "geometry")
+        assert "antimeridian" not in check.message
+        geographic = _check_native_geo_statistics(str(antimeridian_file), "geometry")
+        assert "antimeridian" in geographic.message
+
     def test_native_geo_statistics_message_is_unannotated_without_a_wrap(self, antimeridian_file):
         check = _check_native_geo_statistics(str(antimeridian_file), "geometry")
         assert check.status == CheckStatus.PASSED, check.message

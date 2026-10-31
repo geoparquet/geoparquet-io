@@ -2856,10 +2856,11 @@ def _check_native_geo_statistics(
             )
             # These values may now wrap the antimeridian (#886), and a bare
             # xmin > xmax reads as corrupt metadata; say which it is.
+            wraps = BBox(
+                geo_bbox["xmin"], geo_bbox["ymin"], geo_bbox["xmax"], geo_bbox["ymax"]
+            ).crosses_antimeridian(geographic)
             wrap_note = (
-                " (statistics interpreted as antimeridian-crossing, RFC 7946 5.2)"
-                if geo_bbox["xmin"] > geo_bbox["xmax"]
-                else ""
+                " (statistics interpreted as antimeridian-crossing, RFC 7946 5.2)" if wraps else ""
             )
             return ValidationCheck(
                 name=f"native_geo_stats_{geom_col}",
