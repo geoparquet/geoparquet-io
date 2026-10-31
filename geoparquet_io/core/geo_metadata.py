@@ -1928,21 +1928,22 @@ def row_group_geometry_stats(chunks, *, geographic: bool) -> GeometryStats:
     return merged_geometry_stats(parts, geographic=geographic)
 
 
-def _non_finite_message(column: str, example: str | None = None) -> str:
+def _non_finite_message(column: str | None, example: str | None = None) -> str:
     """The one sentence for a located geometry with an infinite coordinate (#1165).
 
     ``example`` names the offending value where the caller has one; the SQL
     struct expression raises it from inside a query, where it has none.
     """
     where = f", {example}," if example else ","
+    subject = f"Column '{column}' holds a geometry" if column is not None else "A geometry"
     return (
-        f"Column '{column}' holds a geometry with a non-finite (infinite) coordinate"
+        f"{subject} with a non-finite (infinite) coordinate"
         f"{where} so its bounds cannot be measured. Fix or remove that geometry and "
         "try again."
     )
 
 
-def _non_finite_error(column: str, example: str) -> Exception:
+def _non_finite_error(column: str | None, example: str) -> Exception:
     from geoparquet_io.core.exceptions import GeometryError
 
     return GeometryError(_non_finite_message(column, example))
