@@ -287,12 +287,8 @@ def _output_schema(
             input_crs=col_meta.get("crs") if isinstance(col_meta, dict) else None,
             verbose=verbose,
             geo_bbox=bbox,
+            geo_types=types or None,
         )
-        meta = dict(empty.schema.metadata or {})
-        if b"geo" in meta and types:
-            geo = sanitized_carried_geo(meta)
-            geo["columns"][geometry_column]["geometry_types"] = types
-            empty = empty.replace_schema_metadata({**meta, b"geo": json.dumps(geo).encode()})
     else:
         empty = empty.replace_schema_metadata(base_meta)
 

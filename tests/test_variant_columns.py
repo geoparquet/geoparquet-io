@@ -17,7 +17,7 @@ import pytest
 
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, query_schema, sql_path
 from geoparquet_io.core.extract import extract
-from geoparquet_io.core.geo_metadata import gate_illegal_bbox_covering
+from geoparquet_io.core.geo_metadata import GeoBlockOptions, QuerySource, compose_geo_block
 from geoparquet_io.core.inspect_utils import get_preview_data
 
 # One row per VARIANT shape: int, string, nested object, mixed list, NULL.
@@ -148,7 +148,10 @@ class TestCoveringGateParity:
         con = get_duckdb_connection()
         try:
             query = f"SELECT * FROM read_parquet({sql_path(variant_file)})"
-            gated = gate_illegal_bbox_covering(geo, con, query)
+            gated = compose_geo_block(
+                QuerySource(con, query, {b"geo": json.dumps(geo).encode()}),
+                GeoBlockOptions("geometry", version="1.1", covering=None),
+            )
         finally:
             con.close()
         assert "covering" not in gated["columns"]["geometry"]

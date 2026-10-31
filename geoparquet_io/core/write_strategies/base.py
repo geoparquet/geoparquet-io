@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING
 
 from geoparquet_io.core.crs_utils import (
     PARQUET_UNKNOWN_CRS,
-    apply_output_crs,
     entry_crs_is_unknown,
     is_default_crs,
     is_unknown_type_crs,
@@ -36,11 +35,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     NATIVE_GEOMETRY_VERSIONS,
-    CarriedSource,
-    GeoBlockOptions,
-    compose_geo_block,
     read_raw_geo,
-    strip_unsupported_covering,
 )
 from geoparquet_io.core.parquet_writer import carried_geoparquet_version
 
@@ -107,7 +102,7 @@ def native_geometry_crs(
 
     One definition, shared by every strategy: the streaming writer's output
     schema, the disk-rewrite writer's, and the in-memory path in
-    ``common._apply_geoparquet_metadata``.
+    ``arrow_geo_metadata._apply_geoparquet_metadata``.
     """
     if geoparquet_version not in NATIVE_GEOMETRY_VERSIONS:
         return {}
@@ -178,125 +173,14 @@ def wrap_query_with_secondary_crs(
     return f"SELECT * REPLACE ({', '.join(replacements)}) FROM ({query})"
 
 
-def merge_secondary_geometry_metadata(geo_meta: dict, geometry_info: dict | None) -> None:
-    """Give every secondary geometry column an entry in ``geo["columns"]``.
+def written_block_encoding(geoparquet_version: str) -> str | None:
+    """The primary's encoding a DuckDB-written file actually has, for the composer.
 
-    Each secondary keeps the metadata the input declared for it -- crucially its
-    own ``crs``, which is what the native Parquet GEOMETRY type is then built
-    from -- and gains the ``encoding`` the spec requires when the input named
-    none. Existing keys win, so a caller that has already resolved something for
-    the column is not overwritten.
-
-    Mutates ``geo_meta`` in place. Shared by the three write paths that build a
-    block from ``geometry_info``: this module's ``build_geo_metadata``, the
-    streaming strategy's, and ``common._apply_geoparquet_metadata``.
+    DuckDB writes the geometry as WKB (a BLOB for 1.x, native Parquet GEOMETRY
+    for 2.0), so that is the writer's answer; for 1.1-geoarrow it keeps the
+    input's native encoding and leaves the composer's step 3 to name it.
     """
-    if not geometry_info:
-        return
-
-    column_metadata = geometry_info.get("metadata") or {}
-    for sec_col in geometry_info.get("secondary") or ():
-        sec_meta = geo_meta.setdefault("columns", {}).setdefault(sec_col, {})
-        for key, value in column_metadata.get(sec_col, {}).items():
-            if key not in sec_meta:
-                sec_meta[key] = value
-        if "encoding" not in sec_meta:
-            sec_meta["encoding"] = "WKB"
-
-
-def build_geo_metadata(
-    geometry_column: str,
-    geoparquet_version: str,
-    original_metadata: dict | None = None,
-    input_crs: dict | None = None,
-    custom_metadata: dict | None = None,
-    bbox: list[float] | None = None,
-    geometry_types: list[str] | None = None,
-    geometry_info: dict | None = None,
-) -> dict:
-    """
-    Build GeoParquet metadata - single source of truth for all strategies.
-
-    This helper consolidates the metadata building logic that was previously
-    duplicated across strategies.
-
-    Args:
-        geometry_column: Name of the geometry column (primary)
-        geoparquet_version: Target GeoParquet version (1.0, 1.1, 2.0)
-        original_metadata: Original file metadata to parse for existing geo metadata
-        input_crs: PROJJSON dict with CRS to apply to primary column
-        custom_metadata: Custom metadata (e.g., H3 covering info)
-        bbox: Bounding box [xmin, ymin, xmax, ymax] for primary column
-        geometry_types: List of geometry types for primary column
-        geometry_info: Multi-geometry column info dict with keys:
-            - "primary": primary geometry column name
-            - "secondary": list of secondary geometry column names
-            - "metadata": dict mapping column names to their metadata
-
-    Returns:
-        dict: Complete geo metadata structure ready for embedding in Parquet
-    """
-
-    metadata_version = GEOPARQUET_VERSIONS[geoparquet_version]["metadata_version"]
-
-    # Encoding (required by GeoParquet spec), when the carried block names none:
-    # for 1.1-geoarrow, preserve the input encoding (native type) from
-    # geometry_info; every other v1.x version converts geometry to a WKB blob.
-    input_encoding = (
-        geometry_info.get("metadata", {}).get(geometry_column, {}).get("encoding")
-        if geometry_info and geoparquet_version == "1.1-geoarrow"
-        else None
-    )
-    # The carried block, sanitized, initialized for this version, with its
-    # unsupported coverings gated. The bboxless gate is the callers': they
-    # declare a conventional bbox column first (#954). The DuckDB funnel has
-    # already pruned the carried block to the output's columns.
-    geo_meta = compose_geo_block(
-        CarriedSource(original_metadata),
-        GeoBlockOptions(
-            geometry_column=geometry_column,
-            version=metadata_version,
-            encoding=input_encoding or "WKB",
-            defer_bboxless_gate=True,
-        ),
-    )
-
-    col_meta = geo_meta["columns"][geometry_column]
-
-    # Geometry types
-    if geometry_types is not None:
-        col_meta["geometry_types"] = geometry_types
-
-    # Bounding box
-    if bbox is not None:
-        col_meta["bbox"] = bbox
-
-    # CRS: write non-default explicitly; omit (and strip any stale/default/null
-    # value carried from the source) when the output is the spec default.
-    apply_output_crs(col_meta, input_crs)
-
-    # Merge custom metadata into geometry column.
-    #
-    # `covering` is merged one entry deep rather than replaced: it holds one
-    # entry per covering kind (bbox, h3, s2, a5, quadkey), and callers supply
-    # only the one they just produced. Replacing the dict made `gpio sort
-    # quadkey` destroy the bbox covering its input declared while adding its own
-    # (#738). Individual entries still win, so a caller can correct one.
-    if custom_metadata:
-        for key, value in custom_metadata.items():
-            if key == "covering" and isinstance(value, dict):
-                existing = col_meta.get("covering")
-                col_meta["covering"] = (
-                    {**existing, **value} if isinstance(existing, dict) else dict(value)
-                )
-            else:
-                col_meta[key] = value
-
-    # Handle secondary geometry columns from geometry_info
-    merge_secondary_geometry_metadata(geo_meta, geometry_info)
-
-    # 'covering' is 1.1-only: drop whatever the source file or custom_metadata carried
-    return strip_unsupported_covering(geo_meta, geoparquet_version)
+    return None if geoparquet_version == "1.1-geoarrow" else "WKB"
 
 
 class WriteStrategy(str, Enum):

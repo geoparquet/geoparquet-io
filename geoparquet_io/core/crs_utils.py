@@ -593,21 +593,6 @@ def reset_null_crs_warnings() -> None:
     _emit_srid0_crs_warning.cache_clear()
 
 
-def apply_target_crs_to_geo_meta(geo_meta: dict, geom_col: str, target_crs: str, con) -> None:
-    """Set or clear a geometry column's CRS in ``geo_meta`` in place.
-
-    The GeoParquet default CRS (EPSG:4326 / OGC:CRS84) is signalled by *omitting*
-    the ``crs`` key entirely — never by writing an explicit CRS84 object or null.
-    """
-    columns = geo_meta.get("columns", {})
-    if geom_col not in columns:
-        return
-    if is_default_crs(target_crs):
-        columns[geom_col].pop("crs", None)
-    else:
-        columns[geom_col]["crs"] = parse_crs_string_to_projjson(target_crs, con)
-
-
 # CRS type values allowed by the PROJJSON v0.7 schema's "crs" definition.
 # validate.py's crs check reads the same set, so a CRS gpio writes and a CRS
 # gpio validates can never disagree about what counts as PROJJSON.

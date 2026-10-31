@@ -18,7 +18,6 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.process.simplify import (
     simplify_file,
     simplify_table,
-    strip_stale_geometry_stats,
 )
 
 requires_coarsen = pytest.mark.skipif(
@@ -51,12 +50,23 @@ def _wkb_table(geometries, names=None):
     return table.replace_schema_metadata({b"geo": json.dumps(_geo_block()).encode("utf-8")})
 
 
+def _strip(geo: dict) -> dict:
+    """What simplify strips: the simplified column's stats, through the owner."""
+    from geoparquet_io.core.geo_metadata import strip_derived_stats
+
+    return strip_derived_stats({"geo": geo}, columns=["geometry"], recomputed_columns=["geometry"])[
+        "geo"
+    ]
+
+
 class TestStripStaleGeometryStats:
+    """Simplify strips its column's stats with ``geo_metadata.strip_derived_stats``."""
+
     def test_drops_geometry_types_and_bbox_keeps_rest(self):
         geo = _geo_block(crs={"id": {"authority": "EPSG", "code": 4326}})
         geo["columns"]["geometry"]["bbox"] = [0, 0, 1, 1]
         geo["columns"]["geometry"]["edges"] = "planar"
-        stripped = strip_stale_geometry_stats(geo, "geometry")
+        stripped = _strip(geo)
         col = stripped["columns"]["geometry"]
         assert "geometry_types" not in col
         assert "bbox" not in col
@@ -65,8 +75,8 @@ class TestStripStaleGeometryStats:
         assert stripped["primary_column"] == "geometry"
 
     def test_tolerates_malformed_columns(self):
-        assert strip_stale_geometry_stats({"columns": None}, "geometry") == {"columns": None}
-        assert strip_stale_geometry_stats({}, "geometry") == {}
+        assert _strip({"columns": None}) == {"columns": None}
+        assert _strip({}) == {}
 
     def test_only_the_named_column_is_stripped(self):
         geo = {
@@ -75,10 +85,10 @@ class TestStripStaleGeometryStats:
                 "geom2": {"encoding": "WKB", "geometry_types": ["Point"], "bbox": [0, 0, 1, 1]},
             }
         }
-        strip_stale_geometry_stats(geo, "geometry")
-        assert "geometry_types" not in geo["columns"]["geometry"]
-        assert geo["columns"]["geom2"]["geometry_types"] == ["Point"]
-        assert geo["columns"]["geom2"]["bbox"] == [0, 0, 1, 1]
+        stripped = _strip(geo)
+        assert "geometry_types" not in stripped["columns"]["geometry"]
+        assert stripped["columns"]["geom2"]["geometry_types"] == ["Point"]
+        assert stripped["columns"]["geom2"]["bbox"] == [0, 0, 1, 1]
 
 
 class TestValidation:
@@ -1087,7 +1097,7 @@ class TestGeometryColumnResolution:
 
     def test_non_dict_column_metadata_is_tolerated(self):
         geo = {"columns": {"geometry": "not a dict"}}
-        assert strip_stale_geometry_stats(geo, "geometry") == geo
+        assert _strip(geo) == geo
 
 
 def _covering_table(geometries, *, bbox_type=pa.float64(), bbox_column="bbox"):

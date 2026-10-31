@@ -39,7 +39,12 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import has_glob_pattern, resolve_file_url
-from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
+from geoparquet_io.core.geo_metadata import (
+    QuerySource,
+    bounds_of,
+    is_bbox_struct_field,
+    missing_bbox_struct_fields,
+)
 from geoparquet_io.core.geometry_detection import (
     BUILT_GEOMETRY_COLUMN,
     primary_geometry_column,
@@ -218,9 +223,6 @@ _RESERVED_INTERNAL = (
 # --bucket-point mode keywords; any other value names an existing point column.
 BUCKET_POINT_BBOX = "bbox"
 
-# Struct fields a bbox covering column must expose.
-_BBOX_STRUCT_FIELDS = frozenset({"xmin", "ymin", "xmax", "ymax"})
-
 
 def _relation_columns(con, relation: str) -> set[str]:
     """Column names exposed by ``relation``."""
@@ -280,12 +282,12 @@ def _validate_bbox_struct_column(con, relation: str, bbox_column: str) -> None:
         fields = {name for name, _ in describe_query(con, f"SELECT {qbox}.* FROM {relation}")}
     except duckdb.Error:  # not a struct -- .* expansion does not bind
         fields = set()
-    missing = _BBOX_STRUCT_FIELDS - fields
+    missing = missing_bbox_struct_fields(fields)
     if missing:
         raise InvalidParameterError(
             "bbox-column",
             f"column '{bbox_column}' is not a bbox covering struct: expected "
-            f"xmin/ymin/xmax/ymax fields, missing {'/'.join(sorted(missing))}",
+            f"xmin/ymin/xmax/ymax fields, missing {'/'.join(missing)}",
         )
 
 
@@ -730,7 +732,6 @@ def _resolve_bbox_column_for_file(
 
 def _validate_bbox_column_in_table(table, bbox_column: str) -> None:
     """Ensure an explicit table-path ``bbox_column`` exists and is a bbox struct."""
-    import pyarrow as pa
 
     try:
         field = table.schema.field(bbox_column)
@@ -738,9 +739,7 @@ def _validate_bbox_column_in_table(table, bbox_column: str) -> None:
         raise InvalidParameterError(
             "bbox-column", f"bbox column '{bbox_column}' not found in the table"
         ) from None
-    if not pa.types.is_struct(field.type) or not _BBOX_STRUCT_FIELDS.issubset(
-        {f.name for f in field.type}
-    ):
+    if not is_bbox_struct_field(field):
         raise InvalidParameterError(
             "bbox-column",
             f"column '{bbox_column}' is not a bbox covering struct with xmin/ymin/xmax/ymax fields",

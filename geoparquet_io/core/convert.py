@@ -9,7 +9,6 @@ from pathlib import Path
 
 import duckdb
 
-from geoparquet_io.core.arrow_geo_metadata import describe_wkb_geometry
 from geoparquet_io.core.bbox_structure import check_bbox_structure, resolve_bbox_name
 from geoparquet_io.core.column_selection import (
     find_column,
@@ -60,17 +59,24 @@ from geoparquet_io.core.file_utils import (
     validate_output_path,
 )
 from geoparquet_io.core.geo_metadata import (
+    KEEP_CRS,
+    GeoBlockOptions,
     QuerySource,
+    SchemaSource,
+    bbox_struct_sql,
     bbox_xy,
     bounds_of,
     build_bbox_covering,
+    compose_geo_block,
     sanitized_carried_geo_of_file,
     split_zm_suffix,
+    with_geo_block,
 )
 from geoparquet_io.core.geojson_datetimes import DatetimeRead, plan_datetime_read
 from geoparquet_io.core.geometry_detection import (
     BUILT_GEOMETRY_COLUMN,
     STANDARD_GEOMETRY_NAMES,
+    GeometryRead,
     primary_geometry_column,
     resolve_geometry_read,
 )
@@ -79,7 +85,7 @@ from geoparquet_io.core.geometry_repair import (
     repair_query_geometry,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
-from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version, version_to_describe
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
     get_remote_error_hint,
@@ -1471,12 +1477,7 @@ def _build_csv_conversion_query(
         if skip_bbox:
             return ""
         return f""",
-                STRUCT_PACK(
-                    xmin := ST_XMin({geom}),
-                    ymin := ST_YMin({geom}),
-                    xmax := ST_XMax({geom}),
-                    ymax := ST_YMax({geom})
-                ) AS {quote_identifier(bbox_name)}"""
+                {bbox_struct_sql(geom, geometry_name)} AS {quote_identifier(bbox_name)}"""
 
     # Build geometry expression and exclusion list
     if geom_info["type"] == "wkt":
@@ -1752,13 +1753,7 @@ def _build_conversion_query(
     quoted_bbox = quote_identifier(existing_bbox_col) if existing_bbox_col else None
 
     geoarrow_native = encoding.lower() not in {"wkb", "wkt"}
-    if geoarrow_native:
-        xmin_e, ymin_e, xmax_e, ymax_e, cx_e, cy_e = _geoarrow_coord_exprs(quoted_geom, encoding)
-    else:
-        xmin_e = f"ST_XMin({quoted_geom})"
-        ymin_e = f"ST_YMin({quoted_geom})"
-        xmax_e = f"ST_XMax({quoted_geom})"
-        ymax_e = f"ST_YMax({quoted_geom})"
+    read = GeometryRead.for_geoarrow(geom_column, encoding) if geoarrow_native else None
 
     exclude_cols = []
     if existing_bbox_col and skip_bbox:
@@ -1791,12 +1786,7 @@ def _build_conversion_query(
         # caller either preserves it or, for 2.0, skips the bbox.)
         base_select = f"""
             SELECT *,
-                STRUCT_PACK(
-                    xmin := {xmin_e},
-                    ymin := {ymin_e},
-                    xmax := {xmax_e},
-                    ymax := {ymax_e}
-                ) AS {quote_identifier(bbox_name)}
+                {bbox_struct_sql(quoted_geom, geom_column, read)} AS {quote_identifier(bbox_name)}
             FROM {table_expr}
         """
 
@@ -1809,6 +1799,7 @@ def _build_conversion_query(
     # Native encodings key on centroid coordinates, which are NULL for a
     # geometry with no coordinates — ST_Hilbert returns NULL rather than
     # failing, so those rows only need the flag to pin them last.
+    _, _, _, _, cx_e, cy_e = _geoarrow_coord_exprs(quoted_geom, encoding)
     return base_select, _hilbert_order_by(
         bounds, f"{cx_e} IS NULL OR {cy_e} IS NULL", f"{cx_e}, {cy_e}"
     )
@@ -2347,6 +2338,23 @@ def _carry_input_kv_metadata(arrow_table, input_file: str, verbose: bool):
     return arrow_table.replace_schema_metadata(metadata)
 
 
+def _described_read(arrow_table, geometry_column, input_edges, detected_crs):
+    """``arrow_table`` with the block a read describes it by (see the call site)."""
+    geo = compose_geo_block(
+        SchemaSource(arrow_table.schema),
+        GeoBlockOptions(
+            geometry_column=geometry_column,
+            version=version_to_describe(arrow_table.schema),
+            describe=True,
+            covering=None,
+            column_edges={geometry_column: input_edges} if input_edges else None,
+            crs=KEEP_CRS if detected_crs is None else detected_crs,
+            stats={geometry_column: {"geometry_types": []}},
+        ),
+    )
+    return with_geo_block(arrow_table, geo)
+
+
 @uses_aws_profile
 def read_spatial_to_arrow(
     input_file,
@@ -2583,9 +2591,11 @@ def read_spatial_to_arrow(
         # is the geometry, what CRS it is in and which edges it declares, so every
         # Table method that passes the Arrow table down to core sees what a
         # read() table shows (#1222) and the write keeps spherical edges (#1287).
-        arrow_table = describe_wkb_geometry(
-            arrow_table, geometry_column, detected_crs, edges=input_edges
-        )
+        # A description, not an output decision (``version=None``, no covering,
+        # ``geometry_types`` "not known"): the write funnels compose again from
+        # the data.
+        if geometry_column in arrow_table.column_names:
+            arrow_table = _described_read(arrow_table, geometry_column, input_edges, detected_crs)
         if is_parquet:
             arrow_table = _carry_input_kv_metadata(arrow_table, input_file, verbose)
         return arrow_table, detected_crs, geometry_column

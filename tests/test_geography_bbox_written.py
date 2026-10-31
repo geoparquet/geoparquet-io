@@ -335,10 +335,12 @@ def test_a_six_element_geo_bbox_keeps_its_z_bounds():
             }
         },
     }
-    updates = _geo_block_updates(geo_meta, {}, {"geometry": (-30.0, 60.0, 30.0, 63.44)})
+    schema = pa.schema([("geometry", pa.binary())])
+    updates = _geo_block_updates(schema, geo_meta, {}, {"geometry": (-30.0, 60.0, 30.0, 63.44)})
 
     assert updates, "a changed bbox must mark the block for writing"
-    assert geo_meta["columns"]["geometry"]["bbox"] == [-30.0, 60.0, 5.0, 30.0, 63.44, 7.0]
+    written = json.loads(updates["geo"])
+    assert written["columns"]["geometry"]["bbox"] == [-30.0, 60.0, 5.0, 30.0, 63.44, 7.0]
 
 
 def test_an_unboundable_column_still_drops_the_box(tmp_path, monkeypatch, caplog):
@@ -379,9 +381,10 @@ def test_an_unbounded_column_loses_its_planar_block_bbox():
         "primary_column": "geometry",
         "columns": {"geometry": {"encoding": "WKB", "bbox": [-30.0, 60.0, 30.0, 60.0]}},
     }
-    updates = _geo_block_updates(geo_meta, {}, {}, unbounded={"geometry", "absent"})
+    schema = pa.schema([("geometry", pa.binary())])
+    updates = _geo_block_updates(schema, geo_meta, {}, {}, unbounded={"geometry", "absent"})
     assert updates
-    assert "bbox" not in geo_meta["columns"]["geometry"]
+    assert "bbox" not in json.loads(updates["geo"])["columns"]["geometry"]
 
 
 def test_block_bbox_targets_skip_projected_and_planar_columns():

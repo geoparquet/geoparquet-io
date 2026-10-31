@@ -156,11 +156,11 @@ def _row_group_spatial_stats(
         native=lambda: get_per_row_group_native_geo_stats(
             parquet_file, geometry_column, strict=True
         ),
-        bbox_column=lambda: _covering_bbox_column(parquet_file, geometry_column),
+        bbox_column=lambda: _prunable_bbox_column(parquet_file, geometry_column),
     )
 
 
-def _covering_bbox_column(parquet_file: str, geometry_column: str | None) -> str | None:
+def _prunable_bbox_column(parquet_file: str, geometry_column: str | None) -> str | None:
     """The bbox covering column the preview may prune on, or ``None``.
 
     With no explicit column (or the primary named explicitly) that is the

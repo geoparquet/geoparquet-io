@@ -14,7 +14,6 @@ Key abstractions:
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
@@ -37,13 +36,17 @@ from geoparquet_io.core.duckdb_utils import (
     register_arrow,
     sql_path,
 )
-from geoparquet_io.core.edges import declared_edges, set_edges
+from geoparquet_io.core.edges import declared_edges
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
+    ArrowTableSource,
+    GeoBlockOptions,
     backfill_derived_stats,
-    gate_carried_covering,
+    compose_carried_geo,
+    compose_geo_block,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
+    with_geo_block,
 )
 from geoparquet_io.core.geometry_detection import (
     create_geometry_view,
@@ -51,7 +54,11 @@ from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
 )
 from geoparquet_io.core.logging_config import progress, warn
-from geoparquet_io.core.parquet_writer import WriteOptions
+from geoparquet_io.core.parquet_writer import (
+    WriteOptions,
+    resolve_output_geoparquet_version,
+    version_to_describe,
+)
 from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.streaming import (
     apply_geoarrow_extension_type,
@@ -203,26 +210,27 @@ def _stream_input_metadata(table: pa.Table) -> dict:
     # inferred column is declared by the block or GeoArrow-typed, so one answers.
     geometry_fields = pa.schema([table.schema.field(name) for name in inferred_columns])
     primary = primary_geometry_column(geometry_fields, geo=geo)
-    edges_by_col = table_nonplanar_edges(table, primary, None)
-    columns = {}
-    for name, inferred in inferred_columns.items():
-        column = {"encoding": "WKB", **inferred, **geo.get("columns", {}).get(name, {})}
-        # Normalize the declaration with the shared reader, so an unknown value
-        # cannot become a non-planar model merely by crossing a pipe. Not
-        # mapped to the block's version: this block is an intermediate whose
-        # version is the input's, and the write at the other end of the pipe
-        # maps to the output's, so a 2.0 output keeps an ellipsoidal algorithm.
-        set_edges(column, edges_by_col.get(name))
-        columns[name] = column
-    metadata[b"geo"] = json.dumps(
-        {
-            **geo,
-            "version": geo.get("version", "2.0.0"),
-            "primary_column": primary,
-            "columns": columns,
-        }
-    ).encode("utf-8")
-    return metadata
+    # What each column's field says (its CRS, the "not known" geometry types),
+    # the primary's included, is ``geometry_info``; the data's edges, resolved
+    # block-over-type, are ``column_edges``. The composer lets whatever the
+    # carried block already says win. Edges are recorded, not mapped, for a
+    # description: the write at the other end of the pipe maps them to the
+    # output's version, so a 2.0 output keeps an ellipsoidal algorithm.
+    block = compose_geo_block(
+        ArrowTableSource(table),
+        GeoBlockOptions(
+            geometry_column=primary,
+            version=version_to_describe(table.schema),
+            describe=True,
+            covering=None,
+            column_edges=table_nonplanar_edges(table, primary, None),
+            geometry_info={
+                "secondary": [name for name in inferred_columns if name != primary],
+                "metadata": inferred_columns,
+            },
+        ),
+    )
+    return dict(with_geo_block(table, block).schema.metadata)
 
 
 def _wrap_query_with_wkb_conversion(
@@ -408,14 +416,17 @@ def _write_stream_output(
     # actually being written. Without the backfill the stream omits
     # `geometry_types`, which GeoParquet 1.1 requires and which DuckDB refuses to
     # read a file without; without the prune the orphan entry has none either.
-    # ... and then run the two covering gates every file write runs. A stream is
+    # ... and then compose the block as every file write does. A stream is
     # read and persisted exactly like a file gpio wrote, so a covering the
     # pruning has just emptied of its bbox member -- or one declared over a
-    # struct the spec forbids -- is no more writable here than there (#1172).
+    # struct the spec forbids -- is no more writable here than there (#1172),
+    # and a 1.0 input upgrades and declares its bbox column as a file does.
     if original_metadata:
         original_metadata = prune_geo_metadata_to_columns(original_metadata, table.column_names)
         original_metadata = backfill_derived_stats(original_metadata, table)
-        original_metadata = gate_carried_covering(original_metadata, table.schema)
+        # A stream takes no version option: auto mode, the facade's answer.
+        version = resolve_output_geoparquet_version(None, original_metadata=original_metadata)
+        original_metadata = compose_carried_geo(original_metadata, table.schema, version)
         table = apply_metadata_to_table(table, original_metadata)
 
     write_arrow_stream(table)

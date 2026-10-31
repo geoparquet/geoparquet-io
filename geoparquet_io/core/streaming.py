@@ -17,7 +17,6 @@ Arrow IPC is used because:
 from __future__ import annotations
 
 import hashlib
-import json
 import sys
 
 import pyarrow as pa
@@ -161,22 +160,6 @@ def write_arrow_stream(table: pa.Table) -> None:
     writer = ipc.RecordBatchStreamWriter(sys.stdout.buffer, table.schema)
     writer.write_table(table)
     writer.close()
-
-
-def apply_geo_metadata(table: pa.Table, geo_meta: dict) -> pa.Table:
-    """
-    Apply geo metadata to Arrow table schema.
-
-    Args:
-        table: PyArrow Table to update
-        geo_meta: GeoParquet metadata dict to apply
-
-    Returns:
-        New table with updated schema metadata
-    """
-    metadata = dict(table.schema.metadata) if table.schema.metadata else {}
-    metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
-    return table.replace_schema_metadata(metadata)
 
 
 def apply_metadata_to_table(table: pa.Table, metadata: dict | None) -> pa.Table:

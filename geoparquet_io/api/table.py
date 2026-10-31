@@ -1055,13 +1055,12 @@ class Table:
             >>> table = gpio.read('data.parquet')
             >>> print(table.geoparquet_version)  # e.g., '1.0.0'
         """
-        from geoparquet_io.core.geo_metadata import read_raw_geo
-        from geoparquet_io.core.parquet_writer import declared_geoparquet_version
+        from geoparquet_io.core.geo_metadata import declared_version, read_raw_geo
 
         geo_meta = read_raw_geo(self._table.schema.metadata).block
         if geo_meta is None:
             return None
-        return declared_geoparquet_version(geo_meta, default=None)
+        return declared_version(geo_meta, default=None)
 
     def info(self, verbose: bool = True) -> dict | None:
         """

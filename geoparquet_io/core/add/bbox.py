@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pyarrow as pa
 
 from geoparquet_io.core.bbox_structure import (
@@ -16,7 +14,6 @@ from geoparquet_io.core.common import add_computed_column
 from geoparquet_io.core.duckdb_metadata import get_schema_info, get_usable_column_names
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
-    get_duckdb_connection,
     query_schema,
     quote_identifier,
 )
@@ -24,16 +21,23 @@ from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
+    ArrowTableSource,
+    GeoBlockOptions,
     _bbox_claimed_by_another_column,
-    bbox_struct_child_names_match,
+    bbox_struct_array,
+    bbox_struct_sql,
+    bbox_struct_type,
     build_bbox_covering,
+    compose_geo_block,
     covering_supported,
+    declared_version,
+    is_bbox_struct_field,
     sanitized_carried_geo,
     sanitized_carried_geo_of_file,
+    with_geo_block,
 )
 from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
-    register_geometry_column,
     require_geometry_column,
     resolve_geometry_column,
 )
@@ -41,8 +45,8 @@ from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_mat
 from geoparquet_io.core.logging_config import debug, progress, success, warn
 from geoparquet_io.core.parquet_writer import (
     WriteOptions,
-    declared_geoparquet_version,
     resolve_output_geoparquet_version,
+    version_to_describe,
 )
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import open_input, write_output
@@ -64,7 +68,7 @@ def _bbox_metadata_advice(parquet_file: str, declare_by_name: str | None = None)
     sending the user to a command that would report no bbox column at all.
     """
 
-    version = declared_geoparquet_version(sanitized_carried_geo_of_file(parquet_file))
+    version = declared_version(sanitized_carried_geo_of_file(parquet_file))
     if covering_supported(version):
         if check_bbox_structure(parquet_file).get("covering_problem"):
             return "The existing column cannot carry a 'covering'; use --force to rewrite it."
@@ -139,7 +143,7 @@ def _has_bbox_struct_column(con, source: str, bbox_column_name: str) -> bool:
     """
     schema = query_schema(con, f"SELECT * FROM {source}")
     found = find_column(bbox_column_name, schema.names, option_name="bbox_column_name")
-    return found is not None and _is_bbox_struct_field(schema.field(found))
+    return found is not None and is_bbox_struct_field(schema.field(found))
 
 
 def add_bbox_table(
@@ -170,48 +174,13 @@ def add_bbox_table(
     # whole table (every attribute plus an ST_AsWKB re-encode of the geometry)
     # materialized a second full copy of the data for four doubles of new
     # information (#1268), and re-ordered the columns while doing it.
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-    try:
-        warn_planar_math("add_bbox", table, geom_col)
-        read = register_geometry_column(con, "__input_table", table, geom_col)
-        quoted_bbox_col = quote_identifier(bbox_column_name)
-        bbox_query = f"""
-            SELECT STRUCT_PACK(
-                xmin := ST_XMin(__g),
-                ymin := ST_YMin(__g),
-                xmax := ST_XMax(__g),
-                ymax := ST_YMax(__g)
-            ) AS {quoted_bbox_col}
-            FROM (SELECT {read.shape_expr} AS __g FROM __input_table)
-        """
-        bbox_column = con.sql(bbox_query).arrow().read_all().column(0)
-
-        # Append the computed column; everything else keeps its exact bytes,
-        # Arrow types and column order.
-        result = table.append_column(bbox_column_name, bbox_column)
-
-        # Preserve metadata, recording the column just computed as the
-        # geometry's covering bbox (see _declare_computed_bbox).
-        metadata = _declare_computed_bbox(table.schema.metadata, geom_col, bbox_column_name)
-        if metadata:
-            result = result.replace_schema_metadata(metadata)
-
-        return result
-    finally:
-        con.close()
-
-
-def _is_bbox_struct_field(field) -> bool:
-    """Whether an Arrow field is a bbox covering struct rather than a column of that name.
-
-    Child names are matched as spelled, which is what the file-based detector
-    (``bbox_structure``) does: a ``bbox`` struct whose children are
-    ``XMIN/YMIN/XMAX/YMAX`` is the user's own data -- the folded-case test read
-    it as gpio's own and *destroyed* it (#1176).
-    """
-    if not pa.types.is_struct(field.type):
-        return False
-    return bbox_struct_child_names_match({child.name for child in field.type})
+    # The stats owner's per-row kernel over the geometry column alone: four
+    # doubles a row and no copy of the attributes (#1268). Everything else
+    # keeps its exact bytes, Arrow types and column order.
+    warn_planar_math("add_bbox", table, geom_col)
+    bbox_column = bbox_struct_array(table, geom_col, bbox_struct_type())
+    result = table.append_column(bbox_column_name, bbox_column)
+    return _declare_computed_bbox(result, geom_col, bbox_column_name)
 
 
 def _prepare_table_bbox_column(table: pa.Table, bbox_column_name: str) -> tuple[pa.Table, str]:
@@ -226,46 +195,34 @@ def _prepare_table_bbox_column(table: pa.Table, bbox_column_name: str) -> tuple[
     where ``BBOX`` and ``bbox`` are one name.
     """
     found = find_column(bbox_column_name, table.column_names, option_name="bbox_column_name")
-    if found is not None and _is_bbox_struct_field(table.schema.field(found)):
+    if found is not None and is_bbox_struct_field(table.schema.field(found)):
         return table.remove_column(table.column_names.index(found)), bbox_column_name
     return table, resolve_bbox_name(table.column_names, None, requested=bbox_column_name)
 
 
-def _declare_computed_bbox(metadata, geometry_column: str, bbox_column_name: str):
-    """``metadata`` whose geo block declares ``bbox_column_name`` as ``geometry_column``'s bbox.
+def _declare_computed_bbox(table: pa.Table, geometry_column: str, bbox_column_name: str):
+    """``table`` whose geo block declares ``bbox_column_name`` as ``geometry_column``'s bbox.
 
     The column was computed from that geometry right here, which is the
     provenance a ``covering`` needs (#738). Recording it on the table's own
     block is what lets a writer declare a column not named exactly ``bbox``;
-    none will on name alone (#953). A 1.0 output drops it again at write time.
-    No geo block (or no entry for the column) means nothing to record.
+    none will on name alone (#953). The composer declares it, at the version
+    a write of this table declares (the facade's: a 1.0 block, which cannot
+    say a covering, is said as the 1.1 its write would be). No geo block (or
+    no entry for the column) means nothing to record.
     """
-    if not metadata or b"geo" not in metadata:
-        return metadata
-    geo = sanitized_carried_geo(metadata)
-    columns = geo.get("columns")
-    col_meta = columns.get(geometry_column) if isinstance(columns, dict) else None
-    if not isinstance(col_meta, dict):
-        return metadata
-    covering = col_meta.get("covering")
-    covering = dict(covering) if isinstance(covering, dict) else {}
-    covering["bbox"] = build_bbox_covering(bbox_column_name)
-    columns = {**columns, geometry_column: {**col_meta, "covering": covering}}
-    return {**metadata, b"geo": json.dumps({**geo, "columns": columns}).encode("utf-8")}
-
-
-def _bbox_covering_metadata(bbox_column_name: str) -> dict:
-    """The GeoParquet 1.1+ ``covering`` block pointing at ``bbox_column_name``."""
-    return {
-        "covering": {
-            "bbox": {
-                "xmin": [bbox_column_name, "xmin"],
-                "ymin": [bbox_column_name, "ymin"],
-                "xmax": [bbox_column_name, "xmax"],
-                "ymax": [bbox_column_name, "ymax"],
-            }
-        }
-    }
+    geo = sanitized_carried_geo(table.schema.metadata)
+    if not isinstance((geo.get("columns") or {}).get(geometry_column), dict):
+        return table
+    block = compose_geo_block(
+        ArrowTableSource(table),
+        GeoBlockOptions(
+            geometry_column=geometry_column,
+            version=version_to_describe(table.schema),
+            covering=bbox_column_name,
+        ),
+    )
+    return with_geo_block(table, block)
 
 
 def _version_a_copy_would_miss(input_parquet: str) -> str | None:
@@ -277,9 +234,7 @@ def _version_a_copy_would_miss(input_parquet: str) -> str | None:
     other command (approved change 7 of #1367: the facade decides).
     """
     target = resolve_output_geoparquet_version(None, input_file=input_parquet)
-    declared = declared_geoparquet_version(
-        sanitized_carried_geo_of_file(input_parquet), default=None
-    )
+    declared = declared_version(sanitized_carried_geo_of_file(input_parquet), default=None)
     if GEOPARQUET_VERSIONS[target]["metadata_version"] == declared:
         return None
     return target
@@ -294,12 +249,7 @@ def _make_add_bbox_query(
     """Build query to add bbox column to a source."""
     quoted_geom_col = quote_identifier(geometry_column)
     quoted_bbox_col = quote_identifier(bbox_column_name)
-    bbox_expr = f"""STRUCT_PACK(
-        xmin := ST_XMin({quoted_geom_col}),
-        ymin := ST_YMin({quoted_geom_col}),
-        xmax := ST_XMax({quoted_geom_col}),
-        ymax := ST_YMax({quoted_geom_col})
-    )"""
+    bbox_expr = bbox_struct_sql(quoted_geom_col, geometry_column)
 
     if replace_existing:
         return (
@@ -439,7 +389,9 @@ def _add_bbox_streaming(
             # A covering gpio did not compute must not be declared. The version
             # is the facade's, pass-through or not: a 1.0 stream writes 1.1 like
             # every other command (approved change 7).
-            custom_metadata=None if passed_through else _bbox_covering_metadata(bbox_column_name),
+            custom_metadata=None
+            if passed_through
+            else {"covering": {"bbox": build_bbox_covering(bbox_column_name)}},
             **write.funnel_kwargs(),
         )
 
@@ -582,15 +534,10 @@ def _add_bbox_file_based(
 
     # Define the SQL expression (the only unique part)
     quoted_geom_col = quote_identifier(geom_col)
-    sql_expression = f"""STRUCT_PACK(
-        xmin := ST_XMin({quoted_geom_col}),
-        ymin := ST_YMin({quoted_geom_col}),
-        xmax := ST_XMax({quoted_geom_col}),
-        ymax := ST_YMax({quoted_geom_col})
-    )"""
+    sql_expression = bbox_struct_sql(quoted_geom_col, geom_col)
 
     # Build covering metadata for the bbox column (GeoParquet 1.1+ spec)
-    covering_metadata = _bbox_covering_metadata(bbox_column_name)
+    covering_metadata = {"covering": {"bbox": build_bbox_covering(bbox_column_name)}}
 
     # Use the generic helper for all boilerplate
     add_computed_column(

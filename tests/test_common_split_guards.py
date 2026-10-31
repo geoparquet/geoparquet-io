@@ -185,7 +185,7 @@ PRIVATE_NAMES_CEILING: frozenset[str] = frozenset()
 #: functions and classes (11 after T2b, 4 after T3b). These are pins, not ceilings: growth fails, and so
 #: does shrinking until the number here is lowered to match, so slack left by a
 #: deletion never becomes a budget for the next helper (T0b audit).
-LINE_PIN = 363
+LINE_PIN = 358
 DEF_PIN = 4
 
 

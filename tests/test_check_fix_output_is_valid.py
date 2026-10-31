@@ -425,12 +425,12 @@ class TestBboxFixOutput:
 
 
 # ---------------------------------------------------------------------------
-# fix_bboxless_covering
+# fix_bboxless_cover
 # ---------------------------------------------------------------------------
 
 
 class TestBboxlessCoveringFixOutput:
-    """``check all --fix`` -> ``check_fixes.fix_bboxless_covering`` (#1173).
+    """``check all --fix`` -> ``check_fixes.fix_bboxless_cover`` (#1173).
 
     The 2.0 shape is the one no other fix reaches: a 2.0 file wants no bbox
     column, so nothing else in the chain has work and the illegal covering used
@@ -572,7 +572,7 @@ COVERED_ENTRY_POINTS = {
     ),
     # Both bbox paths route through it.
     "fix_bbox_all": "tests.test_check_fix_output_is_valid:TestBboxFixOutput",
-    "fix_bboxless_covering": ("tests.test_check_fix_output_is_valid:TestBboxlessCoveringFixOutput"),
+    "fix_bboxless_cover": ("tests.test_check_fix_output_is_valid:TestBboxlessCoveringFixOutput"),
     "fix_bbox_removal": (
         "tests.test_check_fix_preserves_native_geo:"
         "test_removing_a_bbox_column_keeps_the_crs_it_is_removed_from"

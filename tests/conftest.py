@@ -571,6 +571,26 @@ def has_geoparquet_metadata(parquet_file):
     return metadata is not None and b"geo" in metadata
 
 
+def fast_path_query(*columns: str) -> dict:
+    """``con=``/``query=`` for the 2.0 fast-path decision over an output of ``columns``.
+
+    The decision composes the carried block against the output's schema (the
+    covering gates ask it which columns exist), so a unit test of the decision
+    names the output it describes: ``geometry`` plus each of ``columns`` --
+    ``bbox`` as a spec-order bbox struct, anything else as a string.
+    """
+    con = duckdb.connect()
+    select = ["NULL::BLOB AS geometry"]
+    for name in columns:
+        if name == "bbox":
+            select.append(
+                "{'xmin': 0.0, 'ymin': 0.0, 'xmax': 1.0, 'ymax': 1.0}::STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE) AS bbox"
+            )
+        else:
+            select.append(f'NULL::VARCHAR AS "{name}"')
+    return {"con": con, "query": "SELECT " + ", ".join(select)}
+
+
 def get_geo_metadata(parquet_file):
     """
     Get the full GeoParquet metadata from a file.

@@ -21,6 +21,7 @@ from geoparquet_io.core.geo_metadata import (
     strip_illegal_bbox_covering,
 )
 from geoparquet_io.core.write_funnels import _fast_path_geo_decision
+from tests.conftest import fast_path_query
 
 BBOX_STRUCT = pa.struct(
     [("xmin", pa.float64()), ("ymin", pa.float64()), ("xmax", pa.float64()), ("ymax", pa.float64())]
@@ -130,9 +131,34 @@ class TestTheForcedRewriteSaysWhy:
 
         with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
             carried, needs_rewrite = _fast_path_geo_decision(
-                original, "geometry", "2.0", verbose=True
+                original, "geometry", "2.0", verbose=True, **fast_path_query("bbox")
             )
 
         assert carried is None
         assert needs_rewrite is True
         assert "Taking the metadata rewrite" in caplog.text
+
+    def test_a_bboxless_block_with_types_still_declines_the_carry(self):
+        """Only ``bbox`` gone (the T3e verifier's case): still (None, True).
+
+        ``geometry_types`` survives a filter that drops the ``bbox``; the block
+        is worth keeping (its covering) but a verbatim carry would ship no
+        file bbox, so the rewrite measures it.
+        """
+        block = {
+            "version": "2.0.0",
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {
+                    "encoding": "WKB",
+                    "geometry_types": ["Polygon"],
+                    "covering": {"bbox": build_bbox_covering("bbox")},
+                }
+            },
+        }
+        carried, needs_rewrite = _fast_path_geo_decision(
+            {"geo": json.dumps(block)}, "geometry", "2.0", **fast_path_query("bbox")
+        )
+
+        assert carried is None
+        assert needs_rewrite is True

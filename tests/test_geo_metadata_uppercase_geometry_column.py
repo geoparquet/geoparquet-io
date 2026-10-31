@@ -46,7 +46,7 @@ then, on a standard-name match, returned ``std_name`` (the lowercase literal)
 rather than the column's own spelling, unlike its own ``primary_column`` branch
 directly above it and unlike the owner's name match.
 ``write_funnels.write_parquet_with_metadata`` took that as ``geometry_column``
-and handed it to ``build_geo_metadata``, which wrote ``geo["columns"]["geometry"]``.
+and handed it to the strategy block builder (now ``compose_geo_block``), which wrote ``geo["columns"]["geometry"]``.
 
 Found while mirroring Czech national open geodata (ČÚZK), where 19 layers could
 not be published because the covering never appeared.

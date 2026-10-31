@@ -12,7 +12,7 @@ from geoparquet_io.core.duckdb_metadata import (
     detect_native_geometry_columns,
 )
 from geoparquet_io.core.file_utils import _get_file_cache_key
-from geoparquet_io.core.geo_metadata import carried_version, raw_geo_of_file
+from geoparquet_io.core.geo_metadata import declared_version, raw_geo_of_file
 from geoparquet_io.core.logging_config import debug
 
 # LRU cache for detect_geoparquet_file_type results
@@ -102,8 +102,8 @@ def detect_geoparquet_file_type(parquet_file, verbose=False, con=None):
             # `check bbox`, `check optimization` and `add bbox` down with a bare
             # `AttributeError` (#979). `geo_version` is documented as the
             # version *or None*, and every consumer already handles None.
-            result["geo_version"] = carried_version(
-                geo_meta.get("version"), source=str(parquet_file)
+            result["geo_version"] = declared_version(
+                geo_meta, default=None, source=str(parquet_file)
             )
 
     # Check for native Parquet geo types using schema. A GeoArrow struct column

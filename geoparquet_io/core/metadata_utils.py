@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.bbox_structure import check_bbox_structure, covering_bbox_refs
 from geoparquet_io.core.crs_utils import column_is_geographic, is_geographic_crs
 from geoparquet_io.core.duckdb_metadata import (
     detect_geometry_columns,
@@ -25,13 +25,12 @@ from geoparquet_io.core.duckdb_metadata import (
 from geoparquet_io.core.edges import declares_edges, edges_of, logical_type_edges, state_edges
 from geoparquet_io.core.geo_metadata import (
     bbox_xy,
-    is_covering_path,
+    declared_version,
     row_group_geometry_stats,
     sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.parquet_schema import root_schema_columns
-from geoparquet_io.core.parquet_writer import declared_geoparquet_version
 from geoparquet_io.core.sizing import format_size
 
 
@@ -615,11 +614,6 @@ def format_parquet_geo_metadata(
         )
 
 
-def _is_bbox_covering_paths(cover_info: dict) -> bool:
-    """Every bbox key present and each a ``[column, field]`` path."""
-    return all(is_covering_path(cover_info.get(k)) for k in ("xmin", "ymin", "xmax", "ymax"))
-
-
 def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
     """
     Format and output GeoParquet metadata from the 'geo' key.
@@ -655,7 +649,7 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
 
         # Version
         if "version" in geo_meta:
-            console.print(f"Version: [cyan]{declared_geoparquet_version(geo_meta)}[/cyan]")
+            console.print(f"Version: [cyan]{declared_version(geo_meta)}[/cyan]")
 
         # Primary column
         if "primary_column" in geo_meta:
@@ -749,7 +743,7 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
                     for cover_type, cover_info in covering.items():
                         if cover_type == "bbox" and isinstance(cover_info, dict):
                             # Format bbox covering more concisely
-                            if _is_bbox_covering_paths(cover_info):
+                            if covering_bbox_refs(col_meta) is not None:
                                 # All bbox components present and well-formed
                                 bbox_col = cover_info["xmin"][0]
                                 console.print("      bbox:")

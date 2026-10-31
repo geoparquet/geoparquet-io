@@ -22,6 +22,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.duckdb_utils import fetch_one
+from tests.conftest import fast_path_query
 
 FAST_PATH_MARKER = "using plain COPY TO"
 FIBOA_VALUE = '{"fiboa_version": "0.2.0"}'
@@ -300,7 +301,9 @@ class TestTheCarryDeclines:
     def _carry(self, metadata, geometry_column="geometry", version="2.0"):
         from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
-        return _geo_block_to_carry_on_fast_path(metadata, geometry_column, version)
+        return _geo_block_to_carry_on_fast_path(
+            metadata, geometry_column, version, **fast_path_query()
+        )
 
     def _metadata(self, column_meta: dict) -> dict:
         return {
@@ -339,7 +342,7 @@ class TestTheCarryDeclines:
     def test_a_block_duckdb_owns_declines_after_the_covering_probe_finds_nothing(
         self, fields_v2_file, tmp_path
     ):
-        """con/query in hand, so ``declare_carried_bbox_column`` really runs first.
+        """con/query in hand, so the composer's bbox-covering step really runs first.
 
         The other decline cases short-circuit long before the probe is reachable,
         so none of them exercises the gate as the write path actually reaches it:
@@ -375,7 +378,9 @@ class TestTheCarryDeclines:
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
         from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
-        thin = self._metadata({"encoding": "WKB", "geometry_types": ["Polygon"]})
+        thin = self._metadata(
+            {"encoding": "WKB", "geometry_types": ["Polygon"], "bbox": [0, 0, 1, 1]}
+        )
         con = get_duckdb_connection(load_spatial=True)
         try:
             carried = _geo_block_to_carry_on_fast_path(
@@ -399,10 +404,15 @@ class TestTheCarryDeclines:
 
         class _NoQueriesAllowed:
             def execute(self, *args, **kwargs):  # pragma: no cover - must not run
-                raise AssertionError("declare_carried_bbox_column probed the query anyway")
+                raise AssertionError("the composer probed the query anyway")
 
         metadata = self._metadata(
-            {"encoding": "WKB", "geometry_types": ["Polygon"], "epoch": 2020.5}
+            {
+                "encoding": "WKB",
+                "geometry_types": ["Polygon"],
+                "bbox": [0, 0, 1, 1],
+                "epoch": 2020.5,
+            }
         )
         carried = _geo_block_to_carry_on_fast_path(
             metadata,
@@ -456,12 +466,14 @@ class TestMultiFileInputsDeclineTheCarry:
 
         assert (
             _geo_block_to_carry_on_fast_path(
-                metadata, "geometry", "2.0", input_file=str(two_disjoint_files)
+                metadata, "geometry", "2.0", input_file=str(two_disjoint_files), **fast_path_query()
             )
             is None
         )
         assert (
-            _geo_block_to_carry_on_fast_path(metadata, "geometry", "2.0", input_file=None)
+            _geo_block_to_carry_on_fast_path(
+                metadata, "geometry", "2.0", input_file=None, **fast_path_query()
+            )
             is not None
         )
 
@@ -537,6 +549,7 @@ class TestTheCarriedBlockGoesThroughTheCrsRule:
                         "geometry": {
                             "encoding": "WKB",
                             "geometry_types": ["Polygon"],
+                            "bbox": [0, 0, 1, 1],
                             "crs": None,
                         }
                     },
@@ -544,7 +557,7 @@ class TestTheCarriedBlockGoesThroughTheCrsRule:
             )
         }
 
-        carried = _geo_block_to_carry_on_fast_path(metadata, "geometry", "2.0")
+        carried = _geo_block_to_carry_on_fast_path(metadata, "geometry", "2.0", **fast_path_query())
 
         assert carried is not None
         assert carried["columns"]["geometry"]["crs"] is None
@@ -573,7 +586,10 @@ class TestTheCarriedBlockGoesThroughTheCrsRule:
             )
         }
 
-        assert _geo_block_to_carry_on_fast_path(metadata, "geometry", "2.0") is None
+        assert (
+            _geo_block_to_carry_on_fast_path(metadata, "geometry", "2.0", **fast_path_query())
+            is None
+        )
 
 
 class TestTheDecisionIsNotAskedWhenTheRewriteIsAlreadyDecided:
@@ -635,3 +651,26 @@ class TestTheDecisionIsNotAskedWhenTheRewriteIsAlreadyDecided:
 
         assert self._decisions_for(monkeypatch, v2_epoch_orientation_bbox, out, "2.0") == 1
         assert "covering" in _geo(out)["columns"]["geometry"]
+
+
+def test_a_carried_2_0_block_without_a_bbox_gets_one_measured(fields_v2_file, tmp_path):
+    """HANDOFFS row 69: a 2.0 block that says more than DuckDB's but has no file
+    ``bbox`` is not shipped without one; the rewrite measures it from the data."""
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.geo_metadata import geometry_stats_of
+
+    table = pq.read_table(str(fields_v2_file))
+    metadata = dict(table.schema.metadata)
+    geo = json.loads(metadata[b"geo"])
+    geo["columns"]["geometry"].pop("bbox", None)
+    geo["columns"]["geometry"]["epoch"] = 2020.5
+    metadata[b"geo"] = json.dumps(geo).encode()
+    source = tmp_path / "no_file_bbox.parquet"
+    pq.write_table(table.replace_schema_metadata(metadata), str(source))
+    out = tmp_path / "out.parquet"
+    _sort(source, out)
+
+    column = _geo(out)["columns"]["geometry"]
+    assert column["epoch"] == 2020.5
+    assert column["bbox"] == pytest.approx(geometry_stats_of(str(out), "geometry").bbox)

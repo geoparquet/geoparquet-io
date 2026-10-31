@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import tempfile
@@ -16,7 +15,6 @@ from geoparquet_io.core.bbox_structure import bbox_shaped_struct_columns, check_
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
-    apply_target_crs_to_geo_meta,
     entry_crs_is_unknown,
     extract_crs_from_parquet,
     extract_crs_from_table,
@@ -30,10 +28,11 @@ from geoparquet_io.core.crs_utils import (
     unknown_crs_error,
     unknown_crs_reason,
 )
-from geoparquet_io.core.duckdb_metadata import get_schema_info
+from geoparquet_io.core.duckdb_metadata import get_kv_metadata, get_schema_info
 from geoparquet_io.core.duckdb_utils import (
     as_wkb_sql,
     fetch_one,
+    file_schema,
     get_duckdb_connection,
     quote_identifier,
     register_arrow,
@@ -41,13 +40,20 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
     uses_aws_profile,
 )
-from geoparquet_io.core.edges import edges_of, is_geodesic, strip_edges
+from geoparquet_io.core.edges import PLANAR, edges_of, is_geodesic
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
+    GeoBlockOptions,
+    QuerySource,
+    SchemaSource,
     _bbox_claimed_by_another_column,
+    bbox_struct_sql,
+    compose_geo_block,
+    geo_key_value,
     sanitized_carried_geo,
     sanitized_carried_geo_of_file,
     strip_derived_stats,
+    with_geo_key,
 )
 from geoparquet_io.core.geometry_detection import (
     create_geometry_view,
@@ -58,7 +64,10 @@ from geoparquet_io.core.geometry_detection import (
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.parquet_footer import patch_or_rewrite
-from geoparquet_io.core.parquet_writer import WriteOptions, resolve_output_geoparquet_version
+from geoparquet_io.core.parquet_writer import (
+    WriteOptions,
+    resolve_output_geoparquet_version,
+)
 from geoparquet_io.core.remote import (
     needs_httpfs,
     remote_write_context,
@@ -152,36 +161,38 @@ def _edges_columns_to_drop(
     return {geom_col}
 
 
-def _drop_nonplanar_edges_from_geo_meta(geo_meta: dict, target_crs: str, geom_col: str) -> None:
-    """Strip ``geom_col``'s non-planar ``edges`` from an in-memory geo dict (#601).
+def _retarget_carried_geo(source, metadata: dict, geom_col: str, target_crs: str, con) -> dict:
+    """``metadata`` with its ``geo`` block composed for ``target_crs``.
 
-    The counterpart of ``_edges_columns_to_drop`` for the write paths that hand
-    the input's geo metadata straight through (Arrow tables, streaming). Other
-    columns are untransformed and keep their declaration.
-    """
-    edges = edges_of((geo_meta.get("columns") or {}).get(geom_col))
-    if is_geodesic(edges):
-        strip_edges(geo_meta, columns=[geom_col])
-        _warn_edges_dropped(geom_col, edges, target_crs)
-
-
-def _retarget_carried_geo(metadata: dict, geom_col: str, target_crs: str, con) -> bool:
-    """Rewrite ``metadata[b"geo"]`` for ``target_crs``; False when there is nothing to rewrite.
-
-    The single place the Arrow and streaming paths update the carried block, so
-    the same sanitizing applies to both: the block written back out is the
-    cleaned one, and ``apply_target_crs_to_geo_meta`` -- which indexes
-    ``columns`` -- is never handed a list-, string- or null-shaped block (#887).
+    The single place the Arrow and streaming paths update the carried block:
+    the composer, at the version the block declares, with ``target_crs`` as the
+    requested CRS (``apply_output_crs``: the default by omission) and, when the
+    target is projected, the column's geodesic edges said planar (#601). Other
+    columns are untransformed and keep their declaration. ``source`` supplies
+    the output schema the covering gates read. ``metadata`` comes back as it
+    was when its block cannot be read (#887).
     """
     geo_meta = sanitized_carried_geo(metadata)
     if not geo_meta:
         debug("Could not update CRS in geo metadata, leaving as-is")
-        return False
-    apply_target_crs_to_geo_meta(geo_meta, geom_col, target_crs, con)
-    if _target_crs_is_projected(target_crs, con):
-        _drop_nonplanar_edges_from_geo_meta(geo_meta, target_crs, geom_col)
-    metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
-    return True
+        return metadata
+    edges = edges_of((geo_meta.get("columns") or {}).get(geom_col))
+    planar = is_geodesic(edges) and _target_crs_is_projected(target_crs, con)
+    if planar:
+        _warn_edges_dropped(geom_col, edges, target_crs)
+    block = compose_geo_block(
+        source,
+        GeoBlockOptions(
+            geometry_column=geom_col,
+            version=resolve_output_geoparquet_version(
+                None, original_metadata=metadata, preserve_input=True
+            ),
+            covering=None,
+            crs=parse_crs_string_to_projjson(target_crs, con),
+            column_edges={geom_col: PLANAR} if planar else None,
+        ),
+    )
+    return with_geo_key(metadata, block)
 
 
 #: Raised by the Arrow/Python-API path on an unknown input CRS (``crs: null``,
@@ -264,12 +275,12 @@ def reproject_table(
 
         # Update geo metadata with new CRS
         if table.schema.metadata:
-            new_metadata = dict(table.schema.metadata)
-            if b"geo" in new_metadata:
-                if _retarget_carried_geo(new_metadata, geom_col, target_crs, con):
-                    result = result.replace_schema_metadata(new_metadata)
-            else:
-                result = result.replace_schema_metadata(table.schema.metadata)
+            metadata = dict(table.schema.metadata)
+            if b"geo" in metadata:
+                metadata = _retarget_carried_geo(
+                    SchemaSource(result.schema, metadata), metadata, geom_col, target_crs, con
+                )
+            result = result.replace_schema_metadata(metadata)
 
         return result
     finally:
@@ -373,10 +384,29 @@ def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, 
     # The footer wins over the Arrow schema's view of it: a `geo` key appended
     # after the writer opened is in the footer only, and the guard above read
     # the footer to decide this file needs the rewrite (#913).
-    geo_meta = sanitized_carried_geo_of_file(raw_path)
-    for col in geo_meta.get("columns", {}).values():
-        if entry_crs_is_unknown(col):
-            col.pop("crs", None)
+    metadata = get_kv_metadata(raw_path)
+    geo_meta = sanitized_carried_geo(metadata, source=str(raw_path))
+    # Every unknown CRS said as the default, by omission: the composer's CRS
+    # step over each such column, the block otherwise kept as declared.
+    unknown = {
+        name: "OGC:CRS84"
+        for name, col in (geo_meta.get("columns") or {}).items()
+        if entry_crs_is_unknown(col)
+    }
+    schema = file_schema(raw_path, geoparquet_conversion=False)
+    primary = primary_geometry_column(schema, geo=geo_meta)
+    if primary is not None:
+        geo_meta = compose_geo_block(
+            SchemaSource(schema, metadata),
+            GeoBlockOptions(
+                geometry_column=primary,
+                version=resolve_output_geoparquet_version(
+                    None, original_metadata=metadata, preserve_input=True
+                ),
+                covering=None,
+                column_crs=unknown,
+            ),
+        )
 
     # mkstemp creates the file atomically with 0600 perms (it holds a full copy
     # of the user's data) and a collision-free name. Only the `geo` key
@@ -386,7 +416,7 @@ def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, 
     try:
         patch_or_rewrite(
             raw_path,
-            {"geo": json.dumps(geo_meta)},
+            {"geo": geo_key_value(geo_meta)},
             output_file=temp_path,
             rewrite=rewrite_footer_kv,
             verbose=verbose,
@@ -553,12 +583,7 @@ def reproject_impl(
                 )
                 SELECT
                     *,
-                    STRUCT_PACK(
-                        xmin := ST_XMin({quote_identifier(geom_col)}),
-                        ymin := ST_YMin({quote_identifier(geom_col)}),
-                        xmax := ST_XMax({quote_identifier(geom_col)}),
-                        ymax := ST_YMax({quote_identifier(geom_col)})
-                    ) AS {quote_identifier(bbox_col)}
+                    {bbox_struct_sql(quote_identifier(geom_col), geom_col)} AS {quote_identifier(bbox_col)}
                 FROM reprojected
             """
             if verbose:
@@ -769,12 +794,7 @@ def _reproject_streaming(
                     )
                     SELECT
                         *,
-                        STRUCT_PACK(
-                            xmin := ST_XMin({quote_identifier(geom_col)}),
-                            ymin := ST_YMin({quote_identifier(geom_col)}),
-                            xmax := ST_XMax({quote_identifier(geom_col)}),
-                            ymax := ST_YMax({quote_identifier(geom_col)})
-                        ) AS {quote_identifier(bbox_col)}
+                        {bbox_struct_sql(quote_identifier(geom_col), geom_col)} AS {quote_identifier(bbox_col)}
                     FROM reprojected
                 """
             else:
@@ -805,7 +825,9 @@ def _reproject_streaming(
 
             # Update metadata with target CRS
             if metadata and b"geo" in metadata:
-                _retarget_carried_geo(metadata, geom_col, target_crs, con)
+                metadata = _retarget_carried_geo(
+                    QuerySource(con, query, metadata), metadata, geom_col, target_crs, con
+                )
 
             # Reprojection moves coordinates, so the carried bbox (and, for a
             # geometry-repairing transform, geometry_types) no longer describes

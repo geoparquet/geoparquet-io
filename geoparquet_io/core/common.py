@@ -43,7 +43,7 @@ from geoparquet_io.core.file_utils import (
     is_partition_path,
     resolve_file_url,
 )
-from geoparquet_io.core.geo_metadata import build_bbox_covering
+from geoparquet_io.core.geo_metadata import bbox_struct_sql, build_bbox_covering
 from geoparquet_io.core.geometry_detection import primary_geometry_column, require_geometry_column
 from geoparquet_io.core.logging_config import (
     debug,
@@ -312,12 +312,7 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
 
     # Define SQL expression
     quoted_geom_col = quote_identifier(geom_col)
-    sql_expression = f"""STRUCT_PACK(
-        xmin := ST_XMin({quoted_geom_col}),
-        ymin := ST_YMin({quoted_geom_col}),
-        xmax := ST_XMax({quoted_geom_col}),
-        ymax := ST_YMax({quoted_geom_col})
-    )"""
+    sql_expression = bbox_struct_sql(quoted_geom_col, geom_col)
 
     # Create temporary file path
     temp_file = parquet_file + ".tmp"

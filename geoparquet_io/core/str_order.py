@@ -216,11 +216,7 @@ def str_order_table(
             tile_size,
             output_expressions=output_expressions,
         )
-        result = con.sql(query).arrow().read_all()
-        if table.schema.metadata:
-            result = result.replace_schema_metadata(table.schema.metadata)
-        result = registered.restore_edges(result)
-        return result
+        return registered.read_back(con, query, table.schema.metadata)
     finally:
         con.close()
 
