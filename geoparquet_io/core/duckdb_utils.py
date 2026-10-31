@@ -2028,7 +2028,7 @@ def duckdb_type_is_geometry(type_name: object, *, allow_crs: bool = True) -> boo
 #: DuckDB's numeric type names as DESCRIBE renders them, with the parameters cut
 #: off (``DECIMAL(18,3)`` -> ``DECIMAL``). ``REAL`` and ``NUMERIC`` are the aliases
 #: DuckDB accepts for ``FLOAT`` and ``DECIMAL``.
-_DUCKDB_NUMERIC_TYPES = frozenset(
+_DUCKDB_INTEGER_TYPES = frozenset(
     {
         "TINYINT",
         "SMALLINT",
@@ -2040,13 +2040,18 @@ _DUCKDB_NUMERIC_TYPES = frozenset(
         "UINTEGER",
         "UBIGINT",
         "UHUGEINT",
-        "FLOAT",
-        "REAL",
-        "DOUBLE",
-        "DECIMAL",
-        "NUMERIC",
     }
 )
+_DUCKDB_NUMERIC_TYPES = _DUCKDB_INTEGER_TYPES | {"FLOAT", "REAL", "DOUBLE", "DECIMAL", "NUMERIC"}
+
+
+def duckdb_type_is_integer(type_name: object) -> bool:
+    """Whether a type is one of DuckDB's fixed-width integer types up to BIGINT.
+
+    HUGEINT is excluded: overview SUM casts these types back to BIGINT.
+    """
+    base = str(type_name or "").strip().upper()
+    return base in _DUCKDB_INTEGER_TYPES and "HUGE" not in base
 
 
 def duckdb_type_is_numeric(type_name: object) -> bool:

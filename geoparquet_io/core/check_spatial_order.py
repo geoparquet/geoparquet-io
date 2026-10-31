@@ -18,6 +18,7 @@ from geoparquet_io.core.check_verdict import (
 )
 from geoparquet_io.core.crs_utils import column_is_geographic
 from geoparquet_io.core.duckdb_metadata import (
+    get_file_metadata,
     get_per_row_group_bbox_stats,
     get_per_row_group_native_geo_stats,
     get_row_group_bbox_stats,
@@ -623,7 +624,7 @@ def check_spatial_pushdown_readiness(
             debug("Only 0 or 1 row groups, skip rate is trivially 0.0")
         return {
             "has_geo_bbox": True,
-            "num_row_groups": num_rgs,
+            "num_row_groups": get_file_metadata(parquet_file)["num_row_groups"],
             "estimated_skip_rate": 0.0,
             "avg_bbox_area_ratio": 0.0,
             "passed": False,  # Can't skip any row groups with only 0-1 row groups
@@ -663,7 +664,7 @@ def check_spatial_pushdown_readiness(
 
     return {
         "has_geo_bbox": True,
-        "num_row_groups": num_rgs,
+        "num_row_groups": get_file_metadata(parquet_file)["num_row_groups"],
         "estimated_skip_rate": avg_skip_rate,
         "avg_bbox_area_ratio": avg_area_ratio,
         "passed": passed,

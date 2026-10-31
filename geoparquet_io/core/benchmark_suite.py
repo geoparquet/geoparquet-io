@@ -8,13 +8,11 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import psutil
 
-from geoparquet_io.benchmarks.config import DEFAULT_THRESHOLDS, RegressionThresholds
 from geoparquet_io.benchmarks.operations import get_operation
 from geoparquet_io.benchmarks.profile_report import save_profile_data
 from geoparquet_io.core.benchmark import get_environment_info
@@ -299,96 +297,4 @@ def run_benchmark_suite(
             "memory_limit_mb": memory_limit_mb,
             "files": [str(f) for f in input_files],
         },
-    )
-
-
-class RegressionStatus(Enum):
-    """Status of a regression comparison."""
-
-    OK = "ok"
-    WARNING = "warning"
-    FAILURE = "failure"
-    IMPROVED = "improved"
-
-
-@dataclass(frozen=True, slots=True)
-class ComparisonResult:
-    """Result of comparing two benchmark results.
-
-    Immutable (frozen) to prevent accidental mutation.
-    """
-
-    operation: str
-    file: str
-    baseline_time: float
-    current_time: float
-    time_delta_pct: float
-    baseline_rss_memory: float
-    current_rss_memory: float
-    memory_delta_pct: float
-    status: RegressionStatus
-
-
-def compare_results(
-    baseline: BenchmarkResult,
-    current: BenchmarkResult,
-    thresholds: RegressionThresholds | None = None,
-) -> ComparisonResult:
-    """
-    Compare current result against baseline for regression.
-
-    Uses RSS memory for comparison since it captures PyArrow/DuckDB allocations.
-
-    Args:
-        baseline: Baseline benchmark result
-        current: Current benchmark result
-        thresholds: Optional custom thresholds (uses DEFAULT_THRESHOLDS if None)
-
-    Returns:
-        ComparisonResult with delta and status
-    """
-    if thresholds is None:
-        thresholds = DEFAULT_THRESHOLDS
-
-    # Calculate deltas - use RSS memory (captures PyArrow/DuckDB allocations)
-    # Guard against zero/near-zero baseline time (instant operations or timing errors)
-    # Use 0.001s (1ms) as minimum to avoid amplifying tiny timing differences
-    min_time_threshold = 0.001
-    if baseline.time_seconds > min_time_threshold:
-        time_delta = (current.time_seconds - baseline.time_seconds) / baseline.time_seconds
-    else:
-        # Both are near-instant, consider them equal
-        time_delta = 0.0
-
-    baseline_mem = baseline.peak_rss_memory_mb
-    current_mem = current.peak_rss_memory_mb
-    # Use 1MB as minimum to avoid amplifying small memory differences
-    # Operations using <1MB are considered equal
-    min_mem_threshold = 1.0
-    if baseline_mem > min_mem_threshold:
-        memory_delta = (current_mem - baseline_mem) / baseline_mem
-    else:
-        # Both use minimal memory, consider them equal
-        memory_delta = 0.0
-
-    # Determine status using RegressionThresholds dataclass attributes
-    status = RegressionStatus.OK
-
-    if time_delta < -0.05 and memory_delta < -0.05:
-        status = RegressionStatus.IMPROVED
-    elif time_delta >= thresholds.time_failure or memory_delta >= thresholds.memory_failure:
-        status = RegressionStatus.FAILURE
-    elif time_delta >= thresholds.time_warning or memory_delta >= thresholds.memory_warning:
-        status = RegressionStatus.WARNING
-
-    return ComparisonResult(
-        operation=current.operation,
-        file=current.file,
-        baseline_time=baseline.time_seconds,
-        current_time=current.time_seconds,
-        time_delta_pct=round(time_delta, 4),
-        baseline_rss_memory=baseline_mem,
-        current_rss_memory=current_mem,
-        memory_delta_pct=round(memory_delta, 4),
-        status=status,
     )

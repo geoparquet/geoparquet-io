@@ -235,8 +235,8 @@ def benchmark_suite(
             info("\nTo view profile details, use:")
             info(f"  uv run python -m pstats {profile_files[0]}")
             info("\nOr generate a summary:")
-            info("  from geoparquet_io.benchmarks.profile_report import format_profile_stats")
-            info(f"  print(format_profile_stats('{profile_files[0]}'))")
+            info("  import pstats")
+            info(f"  pstats.Stats('{profile_files[0]}').sort_stats('cumulative').print_stats(20)")
 
     # Save if requested
     if output:

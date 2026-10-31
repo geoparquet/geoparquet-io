@@ -20,44 +20,9 @@ from geoparquet_io.cli.commands.publish import publish
 from geoparquet_io.cli.commands.sort import sort
 from geoparquet_io.cli.decorators import (
     ErrorBoundaryGroup,
-    GlobAwareCommand,
 )
 from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.logging_config import setup_cli_logging
-
-
-class OptionalIntCommand(GlobAwareCommand):
-    """Custom Command that supports options with optional integer values.
-
-    Inherits from GlobAwareCommand to also detect shell-expanded glob patterns
-    and provide helpful error messages.
-
-    Options listed in optional_int_options can be used as flags (defaulting to 10)
-    or with an explicit integer value. For example:
-        --head           -> uses default value of 10
-        --head 5         -> uses value 5
-        (no --head)      -> uses None
-    """
-
-    # Options that support optional integer values and their defaults
-    optional_int_options = {"--head": 10, "--tail": 10}
-
-    def make_context(self, info_name, args, parent=None, **extra):
-        """Preprocess args to insert default values for optional int options."""
-        args = list(args)  # Make a mutable copy
-        for opt, default_val in self.optional_int_options.items():
-            if opt in args:
-                idx = args.index(opt)
-                # Check if next arg exists and looks like an integer
-                if idx + 1 < len(args):
-                    next_arg = args[idx + 1]
-                    # If next arg starts with - (another option) or doesn't look like int
-                    if next_arg.startswith("-") or not next_arg.lstrip("-").isdigit():
-                        args.insert(idx + 1, str(default_val))
-                else:
-                    # Option at end of args
-                    args.insert(idx + 1, str(default_val))
-        return super().make_context(info_name, args, parent=parent, **extra)
 
 
 @with_plugins(entry_points(group="gpio.plugins"))

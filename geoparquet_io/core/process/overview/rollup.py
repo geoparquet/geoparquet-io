@@ -22,9 +22,8 @@ import gc
 import pyarrow as pa
 
 from geoparquet_io.core.admin_datasets import resolve_admin_dataset
-from geoparquet_io.core.duckdb_utils import as_wkb_sql, quote_identifier, register_arrow, sql_path
+from geoparquet_io.core.duckdb_utils import as_wkb_sql, quote_identifier, register_arrow
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     bbox_column_to_declare,
     bbox_struct_array,
@@ -161,7 +160,7 @@ def get_admin_country_context(con, verbose: bool = False) -> tuple[str, str, str
         "overture", ["country"], cache=False, verbose=verbose
     )
     path = dataset.get_source_for_level("country")
-    country_ref = f"read_parquet({sql_path(resolve_file_url(path, verbose))})"
+    country_ref = dataset.table_reference(path)
     code_col = quote_identifier(dataset.get_level_column_mapping()["country"])
     geom_expr = geometry_to_geom_expr(con, country_ref, dataset.get_geometry_column())
     return country_ref, code_col, geom_expr

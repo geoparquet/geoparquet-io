@@ -22,7 +22,6 @@ DEFAULT_QUADKEY_COLUMN_NAME = "quadkey"
 DEFAULT_QUADKEY_RESOLUTION = 13
 
 # Default resolution for quadkey partitioning (prefix length)
-DEFAULT_QUADKEY_PARTITION_RESOLUTION = 9
 
 # Default column name for S2 cell IDs
 DEFAULT_S2_COLUMN_NAME = "s2_cell"
@@ -31,13 +30,11 @@ DEFAULT_S2_COLUMN_NAME = "s2_cell"
 DEFAULT_S2_LEVEL = 13
 
 # Default target rows per partition for S2 auto-resolution
-DEFAULT_S2_TARGET_ROWS = 100000
 
 # Vecorel schema URLs
 VECOREL_CORE_SCHEMA = "https://vecorel.org/specification/v0.1.0/schema.yaml"
 VECOREL_ADMIN_SCHEMA = "https://vecorel.org/administrative-division-extension/v0.1.0/schema.yaml"
 VECOREL_METRICS_SCHEMA = "https://vecorel.org/geometry-metrics-extension/v0.1.0/schema.yaml"
-FIBOA_CORE_SCHEMA = "https://fiboa.org/specification/v0.3.0/schema.yaml"
 
 
 def build_collection_metadata(

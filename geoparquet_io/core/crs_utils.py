@@ -518,11 +518,6 @@ def unknown_crs_error(reason: str) -> str:
     )
 
 
-#: Kept for callers that name the null case. Same text as
-#: ``unknown_crs_error(UNKNOWN_BY_NULL)``.
-NULL_CRS_NO_FLAG_ERROR = unknown_crs_error(UNKNOWN_BY_NULL)
-
-
 def crs_is_explicitly_null(col_meta: dict) -> bool:
     """Return True only when a geometry column's metadata sets ``crs`` to null.
 

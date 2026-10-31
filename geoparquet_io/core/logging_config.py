@@ -22,7 +22,6 @@ Usage in CLI:
 
 import logging
 import sys
-from contextlib import contextmanager
 
 from geoparquet_io.core.exceptions import clean_error_text
 
@@ -111,16 +110,6 @@ class CLIFormatter(logging.Formatter):
         return message
 
 
-class LibraryFormatter(logging.Formatter):
-    """Standard formatter for library usage with timestamps and levels."""
-
-    def __init__(self):
-        super().__init__(
-            fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
-
-
 class DynamicStreamHandler(logging.StreamHandler):
     """
     A StreamHandler that works correctly with Click's CliRunner and piping.
@@ -191,23 +180,6 @@ def get_logger(name: str | None = None) -> logging.Logger:
     if name is None:
         return logger
     return logging.getLogger(name)
-
-
-@contextmanager
-def verbose_logging():
-    """
-    Context manager to temporarily enable verbose (DEBUG) logging.
-
-    Usage:
-        with verbose_logging():
-            debug("This will be shown")
-    """
-    original_level = logger.level
-    logger.setLevel(logging.DEBUG)
-    try:
-        yield
-    finally:
-        logger.setLevel(original_level)
 
 
 def _bootstrap_default_handler(verbose: bool) -> None:

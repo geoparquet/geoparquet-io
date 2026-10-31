@@ -1139,36 +1139,6 @@ def _carries_more_than_duckdb_generates(geo_dict: dict) -> bool:
     )
 
 
-def _geo_block_to_carry_on_fast_path(
-    original_metadata: dict | None,
-    geometry_column: str | None,
-    effective_version: str,
-    con,
-    query: str,
-    verbose: bool = False,
-    input_crs=None,
-    input_file: str | None = None,
-    output_columns: list[str] | None = None,
-) -> dict | None:
-    """The block the 2.0 fast path writes, dropping the must-rewrite half.
-
-    See :func:`_fast_path_geo_decision`, which answers both halves at once. Kept
-    as the name the write path and its tests ask by.
-    """
-    carried, _ = _fast_path_geo_decision(
-        original_metadata,
-        geometry_column,
-        effective_version,
-        con=con,
-        query=query,
-        verbose=verbose,
-        input_crs=input_crs,
-        input_file=input_file,
-        output_columns=output_columns,
-    )
-    return carried
-
-
 def _fast_path_options(
     geometry_column: str,
     effective_version: str,

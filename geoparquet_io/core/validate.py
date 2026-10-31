@@ -1157,13 +1157,15 @@ def _geoarrow_bounds_subquery(raw_url: str, geom_col: str, encoding: str, limit_
     coordinate list (NULL bounds) or, for "point", NaN coordinates; neither has
     an extent to compare, so the isfinite() guard drops both.
     """
-    quoted_geom = quote_identifier(geom_col)
-    xmin, ymin, xmax, ymax, _, _ = _geoarrow_coord_exprs(quoted_geom, encoding)
+    from geoparquet_io.core.geo_metadata import _envelope_columns, _finite_sql, _located_sql
+    from geoparquet_io.core.geometry_detection import GeometryRead
+
+    _, envelope = _envelope_columns(GeometryRead.for_geoarrow(geom_col, encoding))
+    xmin, ymin, xmax, ymax = envelope
     return f"""
         SELECT {xmin} AS xmin, {ymin} AS ymin, {xmax} AS xmax, {ymax} AS ymax
         FROM read_parquet({sql_path(raw_url)})
-        WHERE {quoted_geom} IS NOT NULL
-          AND isfinite({xmin}) AND isfinite({ymin})
+        WHERE {_located_sql(*envelope)} AND {_finite_sql(*envelope)}
         {limit_clause}
     """
 

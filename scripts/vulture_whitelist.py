@@ -16,9 +16,6 @@ This module is never imported; vulture only parses it.
 """
 
 _.__class__  # unused attribute (geoparquet_io/__init__.py:120) -- dynamic: PEP 562 module hook / module class swap
-layer_id  # unused variable (geoparquet_io/core/arcgis.py:1660) -- dead: T0e deletes
-baseline_time  # unused variable (geoparquet_io/core/benchmark_suite.py:323) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
-baseline_rss_memory  # unused variable (geoparquet_io/core/benchmark_suite.py:326) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
 issue_severity  # unused variable (geoparquet_io/core/check_bbox_values.py:152) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
 checked_rows  # unused variable (geoparquet_io/core/check_bbox_values.py:164) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
 undersized_rows  # unused variable (geoparquet_io/core/check_bbox_values.py:167) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
@@ -35,10 +32,6 @@ undersized_examples  # unused variable (geoparquet_io/core/check_bbox_values.py:
 oversized_examples  # unused variable (geoparquet_io/core/check_bbox_values.py:182) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
 null_bbox_examples  # unused variable (geoparquet_io/core/check_bbox_values.py:183) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
 unparsable_examples  # unused variable (geoparquet_io/core/check_bbox_values.py:184) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
-DEFAULT_QUADKEY_PARTITION_RESOLUTION  # unused variable (geoparquet_io/core/constants.py:26) -- dead: T0e deletes
-DEFAULT_S2_TARGET_ROWS  # unused variable (geoparquet_io/core/constants.py:38) -- dead: T0e deletes
-FIBOA_CORE_SCHEMA  # unused variable (geoparquet_io/core/constants.py:44) -- dead: T0e deletes (no package caller; only tests)
-NULL_CRS_NO_FLAG_ERROR  # unused variable (geoparquet_io/core/crs_utils.py:518) -- dead: T0e deletes
 has_estimate  # unused variable (geoparquet_io/core/preview.py:60) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
 stats_source  # unused variable (geoparquet_io/core/preview.py:64) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
 est_rows  # unused variable (geoparquet_io/core/preview.py:68) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
@@ -60,24 +53,14 @@ supports_remote  # unused variable (geoparquet_io/core/write_strategies/duckdb_k
 __dir__  # unused function (geoparquet_io/__init__.py:90) -- dynamic: PEP 562 module hook / module class swap
 reset_crs_disagreement_warnings  # unused function (geoparquet_io/core/crs_utils.py:1128) -- dynamic: test seam that resets module state between tests
 reset_malformed_geo_warnings  # unused function (geoparquet_io/core/geo_metadata.py:217) -- dynamic: test seam that resets module state between tests
-is_stdout  # unused function (geoparquet_io/core/streaming.py:63) -- dead: T0e deletes (no package caller; only tests)
-get_num_row_groups  # unused function (geoparquet_io/core/duckdb_metadata.py:708) -- dead: T0e deletes
 _clear_s3_cache  # unused function (geoparquet_io/core/duckdb_utils.py:247) -- dynamic: test seam that resets module state between tests
 __getattr__  # unused function (geoparquet_io/core/duckdb_utils.py:1101) -- dynamic: PEP 562 module hook / module class swap
 reset_null_crs_warnings  # unused function (geoparquet_io/core/crs_utils.py:604) -- dynamic: test seam that resets module state between tests
-_table_geo_column_meta  # unused function (geoparquet_io/core/reproject.py:126) -- dead: T0e deletes (no package caller; only tests)
-detect_aggregate_file  # unused function (geoparquet_io/core/process/overview/detect.py:316) -- dead: T0e deletes (no package caller; only tests)
 _.to_arrow  # unused method (geoparquet_io/api/table.py:1210) -- dynamic: public Python API (docs/api/python-api.md)
-LibraryFormatter  # unused class (geoparquet_io/core/logging_config.py:112) -- dead: T0e deletes (no package caller; only tests)
-_.list_strategies  # unused method (geoparquet_io/core/write_strategies/__init__.py:82) -- dead: T0e deletes (no package caller; only tests)
-is_azure_url  # unused function (geoparquet_io/core/remote.py:71) -- dead: T0e deletes (no package caller; only tests)
-is_gcs_url  # unused function (geoparquet_io/core/remote.py:84) -- dead: T0e deletes (no package caller; only tests)
 _.sort_hilbert  # unused method (geoparquet_io/api/table.py:1903) -- dynamic: public Python API (docs/api/python-api.md)
-verbose_logging  # unused function (geoparquet_io/core/logging_config.py:194) -- dead: T0e deletes (no package caller; only tests)
 __getattr__  # unused function (geoparquet_io/__init__.py:72) -- dynamic: PEP 562 module hook / module class swap
 sort_hilbert  # unused function (geoparquet_io/api/ops.py:293) -- dynamic: public Python API (docs/api/python-api.md)
 sort_column  # unused function (geoparquet_io/api/ops.py:888) -- dynamic: public Python API (docs/api/python-api.md)
-extract_columns_info  # unused function (geoparquet_io/core/inspect_utils.py:423) -- dead: T0e deletes (no package caller; only tests)
 _.add_h3  # unused method (geoparquet_io/api/table.py:1994) -- dynamic: public Python API (docs/api/python-api.md)
 _.add_a5  # unused method (geoparquet_io/api/table.py:2018) -- dynamic: public Python API (docs/api/python-api.md)
 _.sort_column  # unused method (geoparquet_io/api/table.py:2362) -- dynamic: public Python API (docs/api/python-api.md)
@@ -87,25 +70,19 @@ sort_str  # unused function (geoparquet_io/api/ops.py:313) -- dynamic: public Py
 _.sort_str  # unused method (geoparquet_io/api/table.py:1918) -- dynamic: public Python API (docs/api/python-api.md)
 add_quadkey  # unused function (geoparquet_io/api/ops.py:185) -- dynamic: public Python API (docs/api/python-api.md)
 _.add_quadkey  # unused method (geoparquet_io/api/table.py:1875) -- dynamic: public Python API (docs/api/python-api.md)
-format_comparison_table  # unused function (geoparquet_io/core/benchmark_report.py:33) -- dead: T0e deletes (no package caller; only tests)
-get_files_to_check  # unused function (geoparquet_io/core/partition/reader.py:258) -- dead: T0e deletes (no package caller; only tests)
-_geo_block_to_carry_on_fast_path  # unused function (geoparquet_io/core/write_funnels.py:944) -- dead: T0e deletes (no package caller; only tests)
 sort_quadkey  # unused function (geoparquet_io/api/ops.py:911) -- dynamic: public Python API (docs/api/python-api.md)
 _.check_spatial_pushdown  # unused method (geoparquet_io/api/table.py:3277) -- dynamic: public Python API (docs/api/python-api.md)
 _.add_s2  # unused method (geoparquet_io/api/table.py:2254) -- dynamic: public Python API (docs/api/python-api.md)
 add_bbox_metadata_cmd  # unused function (geoparquet_io/cli/commands/add.py:508) -- dynamic: Click command, registered by its decorator
 _.sort_quadkey  # unused method (geoparquet_io/api/table.py:2386) -- dynamic: public Python API (docs/api/python-api.md)
-OptionalIntCommand  # unused class (geoparquet_io/cli/main.py:29) -- dead: T0e deletes
 add_s2  # unused function (geoparquet_io/api/ops.py:853) -- dynamic: public Python API (docs/api/python-api.md)
 convert_to_shapefile  # unused function (geoparquet_io/api/ops.py:2409) -- dynamic: public Python API (docs/api/python-api.md)
 check_stac_cmd  # unused function (geoparquet_io/cli/commands/check.py:1561) -- dynamic: Click command, registered by its decorator
 convert_to_flatgeobuf  # unused function (geoparquet_io/api/ops.py:2322) -- dynamic: public Python API (docs/api/python-api.md)
 _.overview  # unused method (geoparquet_io/api/table.py:2215) -- dynamic: public Python API (docs/api/python-api.md)
-geodesic_bbox_of_wkb  # unused function (geoparquet_io/core/geodesic_bbox.py:776) -- dead: T0e deletes (no package caller; only tests)
 _.to_geojson  # unused method (geoparquet_io/api/table.py:3069) -- dynamic: public Python API (docs/api/python-api.md)
 inspect_head  # unused function (geoparquet_io/cli/commands/inspect.py:243) -- dynamic: Click command, registered by its decorator
 inspect_tail  # unused function (geoparquet_io/cli/commands/inspect.py:286) -- dynamic: Click command, registered by its decorator
-get_native_geo_statistics  # unused function (geoparquet_io/core/duckdb_metadata.py:1371) -- dead: T0e deletes (no package caller; only tests)
 convert_to_geopackage  # unused function (geoparquet_io/api/ops.py:2275) -- dynamic: public Python API (docs/api/python-api.md)
 convert_to_csv  # unused function (geoparquet_io/api/ops.py:2362) -- dynamic: public Python API (docs/api/python-api.md)
 get_row_group_geo_stats  # unused function (geoparquet_io/api/ops.py:2767) -- dynamic: public Python API (docs/api/python-api.md)
@@ -123,18 +100,15 @@ benchmark_report  # unused function (geoparquet_io/cli/commands/benchmark.py:314
 _.aggregate_a5  # unused method (geoparquet_io/api/table.py:2042) -- dynamic: public Python API (docs/api/python-api.md)
 _.aggregate_h3  # unused method (geoparquet_io/api/table.py:2100) -- dynamic: public Python API (docs/api/python-api.md)
 _.add_admin_divisions  # unused method (geoparquet_io/api/table.py:3514) -- dynamic: public Python API (docs/api/python-api.md)
-format_profile_stats  # unused function (geoparquet_io/benchmarks/profile_report.py:11) -- dead: T0e deletes (no package caller; only tests)
 skills  # unused function (geoparquet_io/cli/main.py:133) -- dynamic: Click command, registered by its decorator
 partition_by_admin  # unused function (geoparquet_io/api/ops.py:1378) -- dynamic: public Python API (docs/api/python-api.md)
 inspect_meta  # unused function (geoparquet_io/cli/commands/inspect.py:343) -- dynamic: Click command, registered by its decorator
 aggregate_a5  # unused function (geoparquet_io/api/ops.py:441) -- dynamic: public Python API (docs/api/python-api.md)
 aggregate_h3  # unused function (geoparquet_io/api/ops.py:504) -- dynamic: public Python API (docs/api/python-api.md)
-compare_results  # unused function (geoparquet_io/core/benchmark_suite.py:332) -- dead: T0e deletes (no package caller; only tests)
 convert_flatgeobuf  # unused function (geoparquet_io/cli/commands/convert.py:789) -- dynamic: Click command, registered by its decorator
 benchmark_explain  # unused function (geoparquet_io/cli/commands/benchmark.py:246) -- dynamic: Click command, registered by its decorator
 convert_shapefile  # unused function (geoparquet_io/cli/commands/convert.py:941) -- dynamic: Click command, registered by its decorator
 str_order_command  # unused function (geoparquet_io/cli/commands/sort.py:108) -- dynamic: Click command, registered by its decorator
-write_format  # unused function (geoparquet_io/core/format_writers.py:784) -- dead: T0e deletes (no package caller; only tests)
 sort_column  # unused function (geoparquet_io/cli/commands/sort.py:177) -- dynamic: Click command, registered by its decorator
 _.partition_by_admin  # unused method (geoparquet_io/api/table.py:3817) -- dynamic: public Python API (docs/api/python-api.md)
 from_wfs  # unused function (geoparquet_io/api/ops.py:2527) -- dynamic: public Python API (docs/api/python-api.md)

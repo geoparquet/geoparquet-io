@@ -439,30 +439,6 @@ def _effective_edges(parquet_geo_info: dict, geoparquet_info: dict, column: str)
     return detect_edges(native, block).get(column, PLANAR)
 
 
-def extract_columns_info(schema: pa.Schema, primary_geom_col: str | None) -> list[dict[str, Any]]:
-    """
-    Extract column information from schema.
-
-    Args:
-        schema: PyArrow schema
-        primary_geom_col: Name of primary geometry column (if known)
-
-    Returns:
-        list: Column info dicts with name, type, is_geometry
-    """
-    columns = []
-    for field in schema:
-        is_geometry = field.name == primary_geom_col
-        columns.append(
-            {
-                "name": field.name,
-                "type": str(field.type),
-                "is_geometry": is_geometry,
-            }
-        )
-    return columns
-
-
 def parse_wkb_type(wkb_bytes: bytes) -> str:
     """
     Parse WKB bytes to extract geometry type.

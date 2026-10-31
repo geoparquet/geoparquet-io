@@ -675,12 +675,6 @@ def get_row_count(parquet_file: str, con=None) -> int:
     return metadata.get("num_rows", 0)
 
 
-def get_num_row_groups(parquet_file: str, con=None) -> int:
-    """Get number of row groups from file metadata."""
-    metadata = get_file_metadata(parquet_file, con)
-    return metadata.get("num_row_groups", 0)
-
-
 #: The prefixed CRS forms, which have the same ``a:b`` shape as a bare
 #: ``<authority>:<code>`` and must therefore be matched *before* it. ``srid:`` is
 #: an SRID (``srid:0`` meaning "unknown"), not an authority named "srid", and
@@ -1301,40 +1295,6 @@ def get_native_geo_stats_by_row_group(
             }
         )
     return chunks
-
-
-def get_native_geo_statistics(parquet_file: str, geometry_column: str, con=None) -> dict | None:
-    """
-    Get native Parquet GeospatialStatistics for a geometry column.
-
-    This retrieves the geo_bbox and geo_types from the Parquet column metadata,
-    which is part of the native Parquet geospatial support (not GeoParquet metadata).
-
-    Reports the first column chunk that carries statistics; for the whole file's
-    bounds use :func:`get_aggregated_native_geo_stats`.
-
-    Args:
-        parquet_file: Path to the parquet file
-        geometry_column: Name of the geometry column
-        con: Optional existing DuckDB connection
-
-    Returns:
-        dict with 'bbox' (list of 4 floats) and 'geometry_types' (list of strings),
-        or None if not available
-    """
-    try:
-        chunks = get_native_geo_stats_by_row_group(parquet_file, geometry_column, con)
-    except Exception:
-        return None
-    if not chunks:
-        return None
-
-    # Both halves must describe the same column chunk: reporting one row group's
-    # bbox beside another's geometry types would be a dict that matches no row
-    # group in the file.
-    first = next((c for c in chunks if c["xmin"] is not None), chunks[0])
-    # One chunk folds to itself on either reading of the CRS.
-    return aggregate_native_geo_stats([first], geographic=True) or None
 
 
 def get_aggregated_native_geo_stats(
