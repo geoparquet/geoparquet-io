@@ -23,18 +23,189 @@ Two levels, because not every call site has a schema:
 - :func:`resolve_columns_against_schema` additionally checks membership, and is
   called only where the schema is already in hand, never for an extra
   round-trip.
+
+This module is also the one place that answers three further questions about
+column names (#1367, concept 12), so no caller carries a private copy:
+
+- **Does this name mean that column?** :func:`fold` is the one case-folding
+  rule, :func:`matching_columns` the one lookup (an exact spelling first, then
+  every folded one), :func:`find_column` / :func:`has_column` /
+  :func:`same_column` its three shapes. Nothing else applies ``.lower()`` to a
+  column name (the ``G1.column_fold`` guard).
+- **What may a computed column be called?** :func:`unique_name`, the one
+  suffixer. Column names are output bytes, so each caller passes the ``start``
+  of its own historic numbering.
+- **Which columns survive an exclusion?** :func:`exclude_columns`, the one
+  guard against dropping a protected column or every column.
 """
 
 from __future__ import annotations
 
+import string
+from collections.abc import Iterable
+
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.logging_config import warn
 
 __all__ = [
+    "bound_column",
+    "exclude_columns",
+    "find_column",
+    "fold",
+    "has_column",
     "join_column_list",
+    "matching_columns",
     "reject_blank_column_entries",
     "resolve_columns_against_schema",
+    "same_column",
     "split_column_list",
+    "unique_name",
 ]
+
+# DuckDB folds identifiers case-insensitively, but only over ASCII: "HEIGHT"
+# binds to a `Height` column while "STRASSE" does not bind to `straße`. A lookup
+# that follows the same rule accepts exactly what the generated SQL would bind,
+# no more and no less.
+_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def fold(name: str) -> str:
+    """``name`` as DuckDB's binder compares it: ASCII letters lowered, the rest kept."""
+    return str(name).translate(_ASCII_LOWER)
+
+
+def matching_columns(name: str, columns: Iterable[str]) -> list[str]:
+    """Every column ``name`` could mean: its exact spelling, else each folded match.
+
+    Exact first because folding is not injective -- a table may carry both
+    ``id`` and ``ID`` -- so a name that is a column is never second-guessed.
+    Order and duplicates follow ``columns``.
+    """
+    columns = [str(col) for col in columns]
+    if name in columns:
+        return [name]
+    folded = fold(name)
+    return [col for col in columns if fold(col) == folded]
+
+
+def find_column(name: str, columns: Iterable[str], *, option_name: str = "column") -> str | None:
+    """The column ``name`` means, in the schema's spelling, or None when there is none.
+
+    Raises:
+        InvalidParameterError: ``name`` is not a column, matches several
+            differently-cased ones, and so cannot be told apart
+    """
+    found = matching_columns(name, columns)
+    if len(found) > 1:
+        raise InvalidParameterError(
+            option_name,
+            f"Ambiguous column name: {name} matches {', '.join(sorted(found))}. "
+            "Use the exact spelling.",
+        )
+    return found[0] if found else None
+
+
+def bound_column(name: str, columns: Iterable[str], *, option_name: str) -> str | None:
+    """The column a SQL binder would resolve ``name`` to, or None when there is none.
+
+    Stricter than :func:`find_column` where the name goes into generated SQL:
+    DuckDB binds ``"HEIGHT"`` to the first of ``height`` and ``HEIGHT``, so an
+    exact hit does not make the request unambiguous. Two columns that fold
+    together are refused (naming both), instead of reading the wrong one with no
+    warning (#1109).
+
+    Raises:
+        InvalidParameterError: more than one column folds to ``name``
+    """
+    found = [col for col in (str(c) for c in columns) if same_column(col, name)]
+    if len(found) > 1:
+        raise InvalidParameterError(
+            option_name,
+            f"Ambiguous column name: {name} matches {', '.join(sorted(found))}; "
+            "DuckDB cannot tell them apart. Rename one of the columns.",
+        )
+    return found[0] if found else None
+
+
+def has_column(columns: Iterable[str], name: str) -> bool:
+    """Whether ``name`` resolves to a column, as DuckDB would resolve it."""
+    return bool(matching_columns(name, columns))
+
+
+def same_column(left: str, right: str) -> bool:
+    """Whether two spellings name one column to DuckDB's binder."""
+    return fold(left) == fold(right)
+
+
+def unique_name(base: str, taken: Iterable[str], *, start: int = 1) -> str:
+    """``base``, or ``base_<n>`` for the first ``n >= start`` that ``taken`` does not hold.
+
+    A computed column aliased ``AS base`` next to ``SELECT *`` does not fail
+    when the source already has that name: DuckDB silently renames one of the
+    two (``base_1``), and everything that goes on to say ``base`` then binds to
+    the *other* column. That is how a computed bbox came to be written under a
+    name its ``covering`` did not point at (#1079), and how the geometry built
+    from a CSV's WKT column came to be the source's own VARCHAR column of that
+    name (#1176). Picking the free name up front makes the alias and every later
+    reference one variable, agreeing by construction.
+
+    The comparison is by :func:`fold` because DuckDB binds identifiers that way:
+    a source column ``BBOX`` takes the name ``bbox`` just as surely, even though
+    Parquet itself would keep the two apart. ``taken`` is not changed; a caller
+    suffixing several names in turn adds each result to it.
+
+    Args:
+        base: The name the computed column would like
+        taken: The names it is emitted beside
+        start: The first suffix tried, ``1`` for ``bbox_1``. Output column names
+            are bytes, so a caller whose numbering began at ``2`` keeps passing 2.
+    """
+    held = {fold(name) for name in taken}
+    candidate, number = base, start
+    while fold(candidate) in held:
+        candidate = f"{base}_{number}"
+        number += 1
+    return candidate
+
+
+def exclude_columns(
+    schema_cols: list[str],
+    requested: list[str] | None,
+    *,
+    protect: str | None = None,
+    option_name: str = "--exclude-cols",
+) -> list[str]:
+    """The columns of ``schema_cols`` left after dropping ``requested``, in schema order.
+
+    The one guard behind every ``--exclude-cols`` that drops columns from a
+    table already in hand (``extract``'s Arrow path, ArcGIS, Carto). Names are
+    resolved against the schema (:func:`resolve_columns_against_schema`: exact
+    first, then a unique folded match; one that is absent or ambiguous raises),
+    so a case slip is an error rather than a filter that silently matches
+    nothing (#991).
+
+    ``protect`` names a column the output requires (the geometry, on a path that
+    writes GeoParquet): asking to drop it warns once and keeps it.
+
+    Raises:
+        InvalidParameterError: a name is blank, absent or ambiguous, or the
+            exclusion would leave no column at all -- a request that is a typo,
+            which used to write a 0-column file without a word (#1176)
+    """
+    drop = resolve_columns_against_schema(requested, schema_cols, option_name)
+    if drop and protect is not None and protect in drop:
+        drop = [col for col in drop if col != protect]
+        warn(f"Cannot exclude '{protect}' column - it is required for GeoParquet output")
+    if not drop:
+        return list(schema_cols)
+    keep = [col for col in schema_cols if col not in set(drop)]
+    if not keep:
+        raise InvalidParameterError(
+            option_name,
+            f"excluding {', '.join(sorted(set(drop)))} would leave no columns at all "
+            f"(available: {', '.join(schema_cols)})",
+        )
+    return keep
 
 
 def reject_blank_column_entries(
@@ -166,16 +337,7 @@ def resolve_columns_against_schema(
 
     reject_blank_column_entries(requested_cols, option_name)
 
-    exact = set(all_columns)
-    folded: dict[str, list[str]] = {}
-    for col in all_columns:
-        folded.setdefault(col.lower(), []).append(col)
-
-    def _candidates(col: str) -> list[str]:
-        """Every schema spelling this name could mean: the exact one, else the folds."""
-        return [col] if col in exact else folded.get(col.lower(), [])
-
-    matches = [(col, _candidates(col)) for col in requested_cols]
+    matches = [(col, matching_columns(col, all_columns)) for col in requested_cols]
 
     ambiguous = {col: cands for col, cands in matches if len(cands) > 1}
     if ambiguous:
