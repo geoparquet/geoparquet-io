@@ -138,7 +138,7 @@ def _add_metrics_streaming(
     if should_stream_output(output_path):
         verbose = False
 
-    def make_query(source: str, con, source_crs: str | None = None) -> str:
+    def make_query(source: str, con, source_crs: str | None, edges, metadata) -> str:
         col_names = query_schema(con, f"SELECT * FROM {source}").names
 
         geom_col = None
@@ -165,6 +165,7 @@ def _add_metrics_streaming(
         output_path,
         make_query,
         verbose=verbose,
+        input_aware=True,
         extra_kv_metadata=extra_kv,
         **write.funnel_kwargs(),
     )
