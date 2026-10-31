@@ -15,10 +15,11 @@ from geoparquet_io.core.bbox_parse import crosses_antimeridian_sql
 from geoparquet_io.core.bbox_structure import get_bbox_advice
 from geoparquet_io.core.column_selection import find_column, has_column
 from geoparquet_io.core.crs_utils import (
-    crs_string_from_table,
-    is_geographic_crs,
+    crs_of,
+    is_geographic,
     source_crs_string,
     transform_geom_sql,
+    transform_source_crs,
 )
 from geoparquet_io.core.duckdb_metadata import get_usable_column_names
 from geoparquet_io.core.duckdb_utils import (
@@ -40,7 +41,7 @@ from geoparquet_io.core.file_utils import (
     scratch_path,
     unlink_released_file,
 )
-from geoparquet_io.core.geo_metadata import sanitized_carried_geo, sanitized_carried_geo_of_file
+from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
     create_geometry_view,
     primary_geometry_column,
@@ -116,10 +117,10 @@ def preflight_index(spec, command, *, directory=False):
         require_community_extension(spec.extension, feature=f"gpio {command} {spec.name}")
 
 
-def validate_index_crs(spec, geo_meta, geom_col, source_crs, description, verbose=False):
+def validate_index_crs(spec, source, geom_col, source_crs, description, verbose=False):
     """Apply the spec's CRS requirement only when no transform is available."""
     if spec.crs_validator is not None and source_crs is None:
-        spec.crs_validator(geo_meta, geom_col, verbose, source_description=description)
+        spec.crs_validator(source, geom_col, verbose, source_description=description)
 
 
 def _keys_from_bbox(spec, use_centroid, source_crs, edges) -> bool:
@@ -163,7 +164,7 @@ def _bbox_midpoint_lon(qbox: str, source_crs) -> str:
     so a projected one keeps the plain midpoint.
     """
     plain = f"({qbox}.xmin + {qbox}.xmax) / 2.0"
-    if not is_geographic_crs(source_crs):
+    if not is_geographic(source_crs):
         return plain
     shifted = f"(({qbox}.xmin + {qbox}.xmax + 360.0) / 2.0)"
     wrapped = f"CASE WHEN {shifted} > 180.0 THEN {shifted} - 360.0 ELSE {shifted} END"
@@ -232,10 +233,8 @@ def add_index_table(spec, table, column_name, resolution, geometry_column=None, 
     validate_index_resolution(spec, resolution, table=True)
     preflight_index(spec, "add")
     geom_col = resolve_geometry_column(table, geometry_column, where="the table")
-    source_crs = crs_string_from_table(table, geom_col)
-    validate_index_crs(
-        spec, sanitized_carried_geo(table.schema.metadata), geom_col, source_crs, "table"
-    )
+    source_crs = transform_source_crs(crs_of(table, geometry_column=geom_col))
+    validate_index_crs(spec, table, geom_col, source_crs, "table")
     edges = nonplanar_edges_of_arrow_table(table, geom_col)
     bbox_col = table_bbox_column(spec, table, source_crs, use_centroid, edges)
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
@@ -297,9 +296,7 @@ def add_index_column(
     input_path = resolve_file_url(input_parquet, verbose)
     source_crs = source_crs_string(input_parquet, verbose, geom_col)
 
-    validate_index_crs(
-        spec, sanitized_carried_geo_of_file(input_parquet), geom_col, source_crs, "file", verbose
-    )
+    validate_index_crs(spec, input_parquet, geom_col, source_crs, "file", verbose)
     edges, bbox_col, advice = file_key_inputs(
         spec, input_parquet, geom_col, source_crs, use_centroid, verbose
     )
@@ -355,7 +352,7 @@ def add_index_streaming(
     def make_query(source, con, source_crs, edges, metadata):
         con.execute("SET geometry_always_xy = true;")
         load_index(con, spec, verbose=verbose and not should_stream_output(output_path))
-        schema = query_schema(con, f"SELECT * FROM {source}").empty_table()
+        schema = query_schema(con, f"SELECT * FROM {source}")
         # The owner over the source's typed columns and the carried block, as
         # every streaming caller asks it (#1367).
         geom_col = require_geometry_column(
@@ -367,15 +364,17 @@ def add_index_streaming(
         )
         validate_index_crs(
             spec,
-            sanitized_carried_geo(metadata),
+            schema.with_metadata(metadata),
             geom_col,
             source_crs,
             "stream",
             verbose and not should_stream_output(output_path),
         )
-        schema = schema.replace_schema_metadata(metadata)
+        schema = schema.with_metadata(metadata)
         column_edges = edges.get(geom_col)
-        bbox_col = table_bbox_column(spec, schema, source_crs, use_centroid, column_edges)
+        bbox_col = table_bbox_column(
+            spec, schema.empty_table(), source_crs, use_centroid, column_edges
+        )
         return computed_column_query(
             source,
             column_name,

@@ -1869,7 +1869,7 @@ def merged_geometry_stats(parts, *, geographic: bool) -> GeometryStats:
     one and makes the result 6 values. Types are the sorted union.
 
     ``geographic`` has no default, so every fold says which CRS it is in
-    (``crs_utils.is_geographic_crs``): for projected coordinates the wrap
+    (``crs_utils.is_geographic``): for projected coordinates the wrap
     reading splits at +/-180, meaningless in metres, so X is plain min/max
     there (#886) -- xmin > xmax in a projected bbox is broken metadata.
 

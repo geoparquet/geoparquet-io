@@ -358,7 +358,8 @@ reason = "permanent: constant geometry filter, not a spatial join"
 "align_to_writer_vector" = ["geoparquet_io/core/parquet_writer.py"]
 
 # Renamed copies no glob sees, by the family they belong to (the #1367
-# Copies rows and the T0b audit). Each is also an exemption below.
+# Copies rows and the T0b audit). A name here is banned outside the owner even
+# once its last copy is deleted (the CRS ones are: T4c), so it cannot grow back.
 [G2.known_copies]
 "resolve_*version*" = ["_detect_version_from_table", "extract_version_from_metadata", "detect_version_for_output"]
 "*crs_equal*" = ["_crs_are_equivalent", "_crs_matches"]
@@ -371,33 +372,9 @@ reason = "permanent: constant geometry filter, not a spatial join"
 # it. count = how many defs of that name the file holds (default 1); the check
 # fails when the tree differs.
 [[G2.exemptions]]
-path = "geoparquet_io/core/add/quadkey.py"
-name = "_is_geographic_crs"
-reason = "is-geographic copy (approved change 8); T4c"
-[[G2.exemptions]]
 path = "geoparquet_io/core/carto.py"
 name = "_fetch_with_retry"
 reason = "permanent: caller-specific classify wrapper over run_with_retry, accepted by the T4a audit"
-[[G2.exemptions]]
-path = "geoparquet_io/core/extract.py"
-name = "is_geographic_crs"
-reason = "is-geographic copy (approved change 8); T4c"
-[[G2.exemptions]]
-path = "geoparquet_io/core/inspect_utils.py"
-name = "_crs_are_equivalent"
-reason = "CRS equality copy (approved change 9); T4c"
-[[G2.exemptions]]
-path = "geoparquet_io/core/validate.py"
-name = "_crs_equals"
-reason = "CRS equality copy (approved change 9); T4c"
-[[G2.exemptions]]
-path = "geoparquet_io/core/wfs.py"
-name = "_is_geographic_crs"
-reason = "is-geographic copy (approved change 8); T4c"
-[[G2.exemptions]]
-path = "geoparquet_io/core/wfs.py"
-name = "_crs_matches"
-reason = "CRS equality copy (approved change 9); T4c"
 
 # ---------------------------------------------------------------------------
 # G3: near-duplicate functions (scripts/check_duplicates.py; pylint R0801)
@@ -454,9 +431,6 @@ reason = "permanent: the same keyword-argument list forwarded to one callee (API
 [[G3.pylint]]
 block = "cli.commands.add:add_h3|cli.commands.sort:str_order_command"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.add.quadkey:_is_geographic_crs|core.extract:is_geographic_crs"
-reason = "is-geographic CRS copy (approved change 8); T4c"
 [[G3.pylint]]
 block = "core.crs_utils:<module>|core.duckdb_metadata:_get_pyarrow_logical_type"
 reason = "GeoArrow extension-name list copied; T3a's decoder owner"

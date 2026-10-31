@@ -15,7 +15,6 @@ Key features:
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import time
@@ -52,7 +51,14 @@ __all__ = [
 
 from geoparquet_io.core.arrow_types import _cast_table_to_schema, _compute_unified_schema
 from geoparquet_io.core.bbox_parse import BBox, parse_bbox, refuse_wrap
-from geoparquet_io.core.crs_utils import _projjson_from_authority
+from geoparquet_io.core.crs_utils import (
+    UnresolvableCRSError,
+    crs_equal,
+    epsg_code_of_label,
+    is_geographic,
+    load_crs,
+    projjson_for_label,
+)
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     fetch_one,
@@ -415,58 +421,27 @@ def negotiate_wfs_version(service_url: str, preferred_version: str = "auto"):
     )
 
 
-# The EPSG code a CRS string names: the ASCII digit run after "EPSG", behind a
-# ":", "/" or "#", that ends the string or one part of a compound URN. "EPSG"
-# must start the string or a URI part, so "not-a-crs-EPSG:4326" names no code.
-# That one rule reads every form WFS servers send:
-#   EPSG:4326                                      short form
-#   urn:ogc:def:crs:EPSG::4326                     OGC URN
-#   urn:x-ogc:def:crs:EPSG:6.11:31287              versioned URN (6.11 is the database version)
-#   urn:EPSG:geographicCRS:25830                   legacy URN
-#   urn:EPSG:def:crs:::25830                       OWSLib's rewrite of the legacy URN
-#   http://www.opengis.net/def/crs/EPSG/0/4326     OGC URL
-#   http://www.opengis.net/gml/srs/epsg.xml#31287  GML srs URL
-#   urn:ogc:def:crs,crs:EPSG::4326,crs:EPSG::5773  compound URN, the first
-#                                                  (horizontal) part is read
-_EPSG_CODE: Final = re.compile(r"(?:^|[:/,])EPSG[^,]*?[:/#]([0-9]{1,9})\s*(?:,|$)", re.IGNORECASE)
-# A server CRS string longer than this is not a CRS name. It is never parsed.
-_MAX_CRS_STRING: Final = 1024
-
-
-def _epsg_code(crs: str) -> str | None:
-    """The EPSG code a CRS string names, in any form listed above, or None."""
-    if len(crs) > _MAX_CRS_STRING:
-        return None
-    match = _EPSG_CODE.search(crs)
-    return match.group(1) if match else None
-
-
 def _normalize_crs(crs: str) -> str:
     """
     Normalize a CRS string to the short ``EPSG:<code>`` form.
 
-    Reads every URN and URL form listed at ``_EPSG_CODE``. CRS84 becomes
+    Reads every URN and URL form ``epsg_code_of_label`` reads. CRS84 becomes
     EPSG:4326 (the short form is read lon/lat in practice, like CRS84).
     Anything else is returned as-is.
 
     Returns:
         Normalized EPSG string (e.g., "EPSG:4326")
     """
-    code = _epsg_code(crs)
+    code = epsg_code_of_label(crs)
     if code:
         return f"EPSG:{code}"
 
     # CRS84 is equivalent to EPSG:4326 (axis order differs but we handle that)
-    if "CRS84" in crs.upper() or "CRS:84" in crs.upper():
+    if crs_equal(crs, "OGC:CRS84"):
         return "EPSG:4326"
 
     # Return as-is if no pattern matches
     return crs
-
-
-def _crs_matches(crs1: str, crs2: str) -> bool:
-    """Check if two CRS strings represent the same coordinate system."""
-    return _normalize_crs(crs1) == _normalize_crs(crs2)
 
 
 def _with_server_crs(table: pa.Table, server_crs: str | None) -> pa.Table:
@@ -564,15 +539,15 @@ def _validate_crs_coordinates(
 
         # Check for mismatch between requested and detected CRS
         mismatch = False
-        if normalized_crs == "EPSG:4326":
+        if crs_equal(normalized_crs, "EPSG:4326"):
             # WGS84 coordinates should be in valid range
             if abs(xmin) > 180 or abs(xmax) > 180 or abs(ymin) > 90 or abs(ymax) > 90:
                 mismatch = True
-        elif normalized_crs == "EPSG:3857":
+        elif crs_equal(normalized_crs, "EPSG:3857"):
             # Web Mercator should have large meter values, not small degree values
             if abs(xmin) < 1000 and abs(xmax) < 1000 and abs(ymin) < 1000 and abs(ymax) < 1000:
                 mismatch = True
-        elif normalized_crs == "EPSG:3035":
+        elif crs_equal(normalized_crs, "EPSG:3035"):
             # LAEA Europe should be in specific range
             if not (2_000_000 < xmin < 7_500_000 and 1_000_000 < ymin < 5_500_000):
                 mismatch = True
@@ -584,8 +559,8 @@ def _validate_crs_coordinates(
             # mismatch when the categories disagree; otherwise trust the
             # server-honored CRS rather than relabel it on a guess, which silently
             # corrupts downstream reprojection (issue #499).
-            requested_geographic = _is_geographic_crs(normalized_crs)
-            detected_geographic = detected == "EPSG:4326"
+            requested_geographic = is_geographic(normalized_crs)
+            detected_geographic = crs_equal(detected, "EPSG:4326")
             if requested_geographic != detected_geographic:
                 mismatch = True
 
@@ -632,7 +607,7 @@ def _reconcile_source_crs(
     one was given, raise under ``strict_crs``, else label the output with the
     real ``source_crs`` rather than silently mislabeling it (issue #499).
     """
-    if _crs_matches(source_crs, requested_crs):
+    if crs_equal(source_crs, requested_crs):
         return table, requested_crs
 
     lead = "Server declared" if origin == "server" else "Coordinates look like"
@@ -1090,14 +1065,14 @@ def _negotiate_crs(layer_info: WFSLayerInfo, output_crs: str | None = None) -> s
     # If user specified CRS, check if supported
     if output_crs:
         for crs in crs_list:
-            if _crs_matches(crs, output_crs):
+            if crs_equal(crs, output_crs):
                 debug(f"Using requested CRS: {crs}")
                 return crs
         warn(f"Requested CRS '{output_crs}' not in layer's CRS list. Using server default.")
 
     # Try EPSG:4326 variants
     for crs in crs_list:
-        if _crs_matches(crs, "EPSG:4326"):
+        if crs_equal(crs, "EPSG:4326"):
             debug(f"Using WGS84: {crs}")
             return crs
 
@@ -1147,69 +1122,11 @@ def _determine_bbox_strategy(
     return True
 
 
-def _is_geographic_crs(crs: str) -> bool:
-    """Check if CRS is a geographic coordinate system (lat/lon, not projected).
-
-    Uses pyproj for authoritative detection across all geographic CRSs rather
-    than a hardcoded list — an allowlist misclassifies valid geographic systems
-    outside it (e.g. EPSG:4171 RGF93) as projected, which would flag a false
-    coordinate mismatch and relabel correct data to EPSG:4326. Falls back to a
-    small known set only when pyproj cannot resolve the CRS.
-    """
-    normalized = _normalize_crs(crs)
-    try:
-        from pyproj import CRS as _PyprojCRS
-
-        return bool(_PyprojCRS.from_user_input(normalized).is_geographic)
-    except Exception:
-        # pyproj unavailable or CRS unrecognized — fall back to a known set.
-        geographic_codes = {
-            "EPSG:4326",  # WGS84
-            "EPSG:4269",  # NAD83
-            "EPSG:4267",  # NAD27
-            "EPSG:4258",  # ETRS89
-        }
-        return normalized in geographic_codes or "CRS84" in crs.upper()
-
-
 # The lon/lat CRS label every WFS server reads in x,y order (see _build_bbox_param).
 _CRS84_URN: Final = "urn:ogc:def:crs:OGC:1.3:CRS84"
 # The OGC URN form, which WFS 1.1.0 and 2.0.0 servers read in the authority's
 # own axis order.
 _EPSG_URN_PREFIX: Final = "urn:ogc:def:crs:EPSG::"
-
-
-# The WMS-style ``CRS:84`` label, which pyproj does not read. The URN and URL
-# forms of CRS84 it reads as they are.
-_CRS_84_LABEL: Final = re.compile(r"^\s*CRS:84\s*$", re.IGNORECASE)
-
-
-def _pyproj_input(crs: str, code: str | None) -> str:
-    """The string pyproj reads for a WFS CRS string with EPSG code ``code``."""
-    if code:
-        return f"EPSG:{code}"
-    if _CRS_84_LABEL.match(crs):
-        return "OGC:CRS84"
-    return crs
-
-
-@lru_cache(maxsize=64)
-def _request_pyproj_crs(crs: str):
-    """The pyproj CRS a WFS CRS string names, or None when it cannot be read.
-
-    The EPSG code comes first (every form ``_EPSG_CODE`` reads, which pyproj
-    does not all know), then ``CRS:84``, then pyproj on the string itself
-    (``ESRI:102100``, a CRS84 URN or URL).
-    """
-    if len(crs) > _MAX_CRS_STRING:
-        return None
-    from pyproj import CRS as _PyprojCRS
-
-    try:
-        return _PyprojCRS.from_user_input(_pyproj_input(crs, _epsg_code(crs)))
-    except Exception as e:
-        debug(f"pyproj could not read CRS {crs[:200]!r}: {e}")
-        return None
 
 
 @dataclass(frozen=True)
@@ -1252,18 +1169,13 @@ def _first_axis_is_north(axis_info) -> bool:
 @lru_cache(maxsize=64)
 def _bbox_axes(crs: str) -> _BboxAxes | None:
     """The axis facts of the request CRS, from pyproj, or None when unknown."""
-    target = _request_pyproj_crs(crs)
+    target = load_crs(crs)
     if target is None or not target.axis_info:
         return None
-    from pyproj import CRS as _PyprojCRS
-
     north_first = _first_axis_is_north(target.axis_info)
     return _BboxAxes(
         north_first=north_first,
-        wgs84_lon_lat=bool(
-            target.is_geographic
-            and target.equals(_PyprojCRS.from_user_input("OGC:CRS84"), ignore_axis_order=True)
-        ),
+        wgs84_lon_lat=is_geographic(target) and crs_equal(target, "OGC:CRS84"),
         x_axis=_x_axis_word(target.axis_info, north_first),
     )
 
@@ -1335,7 +1247,7 @@ def _build_bbox_param(
     if version == "1.0.0":
         return xy
     axes = _bbox_axes(crs)
-    code = _epsg_code(crs)
+    code = epsg_code_of_label(crs)
     swap = axis_order == "latlon" or (axis_order == "auto" and not (axes and axes.wgs84_lon_lat))
     if axes and axes.north_first and code and swap:
         return f"{ymin},{xmin},{ymax},{xmax},{_EPSG_URN_PREFIX}{code}"
@@ -1374,7 +1286,7 @@ def _bbox_looks_lon_lat_on_projected(
     known, a box that overlaps the extent in the CRS but not the extent in
     lon/lat is real small coordinates (EPSG:3857 metres near 0,0), not degrees.
     """
-    if _is_geographic_crs(crs) or _estimate_crs_from_bbox(bbox) != "EPSG:4326":
+    if is_geographic(crs) or not crs_equal(_estimate_crs_from_bbox(bbox), "EPSG:4326"):
         return False
     native = _layer_extent_in_crs(crs, layer_bbox)
     if native is None or layer_bbox is None:
@@ -1431,10 +1343,10 @@ def _warn_no_features_in_bbox(
 def _bbox_crs_line(crs: str) -> str:
     """One line that says --bbox is read in the layer CRS, with its name."""
     label = _normalize_crs(crs)
-    target = _request_pyproj_crs(crs)
+    target = load_crs(crs)
     if target is not None and target.name:
         label = f"{label} ({target.name})"
-    if _is_geographic_crs(crs):
+    if is_geographic(crs):
         order = "lon,lat"
     else:
         axes = _bbox_axes(crs)
@@ -1476,7 +1388,7 @@ def _layer_extent_in_crs(
     if (
         not layer_bbox
         or BBox(*layer_bbox).crosses_antimeridian(geographic=True)
-        or _is_geographic_crs(crs)
+        or is_geographic(crs)
     ):
         return None
     clipped = _clip_to_area_of_use_or_none(layer_bbox, crs)
@@ -3184,7 +3096,7 @@ def _get_tiling_bbox(
     if BBox(*layer_info.bbox).crosses_antimeridian(geographic=True):
         warn("The layer bbox crosses the antimeridian, so auto-tiling is off.")
         return None
-    if _crs_matches(crs, "EPSG:4326"):
+    if crs_equal(crs, "EPSG:4326"):
         return layer_info.bbox
     try:
         lon_lat = _clip_to_area_of_use(layer_info.bbox, _normalize_crs(crs))
@@ -3230,9 +3142,10 @@ def _clip_to_area_of_use(
     alone when the area of use crosses the antimeridian (EPSG:4269), where a
     plain min/max clip would be wrong.
     """
-    from pyproj import CRS as _PyprojCRS
-
-    area = _PyprojCRS.from_user_input(crs).area_of_use
+    target = load_crs(crs)
+    if target is None:
+        raise ValueError(f"pyproj cannot read the CRS {crs[:200]!r}")
+    area = target.area_of_use
     xmin, ymin, xmax, ymax = lon_lat
     if area is None:
         return lon_lat
@@ -3247,29 +3160,20 @@ def _clip_to_area_of_use(
 def _output_crs_projjson(crs: str) -> dict:
     """PROJJSON for the CRS the output is labelled with, or a refusal.
 
-    Tries the EPSG code the string names (any form ``_EPSG_CODE`` reads), then
-    pyproj on the string itself (``ESRI:102100``, a CRS84 URN). A bare id stub
-    is never written. When neither resolves, the extraction stops: writing no
+    ``crs_utils.projjson_for_label`` reads any form a server sends (the EPSG
+    code first, then ``ESRI:102100``, a CRS84 URN) and never writes a bare id
+    stub. When it cannot resolve the label, the extraction stops: writing no
     ``crs`` key would label the coordinates OGC:CRS84 (#1046).
     """
-    code = _epsg_code(crs)
-    cached = _projjson_from_authority("EPSG", code) if code else None
-    if cached is not None:
-        projjson = json.loads(cached)
-        if isinstance(projjson, dict):
-            return projjson
-    if len(crs) <= _MAX_CRS_STRING:
-        try:
-            from pyproj import CRS as _PyprojCRS
-
-            return _PyprojCRS.from_user_input(_pyproj_input(crs, None)).to_json_dict()
-        except Exception as e:
-            debug(f"pyproj could not read CRS {crs[:200]!r}: {e}")
-    raise WFSError(
-        f"gpio could not resolve the layer CRS {crs[:200]!r}, so it cannot label the "
-        "coordinates. Writing the file without a CRS would mark them as lon/lat "
-        "(OGC:CRS84). Ask the service for an EPSG CRS it offers with --output-crs."
-    )
+    try:
+        return projjson_for_label(crs)
+    except UnresolvableCRSError as e:
+        debug(f"pyproj could not read CRS {crs[:200]!r}: {e}")
+        raise WFSError(
+            f"gpio could not resolve the layer CRS {crs[:200]!r}, so it cannot label the "
+            "coordinates. Writing the file without a CRS would mark them as lon/lat "
+            "(OGC:CRS84). Ask the service for an EPSG CRS it offers with --output-crs."
+        ) from e
 
 
 def wfs_to_table(
@@ -3519,7 +3423,7 @@ def wfs_to_table(
         # server actually returned. When those differ, align the bbox to the
         # geometries' CRS so the filter doesn't drop valid rows (issue #499).
         filter_bbox: tuple[float, float, float, float] = bbox
-        if server_crs and not _crs_matches(server_crs, crs):
+        if server_crs and not crs_equal(server_crs, crs):
             filter_bbox = _reproject_bbox_for_local_filter(bbox, crs, server_crs)
         filter_sql = _build_local_bbox_filter(filter_bbox, BUILT_GEOMETRY_COLUMN)
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)

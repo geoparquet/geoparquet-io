@@ -4,7 +4,7 @@
 with no ``geo`` block and a ``srid:0`` type is therefore a shape gpio itself now
 writes, and reading it back must say "unknown", the same as ``crs: null``:
 
-* ``extract_crs_from_parquet`` warns, it does not stay quiet.
+* ``crs_of`` warns, it does not stay quiet.
 * ``convert reproject`` refuses it without ``--src-crs`` or ``--assume-crs84``,
   and honors ``--src-crs`` for every unknown input (null, empty, ``srid:0``).
 * ``add h3``, ``add quadkey`` and ``convert geojson`` warn.
@@ -30,7 +30,7 @@ import geoparquet_io as gpio
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.crs_utils import (
     PARQUET_UNKNOWN_CRS,
-    extract_crs_from_parquet,
+    crs_of,
     reset_null_crs_warnings,
     source_crs_is_unknown,
     table_crs_is_unknown,
@@ -135,7 +135,7 @@ def test_srid0_type_is_unknown(source, tmp_path):
 def test_extract_crs_warns_on_srid0_type(source, tmp_path, caplog):
     path = UNKNOWN_INPUTS[source](tmp_path)
     with caplog.at_level(logging.WARNING):
-        assert extract_crs_from_parquet(path) is None
+        assert crs_of(path) is None
     messages = _unknown_warnings(caplog.records)
     assert messages, caplog.text
     assert PARQUET_UNKNOWN_CRS in messages[0]
@@ -145,7 +145,7 @@ def test_extract_crs_warns_on_srid0_type(source, tmp_path, caplog):
 def test_a_named_srid_type_is_not_unknown(tmp_path, caplog):
     path = _write_duckdb(tmp_path / "pgo_5070.parquet", "NONE", srid="EPSG:5070")
     with caplog.at_level(logging.WARNING):
-        assert extract_crs_from_parquet(path) is not None
+        assert crs_of(path) is not None
     assert source_crs_is_unknown(path) is False
     assert not _unknown_warnings(caplog.records)
 
@@ -184,7 +184,7 @@ def test_reproject_honors_src_crs_for_unknown(source, tmp_path):
     assert result.exit_code == 0, result.output
     x, y = _first_xy(out)
     assert -180 <= x <= 180 and -90 <= y <= 90, (x, y)
-    assert extract_crs_from_parquet(str(out)) is None
+    assert crs_of(str(out)) is None
     assert source_crs_is_unknown(str(out)) is False
 
 

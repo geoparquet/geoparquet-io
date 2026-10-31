@@ -23,9 +23,9 @@ import pyarrow as pa
 from geoparquet_io.core.arrow_geo_metadata import table_geometry_info
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.crs_utils import (
-    crs_string_from_geo_meta,
+    crs_of,
     entry_crs_is_unknown,
-    source_crs_string,
+    transform_source_crs,
 )
 from geoparquet_io.core.duckdb_utils import (
     _wrap_query_with_wkb_conversion,
@@ -311,33 +311,6 @@ def write_output(
         return None
 
 
-def _extract_crs_from_metadata(
-    metadata: dict | None, geometry_column: str | None = None
-) -> dict | str | None:
-    """Extract CRS from GeoParquet metadata.
-
-    A write-path reader: the answer becomes the geoarrow extension type's CRS on
-    the Arrow stream this process writes to stdout, so a malformed carried block
-    goes through the shared shape check (#947). It used to be indexed raw, and
-    the ``except`` beside it caught only the JSON errors -- ``columns: null``
-    escaped as ``argument of type 'NoneType' is not iterable``, and a list- or
-    string-shaped ``columns`` as a ``TypeError`` from the line after it.
-
-    ``geometry_column`` names the column the CRS is about to be attached to.
-    The caller knows it, and reading some other column's CRS onto it is the
-    silent half of #887: a block whose ``primary_column`` sanitizing had to
-    drop would otherwise fall back to the literal ``"geometry"`` and stream a
-    ``geom`` column as if its CRS were absent.
-    """
-    geo_meta = sanitized_carried_geo(metadata)
-    columns = geo_meta.get("columns")
-    if not isinstance(columns, dict):
-        return None
-    col = geometry_column or primary_geometry_column(None, geo=geo_meta)
-    col_meta = columns.get(col)
-    return col_meta.get("crs") if isinstance(col_meta, dict) else None
-
-
 def _write_stream_output(
     con: duckdb.DuckDBPyConnection,
     query: str,
@@ -370,7 +343,7 @@ def _write_stream_output(
     for name in geometry_columns:
         if name is None or name not in table.column_names:
             continue
-        crs = _extract_crs_from_metadata(original_metadata, name)
+        crs = crs_of(table.replace_schema_metadata(original_metadata), geometry_column=name)
         if entry_crs_is_unknown(columns.get(name)):
             crs = "srid:0"
         entry = columns.get(name)
@@ -440,22 +413,6 @@ def _write_file_output(
     )
 
 
-def _detect_transform_source_crs(
-    input_path: str, metadata: dict | None, is_stream: bool
-) -> str | None:
-    """Detect the input's CRS as an ``ST_Transform`` source, or ``None``.
-
-    Streamed input carries its CRS in the Arrow ``geo`` schema metadata; file
-    input is read directly. ``None`` means lon/lat or CRS-less input (no
-    reprojection needed). A CRS that cannot be resolved raises
-    :class:`crs_utils.UnresolvableCRSError` rather than being keyed as lon/lat
-    (#1258), so this runs only for a query fn that transforms.
-    """
-    if is_stream:
-        return crs_string_from_geo_meta(sanitized_carried_geo(metadata), None)
-    return source_crs_string(input_path)
-
-
 def _build_transform_query(
     transform_query_fn, source, con, input_path, metadata, is_stream, *, input_aware=False
 ):
@@ -471,7 +428,12 @@ def _build_transform_query(
     """
     if not input_aware:
         return transform_query_fn(source, con)
-    source_crs = _detect_transform_source_crs(input_path, metadata, is_stream)
+    input_source = (
+        query_schema(con, f"SELECT * FROM {source}").with_metadata(metadata)
+        if is_stream
+        else input_path
+    )
+    source_crs = transform_source_crs(crs_of(input_source))
     edges = input_nonplanar_edges(input_path, metadata, is_stream)
     return transform_query_fn(source, con, source_crs, edges, metadata)
 

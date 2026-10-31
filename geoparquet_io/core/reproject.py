@@ -13,13 +13,12 @@ from geoparquet_io.core.bbox_structure import bbox_shaped_struct_columns, check_
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
+    crs_of,
     entry_crs_is_unknown,
-    extract_crs_from_parquet,
-    extract_crs_from_table,
     geoparquet_crs_is_null,
-    is_geographic_crs,
+    is_projected,
     lonlat_source_name,
-    parse_crs_string_to_projjson,
+    projjson_for_label,
     table_crs_is_unknown,
     transform_source_crs,
     transform_source_label,
@@ -109,20 +108,9 @@ def _detect_crs_from_table(table: pa.Table, geom_col: str) -> str:
     Returns:
         ``"AUTH:CODE"``, canonical PROJJSON, or ``"EPSG:4326"`` when absent
     """
-    crs = extract_crs_from_table(table, geom_col)
+    crs = crs_of(table, geometry_column=geom_col)
     # A missing CRS is WGS84 per the GeoParquet spec.
     return transform_source_crs(crs) or lonlat_source_name(crs)
-
-
-def _target_crs_is_projected(target_crs: str, con=None) -> bool:
-    """True when reprojecting into ``target_crs`` lands in projected space.
-
-    Resolves the CRS string to PROJJSON first: ``is_geographic_crs`` reads the
-    CRS *type* from PROJJSON, while its string fallback only recognizes the
-    WGS84 spellings and would call a geographic datum like EPSG:4269 projected.
-    An unresolvable CRS falls back to that string heuristic.
-    """
-    return not is_geographic_crs(parse_crs_string_to_projjson(target_crs, con) or target_crs)
 
 
 def _warn_edges_dropped(col_name: str, edges: str, target_crs: str) -> None:
@@ -148,7 +136,7 @@ def _edges_columns_to_drop(
     CRS, so its great-circle declaration still holds. Warns when ``geom_col``
     loses a declaration the input actually made.
     """
-    if not _target_crs_is_projected(target_crs, con):
+    if not is_projected(target_crs):
         return set()
     if input_file:
         edges = collect_nonplanar_edges(input_file).get(geom_col)
@@ -172,8 +160,9 @@ def _retarget_carried_geo(source, metadata: dict, geom_col: str, target_crs: str
     if not geo_meta:
         debug("Could not update CRS in geo metadata, leaving as-is")
         return metadata
+    target_projjson = projjson_for_label(target_crs)
     edges = edges_of((geo_meta.get("columns") or {}).get(geom_col))
-    planar = is_geodesic(edges) and _target_crs_is_projected(target_crs, con)
+    planar = is_geodesic(edges) and is_projected(target_crs)
     if planar:
         _warn_edges_dropped(geom_col, edges, target_crs)
     block = compose_geo_block(
@@ -184,7 +173,7 @@ def _retarget_carried_geo(source, metadata: dict, geom_col: str, target_crs: str
                 None, original_metadata=metadata, preserve_input=True
             ),
             covering=None,
-            crs=parse_crs_string_to_projjson(target_crs, con),
+            crs=target_projjson,
             column_edges={geom_col: PLANAR} if planar else None,
         ),
     )
@@ -288,13 +277,13 @@ def _detect_source_crs(input_path: str, verbose: bool, geom_col: str | None = No
 
     Args:
         input_path: RAW (unescaped) path/URL to the input file —
-            ``extract_crs_from_parquet`` escapes its own argument (#718)
+            ``crs_of`` escapes its own argument (#718)
         verbose: Whether to print verbose output
 
     Returns:
         CRS string like "EPSG:4326" or PROJJSON string for ST_Transform
     """
-    crs_info = extract_crs_from_parquet(input_path, verbose=verbose, geometry_column=geom_col)
+    crs_info = crs_of(input_path, verbose=verbose, geometry_column=geom_col)
 
     resolved = transform_source_crs(crs_info)
     if resolved:
@@ -619,7 +608,7 @@ def reproject_impl(
             write = replace(write, compression=codec.name, compression_level=codec.level)
 
             # Get target CRS as PROJJSON for metadata
-            target_crs_projjson = parse_crs_string_to_projjson(target_crs, con)
+            target_crs_projjson = projjson_for_label(target_crs)
 
             # Read original metadata to preserve non-geo KV metadata (e.g., vecorel)
             original_metadata, _ = get_parquet_metadata(input_parquet, verbose)

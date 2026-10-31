@@ -29,19 +29,18 @@ from pyproj import CRS as PyprojCRS
 
 from geoparquet_io.core.crs_utils import (
     CRS_ABSENT,
+    crs_equal,
     crs_from_column_meta,
     get_crs_display_name,
     is_default_crs,
-    is_geographic_crs,
+    is_geographic,
 )
-from geoparquet_io.core.inspect_utils import _crs_are_equivalent
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_crs_valid,
     _check_epoch_valid,
     _check_v2_crs_consistency,
     _check_v2_crs_in_parquet_type,
-    _crs_equals,
     _is_crs84_equivalent,
     _is_ogc_crs84,
     validate_geoparquet,
@@ -71,9 +70,7 @@ CRS84_PROJJSON = PyprojCRS.from_user_input("OGC:CRS84").to_json_dict()
 EPSG4326_PROJJSON = PyprojCRS.from_epsg(4326).to_json_dict()
 EPSG3857_PROJJSON = PyprojCRS.from_epsg(3857).to_json_dict()
 
-BINARY_HELPERS = pytest.mark.parametrize(
-    "compare", [_crs_equals, _crs_are_equivalent], ids=["crs_equals", "crs_are_equivalent"]
-)
+BINARY_HELPERS = pytest.mark.parametrize("compare", [crs_equal], ids=["crs_equal"])
 
 
 def _idless(crs: dict) -> dict:
@@ -131,7 +128,7 @@ class TestCrsFromColumnMeta:
 
     def test_absent_crs_is_geographic(self):
         """Absent means OGC:CRS84, which is lon/lat."""
-        assert is_geographic_crs(CRS_ABSENT) is True
+        assert is_geographic(CRS_ABSENT) is True
 
     def test_absent_crs_is_the_default_crs(self):
         assert is_default_crs(CRS_ABSENT) is True
@@ -233,7 +230,7 @@ class TestBinaryHelpersAbsentVsNull:
 
     @BINARY_HELPERS
     def test_two_unknown_crs_declarations_agree(self, compare):
-        """Both helpers must give the same answer; ``_crs_equals`` already said True.
+        """Both helpers must give the same answer; ``crs_equal`` already said True.
 
         The call sites compare two declarations *of the same file* (geo metadata
         vs Parquet logical type), so "both say unknown" is a consistent file.

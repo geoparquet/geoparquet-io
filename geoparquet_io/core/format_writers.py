@@ -22,7 +22,7 @@ from geoparquet_io.core.bbox_parse import parse_bbox
 from geoparquet_io.core.column_selection import unique_name
 from geoparquet_io.core.crs_utils import (
     _extract_crs_identifier,
-    extract_crs_from_parquet,
+    crs_of,
     is_default_crs,
 )
 from geoparquet_io.core.duckdb_utils import (
@@ -182,7 +182,7 @@ def _get_srs_parameter(input_path: str, verbose: bool = False) -> str | None:
         SRS string for GDAL (always returns a value for valid input)
     """
 
-    crs = extract_crs_from_parquet(input_path, verbose)
+    crs = crs_of(input_path, verbose)
 
     # For default CRS (None, EPSG:4326, OGC:CRS84), explicitly return EPSG:4326
     # GDAL formats don't have implicit defaults - CRS must be explicit

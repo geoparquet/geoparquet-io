@@ -22,7 +22,7 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.crs_utils import (
     NULL_CRS_HINT,
     is_default_crs,
-    is_geographic_crs,
+    is_geographic,
     is_unknown_type_crs,
 )
 from geoparquet_io.core.duckdb_metadata import (
@@ -115,7 +115,7 @@ def _geo_col_meta_from_stats(pf, col_index: int, logical: str, parquet_file: str
     # still names the real CRS (#785). Mirror the logical type, which is the
     # authority at 2.0; it also decides how the extents fold.
     crs_present, crs = _crs_from_geo_logical(logical, parquet_file)
-    folded = row_group_geometry_stats(chunks, geographic=is_geographic_crs(crs))
+    folded = row_group_geometry_stats(chunks, geographic=is_geographic(crs))
     col_meta: dict = {"encoding": "WKB", "geometry_types": folded.geometry_types}
     if folded.bbox is not None:
         col_meta["bbox"] = folded.bbox

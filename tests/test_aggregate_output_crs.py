@@ -10,7 +10,7 @@ from pyproj import CRS
 from shapely import box, from_wkb, to_wkb, total_bounds
 
 import geoparquet_io as gpio
-from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+from geoparquet_io.core.crs_utils import crs_of
 from geoparquet_io.core.geo_metadata import read_raw_geo
 
 
@@ -26,7 +26,7 @@ def _assert_geographic_output(result, path, version="1.1"):
     assert result.crs is not None
     assert CRS.from_user_input(result.crs).equals(CRS("OGC:CRS84"))
     result.write(str(path), geoparquet_version=version)
-    assert extract_crs_from_parquet(str(path)) is None
+    assert crs_of(str(path)) is None
     geo = read_raw_geo(pq.read_schema(path).metadata).value
     if version == "parquet-geo-only":
         assert geo is None

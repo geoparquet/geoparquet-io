@@ -29,11 +29,8 @@ from geoparquet_io.core.crs_utils import (
     CRS_ABSENT,
     UNKNOWN_BY_EMPTY,
     UNKNOWN_BY_NULL,
-    crs_string_from_geo_meta,
-    crs_string_from_table,
+    crs_of,
     entry_crs_is_unknown,
-    extract_crs_from_parquet,
-    extract_crs_from_table,
     is_default_crs,
     is_empty_crs_value,
     transform_source_crs,
@@ -153,28 +150,40 @@ class TestGeoArrowFieldEmptyCrs:
         return pa.Table.from_arrays([_projected_points()], schema=pa.schema([field]))
 
     @pytest.mark.parametrize("value", [0, [], {}, ""], ids=repr)
-    def test_extract_crs_from_table_warns(self, value, caplog):
+    def test_crs_of_a_table_warns(self, value, caplog):
         with caplog.at_level(logging.WARNING):
-            assert extract_crs_from_table(self._table(value), "geometry") is None
+            assert crs_of(self._table(value), geometry_column="geometry") is None
         assert len(_empty_crs_warnings(caplog.records)) == 1
 
     @pytest.mark.parametrize("value", [0, []], ids=repr)
-    def test_crs_string_from_table_warns(self, value, caplog):
+    def test_table_transform_source_warns(self, value, caplog):
         with caplog.at_level(logging.WARNING):
-            assert crs_string_from_table(self._table(value), "geometry") is None
+            assert (
+                transform_source_crs(crs_of(self._table(value), geometry_column="geometry")) is None
+            )
         assert len(_empty_crs_warnings(caplog.records)) == 1
 
 
 class TestGeoBlockEmptyCrs:
-    def test_extract_crs_from_parquet_warns_for_empty_object(self, tmp_path, caplog):
+    def test_crs_of_warns_for_empty_object(self, tmp_path, caplog):
         path = _write_projected(tmp_path / "obj.parquet", {})
         with caplog.at_level(logging.WARNING):
-            assert extract_crs_from_parquet(path) is None
+            assert crs_of(path) is None
         assert _empty_crs_warnings(caplog.records)
 
-    def test_crs_string_from_geo_meta_warns(self, caplog):
+    def test_table_transform_source_warns_for_empty_object(self, caplog):
         with caplog.at_level(logging.WARNING):
-            assert crs_string_from_geo_meta(_geo_block({}), "geometry") is None
+            assert (
+                transform_source_crs(
+                    crs_of(
+                        pa.table({"geometry": pa.array([], pa.binary())}).replace_schema_metadata(
+                            {b"geo": json.dumps(_geo_block({})).encode()}
+                        ),
+                        geometry_column="geometry",
+                    )
+                )
+                is None
+            )
         assert _empty_crs_warnings(caplog.records)
 
 
@@ -221,27 +230,25 @@ class TestQuadkeyStdin:
     """stdin ``add quadkey`` with an empty ``crs`` in the streamed geo metadata."""
 
     @pytest.mark.parametrize("value", ["", {}, [], 0], ids=repr)
-    def test_streamed_quadkey_empty_crs_warns(self, value, caplog):
-        from geoparquet_io.core.stream_io import _detect_transform_source_crs
-
-        metadata = {b"geo": json.dumps(_geo_block(value)).encode()}
-        with caplog.at_level(logging.WARNING):
-            assert _detect_transform_source_crs("-", metadata, True) is None
-        assert _empty_crs_warnings(caplog.records)
-
-    @pytest.mark.parametrize("value", ["", {}, [], 0], ids=repr)
     def test_validate_warns_on_raw_metadata(self, value, caplog):
-        from geoparquet_io.core.add.quadkey import _validate_crs_from_geo_metadata
+        from geoparquet_io.core.add.quadkey import _validate_crs
 
         with caplog.at_level(logging.WARNING):
-            _validate_crs_from_geo_metadata(_geo_block(value), "geometry", False, "stream")
+            _validate_crs(
+                pa.table({"geometry": pa.array([], pa.binary())}).replace_schema_metadata(
+                    {b"geo": json.dumps(_geo_block(value)).encode()}
+                ),
+                "geometry",
+                False,
+                "stream",
+            )
         assert _empty_crs_warnings(caplog.records)
 
-    def test_is_geographic_crs_is_unknown_for_empty(self):
-        from geoparquet_io.core.add.quadkey import _is_geographic_crs
+    def test_an_empty_crs_is_not_projected(self):
+        from geoparquet_io.core.crs_utils import is_projected
 
-        assert _is_geographic_crs({}) is None
-        assert _is_geographic_crs("") is None
+        assert is_projected({}) is False
+        assert is_projected("") is False
 
 
 def test_native_type_empty_crs_stays_unset(tmp_path):
@@ -256,12 +263,12 @@ def test_native_type_empty_crs_stays_unset(tmp_path):
         "(FORMAT PARQUET, GEOPARQUET_VERSION 'NONE')"
     )
     con.close()
-    assert extract_crs_from_parquet(str(out)) is None
+    assert crs_of(str(out)) is None
 
 
 def test_a_real_projected_crs_is_still_used(tmp_path):
     src = _write_projected(tmp_path / "utm.parquet", CRS.from_epsg(32633).to_json_dict())
-    assert transform_source_crs(extract_crs_from_parquet(src)) == "EPSG:32633"
+    assert transform_source_crs(crs_of(src)) == "EPSG:32633"
 
 
 # --------------------------------------------------------------------------- #

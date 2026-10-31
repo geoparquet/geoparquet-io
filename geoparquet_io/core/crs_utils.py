@@ -5,6 +5,7 @@ This module provides functions for extracting, parsing, and validating
 CRS information from GeoParquet files and other spatial formats.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -23,13 +24,15 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.geo_metadata import (
     read_raw_geo,
-    sanitize_geo_metadata,
     sanitized_carried_geo,
     sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.geoarrow_compat import srid_crs_as_text
 from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.logging_config import debug, warn
+
+#: GeoParquet default for an absent CRS key.
+DEFAULT_CRS_LABEL = "OGC:CRS84"
 
 
 class _CrsAbsent:
@@ -214,11 +217,7 @@ def _is_crs84_equivalent(crs) -> bool:
     Pass :data:`CRS_ABSENT` for a column with no ``crs`` key (the default, so
     True) and ``None`` for an explicit ``"crs": null`` (unknown CRS, so False).
 
-    This is *the* "is this value the default CRS?" predicate. Both comparison
-    helpers (``validate._crs_equals`` and ``inspect_utils._crs_are_equivalent``)
-    resolve their absent branch through it, so it lives here rather than in
-    either of them — they used to call different predicates and disagreed on
-    id-less CRS84 PROJJSON and on the ``"SRID:4326"`` spelling.
+    This predicate supplies ``crs_equal`` with its default-CRS answer.
     """
     crs = _parse_crs_value(crs)
     if _is_ogc_crs84(crs):
@@ -758,74 +757,78 @@ def _wrap_query_with_crs(
     """
 
 
-#: Default target CRS for lon/lat operations (grid keying, admin joins). The
-#: GeoParquet default; lon/lat axis order is guaranteed by the session-level
-#: ``geometry_always_xy = true`` that ``get_duckdb_connection`` sets.
-WGS84_TRANSFORM_TARGET = "OGC:CRS84"
+def _crs_of_table(table, geometry_column: str | None = None, *, quiet: bool = False):
+    """Return the CRS of ``geometry_column`` in a pyarrow table or schema.
 
-
-def crs_transform_sql_expr(
-    geom_sql: str,
-    source_crs,
-    target_crs: str = WGS84_TRANSFORM_TARGET,
-) -> str:
-    """Return a SQL expression yielding ``geom_sql`` in ``target_crs``.
-
-    The older name of :func:`transform_geom_sql`, kept for the grid keying and
-    metrics call sites. Both resolve the source through
-    :func:`transform_source_crs`, so an absent or lon/lat source is left alone,
-    a CRS with or without an authority code is transformed, and one that cannot
-    be resolved raises :class:`UnresolvableCRSError` instead of being read as
-    lon/lat (#1258).
-
-    Args:
-        geom_sql: A SQL geometry expression (e.g. a quoted column name or
-            ``ST_Centroid("geometry")``).
-        source_crs: The source CRS as a PROJJSON dict or string, an
-            ``AUTH:CODE`` or WKT string, or ``None``.
-        target_crs: The target CRS string (default OGC:CRS84).
-    """
-    return transform_geom_sql(geom_sql, source_crs, target_crs)
-
-
-def extract_crs_from_table(table, geometry_column: str | None = None):
-    """Return the CRS of ``geometry_column`` in a pyarrow table.
-
-    Reads the ``geo`` block first, then the geometry field's GeoArrow CRS, the
-    only carrier a table read from a native-geo-only Parquet file has (#1262).
-    Returns the CRS value (PROJJSON dict or string) when present and
-    non-default, else ``None``. An explicit ``crs: null`` in the block is an
-    answer (unknown), so the field is not consulted for it. ``geometry_column``
-    defaults to the block's declared primary column, then to the table's own
-    geometry column names. Used by the table-centric (Python API) operations to
-    detect a projected input before grid keying or reprojecting.
+    Implements :func:`crs_of` for Arrow tables and schemas, returning a stated default
+    unchanged. The geometry column is selected by ``primary_geometry_column``.
 
     A write-path reader: the CRS it returns decides how the output is keyed, so
     a malformed carried block goes through :func:`sanitize_geo_metadata` and is
     treated the way an absent one is (#887).
     """
 
-    geo_meta = sanitized_carried_geo(table.schema.metadata)
+    schema = getattr(table, "schema", table)
+    geo_meta = sanitized_carried_geo(schema.metadata)
     columns = geo_meta.get("columns", {})
     col = geometry_column or primary_geometry_column(table, geo=geo_meta)
     if col is None:
         return None
     col_meta = columns.get(col, {})
     if entry_crs_is_unknown(col_meta):
+        if crs_is_explicitly_null(col_meta) and not quiet and b"geo" in (schema.metadata or {}):
+            digest = hashlib.sha1(schema.metadata[b"geo"], usedforsecurity=False)
+            warn_null_crs_once(f"table:{digest.hexdigest()}")
         return None
-    crs = col_meta.get("crs") or _crs_from_geoarrow_field(table, col)
+    crs = col_meta["crs"] if "crs" in col_meta else _crs_from_geoarrow_field(table, col)
+    if not quiet and _table_unknown_by_field_only(table, geo_meta, col):
+        warn_srid0_crs_once(f"table:{col}:{id(table)}")
     if is_empty_crs_value(crs):
         warn_empty_crs_once(crs)
         return None
-    if crs and not is_default_crs(crs):
-        return crs
-    return None
+    # What the table states, a stated default included; None for unstated and
+    # for an explicit null. ``Table.crs`` shows it as it is; a writer reads the
+    # default through ``is_default_crs``.
+    return crs or None
+
+
+def crs_of(source, verbose=False, geometry_column=None, *, quiet=False):
+    """The CRS of ``source``'s primary geometry column. The one reader.
+
+    ``source`` is a Parquet path or URL (a **RAW** one: every helper under it
+    escapes its own argument, #718) or a pyarrow table or schema. ``geometry_column``
+    names the column when the caller knows it; otherwise
+    :func:`primary_geometry_column` does (the ``geo`` block's ``primary_column``,
+    else the standard names, else the first native geometry column), never
+    whichever column happens to name a CRS first (#1232, #1248).
+
+    For a file: the ``geo`` block first, then the Parquet geometry logical type,
+    both read so that two different answers are warned about once
+    (``quiet=True`` suppresses the warnings, for a caller that only asks how to
+    read coordinates). For a table: the ``geo`` block, then the geometry field's
+    GeoArrow CRS, the only carrier a table read from a native-geo-only file has
+    (#1262). The answer is the PROJJSON dict or string the source names, ``None``
+    for an explicit null and for a source that names none. A file's default CRS
+    is ``None`` (a writer omits the key); a table's stated default comes back as
+    stated, which is what ``Table.crs`` shows. One reading order, block first,
+    for both. A present block key wins, including null; only an absent key
+    falls through to extension metadata, then None.
+    """
+    if isinstance(source, os.PathLike):
+        source = os.fspath(source)
+    import pyarrow as pa
+
+    if isinstance(source, pa.Schema):
+        return _crs_of_table(source, geometry_column, quiet=quiet)
+    if hasattr(source, "schema") and hasattr(source, "column_names"):
+        return _crs_of_table(source, geometry_column, quiet=quiet)
+    return _crs_of_file(source, verbose, geometry_column, quiet=quiet)
 
 
 def _crs_from_geo_block(
     parquet_file, geometry_column: str | None = None, *, quiet: bool = False
-) -> tuple[dict | str | None, str | None, bool]:
-    """``(crs, column, stated)`` as the file's ``geo`` block states them.
+) -> tuple[dict | str | None, str | None, bool, Any]:
+    """``(crs, column, stated, raw)`` as the file's ``geo`` block states them.
 
     The column is ``geometry_column`` when the block describes it, else the
     block's primary. The CRS is ``None`` for a missing block, an undescribed
@@ -836,6 +839,9 @@ def _crs_from_geo_block(
     against it, not whichever geometry column happens to come first in the
     schema. ``stated`` is True when the block's entry has a ``crs`` key at all,
     so the caller knows whether a ``srid:0`` type is the only word on it.
+    ``raw`` is that key's value as written, so a caller can tell an explicit
+    default (EPSG:4326, which ``crs`` flattens to ``None``) from a block that
+    says nothing or says null (#1014).
 
     A write-path reader, so a malformed carried block goes through the
     sanitized carried decoder rather than being indexed as-is (#887).
@@ -844,19 +850,19 @@ def _crs_from_geo_block(
     """
     geo_meta = sanitized_carried_geo_of_file(parquet_file)
     if not geo_meta:
-        return None, None, False
+        return None, None, False, None
     columns = geo_meta.get("columns", {})
     if geometry_column is not None and geometry_column in columns:
         col = geometry_column
     else:
         col = primary_geometry_column(parquet_file, geo=geo_meta)
     if col not in columns:
-        return None, col, False
+        return None, col, False, None
     if crs_is_explicitly_null(columns[col]) and not quiet:
         warn_null_crs_once(str(parquet_file))
     crs = columns[col].get("crs")
     stated = "crs" in columns[col]
-    return (crs if crs and not is_default_crs(crs) else None), col, stated
+    return (crs if crs and not is_default_crs(crs) else None), col, stated, crs
 
 
 def _block_omits_requested_column(
@@ -979,6 +985,11 @@ def unknown_crs_reason(parquet_file, geometry_column: str | None = None) -> str 
     # The raw entry is asked too: an empty crs reads as null once sanitized.
     kv = get_kv_metadata(str(parquet_file))
     raw_geo = read_raw_geo(kv).value
+    # An explicit unknown already answers this predicate. Inspect it before
+    # sanitizing so a read-only check does not emit a write-path warning.
+    raw_entry = _raw_column_entry(raw_geo, geometry_column)
+    if entry_crs_is_unknown(raw_entry):
+        return _unknown_reason_of_entry(raw_entry)
     geo_meta = sanitized_carried_geo(kv, source=str(parquet_file))
     columns = geo_meta.get("columns") or {}
     col = geometry_column if geometry_column in columns else None
@@ -1031,6 +1042,15 @@ def field_type_crs_is_unknown(field) -> bool:
     return isinstance(parsed, dict) and is_unknown_type_crs(srid_crs_as_text(parsed).get("crs"))
 
 
+def _block_names_the_default(raw) -> bool:
+    """True when a ``geo`` entry's ``crs`` explicitly names OGC:CRS84 / EPSG:4326.
+
+    Not a null, not an empty value, not a key that is absent: those say
+    "unknown" or nothing, and the Parquet type may speak for them.
+    """
+    return raw is not None and not is_empty_crs_value(raw) and is_default_crs(raw)
+
+
 def _crs_sources_disagree(geo_block_crs, native_crs) -> bool:
     """True only when both sources name a CRS and the two are demonstrably different.
 
@@ -1041,10 +1061,8 @@ def _crs_sources_disagree(geo_block_crs, native_crs) -> bool:
     of the same CRS (different pyproj versions spell the same datum out
     differently), which is not something to tell a user their file is broken over.
 
-    Not ``validate._crs_equals``: that resolves the CRS84-vs-absent and
-    explicit-null cases, which the callers here have already filtered out, and
-    reaching for it would pull the 2800-line validator onto a read path that runs
-    for every rewrite.
+    ``crs_equal`` also resolves absent and explicit-null cases; this warning
+    compares only the two stated authority identifiers.
     """
     left = crs_authority_code(geo_block_crs)
     right = crs_authority_code(native_crs)
@@ -1071,7 +1089,7 @@ def reset_crs_disagreement_warnings() -> None:
     _emit_crs_disagreement_warning.cache_clear()
 
 
-def extract_crs_from_parquet(parquet_file, verbose=False, geometry_column=None, *, quiet=False):
+def _crs_of_file(parquet_file, verbose=False, geometry_column=None, *, quiet=False):
     """
     The CRS (as PROJJSON dict) of a Parquet file's primary geometry column.
 
@@ -1088,41 +1106,21 @@ def extract_crs_from_parquet(parquet_file, verbose=False, geometry_column=None, 
     SQL-escapes its own argument, so a pre-escaped path is escaped twice and
     the existence check then fails on a file that is plainly there (#718).
 
-    Checks in order:
-    1. GeoParquet metadata (columns.<geom_col>.crs)
-    2. Parquet native geo type (from schema logical_type)
-
-    **Both are read, not just the first that answers**, so that a file naming two
-    *different* CRSs is reported rather than resolved in silence. This is where
-    the preference order lives -- :func:`parquet_writer.resolve_input_crs` and
-    every other caller receives one answer and is structurally unable to see that
-    there were two -- so it is where the warning has to be.
-
-    Since #993 that preference decides what a rewrite *writes*: the winner lands
-    in the output's ``geo`` block and, via ``ST_SetCRS``, in its Parquet logical
-    type too. The input contradicted itself and ``gpio check spec`` said so; the
-    output agrees with itself and comes back clean, over coordinates that never
-    moved. Laundering a detectable inconsistency into a clean-looking assertion
-    is the one outcome worth a warning line, and #883's rule already says an
-    overridden metadata key gets named in one.
-
-    The second read costs a schema fetch on files that would previously have
-    stopped at the ``geo`` block -- pyarrow for a local file, the same
-    ``parquet_schema`` DuckDB already runs for a remote one. It is bounded by the
-    footer either way, and ``gpio check spec`` reads both halves of every file
-    regardless.
+    Implements :func:`crs_of` for Parquet files. Both carriers are read so a
+    disagreement can warn once; the default is represented by ``None`` on the
+    write path. The warning compares the requested column in both carriers.
 
     ``quiet=True`` resolves the same answer without the null, srid:0 and
     disagreement warnings, for a caller that only asks how to read coordinates
     (:func:`column_is_geographic`) and must not add lines to a command's output.
     """
-    geo_block_crs, block_col, block_stated = _crs_from_geo_block(
+    geo_block_crs, block_col, block_stated, block_raw = _crs_from_geo_block(
         parquet_file, geometry_column, quiet=quiet
     )
     if _block_omits_requested_column(parquet_file, block_col, geometry_column):
         # The block answered for its primary, not for the column asked about.
         # It says nothing about that column, so its native type is the answer.
-        geo_block_crs, block_col, block_stated = None, geometry_column, False
+        geo_block_crs, block_col, block_stated, block_raw = None, geometry_column, False, None
     # Compare like with like: the block's answer is about one column, so the
     # logical type it is held against has to be that column's. A valid file
     # with a second geometry column in another CRS ahead of the primary in
@@ -1145,6 +1143,20 @@ def extract_crs_from_parquet(parquet_file, verbose=False, geometry_column=None, 
         if verbose:
             debug(f"Found CRS in GeoParquet metadata: {_format_crs_display(geo_block_crs)}")
         return geo_block_crs
+
+    if native_crs is not None and _block_names_the_default(block_raw):
+        # The block says OGC:CRS84 / EPSG:4326 on purpose and the type says
+        # something else. The block wins, per the documented preference; the
+        # type's answer must not slip through as "the block had nothing to say"
+        # just because the default is written as an absent key (#1014).
+        if not quiet:
+            _emit_crs_disagreement_warning(
+                str(parquet_file), _format_crs_display(block_raw), _format_crs_display(native_crs)
+            )
+        return None
+
+    if block_stated:
+        return None
 
     if native_crs is not None:
         if verbose:
@@ -1240,7 +1252,13 @@ def _crs_from_read_type(input_file, con):
             continue
         value = parsed[1]
         if not value.startswith("{"):
-            return parse_crs_string_to_projjson(value)
+            try:
+                return projjson_for_label(value)
+            except UnresolvableCRSError:
+                # Runs inside the caller's handler: a raise would skip the
+                # FileGDB fallback. A label nothing defines is no CRS found, and
+                # the caller refuses a spatial file that has none.
+                return None
         try:
             return json.loads(value)
         except ValueError:
@@ -1275,7 +1293,7 @@ def detect_crs_from_spatial_file(input_file, con, verbose=False):
                     auth_name = crs_info.get("auth_name")
                     auth_code = crs_info.get("auth_code")
                     if auth_name and auth_code:
-                        crs = {"id": {"authority": auth_name, "code": int(auth_code)}}
+                        crs = projjson_for_label(f"{auth_name}:{auth_code}")
                         if verbose:
                             debug(f"Found CRS: {auth_name}:{auth_code}")
                         return crs
@@ -1334,47 +1352,160 @@ def get_crs_display_name(crs_info: dict | str | None) -> str:
     return "unknown"
 
 
-def is_geographic_crs(crs: dict | str | None) -> bool:
-    """Check if CRS is geographic (lat/lon) vs projected."""
-    # No crs key at all means the OGC:CRS84 default, which is geographic. An
-    # explicit null (unknown CRS) is answered the same way deliberately, for the
-    # reason ``validate._get_crs_bounds`` gives: callers use this to sanity-check
-    # coordinates, and lon/lat is the only guess worth making about an unknown
-    # CRS. The null itself is reported by validate's ``_check_crs_valid``.
-    if crs is CRS_ABSENT or crs is None:
+#: The EPSG code in every spelling a CRS label takes. Reads the short form
+#: (``EPSG:4326``), the OGC URN (``urn:ogc:def:crs:EPSG::4326``), OWSLib's rewrite
+#: of the legacy URN (``urn:EPSG:def:crs:::25830``), the OGC URL
+#: (``http://www.opengis.net/def/crs/EPSG/0/4326``), the GML srs URL
+#: (``http://www.opengis.net/gml/srs/epsg.xml#31287``) and the first, horizontal
+#: part of a compound URN (``urn:ogc:def:crs,crs:EPSG::4326,crs:EPSG::5773``).
+_EPSG_LABEL = re.compile(r"(?:^|[:/,])EPSG[^,]*?[:/#]([0-9]{1,9})\s*(?:,|$)", re.IGNORECASE)
+
+#: A label longer than this is not a CRS name. It is never parsed.
+_MAX_CRS_LABEL_CHARS = 1024
+
+#: The WMS-style ``CRS:84`` label, which pyproj does not read.
+_CRS_84_LABEL = re.compile(r"^\s*CRS:84\s*$", re.IGNORECASE)
+
+
+#: Codes EPSG does not define that name Web Mercator: Google's legacy 900913
+#: (older Carto accounts still carry it as a PostGIS SRID) and Esri's WKIDs
+#: 102100 and 102113. One table for every extractor that reads a numeric code
+#: off a service; a label is read as written (:func:`projjson_for_label`).
+_WEB_MERCATOR_ALIASES = {900913: 3857, 102100: 3857, 102113: 3785}
+
+
+def canonical_crs_code(code: int) -> int:
+    """The EPSG code a service's numeric CRS code stands for (Web Mercator aliases mapped)."""
+    return _WEB_MERCATOR_ALIASES.get(code, code)
+
+
+def _label_too_long(text: str) -> bool:
+    """A label longer than a CRS name that is not a WKT or JSON body: never parsed."""
+    return len(text) > _MAX_CRS_LABEL_CHARS and not any(mark in text for mark in "[{")
+
+
+def epsg_code_of_label(label: object) -> str | None:
+    """The EPSG code a CRS label names, in any spelling listed at ``_EPSG_LABEL``."""
+    if not isinstance(label, str) or len(label) > _MAX_CRS_LABEL_CHARS:
+        return None
+    match = _EPSG_LABEL.search(label)
+    return match.group(1) if match else None
+
+
+def _label_authority_pair(label: str) -> tuple[str, str] | None:
+    """The ``(authority, code)`` a text label names, aliases applied, else None.
+
+    The EPSG spellings first, then ``CRS:84``, then a bare ``<authority>:<code>``
+    (``ESRI:102001``, ``OGC:CRS84``). ``srid:`` and ``projjson:`` share that
+    shape and mean something else (a Parquet SRID, a footer key), so they are
+    not authorities.
+    """
+    code = epsg_code_of_label(label)
+    if code:
+        pair = ("EPSG", code)
+    elif _CRS_84_LABEL.match(label):
+        pair = ("OGC", "CRS84")
+    else:
+        text = label.strip()
+        if text.lower().startswith(("srid:", "projjson:")) or not AUTHORITY_CODE_CRS.match(text):
+            return None
+        authority, _, code = text.partition(":")
+        pair = (authority.upper(), code)
+    return pair
+
+
+@lru_cache(maxsize=256)
+def _load_crs_cached(kind: str, key: str):
+    """The pyproj CRS for a cached key, or None when pyproj cannot read it."""
+    from pyproj import CRS
+
+    try:
+        if kind == "json":
+            return CRS.from_json(key)
+        if kind == "authority":
+            return CRS.from_authority(*key.split(":", 1))
+        return CRS.from_user_input(key)
+    except Exception:  # pyproj raises CRSError, ValueError, TypeError
+        return None
+
+
+def load_crs(value: object):
+    """The pyproj CRS a CRS value names, or None when nothing can read it.
+
+    The one place a pyproj ``CRS`` is built from a gpio CRS value (PROJJSON
+    dict, ``AUTH:CODE`` or URN or WKT string, a bare ``{"id": ...}`` stub, a
+    pyproj CRS handed back). ``None`` and an omitted ``crs`` key name no CRS
+    here; :func:`is_geographic` is where those mean the default. Results are
+    cached on the value, since the stats folds ask once per row group.
+    """
+    if value is None or value is CRS_ABSENT:
+        return None
+    if hasattr(value, "to_json_dict") and hasattr(value, "is_geographic"):
+        return value  # already a pyproj CRS
+    if isinstance(value, dict):
+        try:
+            text = json.dumps(value, sort_keys=True)
+        except (TypeError, ValueError):
+            return None
+        if len(text) > MAX_PROJJSON_CHARS:
+            return None
+        loaded = _load_crs_cached("json", text)
+        if loaded is not None:
+            return loaded
+        identifier = _extract_crs_identifier(value)
+        if identifier:  # an id-only stub: the authority defines the CRS
+            return _load_crs_cached("authority", f"{identifier[0]}:{identifier[1]}")
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or len(text) > MAX_PROJJSON_CHARS or _label_too_long(text):
+            return None
+        pair = _label_authority_pair(text)
+        if pair is not None:
+            loaded = _load_crs_cached("authority", ":".join(pair))
+            if loaded is not None:
+                return loaded
+        return _load_crs_cached("user", text)
+    return None
+
+
+def authority_of(crs: object) -> tuple[str, str] | None:
+    """The ``(authority, code)`` PROJ matches a CRS to, or None.
+
+    For a CRS that arrives as a definition without an id (a WKT-only ArcGIS
+    spatial reference) and has to be asked for by code.
+    """
+    loaded = load_crs(crs)
+    return loaded.to_authority() if loaded is not None else None
+
+
+def is_geographic(crs: object) -> bool:
+    """Whether a CRS is geographic (lon/lat), by pyproj and nothing else.
+
+    The one answer. An omitted ``crs`` key (:data:`CRS_ABSENT`) is the OGC:CRS84
+    default and an explicit ``null`` is answered the same way on purpose, for the
+    reason ``validate._get_crs_bounds`` gives: callers use this to sanity-check
+    coordinates, and lon/lat is the only guess worth making about an unknown CRS
+    (the null itself is reported by validate's ``_check_crs_valid``). A projected
+    CRS is False; so is one nothing can read, and a caller that needs to tell
+    those apart asks :func:`is_projected` as well. A compound CRS is geographic
+    when its horizontal part is.
+    """
+    if crs is None or crs is CRS_ABSENT:
         return True
+    loaded = load_crs(crs)
+    return bool(loaded is not None and loaded.is_geographic)
 
-    if isinstance(crs, dict):
-        crs_type = crs.get("type", "").lower()
-        if crs_type == "geographiccrs":
-            return True
-        if crs_type == "projectedcrs":
-            return False
 
-        crs_id = crs.get("id", {})
-        if isinstance(crs_id, dict):
-            authority = crs_id.get("authority", "").upper()
-            code = crs_id.get("code")
-            if authority == "EPSG" and code == 4326:
-                return True
-            if authority == "OGC" and str(code).upper() == "CRS84":
-                return True
+def is_projected(crs: object) -> bool:
+    """Whether a CRS is *definitely* projected: pyproj reads it and it is.
 
-        name = crs.get("name", "").upper()
-        projected_indicators = ["UTM", "ZONE", "MERCATOR", "ALBERS", "LAMBERT", "STATE PLANE"]
-        if any(indicator in name for indicator in projected_indicators):
-            return False
-        if any(x in name for x in ["WGS 84", "WGS84", "CRS84", "4326"]):
-            return True
-
-    if isinstance(crs, str):
-        crs_upper = crs.upper()
-        projected_indicators = ["UTM", "ZONE", "MERCATOR", "ALBERS", "LAMBERT"]
-        if any(indicator in crs_upper for indicator in projected_indicators):
-            return False
-        return any(x in crs_upper for x in ["4326", "CRS84", "WGS84"])
-
-    return False
+    The other half of :func:`is_geographic` for a caller that must not act on a
+    CRS it cannot read (``extract --bbox`` warns, ``add quadkey`` refuses). ``None``
+    and an omitted key are the lon/lat default, so not projected.
+    """
+    loaded = load_crs(crs)
+    return bool(loaded is not None and loaded.is_projected)
 
 
 def column_is_geographic(parquet_file, geometry_column: str | None = None) -> bool:
@@ -1382,14 +1513,79 @@ def column_is_geographic(parquet_file, geometry_column: str | None = None) -> bo
 
     The question every stats fold asks before it reads xmin > xmax as an
     antimeridian wrap (:func:`merge_longitude_ranges`). The CRS is the one
-    :func:`extract_crs_from_parquet` resolves; one that cannot be read is
-    answered as no CRS is, geographic (:func:`is_geographic_crs`).
+    :func:`crs_of` resolves; one that cannot be read is answered as no CRS is,
+    geographic (:func:`is_geographic`).
     """
     try:
-        crs = extract_crs_from_parquet(parquet_file, geometry_column=geometry_column, quiet=True)
+        crs = crs_of(parquet_file, geometry_column=geometry_column, quiet=True)
     except Exception:
         return True
-    return is_geographic_crs(crs)
+    return is_geographic(crs)
+
+
+def _label_identity(crs: object) -> tuple[str, str] | None:
+    """``(AUTHORITY, CODE)`` upper-cased, for the equality rule, or None."""
+    if isinstance(crs, str):
+        pair = _label_authority_pair(crs)
+        if pair is not None:
+            return pair[0].upper(), pair[1].upper()
+    identifier = _extract_crs_identifier(crs)
+    if identifier is not None:
+        return str(identifier[0]).upper(), str(identifier[1]).upper()
+    return None
+
+
+def crs_equal(crs1: object, crs2: object) -> bool:
+    """Whether two CRS values name the same CRS. The one equality.
+
+    Pass :data:`CRS_ABSENT` for a column with no ``crs`` key and ``None`` for an
+    explicit ``"crs": null``; the spec gives them different meanings (default
+    OGC:CRS84 vs unknown CRS) and this resolves them accordingly. Extract them
+    with :func:`crs_from_column_meta`. Otherwise, in order:
+
+    * OGC:CRS84 and EPSG:4326 differ only in axis order and GeoParquet fixes the
+      stored order to (x, y), so they are one CRS in every spelling.
+    * Two values that each carry or spell an authority id are equal when the ids
+      are (a string, a URN, a URL and a PROJJSON with an ``id`` all compare).
+    * Structurally identical values are equal even when pyproj cannot read them
+      (opaque strings, PROJJSON the reader does not know).
+    * Two PROJJSON objects without a usable id are compared by pyproj, axis
+      order ignored; one pyproj cannot read is never equal to a different one,
+      so an unverifiable CRS cannot satisfy a consistency check. A free-form
+      string is only ever equal to itself or to a value naming the same
+      authority id.
+    """
+    if crs1 is CRS_ABSENT or crs2 is CRS_ABSENT:
+        if crs1 is CRS_ABSENT and crs2 is CRS_ABSENT:
+            return True
+        return _is_crs84_equivalent(crs2 if crs1 is CRS_ABSENT else crs1)
+    if crs1 is None or crs2 is None:
+        return crs1 is None and crs2 is None
+    crs1, crs2 = _as_comparable(crs1), _as_comparable(crs2)
+    id1, id2 = _label_identity(crs1), _label_identity(crs2)
+    if id1 is not None and id2 is not None:
+        if is_crs84_identifier(id1) and is_crs84_identifier(id2):
+            return True
+        return id1 == id2
+    if _is_crs84_equivalent(crs1) and _is_crs84_equivalent(crs2):
+        return True
+    if crs1 == crs2:
+        return True
+    if not (isinstance(crs1, dict) and isinstance(crs2, dict)):
+        # A free-form string never matches a different value: no reader can be
+        # relied on to interpret "WGS 84" or "4326", so equality fails closed.
+        return False
+    left, right = load_crs(crs1), load_crs(crs2)
+    if left is None or right is None:
+        return False
+    return bool(left.equals(right, ignore_axis_order=True))
+
+
+def _as_comparable(crs: object):
+    """A pyproj CRS handed in is compared as the PROJJSON it renders."""
+    if hasattr(crs, "to_json_dict") and hasattr(crs, "is_geographic"):
+        return crs.to_json_dict()
+    return crs
 
 
 def merge_longitude_ranges(ranges: list[tuple[float, float]]) -> tuple[float, float]:
@@ -1407,7 +1603,7 @@ def merge_longitude_ranges(ranges: list[tuple[float, float]]) -> tuple[float, fl
 
     The ranges must be **longitudes**: the split of a wrapping range happens at
     +/-180, so callers have to establish a geographic CRS first (see
-    :func:`is_geographic_crs`). For a projected CRS the spec gives a bbox as
+    :func:`is_geographic`). For a projected CRS the spec gives a bbox as
     minima then maxima with no wrap-around, and the caller takes plain min/max.
     """
     if not ranges:
@@ -1463,37 +1659,59 @@ def projjson_from_wkt(wkt: object) -> dict | None:
         return None
 
 
-def parse_crs_string_to_projjson(crs_string, con=None):
-    """Convert a CRS string (like "EPSG:5070") to full PROJJSON dict."""
-    identifier = _extract_crs_identifier(crs_string)
-    if not identifier:
-        return None
+def projjson_for_label(label: object) -> dict:
+    """The complete PROJJSON a CRS label names, or a refusal.
 
-    authority, code = identifier
+    The one resolver from a label to PROJJSON, for every extractor and every
+    ``--crs`` / ``--dst-crs`` flag. A label is an ``AUTH:CODE`` (``EPSG:5070``,
+    ``ESRI:102001``, ``OGC:CRS84``), an EPSG URN or URL, ``CRS:84``, or a
+    WKT/PROJJSON text pyproj reads. It fails closed: a label no authority defines
+    raises :class:`UnresolvableCRSError` naming the label, never an
+    ``{"id": ...}`` stub the output's ``crs`` would carry as if it were a
+    definition, and never ``None``, which a writer reads as OGC:CRS84.
+    """
+    if not isinstance(label, str) or not label.strip():
+        raise _unresolvable_label(label)
+    text = label.strip()
+    pair = _label_authority_pair(text)
+    if pair is not None:
+        cached = _projjson_from_authority(*pair)
+        if cached is not None:
+            found = json.loads(cached)
+            if isinstance(found, dict):
+                return found
+    if len(text) <= MAX_WKT_CHARS and not _label_too_long(text):
+        loaded = _load_crs_cached("user", text)
+        if loaded is not None:
+            return loaded.to_json_dict()
+    raise _unresolvable_label(label)
 
-    try:
-        from pyproj import CRS
 
-        crs = CRS.from_authority(authority, code)
-        return crs.to_json_dict()
-    except Exception:
-        return {"id": {"authority": authority, "code": code}}
+def _unresolvable_label(label: object) -> "UnresolvableCRSError":
+    return UnresolvableCRSError(
+        f"gpio could not resolve the CRS {_shown_crs(label)!r}: no authority defines it and "
+        "PROJ cannot read it as a definition. Use a CRS PROJ knows, such as 'EPSG:<code>'."
+    )
 
 
 #: Canonical lon/lat target CRS for grid keying and admin spatial joins.
 #: With ``SET geometry_always_xy = true`` this is interchangeable with EPSG:4326.
 DEFAULT_TARGET_CRS = "OGC:CRS84"
 
-#: The only shape an authority code bound for SQL may take.
+#: The one shape of a bare ``<authority>:<code>`` CRS, e.g. ``EPSG:32633`` or
+#: ``OGC:CRS84``: what the Parquet geospatial spec permits beside ``srid:``,
+#: ``projjson:`` and inline PROJJSON, and the only shape an authority code bound
+#: for SQL may take.
 #:
-#: The same strict quote-free ``<authority>:<code>`` shape the logical-type
-#: parser enforced before #870 (``_AUTHORITY_CODE_CRS`` in
-#: ``core/duckdb_metadata.py``). #866/#870 made the parser carry *arbitrary*
-#: free-form ``crs`` strings through so validation can fail closed on them, but
-#: a value headed for ``ST_Transform`` is headed for SQL. So only a code of this
-#: shape, or PROJJSON that pyproj wrote itself, ever leaves
-#: :func:`transform_source_crs`, and the sinks escape it once on top.
-_TRANSFORM_CRS_SHAPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.\-]*:[A-Za-z0-9_.\-]+$")
+#: Strict and quote-free. #866/#870 made the logical-type parser carry
+#: *arbitrary* free-form ``crs`` strings through so validation can fail closed on
+#: them, but a value headed for ``ST_Transform`` is headed for SQL. So only a
+#: code of this shape, or PROJJSON that pyproj wrote itself, ever leaves
+#: :func:`transform_source_crs`, and the sinks escape it once on top. Narrow on
+#: purpose: neither ``<null>`` nor an empty ``crs=`` (what DuckDB emits for a
+#: type that declares no CRS) can match. ``duckdb_metadata`` reads the logical
+#: type with this same pattern.
+AUTHORITY_CODE_CRS = re.compile(r"^[A-Za-z][A-Za-z0-9_.\-]*:[A-Za-z0-9_.\-]+$")
 
 #: The largest CRS definition handed to pyproj. Real PROJJSON is a few kilobytes.
 MAX_PROJJSON_CHARS = 262_144
@@ -1536,7 +1754,7 @@ def crs_authority_code(crs) -> str | None:
     For comparing two CRS declarations by their authority code (#1014), not
     for transforming. ``None`` means the CRS is absent, the default
     (OGC:CRS84 / EPSG:4326) or names no code of the strict
-    :data:`_TRANSFORM_CRS_SHAPE`. A transform reads its source through
+    :data:`AUTHORITY_CODE_CRS`. A transform reads its source through
     :func:`transform_source_crs`, which also handles a CRS with no code.
     """
     if not crs or is_default_crs(crs):
@@ -1546,7 +1764,7 @@ def crs_authority_code(crs) -> str | None:
         return None
     authority, code = identifier
     candidate = f"{authority}:{code}"
-    if not _TRANSFORM_CRS_SHAPE.match(candidate):
+    if not AUTHORITY_CODE_CRS.match(candidate):
         return None
     return candidate
 
@@ -1585,7 +1803,7 @@ def _resolvable_authority_code(crs: dict) -> str | None:
         return None
     authority, code = identifier
     candidate = f"{authority}:{code}"
-    if not _TRANSFORM_CRS_SHAPE.match(candidate):
+    if not AUTHORITY_CODE_CRS.match(candidate):
         _emit_ignored_crs_id_warning(_shown_crs_id(candidate), known_shape=False)
         return None
     if _projjson_from_authority(str(authority), str(code)) is not None:
@@ -1645,7 +1863,7 @@ def _transform_source_from_string(text: str) -> str | None:
     if identifier is not None:
         authority, code = identifier
         candidate = f"{authority}:{code}"
-        if _TRANSFORM_CRS_SHAPE.match(candidate):
+        if AUTHORITY_CODE_CRS.match(candidate):
             if _projjson_from_authority(str(authority), str(code)) is None:
                 raise _unresolvable(text, "PROJ does not know that authority code")
             return candidate
@@ -1698,7 +1916,7 @@ def _free_form_source(text: str) -> tuple[bool, str | None]:
     authority = crs.to_authority(min_confidence=100)
     if authority is not None:
         candidate = f"{authority[0]}:{authority[1]}"
-        if _TRANSFORM_CRS_SHAPE.match(candidate):
+        if AUTHORITY_CODE_CRS.match(candidate):
             return True, candidate
     return True, _transform_source_from_dict(crs.to_json_dict())
 
@@ -1718,7 +1936,7 @@ def transform_source_crs(crs) -> str | None:
       default (OGC:CRS84 / EPSG:4326 by id or spelling), or a body pyproj finds
       equal to OGC:CRS84 ignoring axis order.
     - ``"AUTH:CODE"`` when the id (a CompoundCRS's horizontal component's id
-      when it has none) matches :data:`_TRANSFORM_CRS_SHAPE` and PROJ knows it.
+      when it has none) matches :data:`AUTHORITY_CODE_CRS` and PROJ knows it.
     - pyproj's canonical PROJJSON when there is no usable id and the body
       parses. An id PROJ does not know is dropped with a warning.
 
@@ -1821,12 +2039,10 @@ def source_crs_string(
     """Detect ``parquet_file``'s primary CRS as an ``ST_Transform`` source.
 
     ``geometry_column`` is the column the caller is about to transform, when it
-    knows it (see :func:`extract_crs_from_parquet`). Returns what
+    knows it (see :func:`crs_of`). Returns what
     :func:`transform_source_crs` returns, ``None`` for lon/lat input.
     """
-    return transform_source_crs(
-        extract_crs_from_parquet(parquet_file, verbose, geometry_column=geometry_column)
-    )
+    return transform_source_crs(crs_of(parquet_file, verbose, geometry_column=geometry_column))
 
 
 def reproject_to_source_sql(geom_expr: str, source_crs, base_crs: str = DEFAULT_TARGET_CRS) -> str:
@@ -1844,32 +2060,6 @@ def reproject_to_source_sql(geom_expr: str, source_crs, base_crs: str = DEFAULT_
     if src is None:
         return geom_expr
     return f"ST_Transform({geom_expr}, {sql_literal(base_crs)}, {sql_literal(src)})"
-
-
-def crs_string_from_geo_meta(geo_meta: dict | None, geom_col: str) -> str | None:
-    """Return the ``ST_Transform`` source for a geometry column's CRS.
-
-    ``geo_meta`` is parsed GeoParquet ``geo`` metadata (as carried on a PyArrow
-    schema for the table-centric Python API). Resolved by
-    :func:`transform_source_crs`, so ``None`` means no transform is needed (the
-    CRS is absent, the default or explicitly null) and a CRS with no authority
-    code comes back as canonical PROJJSON rather than ``None`` (#1258).
-
-    A write-path reader: the string it returns is spliced into an
-    ``ST_Transform`` call, so the block is sanitized first (#887). Sanitizing
-    here rather than in the callers keeps a caller that hands over a raw block
-    safe; the callers in the package read it with ``sanitized_carried_geo``.
-    """
-
-    geo_meta = sanitize_geo_metadata(geo_meta)
-    if not geo_meta:
-        return None
-    columns = geo_meta.get("columns", {})
-    col_meta = columns.get(geom_col)
-    if col_meta is None:
-        col_meta = columns.get(primary_geometry_column(None, geo=geo_meta), {})
-    crs = col_meta.get("crs") if isinstance(col_meta, dict) else None
-    return transform_source_crs(crs)
 
 
 #: GeoArrow geometry extension names (registered by ``geoarrow.pyarrow``).
@@ -2024,7 +2214,7 @@ def _crs_from_geoarrow_field(table, geom_col: str):
     ``crs`` value (PROJJSON dict or string), or ``None``.
     """
     try:
-        field = table.schema.field(geom_col)
+        field = getattr(table, "schema", table).field(geom_col)
     except (KeyError, ValueError):
         return None
 
@@ -2032,6 +2222,15 @@ def _crs_from_geoarrow_field(table, geom_col: str):
     crs = _crs_from_extension_type(field.type)
     if crs is not None:
         return crs
+
+    # Any extension type that carries a ``crs`` attribute (a GeoArrow-compatible
+    # type from another library). An unreadable object falls through to the raw
+    # metadata rather than being returned as if it were a CRS (#816).
+    carried = getattr(field.type, "crs", None)
+    if carried is not None:
+        resolved = geoarrow_crs_to_projjson(carried)
+        if resolved is not None:
+            return resolved
 
     # Case 2: plain binary field — CRS is in the raw extension metadata.
     md = getattr(field, "metadata", None)
@@ -2049,25 +2248,6 @@ def _crs_from_geoarrow_field(table, geom_col: str):
     return _crs_from_extension_metadata(ext_dict)
 
 
-def crs_string_from_table(table, geom_col: str) -> str | None:
-    """Detect an Arrow table's geometry CRS as an ``ST_Transform`` source.
-
-    Checks both CRS carriers used by the table-centric Python API:
-    1. The schema-level GeoParquet ``geo`` metadata.
-    2. The geometry field's GeoArrow ``ARROW:extension:metadata`` (parquet-geo-only).
-
-    Returns what :func:`transform_source_crs` returns, ``None`` for lon/lat input.
-    """
-    geo_meta = sanitized_carried_geo(table.schema.metadata)
-    crs = crs_string_from_geo_meta(geo_meta, geom_col)
-    if crs:
-        return crs
-    source = transform_source_crs(_crs_from_geoarrow_field(table, geom_col))
-    if source is None and _table_unknown_by_field_only(table, geo_meta, geom_col):
-        warn_srid0_crs_once(f"table:{geom_col}:{id(table)}")
-    return source
-
-
 def _table_unknown_by_field_only(table, geo_meta: dict | None, geom_col: str) -> bool:
     """True when only the field's ``srid:0`` speaks for ``geom_col``, saying "unknown".
 
@@ -2078,6 +2258,5 @@ def _table_unknown_by_field_only(table, geo_meta: dict | None, geom_col: str) ->
     entry = columns.get(geom_col) if isinstance(columns, dict) else None
     if isinstance(entry, dict) and "crs" in entry:
         return False
-    return geom_col in table.schema.names and field_type_crs_is_unknown(
-        table.schema.field(geom_col)
-    )
+    schema = getattr(table, "schema", table)
+    return geom_col in schema.names and field_type_crs_is_unknown(schema.field(geom_col))

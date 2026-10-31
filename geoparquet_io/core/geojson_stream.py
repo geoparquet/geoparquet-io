@@ -43,8 +43,10 @@ if TYPE_CHECKING:
 
 from geoparquet_io.core.crs_utils import (
     crs_is_explicitly_null,
-    crs_string_from_table,
+    crs_of,
+    is_default_crs,
     source_crs_string,
+    transform_source_crs,
     transform_source_label,
     warn_null_crs_once,
 )
@@ -67,7 +69,11 @@ from geoparquet_io.core.file_utils import (
     has_glob_pattern,
     resolve_file_url,
 )
-from geoparquet_io.core.geo_metadata import sanitized_carried_geo
+from geoparquet_io.core.geo_metadata import (
+    bbox_xy,
+    sanitized_carried_geo,
+    sanitized_carried_geo_of_file,
+)
 from geoparquet_io.core.geometry_repair import repair_geometry_sql
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
@@ -214,22 +220,7 @@ def _needs_reprojection(source_crs: str | None) -> bool:
     Returns:
         True if data needs reprojection to WGS84
     """
-    if source_crs is None:
-        # No CRS info - assume WGS84
-        return False
-
-    # Normalize CRS string for comparison
-    crs_upper = source_crs.upper().replace(" ", "")
-
-    # Common WGS84 representations
-    wgs84_variants = {
-        "EPSG:4326",
-        "OGC:CRS84",
-        "CRS84",
-        "WGS84",
-    }
-
-    return crs_upper not in wgs84_variants
+    return source_crs is not None and not is_default_crs(source_crs)
 
 
 def _is_geometry_or_bbox(column: str, geometry_column: str) -> bool:
@@ -681,6 +672,65 @@ def _stream_feature_collection(
     return count
 
 
+#: A small allowance on the lon/lat range, for coordinates a float rounding put
+#: just past 180 or 90.
+_LONLAT_TOLERANCE = 1e-6
+
+
+def _extent_of(source, geometry_column: str):
+    """The declared block extent, else the bounds owner's measurement."""
+    from geoparquet_io.core.exceptions import GeometryError
+    from geoparquet_io.core.geo_metadata import bounds_of
+
+    geo = (
+        sanitized_carried_geo(source.schema.metadata)
+        if hasattr(source, "schema")
+        else sanitized_carried_geo_of_file(source)
+    )
+    declared = geo.get("columns", {}).get(geometry_column, {}).get("bbox")
+    if isinstance(declared, list) and len(declared) in (4, 6, 8):
+        try:
+            return bbox_xy(declared)
+        except (TypeError, ValueError):
+            pass
+    try:
+        return bounds_of(source, geometry_column)
+    except GeometryError:
+        return None
+
+
+def _refuse_extent_outside_lonlat(input_path: str, geometry_column: str, table=None) -> None:
+    """Refuse to write RFC 7946 GeoJSON from coordinates that are not lon/lat.
+
+    Reached only when the input is not reprojected: its CRS is absent, lon/lat or
+    unknown. An unknown CRS is the way projected coordinates get here (#1258), and
+    the output would be wrong by definition, so it stops (#1263). ``table`` is
+    the stream read from stdin; a file is read by path.
+    """
+    extent = (
+        _extent_of(table, geometry_column)
+        if table is not None
+        else _extent_of(input_path, geometry_column)
+    )
+    if extent is None:
+        return
+    xmin, ymin, xmax, ymax = extent
+    tolerance = _LONLAT_TOLERANCE
+    if (
+        xmin < -180 - tolerance
+        or xmax > 180 + tolerance
+        or ymin < -90 - tolerance
+        or ymax > 90 + tolerance
+    ):
+        raise GeoParquetError(
+            f"The extent of {input_path} (x {xmin:g} to {xmax:g}, y {ymin:g} to {ymax:g}) lies "
+            "outside the lon/lat range, so it cannot be written as RFC 7946 GeoJSON. If the "
+            "coordinates are projected, name their CRS first: "
+            "`gpio convert reproject <input> <output> --src-crs <CRS> --dst-crs EPSG:4326`. "
+            "To write the coordinates as they are, pass --keep-crs."
+        )
+
+
 @uses_aws_profile
 def convert_to_geojson_stream(
     input_path: str,
@@ -772,6 +822,8 @@ def convert_to_geojson_stream(
         geometry_column = resolve_geometry_column(input_path, con=con)
         require_planar_geojson_file(input_path, geometry_column)
         debug(f"Using geometry column: {geometry_column}")
+        if not keep_crs and not needs_reproject:
+            _refuse_extent_outside_lonlat(input_path, geometry_column)
 
         # Get property columns
         property_columns = _get_property_columns(con, source_ref, geometry_column)
@@ -903,10 +955,14 @@ def _convert_from_stream(
     _require_planar_geojson_edges(geometry_column, edges)
     _warn_on_explicit_null_crs(table, geometry_column)
     # --keep-crs writes the input coordinates, so the CRS is never resolved.
-    source_crs = None if keep_crs else crs_string_from_table(table, geometry_column)
+    source_crs = (
+        None if keep_crs else transform_source_crs(crs_of(table, geometry_column=geometry_column))
+    )
     needs_reproject = _needs_reprojection(source_crs)
     if needs_reproject:
         info(f"Reprojecting from {transform_source_label(source_crs)} to WGS84 (RFC 7946)")
+    elif not keep_crs:
+        _refuse_extent_outside_lonlat("the Arrow stream", geometry_column, table)
 
     # Get property columns
     property_columns = [

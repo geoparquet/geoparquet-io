@@ -22,8 +22,7 @@ from geoparquet_io.core.common import (
 )
 from geoparquet_io.core.constants import VECOREL_METRICS_SCHEMA, build_collection_metadata
 from geoparquet_io.core.crs_utils import (
-    crs_transform_sql_expr,
-    extract_crs_from_parquet,
+    crs_of,
     transform_geom_sql,
 )
 from geoparquet_io.core.duckdb_utils import describe_query, quote_identifier
@@ -192,10 +191,10 @@ def _add_metrics_file_based(
         primary_geometry_column(input_parquet, verbose=verbose), input_parquet
     )
 
-    # RAW path: extract_crs_from_parquet escapes its own argument (#718).
-    source_crs = extract_crs_from_parquet(input_parquet, verbose, geometry_column=geom_col)
+    # RAW path: crs_of escapes its own argument (#718).
+    source_crs = crs_of(input_parquet, verbose, geometry_column=geom_col)
     area_expr, perimeter_expr = _metric_exprs(
-        crs_transform_sql_expr(quote_identifier(geom_col), source_crs)
+        transform_geom_sql(quote_identifier(geom_col), source_crs)
     )
 
     if dry_run:

@@ -48,11 +48,10 @@ from geoparquet_io.core.arrow_geo_metadata import (
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
     _wrap_query_with_crs,
-    extract_crs_from_parquet,
+    crs_of,
     get_crs_display_name,
-    is_geographic_crs,
+    is_geographic,
     is_unknown_type_crs,
-    parse_crs_string_to_projjson,
 )
 from geoparquet_io.core.derive_geo_from_file import (
     derive_secondary_geometry_info,
@@ -359,10 +358,8 @@ def _geography_candidates(output_file: str, edges_by_col: dict[str, str]) -> dic
     for name, edges in candidates.items():
         if name not in planar:
             continue
-        crs = extract_crs_from_parquet(output_file, geometry_column=name)
-        if isinstance(crs, str):
-            crs = parse_crs_string_to_projjson(crs) or crs
-        if is_geographic_crs(crs):
+        crs = crs_of(output_file, geometry_column=name)
+        if is_geographic(crs):
             geography[name] = edges
         else:
             warn(
@@ -398,7 +395,7 @@ def _block_bbox_targets(
             continue
         if not is_nonplanar(edges):
             continue
-        if is_geographic_crs(col_meta.get("crs")):
+        if is_geographic(col_meta.get("crs")):
             targets[name] = edges
     return targets
 
@@ -424,7 +421,7 @@ def _geodesic_bounds(
         if isinstance(columns.get(name), dict)
     }
     ellipsoids = {
-        name: ellipsoid_for_crs(extract_crs_from_parquet(output_file, geometry_column=name))
+        name: ellipsoid_for_crs(crs_of(output_file, geometry_column=name))
         for name, edges in targets.items()
         if is_ellipsoidal(edges)
     }
@@ -2084,10 +2081,8 @@ def write_geoparquet_table(
     # Extract original metadata for preservation
     original_metadata = table.schema.metadata
 
-    # Extract CRS from original metadata if available
-    col_meta = (geo_meta.get("columns") or {}).get(geometry_column)
     if input_crs is None:
-        input_crs = col_meta.get("crs") if isinstance(col_meta, dict) else None
+        input_crs = crs_of(table, geometry_column=geometry_column, quiet=True)
 
     # Validated and resolved once, by the owner; every write below takes it.
     codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)

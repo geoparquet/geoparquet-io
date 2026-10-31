@@ -22,6 +22,7 @@ from geoparquet_io.core.check_verdict import validation_verdict
 from geoparquet_io.core.column_selection import fold
 from geoparquet_io.core.crs_utils import (
     CRS_ABSENT,
+    DEFAULT_CRS_LABEL,
     NULL_CRS_HINT,
     PARQUET_UNKNOWN_CRS,
     PROJJSON_CRS_TYPES,
@@ -29,11 +30,14 @@ from geoparquet_io.core.crs_utils import (
     _is_ogc_crs84,
     _parse_crs_value,
     column_is_geographic,
+    crs_equal,
     crs_from_column_meta,
-    entry_crs_is_unknown,
+    crs_of,
     get_crs_display_name,
-    is_geographic_crs,
+    is_geographic,
     is_unknown_type_crs,
+    load_crs,
+    source_crs_is_unknown,
 )
 from geoparquet_io.core.duckdb_metadata import (
     count_kv_key,
@@ -608,7 +612,7 @@ def _check_edges_spherical_on_projected_crs(
     # An absent or null CRS means "OGC:CRS84 default" / "unknown"; neither is a
     # projected CRS, and _check_crs_valid is what reports a null.
     crs = resolve_crs_reference(parquet_file, col_meta.get("crs"))
-    if is_geographic_crs(crs):
+    if is_geographic(crs):
         return None
 
     return ValidationCheck(
@@ -684,23 +688,10 @@ def _check_bbox_valid(col_meta: dict, col_name: str, geo_version: str = "1.0.0")
 
 def _resolve_datum_type(crs: Any) -> str | None:
     """Resolve a CRS value's datum type name via pyproj; None when unresolvable."""
-    try:
-        from pyproj import CRS as PyprojCRS
-
-        if isinstance(crs, dict):
-            try:
-                pyproj_crs = PyprojCRS.from_json_dict(crs)
-            except Exception:
-                # Partial PROJJSON: resolve via its authority:code id instead
-                crs_id = crs.get("id") or {}
-                pyproj_crs = PyprojCRS.from_user_input(
-                    f"{crs_id.get('authority')}:{crs_id.get('code')}"
-                )
-        else:
-            pyproj_crs = PyprojCRS.from_user_input("OGC:CRS84")
-        return pyproj_crs.datum.type_name if pyproj_crs.datum else ""
-    except Exception:
+    loaded = load_crs(crs)
+    if loaded is None:
         return None
+    return loaded.datum.type_name if loaded.datum else ""
 
 
 def _check_epoch_valid(col_meta: dict, col_name: str) -> ValidationCheck:
@@ -731,7 +722,7 @@ def _check_epoch_valid(col_meta: dict, col_name: str) -> ValidationCheck:
             f'column "{col_name}" declares epoch {epoch} but CRS is null; cannot verify datum type',
         )
     if crs is CRS_ABSENT:
-        crs = None  # _resolve_datum_type reads a non-dict as the OGC:CRS84 default
+        crs = DEFAULT_CRS_LABEL
 
     datum_type = _resolve_datum_type(crs)
     if datum_type is None:
@@ -1704,7 +1695,7 @@ def _interpret_bbox_result(result: tuple | None, geom_col: str) -> ValidationChe
 
 def _wrap_refusal(crs, subject: str = "this bbox is") -> str:
     """Why an xmin > xmax extent is not the wrap (BBox.crosses_antimeridian said no)."""
-    if not is_geographic_crs(crs):
+    if not is_geographic(crs):
         return (
             f"applies only to geographic CRS, so {subject} invalid for the declared projected CRS"
         )
@@ -1747,7 +1738,7 @@ def _check_bbox_contains_data(
             ),
             category="data_validation",
         )
-    wrapped = BBox(xy[0], xy[1], xy[2], xy[3]).crosses_antimeridian(is_geographic_crs(crs))
+    wrapped = BBox(xy[0], xy[1], xy[2], xy[3]).crosses_antimeridian(is_geographic(crs))
     if xy[0] > xy[2] and not wrapped:
         return ValidationCheck(
             name=f"bbox_contains_data_{geom_col}",
@@ -2797,7 +2788,9 @@ def _is_bbox_valid(geo_bbox: dict) -> bool:
 
 
 def _check_native_geo_statistics(
-    parquet_file: str, geom_col: str, schema_info: list | None = None
+    parquet_file: str,
+    geom_col: str,
+    schema_info: list | None = None,
 ) -> ValidationCheck:
     """Check that geometry column has native Parquet GeospatialStatistics (geo_bbox).
 
@@ -2807,6 +2800,10 @@ def _check_native_geo_statistics(
     the edges, with the drop kept as the fallback when nothing can bound a
     column; ``geography_stats_bbox_*`` and ``geography_stats_cover_edges_*``
     validate the box when there is one.
+
+    ``crs`` is the column's declared CRS, the one the sibling
+    ``native_geo_stats_contains_data`` check is given, so a validation run
+    decides "geographic" once per column; without it the file's CRS is read.
     """
     from geoparquet_io.core.duckdb_metadata import (
         aggregate_native_geo_stats,
@@ -2900,7 +2897,7 @@ def _projected_inverted_row_group(chunks: list[dict], crs) -> int | None:
     The one arm for a projected wrap: the fold of a projected extent is plain
     min/max, so it is never inverted unless a chunk is.
     """
-    if is_geographic_crs(crs):
+    if is_geographic(crs):
         return None
     for chunk in chunks:
         xmin, xmax = chunk.get("xmin"), chunk.get("xmax")
@@ -2968,7 +2965,7 @@ def _check_native_geo_stats_contains_data(
         # The sample below spans the whole file, so it is judged against the
         # whole file's statistics -- the union over every row group, not the
         # bounds of whichever one happens to come first.
-        stats = aggregate_native_geo_stats(chunks, geographic=is_geographic_crs(crs))
+        stats = aggregate_native_geo_stats(chunks, geographic=is_geographic(crs))
 
         if not stats:
             return ValidationCheck(
@@ -3016,7 +3013,7 @@ def _check_native_geo_stats_contains_data(
         # (xmin > xmax), the same reading _check_bbox_contains_data applies --
         # and, like there, only for a geographic CRS (a projected wrap was
         # refused per row group above); BBox.crosses_antimeridian is the rule.
-        wrapped = BBox(xmin, ymin, xmax, ymax).crosses_antimeridian(is_geographic_crs(crs))
+        wrapped = BBox(xmin, ymin, xmax, ymax).crosses_antimeridian(is_geographic(crs))
         if xmin > xmax and not wrapped:
             return ValidationCheck(
                 name=f"native_geo_stats_contains_data_{geom_col}",
@@ -3417,7 +3414,7 @@ def _check_v2_crs_consistency(geo_meta: dict, schema_info: list, geom_col: str) 
 
     # Both sides unknown (metadata null, Parquet srid:0) lands here and matches,
     # as does every ordinary pair of named CRSs.
-    if _crs_equals(metadata_crs, schema_crs):
+    if crs_equal(metadata_crs, schema_crs):
         return ValidationCheck(
             name=f"v2_crs_consistency_{geom_col}",
             status=CheckStatus.PASSED,
@@ -3572,8 +3569,8 @@ def _check_parquet_geo_only_crs(
         # Still a string means nothing resolved it: the Parquet crs property
         # is free-form, so this is a value like "4326" or "WGS 84" that no
         # reader can be relied on to interpret. Report it before the
-        # is_geographic_crs heuristic below, which pattern-matches "4326"
-        # into a confident "CRS is geographic" gpio cannot back (#866).
+        # geographic classification below; unsupported metadata must still be
+        # reported even when pyproj can interpret the free-form label (#866).
         if isinstance(crs, str):
             return ValidationCheck(
                 name=f"parquet_geo_only_crs_{geom_col}",
@@ -3586,7 +3583,7 @@ def _check_parquet_geo_only_crs(
             )
 
         # Check if CRS is geographic (WGS84, EPSG:4326, OGC:CRS84)
-        if is_geographic_crs(crs):
+        if is_geographic(crs):
             return ValidationCheck(
                 name=f"parquet_geo_only_crs_{geom_col}",
                 status=CheckStatus.PASSED,
@@ -3665,14 +3662,18 @@ def _extract_epsg_code(crs: Any) -> int | None:
 def _get_bounds_from_pyproj(epsg_code: int) -> tuple[float, float, float, float] | None:
     """Get CRS bounds from pyproj."""
     try:
-        from pyproj import CRS as PyprojCRS
-
-        pyproj_crs = PyprojCRS.from_epsg(epsg_code)
-        area = pyproj_crs.area_of_use
+        pyproj_crs = load_crs(f"EPSG:{epsg_code}")
+        area = pyproj_crs.area_of_use if pyproj_crs is not None else None
         if not area:
             return None
 
-        if pyproj_crs.is_geographic:
+        if is_geographic(pyproj_crs):
+            if area.west > area.east:
+                # The area of use crosses the antimeridian (EPSG:4269 NAD83 runs
+                # 167.65 east to -40.73 west): the valid longitudes are the union
+                # [west, 180] U [-180, east], which a min/max sample cannot test
+                # against. Keep the latitude test and let any longitude through (#906).
+                return (-180.0, area.south, 180.0, area.north)
             return (area.west, area.south, area.east, area.north)
 
         # For projected CRS, transform geographic bounds to projected coordinates
@@ -3686,10 +3687,9 @@ def _transform_bounds_to_projected(
 ) -> tuple[float, float, float, float] | None:
     """Transform geographic bounds to projected CRS coordinates."""
     try:
-        from pyproj import CRS as PyprojCRS
         from pyproj import Transformer
 
-        transformer = Transformer.from_crs(PyprojCRS.from_epsg(4326), pyproj_crs, always_xy=True)
+        transformer = Transformer.from_crs("EPSG:4326", pyproj_crs, always_xy=True)
         corners = [
             (area.west, area.south),
             (area.west, area.north),
@@ -3890,7 +3890,7 @@ def _check_coordinates_valid_for_crs(
 
         actual_xmin, actual_xmax, actual_ymin, actual_ymax, total = bounds_result
         actual = (actual_xmin, actual_xmax, actual_ymin, actual_ymax)
-        is_geo = is_geographic_crs(crs)
+        is_geo = is_geographic(crs)
 
         # Check bounds based on CRS type
         geo_warning = None
@@ -3955,89 +3955,6 @@ def _check_coordinates_valid_for_crs(
 # =============================================================================
 # Helper Functions
 # =============================================================================
-
-
-def _get_crs_from_schema(schema_info: list, geom_col: str) -> Any:
-    """Extract CRS from schema logical type for a geometry column."""
-
-    index = root_schema_index(schema_info, geom_col)
-    if index is not None:
-        col = schema_info[index]
-        logical_type = col.get("logical_type") or ""
-        parsed = parse_geometry_logical_type(logical_type)
-        if parsed:
-            return parsed.get("crs")
-        return None
-    return None
-
-
-def _complete_crs_id(crs: dict) -> tuple[str, str] | None:
-    """Normalized (authority, code) when both are present and non-empty, else None."""
-    crs_id = crs.get("id")
-    if not isinstance(crs_id, dict):
-        return None
-    authority = str(crs_id.get("authority") or "").upper()
-    code = str(crs_id.get("code") or "").upper()
-    if authority and code:
-        return (authority, code)
-    return None
-
-
-def _crs_equals(crs1: Any, crs2: Any) -> bool:
-    """Compare two CRS values for equality.
-
-    Pass :data:`CRS_ABSENT` for a column with no ``crs`` key and ``None`` for an
-    explicit ``"crs": null``; the spec gives them different meanings (default
-    OGC:CRS84 vs unknown CRS) and this helper resolves them accordingly. Use
-    :func:`~geoparquet_io.core.crs_utils.crs_from_column_meta` to extract them.
-    """
-    # An omitted crs key means the OGC:CRS84 default, so it equals anything
-    # CRS84-equivalent -- and, being a *known* CRS, differs from an explicit null.
-    if crs1 is CRS_ABSENT or crs2 is CRS_ABSENT:
-        if crs1 is CRS_ABSENT and crs2 is CRS_ABSENT:
-            return True
-        return _is_crs84_equivalent(crs2 if crs1 is CRS_ABSENT else crs1)
-
-    # An explicit null means the CRS is unknown: it matches only another
-    # unknown, never a CRS the other side actually names.
-    if crs1 is None or crs2 is None:
-        return crs1 is None and crs2 is None
-
-    # OGC:CRS84 and EPSG:4326 differ only in axis order, and GeoParquet fixes
-    # the stored order to (x, y). They describe the same coordinates in every
-    # GeoParquet file, in every spelling -- id stub, authority string, URN or
-    # full PROJJSON -- so resolve them before the id fast path below, which
-    # would otherwise report the single most common equivalent pair as unequal.
-    if _is_crs84_equivalent(crs1) and _is_crs84_equivalent(crs2):
-        return True
-
-    if not (isinstance(crs1, dict) and isinstance(crs2, dict)):
-        # Direct comparison for strings
-        return crs1 == crs2
-
-    # When both sides carry a complete authority:code id, trust it (the spec
-    # treats the id as authoritative).
-    id1 = _complete_crs_id(crs1)
-    id2 = _complete_crs_id(crs2)
-    if id1 and id2:
-        return id1 == id2
-
-    # Structurally identical PROJJSON is equal even if pyproj can't parse it.
-    if crs1 == crs2:
-        return True
-
-    # At least one side lacks a usable id: compare semantically. Axis order is
-    # ignored because GeoParquet fixes coordinate order to (x, y). Fail closed
-    # on pyproj errors — an unverifiable CRS must not satisfy a consistency
-    # check.
-    try:
-        from pyproj import CRS as PyprojCRS
-
-        return PyprojCRS.from_json_dict(crs1).equals(
-            PyprojCRS.from_json_dict(crs2), ignore_axis_order=True
-        )
-    except Exception:
-        return False
 
 
 # =============================================================================
@@ -4427,6 +4344,10 @@ def _run_parquet_geo_only_checks(
         # was written for it once, never registered, and removed in #1038).
         checks.append(_check_native_geo_type_present(schema_info, geom_col))
         checks.append(_check_geography_edges_valid(schema_info, geom_col))
+        # The declared CRS decides whether xmin > xmax in the statistics is an
+        # antimeridian wrap or broken metadata; here it comes from the Parquet
+        # logical type, the only place a geo-only file declares it.
+        crs = crs_of(parquet_file, geometry_column=geom_col, quiet=True)
         checks.append(_check_native_geo_statistics(parquet_file, geom_col, schema_info))
         checks.append(_check_geography_stats_bbox(parquet_file, geom_col, schema_info))
 
@@ -4435,10 +4356,6 @@ def _run_parquet_geo_only_checks(
 
         # Data validation if requested
         if validate_data and con:
-            # The declared CRS decides whether xmin > xmax in the statistics is
-            # an antimeridian wrap or broken metadata; here it comes from the
-            # Parquet logical type, the only place a geo-only file declares it.
-            crs = _get_crs_from_schema(schema_info, geom_col)
             checks.append(_check_native_geo_types_match(parquet_file, geom_col, sample_size, con))
             checks.append(
                 _check_native_geo_stats_contains_data(parquet_file, geom_col, con, sample_size, crs)
@@ -4454,9 +4371,14 @@ def _run_parquet_geo_only_checks(
                 )
             )
 
-            # Check coordinates are valid for declared CRS
+            # Unknown is distinct from the absent/default CRS for range validation.
+            range_crs = (
+                PARQUET_UNKNOWN_CRS if source_crs_is_unknown(parquet_file, geom_col) else crs
+            )
             checks.append(
-                _check_coordinates_valid_for_crs(parquet_file, geom_col, crs, con, sample_size)
+                _check_coordinates_valid_for_crs(
+                    parquet_file, geom_col, range_crs, con, sample_size
+                )
             )
 
     return checks
@@ -4578,7 +4500,7 @@ def _run_geoparquet_checks(
             # null or empty crs, or no crs key over a srid:0 type) is spelled
             # the way the Parquet type spells it, so the check skips it rather
             # than reading it as the lon/lat default.
-            unknown = entry_crs_is_unknown(col_meta, _get_crs_from_schema(schema_info, col_name))
+            unknown = source_crs_is_unknown(parquet_file, col_name)
             range_crs = PARQUET_UNKNOWN_CRS if unknown else crs
             checks.append(
                 _check_coordinates_valid_for_crs(
@@ -4620,6 +4542,10 @@ def _run_geoparquet_checks(
         checks.append(_check_native_columns_in_metadata(schema_info, columns))
         # Parquet native geo type checks (run first for 2.0)
         for col_name, col_meta in columns.items():
+            # A 2.0 column may declare its CRS in the GeoParquet metadata, in the
+            # Parquet logical type, or both; either one rules out reading
+            # xmin > xmax as an antimeridian wrap when it is projected.
+            stats_crs = crs_of(parquet_file, geometry_column=col_name, quiet=True)
             checks.append(_check_native_geo_type_present(schema_info, col_name))
             checks.append(_check_native_crs_format(schema_info, col_name))
             checks.append(_check_geography_edges_valid(schema_info, col_name))
@@ -4636,10 +4562,6 @@ def _run_geoparquet_checks(
                 checks.append(
                     _check_native_geo_types_match(parquet_file, col_name, sample_size, con)
                 )
-                # A 2.0 column may declare its CRS in the GeoParquet metadata,
-                # in the Parquet logical type, or both; either one rules out
-                # reading xmin > xmax as an antimeridian wrap when it is projected.
-                stats_crs = col_meta.get("crs") or _get_crs_from_schema(schema_info, col_name)
                 checks.append(
                     _check_native_geo_stats_contains_data(
                         parquet_file, col_name, con, sample_size, stats_crs

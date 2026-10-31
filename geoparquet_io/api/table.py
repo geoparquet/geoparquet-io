@@ -945,9 +945,9 @@ class Table:
             >>> table = gpio.read('data.parquet')
             >>> print(table.crs)  # e.g., {'id': {'authority': 'EPSG', 'code': 4326}, ...}
         """
-        from geoparquet_io.core.streaming import extract_crs_from_table
+        from geoparquet_io.core.crs_utils import crs_of
 
-        embedded = extract_crs_from_table(self._table, self._geometry_column)
+        embedded = crs_of(self._table, geometry_column=self._geometry_column)
         if embedded is not None:
             return embedded
         return self._crs_hint
@@ -1421,9 +1421,9 @@ class Table:
             # PROJJSON dict, so normalise a string identifier (e.g. "EPSG:3857").
             input_crs = self.crs
             if isinstance(input_crs, str):
-                from geoparquet_io.core.crs_utils import parse_crs_string_to_projjson
+                from geoparquet_io.core.crs_utils import projjson_for_label
 
-                input_crs = parse_crs_string_to_projjson(input_crs)
+                input_crs = projjson_for_label(input_crs)
             elif input_crs is None:
                 # `self.crs` is None for an unknown CRS and for the default
                 # alike. Unknown has to be said on the way out (`crs: null`,

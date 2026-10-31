@@ -25,12 +25,9 @@ from geoparquet_io.core.column_selection import (
     split_column_list,
 )
 from geoparquet_io.core.common import get_parquet_metadata, should_skip_bbox
-from geoparquet_io.core.crs_utils import get_crs_display_name
+from geoparquet_io.core.crs_utils import crs_of, get_crs_display_name, is_projected
 from geoparquet_io.core.duckdb_metadata import (
     get_row_count,
-    get_schema_info,
-    native_geo_type,
-    parse_geometry_logical_type,
 )
 from geoparquet_io.core.duckdb_utils import (
     _get_query_columns,
@@ -62,7 +59,6 @@ from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
-    sanitized_carried_geo_of_file,
     strip_derived_stats,
     strip_orientation,
 )
@@ -76,7 +72,6 @@ from geoparquet_io.core.geometry_repair import (
     repair_query_geometry,
 )
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
-from geoparquet_io.core.parquet_schema import root_schema_index
 from geoparquet_io.core.parquet_writer import (
     WriteOptions,
     resolve_output_geoparquet_version,
@@ -112,90 +107,6 @@ def looks_like_latlong_bbox(bbox: tuple[float, float, float, float]) -> bool:
     return -180 <= xmin <= 180 and -180 <= xmax <= 180 and -90 <= ymin <= 90 and -90 <= ymax <= 90
 
 
-def is_geographic_crs(crs_info: dict | str | None) -> bool | None:
-    """
-    Check if CRS is geographic (lat/long) vs projected.
-
-    Returns:
-        True if geographic, False if projected, None if unknown
-    """
-    if crs_info is None:
-        return None
-
-    if isinstance(crs_info, str):
-        crs_upper = crs_info.upper()
-        # Common geographic CRS codes
-        if any(
-            code in crs_upper for code in ["4326", "CRS84", "CRS:84", "OGC:CRS84", "4269", "4267"]
-        ):
-            return True
-        return None
-
-    if isinstance(crs_info, dict):
-        # Check PROJJSON type
-        crs_type = crs_info.get("type", "")
-        if crs_type == "GeographicCRS":
-            return True
-        if crs_type == "ProjectedCRS":
-            return False
-
-        # Check EPSG code
-        crs_id = crs_info.get("id", {})
-        if isinstance(crs_id, dict):
-            code = crs_id.get("code")
-            if code in [4326, 4269, 4267]:  # Common geographic codes
-                return True
-
-    return None
-
-
-def _native_crs_from_schema(schema_info: list, geometry_col: str) -> dict | str | None:
-    """CRS in the ROOT column's Parquet geo logical type, else ``None``.
-
-    A struct child called like the column, listed first, must not supply it.
-    """
-    index = root_schema_index(schema_info, geometry_col)
-    if index is None:
-        return None
-    logical_type = schema_info[index].get("logical_type") or ""
-    if native_geo_type(logical_type) is None:
-        return None
-    parsed = parse_geometry_logical_type(logical_type)
-    return parsed["crs"] if parsed and "crs" in parsed else None
-
-
-def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | None:
-    """
-    Get CRS info from GeoParquet metadata or Parquet geo logical type.
-
-    Returns CRS info dict/string or None if not found.
-    """
-
-    # First try GeoParquet file-level metadata
-    try:
-        geo_meta = sanitized_carried_geo_of_file(input_parquet)
-        if geo_meta:
-            columns_meta = geo_meta.get("columns", {})
-            if geometry_col in columns_meta:
-                crs_info = columns_meta[geometry_col].get("crs")
-                if crs_info:
-                    return crs_info
-    except Exception:
-        # CRS extraction is optional
-        pass
-
-    # Fall back to Parquet geo logical type (for GeoParquet 2.0 / parquet-geo)
-    try:
-        crs = _native_crs_from_schema(get_schema_info(input_parquet), geometry_col)
-        if crs is not None:
-            return crs
-    except Exception:
-        # CRS extraction is optional
-        pass
-
-    return None
-
-
 def _get_data_bounds(input_parquet: str, geometry_col: str) -> tuple | None:
     """The file's data bounds through the one file entry point (covering first), or None.
 
@@ -218,10 +129,8 @@ def _warn_if_crs_mismatch(
     if not looks_like_latlong_bbox(bbox):
         return  # User's bbox doesn't look like lat/long, no warning needed
 
-    crs_info = _get_crs_from_file(input_parquet, geometry_col)
-    is_geographic = is_geographic_crs(crs_info)
-
-    if is_geographic is False:  # Definitely projected
+    crs_info = crs_of(input_parquet, geometry_column=geometry_col, quiet=True)
+    if is_projected(crs_info):  # Definitely projected
         crs_name = get_crs_display_name(crs_info)
         data_bounds = _get_data_bounds(input_parquet, geometry_col)
 

@@ -615,9 +615,9 @@ class TestNeedsReprojection:
         """OGC:CRS84 is WGS84 and should not need reprojection."""
         assert _needs_reprojection("OGC:CRS84") is False
 
-    def test_wgs84_crs84_no_reprojection(self):
-        """CRS84 variant should not need reprojection."""
-        assert _needs_reprojection("CRS84") is False
+    def test_bare_crs84_is_not_a_default_transform_source(self):
+        """The predicate follows the owner; unresolved bare labels are not defaults."""
+        assert _needs_reprojection("CRS84") is True
 
     def test_wgs84_case_insensitive(self):
         """WGS84 detection should be case insensitive."""

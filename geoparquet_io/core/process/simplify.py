@@ -21,7 +21,7 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.bbox_structure import bbox_covering_column_for
 from geoparquet_io.core.compression import resolve_codec
-from geoparquet_io.core.crs_utils import is_geographic_crs
+from geoparquet_io.core.crs_utils import crs_of, is_geographic, load_crs, lonlat_source_name
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
@@ -98,16 +98,16 @@ def _simplify_crs_transformers(
     comes from the carried geo block, defaulting to OGC:CRS84 like the rest
     of gpio.
     """
-    from pyproj import CRS, Transformer
-    from pyproj.exceptions import CRSError
+    from pyproj import Transformer
 
     shapely = load_module("shapely")
-    try:
-        src = CRS.from_json_dict(src_crs_json) if src_crs_json else CRS.from_user_input("OGC:CRS84")
-    except CRSError as e:
-        raise InvalidParameterError("simplify_crs", f"input CRS unusable: {e}") from e
+    src = load_crs(src_crs_json)
+    if src is None and is_geographic(src_crs_json):
+        src = load_crs(lonlat_source_name(src_crs_json))
+    if src is None:
+        raise InvalidParameterError("simplify_crs", "input CRS unusable: pyproj cannot read it")
     if simplify_crs.lower() in ("auto-utm", "utm"):
-        if not src.is_geographic:
+        if not is_geographic(src):
             raise InvalidParameterError(
                 "simplify_crs",
                 "'auto-utm' needs geographic (lon/lat) input; give an explicit CRS",
@@ -115,12 +115,11 @@ def _simplify_crs_transformers(
         if sample_wkb is None:
             return None, None  # nothing to transform
         centroid = shapely.from_wkb(sample_wkb).centroid
-        target = CRS.from_epsg(_utm_epsg(centroid.x, centroid.y))
+        target = load_crs(f"EPSG:{_utm_epsg(centroid.x, centroid.y)}")
     else:
-        try:
-            target = CRS.from_user_input(simplify_crs)
-        except CRSError as e:
-            raise InvalidParameterError("simplify_crs", str(e)) from e
+        target = load_crs(simplify_crs)
+        if target is None:
+            raise InvalidParameterError("simplify_crs", f"cannot read the CRS {simplify_crs!r}")
     forward = Transformer.from_crs(src, target, always_xy=True)
     inverse = Transformer.from_crs(target, src, always_xy=True)
     return _coord_func(forward), _coord_func(inverse)
@@ -410,12 +409,7 @@ def simplify_table(
     column = table.column(geom_col)
     forward = inverse = None
     if simplify_crs:
-        src_crs = (
-            sanitized_carried_geo(table.schema.metadata)
-            .get("columns", {})
-            .get(geom_col, {})
-            .get("crs")
-        )
+        src_crs = crs_of(table, geometry_column=geom_col, quiet=True)
         sample = _first_wkb_of(column)
         forward, inverse = _simplify_crs_transformers(simplify_crs, src_crs, sample)
 
@@ -555,16 +549,12 @@ def _simplify_file_streaming(
     writer_schema = schema.with_metadata(None)
     batch_stats: list[GeometryStats] = []
     # The output keeps the input's CRS, which decides how the batch extents fold.
-    geographic = is_geographic_crs(
-        sanitized_carried_geo(schema.metadata).get("columns", {}).get(geom_col, {}).get("crs")
-    )
+    src_crs = crs_of(schema, geometry_column=geom_col, quiet=True)
+    geographic = is_geographic(src_crs)
     collapsed = 0
     dropped = 0
     forward = inverse = None
     if simplify_crs:
-        src_crs = (
-            sanitized_carried_geo(schema.metadata).get("columns", {}).get(geom_col, {}).get("crs")
-        )
         # Scan the geometry column alone (bounded memory) until a sample turns
         # up: the first batch can be all nulls, and auto-utm falling back to
         # "nothing to transform" would silently apply a metre tolerance in

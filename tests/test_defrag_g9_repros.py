@@ -107,7 +107,7 @@ def test_982_add_quadkey_survives_a_malformed_geo_block(tmp_path, malformed):
     out = tmp_path / "out.parquet"
     result = _run("add", "quadkey", src, out)
     # The block now reaches the CRS check through the sanitizer: it warns and
-    # reads as absent instead of crashing in `_validate_crs_from_geo_metadata`.
+    # reads as absent instead of crashing in `crs_of`.
     assert "Ignoring malformed 'geo' metadata" in result.output, _explain(result)
     # What happens next is DuckDB's: its Parquet reader refuses these blocks
     # outright, as it does for every other DuckDB-read command (`sort hilbert`,
@@ -278,9 +278,13 @@ def test_1292_table_bounds_of_a_geoarrow_wkb_column():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="#906")
 def test_906_check_spec_accepts_nad83_points_in_its_area_of_use(tmp_path):
-    """Expected to fail: ``✗ coordinates outside valid range for CRS  min_x=-70.5000 < 167.65``."""
+    """Was ``✗ coordinates outside valid range for CRS  min_x=-70.5000 < 167.65`` (fixed by T4c).
+
+    EPSG:4269's area of use runs 167.65 east to -40.73 west, across the
+    antimeridian, so a min/max comparison against (west, east) rejected every
+    continental US point. A wrapping area of use now tests latitude only.
+    """
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
     from tests.native_geo_probes import projjson
 
@@ -444,9 +448,8 @@ def test_1146_every_row_group_holds_a_located_geometry(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="#1014")
 def test_1014_explicit_4326_block_against_a_5070_logical_type_is_not_silent(tmp_path, caplog):
-    """Expected to fail: the output says EPSG:5070 and no warning names the disagreement.
+    """Was: the output said EPSG:5070 and no warning named the disagreement (fixed by T4c).
 
     Row 3 of the issue's table: the ``geo`` block states an explicit EPSG:4326
     PROJJSON, the Parquet logical type states EPSG:5070. ``_crs_from_geo_block``
@@ -688,13 +691,13 @@ def test_1215_row_group_size_mb_is_applied_on_every_path(tmp_path, path):
 def test_957_malformed_geo_warning_names_each_file(tmp_path, caplog):
     """Failed with one un-sourced warning for the first file and silence for the second.
 
-    The issue's repro, verbatim: ``extract_crs_from_parquet`` over two files
+    The issue's repro, verbatim: ``crs_of`` over two files
     with the same malformed block in one process. ``sanitize_geo_metadata`` took
     no ``source``, so its warn-once cache keyed on the detail alone. Every CLI
     command already names its input through ``geometry_detection`` (#945); the
     readers that sanitize rather than guard are what this pins.
     """
-    from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+    from geoparquet_io.core.crs_utils import crs_of
     from geoparquet_io.core.geo_metadata import reset_malformed_geo_warnings
 
     reset_malformed_geo_warnings()
@@ -707,7 +710,7 @@ def test_957_malformed_geo_warning_names_each_file(tmp_path, caplog):
     for path in paths:
         caplog.clear()
         with caplog.at_level(logging.WARNING):
-            extract_crs_from_parquet(str(path))
+            crs_of(str(path))
         named = [r.getMessage() for r in caplog.records if str(path) in r.getMessage()]
         assert any("'primary_column' is a number" in m for m in named), caplog.text
 

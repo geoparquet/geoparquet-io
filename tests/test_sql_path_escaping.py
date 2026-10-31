@@ -16,7 +16,7 @@ escapes it exactly once, at the SQL boundary, through ``sql_path`` (#802).
 Issue #718 found three more paths of the same family:
 
 * ``convert geoparquet`` handed its already-escaped ``input_url`` to
-  ``crs_utils.extract_crs_from_parquet``, which escapes its own argument
+  ``crs_utils.crs_of``, which escapes its own argument
   (double escape -> ``FileNotFoundGeoParquetError``);
 * ``add geometry-metrics --vecorel`` reached
   ``constants.ensure_vecorel_columns``, which pre-escaped a path before handing
@@ -299,12 +299,12 @@ class TestApostropheInInputPath:
         geo = json.loads(pq.read_schema(apostrophe_file_with_bbox).metadata[b"geo"])
         assert geo["columns"]["geometry"]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
 
-    def test_extract_crs_from_parquet_takes_a_raw_path(self, apostrophe_file):
+    def test_crs_of_takes_a_raw_path(self, apostrophe_file):
         """The helper's contract is RAW in, like every duckdb_metadata getter."""
-        from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+        from geoparquet_io.core.crs_utils import crs_of
 
         # No exception: the file is plainly there, whatever the CRS turns out to be.
-        extract_crs_from_parquet(apostrophe_file)
+        crs_of(apostrophe_file)
 
     @pytest.mark.parametrize(
         ("fixture", "extra_args"),

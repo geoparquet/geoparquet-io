@@ -7,9 +7,10 @@ import pyarrow as pa
 
 from geoparquet_io.core.constants import DEFAULT_QUADKEY_COLUMN_NAME, DEFAULT_QUADKEY_RESOLUTION
 from geoparquet_io.core.crs_utils import (
+    crs_of,
     get_crs_display_name,
-    is_empty_crs_value,
-    warn_empty_crs_once,
+    is_geographic,
+    is_projected,
 )
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.index_ops import IndexSpec, add_index_column, add_index_table
@@ -19,91 +20,10 @@ from geoparquet_io.core.logging_config import (
 from geoparquet_io.core.parquet_writer import WriteOptions
 
 
-def _is_geographic_crs(crs_info: dict | str | None) -> bool | None:
-    """
-    Check if CRS is geographic (lat/long) vs projected.
-
-    Returns:
-        True if geographic, False if projected, None if unknown (also for an
-        empty value such as ``""`` or ``{}``, #1267)
-    """
-    if crs_info is None or is_empty_crs_value(crs_info):
-        return None
-
-    if isinstance(crs_info, str):
-        crs_upper = crs_info.upper()
-        # Common geographic CRS codes
-        if any(
-            code in crs_upper for code in ["4326", "CRS84", "CRS:84", "OGC:CRS84", "4269", "4267"]
-        ):
-            return True
-        return None
-
-    if isinstance(crs_info, dict):
-        # Check PROJJSON type
-        crs_type = crs_info.get("type", "")
-        if crs_type == "GeographicCRS":
-            return True
-        if crs_type == "ProjectedCRS":
-            return False
-
-        # Check EPSG code
-        crs_id = crs_info.get("id", {})
-        if isinstance(crs_id, dict):
-            code = crs_id.get("code")
-            if code in [4326, 4269, 4267]:  # Common geographic codes
-                return True
-
-    return None
-
-
-def _validate_crs_from_geo_metadata(
-    geo_meta: dict | None,
-    geom_col: str,
-    verbose: bool,
-    source_description: str = "data",
-) -> None:
-    """
-    Validate CRS from geo metadata dictionary.
-
-    Common helper used by file-based, streaming, and table-based paths.
-
-    Args:
-        geo_meta: Parsed geo metadata dict (from GeoParquet schema)
-        geom_col: Name of the geometry column
-        verbose: Whether to print debug output
-        source_description: Description for error messages (e.g., "file", "stream", "table")
-
-    Raises:
-        GeoParquetError: If CRS is detected as projected
-    """
-    if not geo_meta:
-        if verbose:
-            debug("No GeoParquet metadata found, assuming WGS84 coordinates")
-        return
-
-    columns_meta = geo_meta.get("columns", {})
-    if geom_col not in columns_meta:
-        if verbose:
-            debug(f"Geometry column '{geom_col}' not found in metadata, assuming WGS84")
-        return
-
-    crs_info = columns_meta[geom_col].get("crs")
-
-    # An empty value names no CRS: unknown, like null, and said so (#1267).
-    if is_empty_crs_value(crs_info):
-        warn_empty_crs_once(crs_info)
-        return
-
-    # No CRS specified means default (WGS84)
-    if crs_info is None:
-        if verbose:
-            debug("No CRS specified in metadata, using default WGS84")
-        return
-
-    is_geographic = _is_geographic_crs(crs_info)
-
-    if is_geographic is False:
+def _validate_crs(source, geom_col: str, verbose: bool, source_description: str = "data") -> None:
+    """Refuse a projected source when no index transform is available."""
+    crs_info = crs_of(source, geometry_column=geom_col, quiet=True)
+    if is_projected(crs_info):
         crs_name = get_crs_display_name(crs_info)
         raise GeoParquetError(
             f"Quadkeys require geographic coordinates (lat/lon), but this {source_description} "
@@ -112,7 +32,7 @@ def _validate_crs_from_geo_metadata(
             f"  gpio convert reproject <input> <output> --dst-crs EPSG:4326"
         )
 
-    if verbose and is_geographic:
+    if verbose and is_geographic(crs_info):
         debug("CRS validated as geographic (lat/lon coordinates)")
 
 
@@ -170,7 +90,7 @@ SPEC = IndexSpec(
     column_option="--quadkey-column",
     register=register_quadkey_udf,
     bbox_midpoint=True,
-    crs_validator=_validate_crs_from_geo_metadata,
+    crs_validator=_validate_crs,
     prefix_partition=True,
     coerce_resolution=True,
     display_unit="zoom level",

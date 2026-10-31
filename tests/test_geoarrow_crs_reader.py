@@ -28,9 +28,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.crs_utils import _crs_from_extension_type, geoarrow_crs_to_projjson
+from geoparquet_io.core.crs_utils import _crs_from_extension_type, crs_of, geoarrow_crs_to_projjson
 from geoparquet_io.core.duckdb_metadata import _get_pyarrow_logical_type
-from geoparquet_io.core.streaming import extract_crs_from_table
 
 # ---------------------------------------------------------------------------
 # Carrier shapes
@@ -176,7 +175,7 @@ def _via_streaming(carrier):
     _CRS_PAYLOADS[token] = carrier
     storage = pa.array([_wkb_point(0.0, 0.0)], type=pa.binary())
     geom = pa.ExtensionArray.from_storage(_CrsCarrierType(token), storage)
-    return extract_crs_from_table(pa.table({"id": [1], "geometry": geom}), "geometry")
+    return crs_of(pa.table({"id": [1], "geometry": geom}), geometry_column="geometry")
 
 
 def _via_crs_utils(carrier):
@@ -198,7 +197,7 @@ def _via_duckdb_metadata(carrier):
 
 ENTRY_POINTS = [
     pytest.param(_via_helper, id="crs_utils.geoarrow_crs_to_projjson"),
-    pytest.param(_via_streaming, id="streaming.extract_crs_from_table"),
+    pytest.param(_via_streaming, id="crs_of(table)"),
     pytest.param(_via_crs_utils, id="crs_utils._crs_from_extension_type"),
     pytest.param(_via_duckdb_metadata, id="duckdb_metadata._get_pyarrow_logical_type"),
 ]
@@ -309,7 +308,7 @@ class TestEmptyValuesFallThrough:
             {b"geo": json.dumps(geo).encode("utf-8")}
         )
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert isinstance(crs, dict)
         assert crs["id"] == {"authority": "EPSG", "code": 3857}

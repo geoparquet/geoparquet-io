@@ -20,13 +20,14 @@ from geoparquet_io.core.column_selection import (
 from geoparquet_io.core.common import should_skip_bbox
 from geoparquet_io.core.crs_utils import (
     _format_crs_display,
+    crs_equal,
+    crs_of,
     detect_crs_from_spatial_file,
-    extract_crs_from_parquet,
     horizontal_crs,
     is_default_crs,
     normalize_projjson_crs,
     note_default_crs_normalized,
-    parse_crs_string_to_projjson,
+    projjson_for_label,
 )
 from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
@@ -2447,7 +2448,7 @@ def read_spatial_to_arrow(
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_file))
 
     # Determine CRS
-    user_specified_crs = crs != "EPSG:4326"
+    user_specified_crs = not crs_equal(crs, "EPSG:4326")
     detected_crs = None
 
     try:
@@ -2474,19 +2475,17 @@ def read_spatial_to_arrow(
                     f"only valid for CSV/TSV files and Parquet lat/lon or WKT columns. "
                     f"For {os.path.splitext(input_file)[1]} files, CRS is read from the file metadata.",
                 )
-            detected_crs = parse_crs_string_to_projjson(crs, con)
+            detected_crs = projjson_for_label(crs)
             if verbose:
                 debug(f"Using user-specified CRS: {crs}")
         elif tabular:
             # CSV with default CRS - detected_crs stays None
             pass
         elif is_parquet:
-            # RAW path: extract_crs_from_parquet escapes its own argument (#718).
+            # RAW path: crs_of escapes its own argument (#718).
             # Name the primary: with no geo block, a secondary column ahead of
             # it in schema order would otherwise lend it its CRS (#1232).
-            crs_from_file = extract_crs_from_parquet(
-                input_file, verbose=verbose, geometry_column=parquet_geom_column
-            )
+            crs_from_file = crs_of(input_file, verbose=verbose, geometry_column=parquet_geom_column)
             if crs_from_file and not is_default_crs(crs_from_file):
                 # Same repair-or-reject as _determine_effective_crs: the API
                 # write path copies this CRS into the output verbatim (#705).
@@ -3038,7 +3037,7 @@ def _determine_effective_crs(
     and without the name the first non-default CRS in schema order answers --
     a secondary column's, when one comes first (#1232).
     """
-    user_specified_crs = crs != "EPSG:4326"
+    user_specified_crs = not crs_equal(crs, "EPSG:4326")
 
     if user_specified_crs:
         if not is_csv:
@@ -3049,16 +3048,14 @@ def _determine_effective_crs(
             )
         if verbose:
             debug(f"Using user-specified CRS: {crs}")
-        return parse_crs_string_to_projjson(crs, con)
+        return projjson_for_label(crs)
 
     if is_csv:
         return None  # CSV with default CRS
 
     if is_parquet:
-        # RAW path: extract_crs_from_parquet escapes its own argument (#718).
-        detected = extract_crs_from_parquet(
-            input_file, verbose=verbose, geometry_column=geometry_column
-        )
+        # RAW path: crs_of escapes its own argument (#718).
+        detected = crs_of(input_file, verbose=verbose, geometry_column=geometry_column)
         if not detected or is_default_crs(detected):
             return None
         # Repair or reject before writing: an input CRS that is not valid

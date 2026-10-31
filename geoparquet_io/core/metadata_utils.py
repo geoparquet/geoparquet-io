@@ -12,7 +12,7 @@ from rich.table import Table
 from rich.text import Text
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure, covering_bbox_refs
-from geoparquet_io.core.crs_utils import column_is_geographic, is_geographic_crs
+from geoparquet_io.core.crs_utils import column_is_geographic, is_geographic
 from geoparquet_io.core.duckdb_metadata import (
     detect_geometry_columns,
     get_file_metadata,
@@ -465,7 +465,7 @@ def _print_geo_column_stats(
 ) -> None:
     """Print bbox and row group statistics for a geo column."""
     overall_bbox = _calculate_overall_bbox(
-        col_info["row_group_stats"], geographic=is_geographic_crs(col_info["crs"])
+        col_info["row_group_stats"], geographic=is_geographic(col_info["crs"])
     )
     if overall_bbox:
         console.print(

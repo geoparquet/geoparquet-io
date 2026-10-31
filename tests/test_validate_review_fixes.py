@@ -1,7 +1,7 @@
 """Unit tests for verified code-review fixes (todos 036, 038, 039, 042).
 
 Covers:
-- 036: _crs_equals must not report equality for arbitrary id-less PROJJSON pairs
+- 036: crs_equal must not report equality for arbitrary id-less PROJJSON pairs
 - 038: validator must not crash on malformed metadata (numeric crs.id authority,
        valid-JSON non-object geo values)
 - 039: non-planar edges declared on a planar GEOMETRY column must be flagged
@@ -18,6 +18,7 @@ import pyarrow.parquet as pq
 import pytest
 from pyproj import CRS as PyprojCRS
 
+from geoparquet_io.core.crs_utils import crs_equal
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.validate import (
     CheckStatus,
@@ -26,7 +27,6 @@ from geoparquet_io.core.validate import (
     _check_v2_edges_consistency,
     _check_version_features,
     _check_version_known,
-    _crs_equals,
     _interpret_bbox_result,
     _is_crs84_equivalent,
     _is_ogc_crs84,
@@ -48,41 +48,41 @@ class TestCrsEqualsIdless:
     """036: id-less PROJJSON dicts must be compared semantically, not assumed equal."""
 
     def test_idless_3857_vs_idless_utm32n_not_equal(self):
-        assert not _crs_equals(_idless_projjson("EPSG:3857"), _idless_projjson("EPSG:32632"))
+        assert not crs_equal(_idless_projjson("EPSG:3857"), _idless_projjson("EPSG:32632"))
 
     def test_identical_idless_projjson_equal(self):
         a = _idless_projjson("EPSG:3857")
         b = json.loads(json.dumps(a))
-        assert _crs_equals(a, b)
+        assert crs_equal(a, b)
 
     def test_both_with_matching_id_equal(self):
         a = {"type": "ProjectedCRS", "name": "A", "id": {"authority": "EPSG", "code": 3857}}
         b = {"type": "ProjectedCRS", "name": "B", "id": {"authority": "EPSG", "code": 3857}}
-        assert _crs_equals(a, b)
+        assert crs_equal(a, b)
 
     def test_both_with_different_id_not_equal(self):
         a = {"type": "ProjectedCRS", "name": "A", "id": {"authority": "EPSG", "code": 3857}}
         b = {"type": "ProjectedCRS", "name": "A", "id": {"authority": "EPSG", "code": 32632}}
-        assert not _crs_equals(a, b)
+        assert not crs_equal(a, b)
 
     def test_different_dicts_sharing_name_are_not_equal(self):
         """The old name-only fallback made these equal; must fail closed now."""
-        assert not _crs_equals(
+        assert not crs_equal(
             {"name": "whatever", "type": "GeographicCRS"},
             {"name": "whatever", "type": "ProjectedCRS"},
         )
 
     def test_identical_unparsable_dicts_are_equal(self):
         """Byte-identical declarations describe the same CRS even if unparsable."""
-        assert _crs_equals({"name": "whatever"}, {"name": "whatever"})
+        assert crs_equal({"name": "whatever"}, {"name": "whatever"})
 
     def test_string_forms_unchanged(self):
-        assert _crs_equals("EPSG:4326", "EPSG:4326")
-        assert not _crs_equals("EPSG:4326", "EPSG:3857")
+        assert crs_equal("EPSG:4326", "EPSG:4326")
+        assert not crs_equal("EPSG:4326", "EPSG:3857")
 
     def test_none_handling_unchanged(self):
-        assert _crs_equals(None, None)
-        assert not _crs_equals(None, {"name": "x"})
+        assert crs_equal(None, None)
+        assert not crs_equal(None, {"name": "x"})
 
 
 class TestMalformedMetadataNoCrash:

@@ -295,13 +295,13 @@ def _parquet_with_list_block(tmp_path):
 def test_list_shaped_block_reads_absent_on_the_carried_file_readers(tmp_path):
     """The four write/transform readers that assumed a dict (T3a fourth pass)."""
     from geoparquet_io.core.add.bbox import _bbox_metadata_advice
-    from geoparquet_io.core.extract import _get_crs_from_file
+    from geoparquet_io.core.crs_utils import crs_of
     from geoparquet_io.core.format_writers import _should_promote_to_multi
     from geoparquet_io.core.write_funnels import collect_nonplanar_edges
 
     path = _parquet_with_list_block(tmp_path)
     assert collect_nonplanar_edges(path) == {}
-    assert _get_crs_from_file(path, "geometry") is None
+    assert crs_of(path, geometry_column="geometry", quiet=True) is None
     assert _bbox_metadata_advice(path).startswith("Run 'gpio add bbox-metadata'")
     assert _should_promote_to_multi(path, "geometry") is False
 

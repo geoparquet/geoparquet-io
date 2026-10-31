@@ -30,7 +30,7 @@ from click.testing import CliRunner
 
 import geoparquet_io as gpio
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.crs_utils import PARQUET_UNKNOWN_CRS, extract_crs_from_parquet
+from geoparquet_io.core.crs_utils import PARQUET_UNKNOWN_CRS, crs_of
 
 VERSIONS = ["1.1", "2.0", "parquet-geo-only"]
 STRATEGIES = ["duckdb-kv", "in-memory", "streaming", "disk-rewrite"]
@@ -122,7 +122,7 @@ def assert_unknown(path, version: str) -> None:
         assert _type_crs(path) == PARQUET_UNKNOWN_CRS
     else:
         assert _type_crs(path) is None
-    assert extract_crs_from_parquet(str(path)) is None
+    assert crs_of(str(path)) is None
     assert _crs_check_failures(path) == []
 
 
@@ -225,7 +225,7 @@ def test_reproject_with_assume_crs84_writes_the_default(tmp_path):
 
 def test_srid0_type_reads_as_unknown(tmp_path):
     src = INPUTS["pgo_srid0"](tmp_path)
-    assert extract_crs_from_parquet(src) is None
+    assert crs_of(src) is None
 
 
 def test_srid0_is_never_written_into_the_geo_block(tmp_path):

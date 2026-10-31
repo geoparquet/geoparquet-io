@@ -92,10 +92,11 @@ EXPECTED_COUNTS = {
     "G1.geometry_identity": 8,
     "G1.geo_compose": 0,
     "G1.staging": 0,
-    "G2.exemptions": 7,
+    "G1.crs": 0,
+    "G2.exemptions": 1,
     "G3.pairs": 0,
     "G3.baseline": 0,
-    "G3.pylint": 17,
+    "G3.pylint": 16,
     "G13.options": 11,
     "G13.bbox_parsers": 0,
     "G4.whitelist": 148,
@@ -3238,6 +3239,171 @@ def _find_staging(m: _Module) -> Iterator[Hit]:
             yield m.hit(node)
 
 
+#: The pyproj names a CRS is built from.
+_PYPROJ_CRS_CLASSES = {"pyproj.CRS", "pyproj.crs.CRS"}
+#: Type words of a PROJJSON ``type`` member; reading one is deciding "geographic".
+_CRS_TYPE_WORDS = {"geographiccrs", "projectedcrs"}
+
+
+def _dotted(node: ast.AST) -> str | None:
+    """``a.b.c`` for a Name/Attribute chain, else None."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _is_pyproj_crs(m: _Module, node: ast.AST) -> bool:
+    """``CRS`` / ``C`` (``from pyproj import CRS as C``) / ``pyproj.CRS`` /
+    ``pyproj.crs.CRS`` as an expression."""
+    dotted = _dotted(node)
+    if dotted is None:
+        return False
+    head, _, rest = dotted.partition(".")
+    origin = m.imports.get(head)
+    if origin is None:
+        return False
+    return (origin + ("." + rest if rest else "")) in _PYPROJ_CRS_CLASSES
+
+
+def _find_crs(m: _Module) -> Iterator[Hit]:
+    """A CRS question answered outside ``core/crs_utils.py``: a pyproj CRS built
+    here (``CRS(...)``, ``CRS.from_user_input`` / ``from_json_dict`` /
+    ``from_epsg`` / ``from_wkt``..., also through ``pyproj.CRS``), an
+    ``.is_geographic`` or ``.is_projected`` read, an ``.equals(...,
+    ignore_axis_order=...)`` comparison, or a PROJJSON ``GeographicCRS`` /
+    ``ProjectedCRS`` type word.
+
+    ``crs_utils`` owns ``is_geographic``, ``crs_equal``, ``projjson_for_label``
+    and ``crs_of`` (and ``load_crs``, the one place a pyproj object is built).
+    Would have caught the four is-geographic copies (the owner's name heuristic,
+    wfs's pyproj call with a hard-coded fallback, extract's and quadkey's
+    code lists that disagreed on ``None`` and on EPSG:4171), the two equality
+    copies, and the three label-to-PROJJSON resolvers #1367 found, one of which
+    wrote an ``{"id": ...}`` stub when pyproj could not resolve the label.
+    Not seen: a CRS built through ``getattr(pyproj, "CRS")`` or an attribute read
+    off an object this module did not build from pyproj (``.axis_info``,
+    ``.area_of_use``, ``.ellipsoid`` are facts about a loaded CRS, not the
+    questions above).
+    """
+
+    def crs_literal(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value.upper().startswith(("EPSG:", "OGC:CRS84"))
+        if isinstance(node, ast.Dict):
+            return any(
+                isinstance(k, ast.Constant) and k.value in ("id", "$schema") for k in node.keys
+            )
+        if isinstance(node, (ast.Set, ast.Tuple, ast.List)):
+            return any(crs_literal(v) for v in node.elts)
+        return False
+
+    def get_call(node, key=None):
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and node.args
+            and (
+                key is None
+                or (isinstance(node.args[0], ast.Constant) and node.args[0].value == key)
+            )
+        )
+
+    def columns(node):
+        if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+            node = node.values[0]
+        return (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant)
+            and node.slice.value == "columns"
+        ) or get_call(node, "columns")
+
+    def direct_entry(node):
+        if isinstance(node, ast.Subscript):
+            return columns(node.value)
+        return get_call(node) and columns(node.func.value)
+
+    # Track explicit entry bindings within their own lexical scope. Iterating
+    # columns/items for block validation or display is deliberately not this shape.
+    parents = {
+        child: parent for parent in ast.walk(m.tree) for child in ast.iter_child_nodes(parent)
+    }
+
+    def scope(node):
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+                return node
+        return m.tree
+
+    bindings = {
+        (scope(node), target.id)
+        for node in ast.walk(m.tree)
+        if isinstance(node, ast.Assign) and direct_entry(node.value)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+
+    def block_entry(node):
+        return direct_entry(node) or (
+            isinstance(node, ast.Name) and (scope(node), node.id) in bindings
+        )
+
+    for node in ast.walk(m.tree):
+        if isinstance(node, ast.Compare) and any(
+            crs_literal(v) for v in [node.left, *node.comparators]
+        ):
+            yield m.hit(node)
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.ctx, ast.Load)
+            and isinstance(node.slice, ast.Constant)
+            and node.slice.value == "crs"
+            and block_entry(node.value)
+        ):
+            yield m.hit(node)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and block_entry(node.func.value)
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == "crs"
+        ):
+            yield m.hit(node)
+        if isinstance(node, ast.Call):
+            func = node.func
+            if _is_pyproj_crs(m, func):
+                yield m.hit(node)
+            elif (
+                isinstance(func, ast.Attribute)
+                and func.attr.startswith("from_")
+                and _is_pyproj_crs(m, func.value)
+            ):
+                yield m.hit(node)
+            elif (
+                isinstance(func, ast.Attribute)
+                and func.attr == "equals"
+                and any(k.arg == "ignore_axis_order" for k in node.keywords)
+            ):
+                yield m.hit(node)
+        elif isinstance(node, ast.Attribute) and node.attr in ("is_geographic", "is_projected"):
+            yield m.hit(node)
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value.lower() in _CRS_TYPE_WORDS
+            and id(node) not in m.docstrings
+        ):
+            yield m.hit(node)
+
+
 @dataclass(frozen=True)
 class Arm:
     finder: Callable[..., Iterator[Hit]]
@@ -3288,6 +3454,7 @@ ARMS = {
     ),
     "geo_compose": Arm(_find_geo_compose, ("geoparquet_io/core/geo_metadata.py",)),
     "staging": Arm(_find_staging, ("geoparquet_io/core/file_utils.py",)),
+    "crs": Arm(_find_crs, ("geoparquet_io/core/crs_utils.py",)),
 }
 
 
@@ -3815,6 +3982,9 @@ G1_PLANTS = {
         "def bounds(con, q, g):\n"
         '    return con.execute(f"SELECT MIN(ST_XMin({g})), MAX(ST_XMax({g})) FROM ({q})")\n'
     ),
+    "crs": (
+        "def read(label):\n    from pyproj import CRS\n\n    return CRS.from_user_input(label)\n"
+    ),
 }
 
 #: Near-misses each arm must not flag, so a planted hit is the pattern itself.
@@ -3889,6 +4059,11 @@ G1_CLEAN = {
     "geometry_stats": (
         "def bbox_column(g):\n"
         '    return f"STRUCT_PACK(xmin := ST_XMin({g}), ymax := ST_YMax({g})) AS bbox"\n'
+    ),
+    "crs": (
+        "from pyproj import Transformer\n\n"
+        "class CRS:\n    pass\n\n"
+        "def move(a, b):\n    return Transformer.from_crs(a, b, always_xy=True), CRS()\n"
     ),
 }
 
@@ -4417,6 +4592,62 @@ def test_g12_geometry_identity_arm_lets_duckdb_utils_spell_the_codec_only(tmp_pa
     )
     hits = arm_hits(tmp_path, "geometry_identity")
     assert [h.name for h in hits] == ["col"], hits
+
+
+#: Every spelling of "decide a CRS question here" the crs arm must flag (T4c).
+CRS_SHAPES = {
+    "get chain with fallback": 'def f(geo, c):\n    return (geo.get("columns") or {}).get(c, {}).get("crs")\n',
+    "get chain": 'def f(geo, c):\n    return geo.get("columns", {}).get(c, {}).get("crs")\n',
+    "local get": 'def f(geo, c):\n    entry = geo.get("columns", {}).get(c, {})\n    return entry.get("crs")\n',
+    "local subscript": 'def f(geo, c):\n    entry = geo["columns"][c]\n    return entry["crs"]\n',
+    "literal id comparison": 'def f(c):\n    return c == {"id": {"authority": "EPSG", "code": 4326}}\n',
+    "upper default set": 'def f(c):\n    return c.upper() in {"EPSG:4326", "OGC:CRS84", "CRS84"}\n',
+    "lower default set": 'def f(c):\n    return c.lower() in {"epsg:4326", "ogc:crs84"}\n',
+    "raw get": 'def f(geo, col):\n    return geo["columns"][col].get("crs")\n',
+    "raw subscript": 'def f(geo, col):\n    return geo["columns"][col]["crs"]\n',
+    "from pyproj import CRS; CRS.from_user_input": (
+        "from pyproj import CRS\n\ndef f(x):\n    return CRS.from_user_input(x)\n"
+    ),
+    "from_json_dict": ("from pyproj import CRS\n\ndef f(x):\n    return CRS.from_json_dict(x)\n"),
+    "from_epsg": "from pyproj import CRS\n\nA = CRS.from_epsg(4326)\n",
+    "CRS(...) constructor": "from pyproj import CRS\n\nA = CRS('EPSG:4326')\n",
+    "aliased class": (
+        "from pyproj import CRS as PyprojCRS\n\ndef f(x):\n    return PyprojCRS.from_wkt(x)\n"
+    ),
+    "module attribute": "import pyproj\n\ndef f(x):\n    return pyproj.CRS.from_string(x)\n",
+    "pyproj.crs.CRS": "import pyproj.crs\n\ndef f(x):\n    return pyproj.crs.CRS.from_string(x)\n",
+    "from pyproj.crs import CRS": "from pyproj.crs import CRS\n\nA = CRS.from_epsg(3857)\n",
+    ".is_geographic read": "def f(c):\n    return c.is_geographic\n",
+    ".is_projected read": "def f(c):\n    return c.is_projected\n",
+    "equals with ignore_axis_order": (
+        "def f(a, b):\n    return a.equals(b, ignore_axis_order=True)\n"
+    ),
+    "PROJJSON type word": ('def f(crs):\n    return crs.get("type") == "GeographicCRS"\n'),
+    "lower-case type word": 'GEO = "projectedcrs"\n',
+}
+
+#: Shapes close to the above that are not the pattern.
+CRS_NEAR_MISSES = {
+    "a Transformer": "from pyproj import Transformer\n\nT = Transformer.from_crs('a', 'b')\n",
+    "a Geod": "from pyproj import Geod\n\nG = Geod(ellps='WGS84')\n",
+    "another class named CRS": "class CRS:\n    @classmethod\n    def from_x(cls):\n        return cls()\n\nA = CRS.from_x()\n",
+    "equals without the axis flag": "def f(a, b):\n    return a.equals(b)\n",
+    "the words in a docstring": 'def f():\n    """A GeographicCRS or ProjectedCRS."""\n',
+    "an axis_info read": "def f(c):\n    return c.axis_info\n",
+    "a name that ends in geographic": "def f(c):\n    return c.column_is_geographic\n",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(CRS_SHAPES))
+def test_g12_crs_arm_flags_every_shape(shape, tmp_path):
+    repo = _plant(tmp_path, "crs", CRS_SHAPES[shape])
+    assert arm_hits(repo, "crs"), shape
+
+
+@pytest.mark.parametrize("shape", sorted(CRS_NEAR_MISSES))
+def test_g12_crs_arm_passes_its_look_alikes(shape, tmp_path):
+    repo = _plant(tmp_path, "crs", CRS_NEAR_MISSES[shape])
+    assert arm_hits(repo, "crs") == [], shape
 
 
 @pytest.mark.parametrize("arm_name", sorted(ARMS))
