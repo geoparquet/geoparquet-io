@@ -1,4 +1,9 @@
-"""The layout guarantee preserves row order, with an all-degenerate exception."""
+"""The layout guarantee preserves row order, with an all-degenerate exception.
+
+The layout is ``parquet_writer.located_row_group_layout``'s; every position of
+the unlocated rows runs on the default strategy, and each other strategy shows
+it takes the owner's layout on one position.
+"""
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -8,9 +13,15 @@ import geoparquet_io as gpio
 from geoparquet_io.core.geo_metadata import geometry_stats_of
 from tests._defrag_fixtures import geo_block, point_wkb, write_with_geo
 
+_CELLS = [("duckdb-kv", p) for p in ("leading", "middle", "trailing", "all")] + [
+    (s, "middle") for s in ("in-memory", "streaming", "disk-rewrite")
+]
 
-@pytest.mark.parametrize("strategy", ["duckdb-kv", "in-memory", "streaming", "disk-rewrite"])
-@pytest.mark.parametrize("position", ["leading", "middle", "trailing", "all"])
+
+@pytest.mark.parametrize(
+    ("strategy", "position"),
+    [pytest.param(s, p, id=f"{p}-{s}") for s, p in _CELLS],
+)
 def test_table_write_merges_unlocated_groups_without_reordering(tmp_path, strategy, position):
     located = [point_wkb(1, 2)] * 2048
     # EMPTY is also unlocated; a non-null-only check would miss this group.

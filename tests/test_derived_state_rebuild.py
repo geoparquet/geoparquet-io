@@ -228,14 +228,27 @@ def _cases():
             yield pytest.param(path, field, marks=marks, id=f"{path}-{field}")
 
 
+class _Rewritten(dict):
+    """(output block, fresh block) per path, built the first time a cell asks.
+
+    A worker runs only some of the cells, so it builds only their paths instead
+    of all ten.
+    """
+
+    def __init__(self, tmp_path_factory):
+        super().__init__()
+        self._factory = tmp_path_factory
+
+    def __missing__(self, name: str) -> tuple[dict, dict]:
+        tmp = self._factory.mktemp(name)
+        out, edges = PATHS[name](tmp)
+        self[name] = (footer_geo(out), _fresh_geo(out, tmp, edges))
+        return self[name]
+
+
 @pytest.fixture(scope="module")
-def rewritten(tmp_path_factory) -> dict[str, tuple[Path, dict]]:
-    result = {}
-    for name, build in PATHS.items():
-        tmp = tmp_path_factory.mktemp(name)
-        out, edges = build(tmp)
-        result[name] = (footer_geo(out), _fresh_geo(out, tmp, edges))
-    return result
+def rewritten(tmp_path_factory) -> dict[str, tuple[dict, dict]]:
+    return _Rewritten(tmp_path_factory)
 
 
 @pytest.mark.parametrize(("path", "field"), list(_cases()))

@@ -15,6 +15,13 @@ Source kinds: a 1.1 file declaring a covering over its bbox struct and a
 projected CRS; a 1.0 file with an undeclared conventional ``bbox`` column; a
 1.1 file declaring ``edges: spherical``; a GeoJSON file (no carried block).
 
+Which cells run: ``simplify`` and the stream (no G7 path) on every source and
+version; every other path on every source in auto mode, and the four
+``Table.write`` strategies at 2.0 as well, where the Arrow and DuckDB writers
+take different native routes. An explicit version reaching each path is
+``tests/test_output_version_table.py``'s routing table; the composer's answer at
+each version is the ``simplify`` column and ``tests/test_compose_geo_block.py``.
+
 What this table asserts is *agreement*: every path writes the block ``extract``
 writes. It does not say what that block should contain -- a defect every path
 shared would pass here. The block's content (each step, each gate, each input)
@@ -131,14 +138,23 @@ def sources(tmp_path_factory) -> dict[str, Path]:
     return parquet
 
 
+class _References(dict):
+    """``extract``'s block per (source, version), written the first time a cell asks."""
+
+    def __init__(self, sources: dict[str, Path], root: Path):
+        super().__init__()
+        self._sources, self._root = sources, root
+
+    def __missing__(self, key: tuple[str, str]) -> dict | None:
+        kind, version = key
+        out = self._root / f"{kind}_{version}.parquet"
+        self[key] = _geo(_run(REFERENCE, self._sources[kind], out, version))
+        return self[key]
+
+
 @pytest.fixture(scope="module")
 def references(sources, tmp_path_factory) -> dict:
-    root = tmp_path_factory.mktemp("composition_ref")
-    return {
-        (kind, version): _geo(_run(REFERENCE, src, root / f"{kind}_{version}.parquet", version))
-        for kind, src in sources.items()
-        for version in VERSIONS
-    }
+    return _References(sources, tmp_path_factory.mktemp("composition_ref"))
 
 
 #: ``convert`` adds a bbox column when the input has none (a data change, so
@@ -149,18 +165,23 @@ SKIP = {
     **{(k, v, "stream"): "the stream takes no version" for k in SOURCES for v in VERSIONS[1:]},
 }
 
-#: ``convert`` at 2.0 drops the input's bbox column ("not needed for native geo
-#: types": a data decision, not the block's), and re-resolves the CRS from the
-#: native type, so its PROJJSON is the same CRS spelled by another PROJ.
-#: The block is compared on what the composer's rule says for those columns.
-CONVERT_DROPS_BBOX = {(k, "2.0", "convert_geoparquet") for k in SOURCES}
+#: Paths run on every version; the rest run in auto mode (and ``Table.write``
+#: at 2.0 too): see the module docstring.
+EVERY_VERSION_PATHS = {"simplify", "stream"}
+TABLE_WRITE_PATHS = {f"table_write_{s}" for s in STRATEGIES}
+
+
+def _runs(version: str, path_name: str) -> bool:
+    if path_name in EVERY_VERSION_PATHS or version == "auto":
+        return True
+    return version == "2.0" and path_name in TABLE_WRITE_PATHS
 
 
 def _cases():
     for kind in SOURCES:
         for version in VERSIONS:
             for path_name in PATHS:
-                if (kind, version, path_name) in SKIP:
+                if (kind, version, path_name) in SKIP or not _runs(version, path_name):
                     continue
                 yield pytest.param(kind, version, path_name, id=f"{kind}-{version}-{path_name}")
 
@@ -171,27 +192,7 @@ def test_every_path_declares_the_same_block(
 ):
     out = _run(path_name, sources[kind], tmp_path / "out.parquet", version)
     got, want = _geo(out), references[(kind, version)]
-    if (kind, version, path_name) in CONVERT_DROPS_BBOX:
-        got, want = _without_dropped_bbox(out, got, want)
     assert got == want, _diff(got, want)
-
-
-def _without_dropped_bbox(out: Path, got: dict, want: dict) -> tuple[dict, dict]:
-    """``(got, want)`` with what convert's 2.0 data decision changes taken out.
-
-    The output has no bbox column, so the composer declares no covering over
-    one; and the CRS is compared as the CRS it names, not its PROJJSON text.
-    """
-    from geoparquet_io.core.crs_utils import crs_authority_code
-
-    assert "bbox" not in pq.read_schema(str(out)).names
-    got, want = json.loads(json.dumps(got)), json.loads(json.dumps(want))
-    for block in (got, want):
-        entry = block["columns"][block["primary_column"]]
-        entry.pop("covering", None)
-        if "crs" in entry:
-            entry["crs"] = crs_authority_code(entry["crs"])
-    return got, want
 
 
 def _diff(got, want, prefix="") -> str:

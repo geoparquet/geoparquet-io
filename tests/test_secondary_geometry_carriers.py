@@ -448,7 +448,10 @@ _DETERMINISM_SCRIPT = textwrap.dedent(
 )
 
 
-@pytest.mark.parametrize("strategy", STRATEGIES)
+# ``duckdb-kv`` writes the column with DuckDB's ``COPY``: no Arrow extension
+# type is built, so the process's geoarrow registration cannot reach it. Its
+# carrier is ``TestSecondaryCarrierMatchesTheTargetVersion``'s.
+@pytest.mark.parametrize("strategy", [s for s in STRATEGIES if s != "duckdb-kv"])
 @pytest.mark.parametrize("version", ["1.1", "2.0"])
 def test_secondary_carrier_is_independent_of_geoarrow_import(
     strategy, version, two_geometry_source, tmp_path

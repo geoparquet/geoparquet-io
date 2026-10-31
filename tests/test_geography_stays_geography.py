@@ -57,6 +57,17 @@ def _one_file(out: Path) -> Path:
     return out
 
 
+def _spec_failures_and_warnings(path) -> tuple[list[str], list[str]]:
+    """``check spec``'s failed and warning messages, from one run of it."""
+    from tests.native_geo_probes import spec_report
+
+    checks = spec_report(path)["checks"]
+    return tuple(
+        [f"{c['name']}: {c['message']}" for c in checks if c["status"] == status]
+        for status in ("failed", "warning")
+    )
+
+
 def _edges_in_geo_block(path, column="geometry"):
     return ((geo_block(path) or {}).get("columns") or {}).get(column, {}).get("edges")
 
@@ -157,11 +168,17 @@ def test_a_native_geography_stays_geography(path_name, native_geography, tmp_pat
 
     assert native_geo_edges(out) == SPHERICAL
     assert _edges_in_geo_block(out) == "spherical"
-    assert spec_problems(out) == []
-    assert spec_problems(out, status="warning") == []
+    assert _spec_failures_and_warnings(out) == ([], [])
 
 
-@pytest.mark.parametrize("path_name", list(WRITE_PATHS), ids=list(WRITE_PATHS))
+#: ``convert geoparquet``, ``sort hilbert`` and ``extract`` (the pipe) retype a
+#: block-declared spherical column at 2.0 in tests/test_edges_owner.py's
+#: cross-path table (``[vincenty-2.0-geographic]``); the paths it does not run
+#: are held to it here.
+DECLARED_AT_2_0_PATHS = ["add-bbox", "add-quadkey", "sort-column", "partition-string"]
+
+
+@pytest.mark.parametrize("path_name", DECLARED_AT_2_0_PATHS, ids=DECLARED_AT_2_0_PATHS)
 def test_declared_spherical_edges_become_a_geography_at_2_0(
     path_name, declared_spherical_wkb, tmp_path
 ):
@@ -172,8 +189,7 @@ def test_declared_spherical_edges_become_a_geography_at_2_0(
 
     assert native_geo_edges(out) == SPHERICAL
     assert _edges_in_geo_block(out) == "spherical"
-    assert spec_problems(out) == []
-    assert spec_problems(out, status="warning") == []
+    assert _spec_failures_and_warnings(out) == ([], [])
 
 
 def test_a_1_1_output_keeps_wkb_with_edges_in_the_block(native_geography, tmp_path):
@@ -209,8 +225,7 @@ def test_only_the_spherical_secondary_becomes_a_geography(
     assert native_geo_edges(out, "geometry") == PLANAR
     assert native_geo_edges(out, "geog") == SPHERICAL
     assert _edges_in_geo_block(out, "geog") == "spherical"
-    assert spec_problems(out) == []
-    assert spec_problems(out, status="warning") == []
+    assert _spec_failures_and_warnings(out) == ([], [])
 
 
 def test_an_ellipsoidal_algorithm_is_kept_verbatim(rows, tmp_path):

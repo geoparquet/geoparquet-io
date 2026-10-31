@@ -6,9 +6,12 @@ unset level means: 15 in the Arrow funnel, 9 in ``gpio process``, DuckDB's own
 rewrites. ``none`` became ``UNCOMPRESSED`` on one path and ``NONE`` on another;
 ``LZ4_RAW`` was accepted by one rewriter and refused by every validator.
 
-These tests pin the owner's table, run ``none``/``uncompressed``/``LZ4_RAW``
-through every CLI entry that takes ``--compression``, and walk the package for
-a codec map or list outside the owner.
+These tests pin the owner's table (every spelling, every codec's level), run
+``none`` through every CLI entry and ``Table.write`` strategy that takes a
+codec, show the shared ``--compression`` option's refusals on one command, hold
+each internal write site to the owner's unset level (``Table.write`` and the
+G7 CLI paths are G7's ``level`` cells), and walk the package for a codec map or
+list outside the owner.
 """
 
 from __future__ import annotations
@@ -387,8 +390,10 @@ def test_level_help_is_the_owner_level_per_codec(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+# One spelling per strategy: ``none`` / ``uncompressed`` / ``NONE`` are one codec
+# in the owner (``test_resolve_table``); the strategy is what routes it.
 @pytest.mark.parametrize("strategy", ["duckdb-kv", "in-memory", "streaming", "disk-rewrite"])
-@pytest.mark.parametrize("spelling", ["none", "uncompressed", "NONE"])
+@pytest.mark.parametrize("spelling", ["none"])
 def test_table_write_none_is_uncompressed_on_every_strategy(tmp_path, strategy, spelling):
     import geoparquet_io as gpio
 
@@ -484,15 +489,24 @@ CLI_COMMANDS = [
 ]
 
 
+#: ``--compression`` / ``--compression-level`` are one decorator pair
+#: (``cli/decorators._add_compression_options``) on every command, and the
+#: refusals below are its Click type and callback: one command shows them, and
+#: tests/test_cli_surface.py's snapshot pins each command's choice list and
+#: level range. What a command does with an accepted codec is its own, so the
+#: write itself runs on every command (one spelling: the owner folds the rest).
+USAGE_COMMANDS = ["convert geoparquet"]
+
+
 @pytest.mark.parametrize("command", CLI_COMMANDS)
-@pytest.mark.parametrize("spelling", ["none", "uncompressed", "UNCOMPRESSED"])
+@pytest.mark.parametrize("spelling", ["none"])
 def test_cli_none_and_uncompressed_write_uncompressed(tmp_path, command, spelling):
     result, out = _cli_write(tmp_path, command, ["--compression", spelling])
     assert result.exit_code == 0, result.output
     assert _codecs(out) == {"UNCOMPRESSED"}
 
 
-@pytest.mark.parametrize("command", CLI_COMMANDS)
+@pytest.mark.parametrize("command", USAGE_COMMANDS)
 def test_cli_lz4_raw_is_a_usage_error(tmp_path, command):
     result, out = _cli_write(tmp_path, command, ["--compression", "LZ4_RAW"])
     assert result.exit_code == 2, result.output
@@ -500,7 +514,7 @@ def test_cli_lz4_raw_is_a_usage_error(tmp_path, command):
     assert not out.exists()
 
 
-@pytest.mark.parametrize("command", CLI_COMMANDS)
+@pytest.mark.parametrize("command", USAGE_COMMANDS)
 @pytest.mark.parametrize(
     ("codec_args", "message"),
     [
@@ -535,10 +549,9 @@ def test_cli_gzip_level_inside_its_range_is_accepted(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "command",
-    ["convert geoparquet", "sort hilbert", "extract", "add bbox"],
-)
+# Keep one exact default pin for the G7 paths; sort hilbert and extract
+# retain G7's nearest-reference level check. ``add bbox`` is not a G7 path.
+@pytest.mark.parametrize("command", ["convert geoparquet", "add bbox"])
 def test_cli_unset_level_is_the_documented_fifteen(tmp_path, command):
     unset_dir = tmp_path / "unset"
     l15_dir = tmp_path / "l15"
@@ -548,6 +561,12 @@ def test_cli_unset_level_is_the_documented_fifteen(tmp_path, command):
     r2, l15 = _cli_write(l15_dir, command, ["--compression-level", "15"])
     assert r1.exit_code == 0, r1.output
     assert r2.exit_code == 0, r2.output
+    if command == "convert geoparquet":
+        l3_dir = tmp_path / "l3"
+        l3_dir.mkdir()
+        r3, l3 = _cli_write(l3_dir, command, ["--compression-level", "3"])
+        assert r3.exit_code == 0, r3.output
+        assert l3.read_bytes() != l15.read_bytes(), "3 and 15 must differ here"
     assert unset.read_bytes() == l15.read_bytes()
 
 
@@ -1038,15 +1057,6 @@ def _convert(version: str):
     return write
 
 
-def _table_write(strategy: str):
-    def write(out: Path, level):
-        import geoparquet_io as gpio
-
-        gpio.read(str(PLACES)).write(str(out), compression_level=level, write_strategy=strategy)
-
-    return write
-
-
 def _geo_rewrite(out: Path, level):
     """The funnel's one footer rewrite, every footer patch's fallback."""
     from geoparquet_io.core.parquet_writer import WriteOptions
@@ -1075,10 +1085,7 @@ LEVEL_SITES = {
     "in-memory table, no geometry": _table_plain("in-memory"),
     "plain COPY, 2.0": _convert("2.0"),
     "plain COPY, parquet-geo-only": _convert("parquet-geo-only"),
-    "Table.write in-memory": _table_write("in-memory"),
-    "Table.write disk-rewrite": _table_write("disk-rewrite"),
-    "Table.write streaming": _table_write("streaming"),
-    "Table.write duckdb-kv": _table_write("duckdb-kv"),
+    # ``Table.write`` on each strategy is G7's ``table_write_<strategy>-level``.
     "geo rewrite": _geo_rewrite,
 }
 

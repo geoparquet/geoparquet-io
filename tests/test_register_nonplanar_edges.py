@@ -322,8 +322,10 @@ def _leaf_logical_type(path, column="geometry") -> str:
     return str(leaf.logical_type)
 
 
+# With a bbox only: a cell without one asserts a subset of the same things (the
+# type and the order, where there is no column after the geometry to misplace).
 @pytest.mark.parametrize("strategy", ["duckdb-kv", "disk-rewrite", "in-memory", "streaming"])
-@pytest.mark.parametrize("with_bbox", [False, True], ids=["no-bbox", "bbox"])
+@pytest.mark.parametrize("with_bbox", [True], ids=["bbox"])
 @pytest.mark.parametrize("edges", ["planar", "spherical"])
 def test_every_strategy_writes_the_native_type_and_keeps_column_order(
     rows, tmp_path, strategy, with_bbox, edges
