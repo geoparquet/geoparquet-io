@@ -478,11 +478,11 @@ reason = "permanent: the same keyword-argument list forwarded to one callee (API
 [[G3.pylint]]
 block = "cli.commands.process:process_aggregate_a5|core.process.aggregate.by_h3:aggregate_by_h3"
 count = 2
-reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
+reason = "aggregation options (metric, breakdown, bucket-point, ...) forwarded to the grid driver; T5a: one aggregate-options object"
 [[G3.pylint]]
 block = "cli.commands.process:process_aggregate_h3|core.process.aggregate.by_a5:aggregate_by_a5"
 count = 2
-reason = "kwarg list forwarded to one callee; identical since T2a removed the per-site codec policy; permanent (same class as the 34 forwarded-keyword entries T0c accepted)"
+reason = "aggregation options (metric, breakdown, bucket-point, ...) forwarded to the grid driver; T5a: one aggregate-options object"
 [[G3.pylint]]
 block = "core.add.quadkey:_is_geographic_crs|core.extract:is_geographic_crs"
 reason = "is-geographic CRS copy (approved change 8); T4c"
@@ -498,7 +498,7 @@ reason = "permanent: the same keyword-argument list forwarded to one callee (API
 [[G3.pylint]]
 block = "core.process.aggregate.by_a5:aggregate_by_a5|core.process.aggregate.by_h3:aggregate_by_h3"
 count = 2
-reason = "permanent: aggregate-by-a5/h3 public entry points forward the same parameters to one grid driver (grid_common)"
+reason = "aggregation options (metric, breakdown, bucket-point, ...) forwarded to the grid driver; T5a: one aggregate-options object"
 [[G3.pylint]]
 block = "core.process.raster.contour:contour_file|core.process.raster.polygonize:polygonize_file"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
@@ -535,11 +535,11 @@ reason = "permanent: convert geoparquet auto-detects (None); shapefile DBF text 
 [[G13.options]]
 option = "--geometry"
 fields = ["type", "is_flag"]
-reason = "T5c: extract carto's --geometry is a bool flag where every other command takes a column name"
+reason = "permanent: a different concept (include geometry) under the same name; renaming breaks the CLI"
 [[G13.options]]
 option = "--geometry-column"
 fields = ["default"]
-reason = "T5c, stopped: simplify now shares column_name_option; the defaults differ in meaning -- sort's 'geometry' is its auto-detect sentinel (hilbert_order/str_order), simplify's None the primary column -- and unifying them changes sort's rendered default, which T5c may not do unasked"
+reason = "T3c: sort's 'geometry' default is a copy of the primary-column rule (hilbert_order/str_order auto-detect sentinel); the default becomes None via primary_geometry_column there. Simplify shares column_name_option since T5c"
 [[G13.options]]
 option = "--geoparquet-version"
 fields = ["type"]
@@ -551,7 +551,7 @@ reason = "permanent: S2 level (add 13; partition None = auto-resolve) vs aggrega
 [[G13.options]]
 option = "--precision"
 fields = ["default"]
-reason = "T5c: pmtiles create forwards --precision to the GeoJSON writer (core/pmtiles.py) with its own default 6 against the writer's 7"
+reason = "permanent: PMTiles tile precision 6 and GeoJSON writer precision 7 are deliberate per-format defaults; one default changes tile bytes (not approved)"
 [[G13.options]]
 option = "--profile"
 fields = ["type", "is_flag"]
