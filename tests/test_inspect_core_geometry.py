@@ -7,7 +7,6 @@ spatial: faster start-up, and no failure on hosts that cannot download
 extensions. On DuckDB 1.5 nothing changes: spatial is loaded exactly as before.
 """
 
-import os
 import struct
 
 import duckdb
@@ -46,11 +45,6 @@ requires_no_core_geometry = pytest.mark.skipif(
 @pytest.fixture
 def runner():
     return CliRunner()
-
-
-@pytest.fixture
-def test_file():
-    return os.path.join(os.path.dirname(__file__), "data", "places_test.parquet")
 
 
 @pytest.fixture
@@ -112,16 +106,16 @@ def test_core_geometry_matches_installed_duckdb():
     ],
     ids=["head", "tail", "meta", "meta-geo-stats"],
 )
-def test_inspect_skips_spatial_on_core_geometry(runner, test_file, extension_loads, args):
-    result = runner.invoke(cli, [*args, test_file], catch_exceptions=False)
+def test_inspect_skips_spatial_on_core_geometry(runner, places_test_file, extension_loads, args):
+    result = runner.invoke(cli, [*args, places_test_file], catch_exceptions=False)
 
     assert result.exit_code == 0
     assert "spatial" not in extension_loads
 
 
 @requires_core_geometry
-def test_inspect_head_output_intact_without_spatial(runner, test_file, extension_loads):
-    result = runner.invoke(cli, ["inspect", "head", test_file, "3"], catch_exceptions=False)
+def test_inspect_head_output_intact_without_spatial(runner, places_test_file, extension_loads):
+    result = runner.invoke(cli, ["inspect", "head", places_test_file, "3"], catch_exceptions=False)
 
     assert result.exit_code == 0
     assert "spatial" not in extension_loads
@@ -141,9 +135,9 @@ def test_inspect_head_output_intact_without_spatial(runner, test_file, extension
     ids=["head", "tail", "meta", "meta-geo-stats"],
 )
 @pytest.mark.usefixtures("spatial_unavailable")
-def test_inspect_works_with_spatial_genuinely_unavailable(runner, test_file, args):
+def test_inspect_works_with_spatial_genuinely_unavailable(runner, places_test_file, args):
     """The air-gap case: the spatial extension cannot be installed at all."""
-    result = runner.invoke(cli, [*args, test_file], catch_exceptions=False)
+    result = runner.invoke(cli, [*args, places_test_file], catch_exceptions=False)
 
     assert result.exit_code == 0
 
@@ -152,8 +146,10 @@ def test_inspect_works_with_spatial_genuinely_unavailable(runner, test_file, arg
 
 
 @requires_no_core_geometry
-def test_inspect_head_still_loads_spatial_without_core_geometry(runner, test_file, extension_loads):
-    result = runner.invoke(cli, ["inspect", "head", test_file], catch_exceptions=False)
+def test_inspect_head_still_loads_spatial_without_core_geometry(
+    runner, places_test_file, extension_loads
+):
+    result = runner.invoke(cli, ["inspect", "head", places_test_file], catch_exceptions=False)
 
     assert result.exit_code == 0
     assert "spatial" in extension_loads

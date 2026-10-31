@@ -94,6 +94,8 @@ class DocExampleItem(pytest.Item):
             self.add_marker(pytest.mark.network)
         # Whole-pipeline examples are slow, including fast directives (#1402).
         self.add_marker(pytest.mark.slow)
+        # Whole-pipeline checks use the slow lane; 60 s is the fast lane's cap (#1402).
+        self.add_marker(pytest.mark.timeout(600))
         if directives.skip:
             reason = directives.skip_reason or "marked skip by a doctest directive"
             self.add_marker(pytest.mark.skip(reason=reason))

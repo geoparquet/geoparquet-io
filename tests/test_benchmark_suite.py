@@ -24,6 +24,24 @@ from geoparquet_io.core.benchmark_suite import (
 )
 
 
+@pytest.fixture
+def test_parquet():
+    """Create a small test parquet file."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "test.parquet"
+        table = pa.table(
+            {
+                "id": [1, 2, 3],
+                "geometry": [b"point1", b"point2", b"point3"],
+            }
+        )
+        pq.write_table(table, path)
+        yield path
+
+
 class TestBenchmarkConfig:
     """Tests for benchmark configuration."""
 
@@ -122,23 +140,6 @@ class TestOperationRegistry:
 class TestBenchmarkRunner:
     """Tests for benchmark runner."""
 
-    @pytest.fixture
-    def test_parquet(self):
-        """Create a small test parquet file."""
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "test.parquet"
-            table = pa.table(
-                {
-                    "id": [1, 2, 3],
-                    "geometry": [b"point1", b"point2", b"point3"],
-                }
-            )
-            pq.write_table(table, path)
-            yield path
-
     def test_run_single_operation_returns_result(self, test_parquet):
         """Test that run_single_operation returns BenchmarkResult."""
         with tempfile.TemporaryDirectory() as output_dir:
@@ -188,23 +189,6 @@ class TestBenchmarkRunner:
 
 class TestBenchmarkSuite:
     """Tests for full benchmark suite."""
-
-    @pytest.fixture
-    def test_parquet(self):
-        """Create a small test parquet file."""
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "test.parquet"
-            table = pa.table(
-                {
-                    "id": [1, 2, 3],
-                    "geometry": [b"point1", b"point2", b"point3"],
-                }
-            )
-            pq.write_table(table, path)
-            yield path
 
     def test_run_suite_returns_suite_result(self, test_parquet):
         """Test that run_benchmark_suite returns SuiteResult."""
@@ -362,23 +346,6 @@ class TestChainOperationExecution:
 
 class TestProfilingIntegration:
     """Tests for profiling integration."""
-
-    @pytest.fixture
-    def test_parquet(self):
-        """Create a small test parquet file."""
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "test.parquet"
-            table = pa.table(
-                {
-                    "id": [1, 2, 3],
-                    "geometry": [b"point1", b"point2", b"point3"],
-                }
-            )
-            pq.write_table(table, path)
-            yield path
 
     def test_run_single_operation_without_profiling(self, test_parquet):
         """Test that profiling is disabled by default."""

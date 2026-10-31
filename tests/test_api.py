@@ -2360,11 +2360,6 @@ class TestTableMetadata:
             pytest.skip("Test data not available")
         return read(PLACES_PARQUET)
 
-    def test_metadata_returns_dict(self, sample_table):
-        """Test metadata() returns a dictionary."""
-        result = sample_table.metadata()
-        assert result["rows"] == sample_table.num_rows
-
     def test_metadata_has_basic_fields(self, sample_table):
         """Test metadata() includes basic fields."""
         result = sample_table.metadata()

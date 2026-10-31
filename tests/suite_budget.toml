@@ -1,0 +1,5 @@
+# These numbers only go down; raising either needs a reason in the PR.
+# Re-seed at integration merge after the suite diet lands.
+[fast_suite]
+max_collected = 14171
+max_timeout_marks = 4

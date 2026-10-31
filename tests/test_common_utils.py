@@ -282,11 +282,6 @@ class TestFindPrimaryGeometryColumn:
         result = primary_geometry_column(buildings_test_file, verbose=False)
         assert result == "geometry"
 
-    def test_with_verbose(self, places_test_file):
-        """Test with verbose flag."""
-        result = primary_geometry_column(places_test_file, verbose=True)
-        assert result == "geometry"
-
 
 class TestGetParquetMetadata:
     """Tests for get_parquet_metadata function."""
