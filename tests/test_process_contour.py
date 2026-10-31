@@ -117,17 +117,26 @@ class TestCliContour:
 
         return CliRunner().invoke(cli, ["process", "contour", *args])
 
-    def test_levels_and_interval_are_exclusive(self, tmp_path):
+    # The core's resolve rule is the one rule (#1367 audit): the CLI no longer
+    # restates it, and contour_file applies it before it opens the raster, so
+    # these still answer with no raster extra installed and no such file.
+    def test_levels_and_interval_are_exclusive(self, tmp_path, monkeypatch):
+        import sys as _sys
+
+        monkeypatch.setitem(_sys.modules, "rasterio", None)
         result = self._invoke(
             ["in.tif", str(tmp_path / "o.parquet"), "--levels", "0,100", "--interval", "50"]
         )
-        assert result.exit_code != 0
-        assert "--levels" in result.output and "--interval" in result.output
+        assert result.exit_code == 2, result.output
+        assert "either explicit levels or an interval, not both" in result.output
 
-    def test_one_of_levels_or_interval_required(self, tmp_path):
+    def test_one_of_levels_or_interval_required(self, tmp_path, monkeypatch):
+        import sys as _sys
+
+        monkeypatch.setitem(_sys.modules, "rasterio", None)
         result = self._invoke(["in.tif", str(tmp_path / "o.parquet")])
-        assert result.exit_code != 0
-        assert "--levels" in result.output and "--interval" in result.output
+        assert result.exit_code == 2, result.output
+        assert "one of levels or interval is required" in result.output
 
     def test_bad_levels_value_is_a_clean_error(self, tmp_path):
         result = self._invoke(["in.tif", str(tmp_path / "o.parquet"), "--levels", "0,abc"])
