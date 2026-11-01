@@ -109,7 +109,7 @@ jobs:
         # with "InvalidDistribution: '2.5' is not a valid metadata version",
         # which failed the v1.4.0 publish after the tag was already pushed.
         # v1.14.2 ships Twine 7, which accepts 2.5.
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           print-hash: true
 
