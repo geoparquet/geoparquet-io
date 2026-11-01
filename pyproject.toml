@@ -55,7 +55,7 @@ dependencies = [
     # on every push (not a required check yet)
     # (#1345), but 'geography' is not published for 2.0 yet, so the cap stays
     # until it is (#1346).
-    "duckdb>=1.5.6,<1.6",
+    "duckdb>=1.5.6,<2.1",
     "pandas>=1.0.0",
     "fsspec>=2023.9.0",
     "rich>=13.0.0",
